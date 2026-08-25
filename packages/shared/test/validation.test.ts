@@ -96,6 +96,15 @@ describe("validatePortfolioUpdate", () => {
     expect(link("spotify", "https://opеn.spotify.com/x").ok).toBe(false); // е is Cyrillic "е", not Latin "e"
     expect(link("spotify", "HTTPS://OPEN.SPOTIFY.COM/artist/a").ok).toBe(true); // regex has /i — uppercase scheme+host are fine
   });
+  it("accepts query/fragment/explicit-port URL shapes and whitespace padding, and rejects the host:port@ userinfo trick", () => {
+    const link = (kind: string, url: string) =>
+      validatePortfolioUpdate({ ...ok, externalLinks: [{ kind: kind as never, url }] });
+    expect(link("spotify", "https://open.spotify.com?si=1").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com#x").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com:443/artist/a").ok).toBe(true);
+    expect(link("spotify", "  https://open.spotify.com/artist/a  ").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com:80@evil.example/").ok).toBe(false);
+  });
   it("rejects the 'Nothing to update' case when bio/genres/externalLinks are all omitted", () => {
     expect(validatePortfolioUpdate({ profileId: "p1" }).ok).toBe(false);
   });
@@ -158,6 +167,13 @@ describe("validateBookingUpdate", () => {
   it("rejects an invalid profileId (empty, or containing a path separator)", () => {
     expect(validateBookingUpdate({ ...ok, profileId: "" }).ok).toBe(false);
     expect(validateBookingUpdate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
+  it("treats preferences with all scalar fields omitted (undefined, not just explicit null) as valid", () => {
+    expect(validateBookingUpdate({
+      profileId: "p1",
+      rates: { perHour: null, perSong: null, perSet: null },
+      preferences: { gigTypes: [] } as never,
+    }).ok).toBe(true);
   });
 });
 

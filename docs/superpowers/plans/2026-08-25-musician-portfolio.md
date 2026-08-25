@@ -125,6 +125,15 @@ describe("validatePortfolioUpdate", () => {
     expect(link("spotify", "https://opеn.spotify.com/x").ok).toBe(false); // е is Cyrillic "е", not Latin "e"
     expect(link("spotify", "HTTPS://OPEN.SPOTIFY.COM/artist/a").ok).toBe(true); // regex has /i — uppercase scheme+host are fine
   });
+  it("accepts query/fragment/explicit-port URL shapes and whitespace padding, and rejects the host:port@ userinfo trick", () => {
+    const link = (kind: string, url: string) =>
+      validatePortfolioUpdate({ ...ok, externalLinks: [{ kind: kind as never, url }] });
+    expect(link("spotify", "https://open.spotify.com?si=1").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com#x").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com:443/artist/a").ok).toBe(true);
+    expect(link("spotify", "  https://open.spotify.com/artist/a  ").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com:80@evil.example/").ok).toBe(false);
+  });
   it("rejects the 'Nothing to update' case when bio/genres/externalLinks are all omitted", () => {
     expect(validatePortfolioUpdate({ profileId: "p1" }).ok).toBe(false);
   });
@@ -187,6 +196,13 @@ describe("validateBookingUpdate", () => {
   it("rejects an invalid profileId (empty, or containing a path separator)", () => {
     expect(validateBookingUpdate({ ...ok, profileId: "" }).ok).toBe(false);
     expect(validateBookingUpdate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
+  it("treats preferences with all scalar fields omitted (undefined, not just explicit null) as valid", () => {
+    expect(validateBookingUpdate({
+      profileId: "p1",
+      rates: { perHour: null, perSong: null, perSet: null },
+      preferences: { gigTypes: [] } as never,
+    }).ok).toBe(true);
   });
 });
 
@@ -461,10 +477,12 @@ function validateLink(link: unknown): Result {
   if (typeof l !== "object" || l === null || typeof l.kind !== "string" || typeof l.url !== "string") {
     return fail("Invalid link.");
   }
-  // Object.hasOwn, not `in` — `in` walks the prototype chain, so kind values
+  // hasOwnProperty, not `in` — `in` walks the prototype chain, so kind values
   // like "constructor"/"toString"/"__proto__" would otherwise pass this guard
-  // and crash `hosts.includes` below with an uncaught TypeError.
-  if (!Object.hasOwn(LINK_HOSTS, l.kind)) return fail("Unknown link type.");
+  // and crash `hosts.includes` below with an uncaught TypeError. Called via
+  // Object.prototype (not Object.hasOwn) to avoid an engine-version
+  // assumption on RN/JSC.
+  if (!Object.prototype.hasOwnProperty.call(LINK_HOSTS, l.kind)) return fail("Unknown link type.");
   const url = l.url.trim();
   if (url.length > 300) return fail("Link URLs must be 300 characters or fewer.");
   const m = HTTPS_HOST_RE.exec(url);
@@ -507,7 +525,7 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
       const v = validateLink(l);
       if (!v.ok) return v;
     }
-    const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url}`);
+    const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url.trim()}`);
     if (new Set(linkKeys).size !== linkKeys.length) return fail("Duplicate links.");
   }
   return { ok: true };
@@ -544,19 +562,22 @@ export function validateBookingUpdate(input: BookingUpdateInput): Result {
   for (const g of p.gigTypes) {
     if (!(GIG_TYPES as readonly string[]).includes(g)) return fail("Unknown gig type.");
   }
-  if (p.travelRadiusKm !== null && (typeof p.travelRadiusKm !== "number"
+  // != null (not !==) on these five scalars: an absent (undefined) field is
+  // treated the same as an explicit null, matching validateRate's
+  // absent-means-unset semantics — the musician just hasn't filled it in yet.
+  if (p.travelRadiusKm != null && (typeof p.travelRadiusKm !== "number"
       || !Number.isInteger(p.travelRadiusKm) || p.travelRadiusKm < 0 || p.travelRadiusKm > 3000)) {
     return fail("Travel radius must be 0-3000 km.");
   }
-  if (p.actSize !== null && !(ACT_SIZES as readonly string[]).includes(p.actSize)) {
+  if (p.actSize != null && !(ACT_SIZES as readonly string[]).includes(p.actSize)) {
     return fail("Invalid act size.");
   }
-  if (p.typicalSetMinutes !== null && (typeof p.typicalSetMinutes !== "number"
+  if (p.typicalSetMinutes != null && (typeof p.typicalSetMinutes !== "number"
       || !Number.isInteger(p.typicalSetMinutes) || p.typicalSetMinutes < 15 || p.typicalSetMinutes > 480)) {
     return fail("Set length must be 15-480 minutes.");
   }
-  if (p.bringsOwnPA !== null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
-  if (p.availabilityPattern !== null
+  if (p.bringsOwnPA != null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
+  if (p.availabilityPattern != null
       && !(AVAILABILITY_PATTERNS as readonly string[]).includes(p.availabilityPattern)) {
     return fail("Invalid availability.");
   }

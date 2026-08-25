@@ -85,10 +85,12 @@ function validateLink(link: unknown): Result {
   if (typeof l !== "object" || l === null || typeof l.kind !== "string" || typeof l.url !== "string") {
     return fail("Invalid link.");
   }
-  // Object.hasOwn, not `in` — `in` walks the prototype chain, so kind values
+  // hasOwnProperty, not `in` — `in` walks the prototype chain, so kind values
   // like "constructor"/"toString"/"__proto__" would otherwise pass this guard
-  // and crash `hosts.includes` below with an uncaught TypeError.
-  if (!Object.hasOwn(LINK_HOSTS, l.kind)) return fail("Unknown link type.");
+  // and crash `hosts.includes` below with an uncaught TypeError. Called via
+  // Object.prototype (not Object.hasOwn) to avoid an engine-version
+  // assumption on RN/JSC.
+  if (!Object.prototype.hasOwnProperty.call(LINK_HOSTS, l.kind)) return fail("Unknown link type.");
   const url = l.url.trim();
   if (url.length > 300) return fail("Link URLs must be 300 characters or fewer.");
   const m = HTTPS_HOST_RE.exec(url);
@@ -131,7 +133,7 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
       const v = validateLink(l);
       if (!v.ok) return v;
     }
-    const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url}`);
+    const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url.trim()}`);
     if (new Set(linkKeys).size !== linkKeys.length) return fail("Duplicate links.");
   }
   return { ok: true };
@@ -168,19 +170,22 @@ export function validateBookingUpdate(input: BookingUpdateInput): Result {
   for (const g of p.gigTypes) {
     if (!(GIG_TYPES as readonly string[]).includes(g)) return fail("Unknown gig type.");
   }
-  if (p.travelRadiusKm !== null && (typeof p.travelRadiusKm !== "number"
+  // != null (not !==) on these five scalars: an absent (undefined) field is
+  // treated the same as an explicit null, matching validateRate's
+  // absent-means-unset semantics — the musician just hasn't filled it in yet.
+  if (p.travelRadiusKm != null && (typeof p.travelRadiusKm !== "number"
       || !Number.isInteger(p.travelRadiusKm) || p.travelRadiusKm < 0 || p.travelRadiusKm > 3000)) {
     return fail("Travel radius must be 0-3000 km.");
   }
-  if (p.actSize !== null && !(ACT_SIZES as readonly string[]).includes(p.actSize)) {
+  if (p.actSize != null && !(ACT_SIZES as readonly string[]).includes(p.actSize)) {
     return fail("Invalid act size.");
   }
-  if (p.typicalSetMinutes !== null && (typeof p.typicalSetMinutes !== "number"
+  if (p.typicalSetMinutes != null && (typeof p.typicalSetMinutes !== "number"
       || !Number.isInteger(p.typicalSetMinutes) || p.typicalSetMinutes < 15 || p.typicalSetMinutes > 480)) {
     return fail("Set length must be 15-480 minutes.");
   }
-  if (p.bringsOwnPA !== null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
-  if (p.availabilityPattern !== null
+  if (p.bringsOwnPA != null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
+  if (p.availabilityPattern != null
       && !(AVAILABILITY_PATTERNS as readonly string[]).includes(p.availabilityPattern)) {
     return fail("Invalid availability.");
   }
