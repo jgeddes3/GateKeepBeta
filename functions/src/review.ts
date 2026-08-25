@@ -55,7 +55,21 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
 export const grantAdmin = onCall<{ uid: string }>({ region: "us-central1" }, async (req) => {
   const actorUid = requireAdmin(req);
   const { uid } = req.data;
-  await getAuth().setCustomUserClaims(uid, { admin: true });
+  if (typeof uid !== "string" || uid.trim().length === 0) {
+    throw new HttpsError("invalid-argument", "A user id is required.");
+  }
+  let target;
+  try { target = await getAuth().getUser(uid); }
+  catch { throw new HttpsError("not-found", "No such user."); }
+  // Spec §8's compensating control for no built-in 2FA: admin accounts must
+  // be Google sign-in accounts (inherits Google's account-level 2FA).
+  const isGoogleLinked = target.providerData.some((p) => p.providerId === "google.com");
+  if (!isGoogleLinked) {
+    throw new HttpsError("failed-precondition", "Admin accounts must use Google sign-in.");
+  }
+  // Merge rather than replace — a bare setCustomUserClaims(uid, { admin: true })
+  // would silently drop any other custom claims already set on the account.
+  await getAuth().setCustomUserClaims(uid, { ...target.customClaims, admin: true });
   await writeAudit({ actorUid, action: "admin_granted", targetId: uid, detail: "" });
   return { ok: true };
 });

@@ -67,6 +67,82 @@ describe("invites", () => {
     await expect(callFn("respondToInvite", { inviteId, accept: true }, invitee.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+
+  it("accepting an invite while already a member fails with already-exists, and does not overwrite the existing membership", async () => {
+    const { owner, profileId } = await bandWithOwner("inv5");
+    const email = `dup2-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    const { inviteId: first } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
+    await callFn("respondToInvite", { inviteId: first, accept: true }, invitee.user);
+    // A second, independent invite to the same (now-member) email — accepting
+    // it must not blindly .set() over the existing membership doc.
+    const { inviteId: second } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "admin", label: "sax2" }, owner.user);
+    await expect(callFn("respondToInvite", { inviteId: second, accept: true }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/already-exists" });
+    const m = await adb.doc(`profiles/${profileId}/members/${invitee.uid}`).get();
+    expect(m.data()?.role).toBe("member");
+    expect(m.data()?.label).toBe("sax");
+  });
+
+  it("inviting your own email is rejected (you're already on this profile)", async () => {
+    const { owner, profileId } = await bandWithOwner("inv6");
+    await expect(callFn("inviteMember", { profileId, email: owner.user.email!, role: "member", label: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("inviteMember rejects an invalid role, and a non-string/overlong label is handled (trimmed and capped)", async () => {
+    const { owner, profileId } = await bandWithOwner("inv7");
+    const email = `badrole-${Date.now()}@test.com`;
+    await signUpTestUser(email);
+    await expect(callFn("inviteMember", { profileId, email, role: "owner", label: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+
+    const email2 = `longlabel-${Date.now()}@test.com`;
+    const invitee2 = await signUpTestUser(email2);
+    const longLabel = `  ${"x".repeat(90)}  `;
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email: email2, role: "member", label: longLabel }, owner.user);
+    const inv = (await adb.doc(`invites/${inviteId}`).get()).data();
+    expect(inv?.label.length).toBe(60);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee2.user);
+  });
+
+  it("respondToInvite rejects invites older than 14 days", async () => {
+    const { owner, profileId } = await bandWithOwner("inv8");
+    const email = `exp-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    const oldCreatedAt = Date.now() - 15 * 86_400_000;
+    const inviteRef = await adb.collection("invites").add({
+      profileId, profileName: "Band", invitedUid: invitee.uid, role: "member",
+      label: "x", invitedByUid: owner.uid, status: "pending", createdAt: oldCreatedAt,
+    });
+    await expect(callFn("respondToInvite", { inviteId: inviteRef.id, accept: true }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("a profile admin can revoke a pending invite; the invitee can no longer accept it", async () => {
+    const { owner, profileId } = await bandWithOwner("inv9");
+    const email = `rev-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    await callFn("revokeInvite", { inviteId }, owner.user);
+    expect((await adb.doc(`invites/${inviteId}`).get()).data()?.status).toBe("revoked");
+    await expect(callFn("respondToInvite", { inviteId, accept: true }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("a non-admin cannot revoke an invite", async () => {
+    const { owner, profileId } = await bandWithOwner("inv10");
+    const email = `rev2-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    await expect(callFn("revokeInvite", { inviteId }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
 });
 
 describe("removal and admin transfer", () => {

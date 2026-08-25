@@ -78,17 +78,45 @@ describe("reviewProfile", () => {
 });
 
 describe("grantAdmin", () => {
-  it("admin grants claim + audit logged; non-admin denied", async () => {
+  it("admin grants claim to a Google-linked account + audit logged (custom claims merged, not replaced); non-admin denied", async () => {
     const adminUser = await makeAdminUser();
-    const target = await signUpTestUser(`t-${Date.now()}@test.com`);
-    await callFn("grantAdmin", { uid: target.uid }, adminUser.user);
-    const rec = await adminAuth(admin).getUser(target.uid);
+    const targetUid = `google-target-${Date.now()}`;
+    const targetEmail = `t-${Date.now()}@test.com`;
+    // The client SDK's createUserWithEmailAndPassword always yields a
+    // "password" provider — importUsers is the only way (emulator or prod)
+    // to seed a user with google.com provider data without a real OAuth
+    // flow, so the failed-precondition Google-only gate can be exercised
+    // on its passing branch.
+    await adminAuth(admin).importUsers([{
+      uid: targetUid,
+      email: targetEmail,
+      providerData: [{ uid: targetEmail, email: targetEmail, providerId: "google.com" }],
+      customClaims: { betaTester: true },
+    }]);
+    await callFn("grantAdmin", { uid: targetUid }, adminUser.user);
+    const rec = await adminAuth(admin).getUser(targetUid);
     expect(rec.customClaims?.admin).toBe(true);
+    expect(rec.customClaims?.betaTester).toBe(true); // merged, not replaced
     const logs = await adb.collection("auditLogs")
-      .where("targetId", "==", target.uid).where("action", "==", "admin_granted").get();
+      .where("targetId", "==", targetUid).where("action", "==", "admin_granted").get();
     expect(logs.size).toBe(1);
     expect(logs.docs[0].data().actorUid).toBe(adminUser.uid);
     const stranger = await signUpTestUser(`s-${Date.now()}@test.com`);
-    await expect(callFn("grantAdmin", { uid: stranger.uid }, stranger.user)).rejects.toThrow();
+    await expect(callFn("grantAdmin", { uid: targetUid }, stranger.user)).rejects.toThrow();
+  });
+
+  it("rejects granting admin to a non-Google (password) account — spec §8's no-2FA compensating control", async () => {
+    const adminUser = await makeAdminUser();
+    const target = await signUpTestUser(`pw-${Date.now()}@test.com`);
+    await expect(callFn("grantAdmin", { uid: target.uid }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    const rec = await adminAuth(admin).getUser(target.uid);
+    expect(rec.customClaims?.admin).not.toBe(true);
+  });
+
+  it("rejects a missing/empty uid with invalid-argument", async () => {
+    const adminUser = await makeAdminUser();
+    await expect(callFn("grantAdmin", { uid: "" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
 });
