@@ -43,6 +43,15 @@ service cloud.firestore {
       }
     }
 
+    // Recursive-wildcard match needed for collectionGroup('members') queries —
+    // the nested /profiles/{profileId}/members/{memberUid} rule above does NOT
+    // apply to collection-group queries. Mirrors the self-read clause so the
+    // app's "my profiles" query (collectionGroup('members').where('uid','==',uid))
+    // works for signed-in users reading their own membership docs.
+    match /{path=**}/members/{memberUid} {
+      allow read: if signedIn() && request.auth.uid == resource.data.uid;
+    }
+
     match /invites/{inviteId} {
       allow read: if signedIn()
         && (request.auth.uid == resource.data.invitedUid
