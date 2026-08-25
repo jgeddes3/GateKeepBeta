@@ -2,12 +2,19 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
-    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+    // Uses token.get(..., false) rather than firestore.rules' `token.admin == true`
+    // style deliberately: a missing claim resolves to `false` cleanly instead of
+    // throwing an EvaluationException that would otherwise spam the logs.
+    function isAdmin() { return request.auth != null && request.auth.token.get('admin', false) == true; }
 
     // Serving path: only ever contains approved/instantly-publishable content
     // (the transcode/photo pipelines are the only writers). World-readable.
     match /public/{allPaths=**} {
-      allow read: if true;
+      allow get: if true;
+      // Paths are resolved from Firestore docs, never by listing. Listing would
+      // enumerate every profileId (drafts included) — mirrors the /handles
+      // get/list split in firestore.rules.
+      allow list: if false;
       allow write: if false;
     }
 
@@ -21,18 +28,32 @@ service firebase.storage {
     // trigger; a 24h lifecycle rule (console/deploy config) reaps strays.
     // Membership of {profileId} is NOT checkable here — the trigger verifies it
     // before any content reaches a profile.
+    // customMetadata on staging objects is client-controlled and untrusted — the
+    // processUpload trigger derives uid/profileId from the OBJECT PATH only and
+    // must never read object.metadata.
     match /staging/audio/{uid}/{profileId}/{trackId} {
-      allow write: if isOwner(uid)
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && trackId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
         && request.resource.size <= 50 * 1024 * 1024
         && request.resource.contentType.matches('audio/.*');
-      allow read: if false;
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
     }
     match /staging/photos/{uid}/{profileId}/{fileName} {
-      allow write: if isOwner(uid)
+      // fileName is deliberately extensionless: the path builder emits
+      // `${kind}-${nonce}` with no extension; nonces must stick to A-Za-z0-9 and hyphen.
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
         && request.resource.size <= 10 * 1024 * 1024
         && request.resource.contentType.matches('image/(jpeg|png|webp)')
-        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]+');
-      allow read: if false;
+        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]{1,80}');
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
     }
 
     match /{allPaths=**} { allow read, write: if false; }

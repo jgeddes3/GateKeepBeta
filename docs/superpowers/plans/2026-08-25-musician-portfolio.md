@@ -645,12 +645,19 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
-    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+    // Uses token.get(..., false) rather than firestore.rules' `token.admin == true`
+    // style deliberately: a missing claim resolves to `false` cleanly instead of
+    // throwing an EvaluationException that would otherwise spam the logs.
+    function isAdmin() { return request.auth != null && request.auth.token.get('admin', false) == true; }
 
     // Serving path: only ever contains approved/instantly-publishable content
     // (the transcode/photo pipelines are the only writers). World-readable.
     match /public/{allPaths=**} {
-      allow read: if true;
+      allow get: if true;
+      // Paths are resolved from Firestore docs, never by listing. Listing would
+      // enumerate every profileId (drafts included) — mirrors the /handles
+      // get/list split in firestore.rules.
+      allow list: if false;
       allow write: if false;
     }
 
@@ -664,18 +671,32 @@ service firebase.storage {
     // trigger; a 24h lifecycle rule (console/deploy config) reaps strays.
     // Membership of {profileId} is NOT checkable here — the trigger verifies it
     // before any content reaches a profile.
+    // customMetadata on staging objects is client-controlled and untrusted — the
+    // processUpload trigger derives uid/profileId from the OBJECT PATH only and
+    // must never read object.metadata.
     match /staging/audio/{uid}/{profileId}/{trackId} {
-      allow write: if isOwner(uid)
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && trackId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
         && request.resource.size <= 50 * 1024 * 1024
         && request.resource.contentType.matches('audio/.*');
-      allow read: if false;
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
     }
     match /staging/photos/{uid}/{profileId}/{fileName} {
-      allow write: if isOwner(uid)
+      // fileName is deliberately extensionless: the path builder emits
+      // `${kind}-${nonce}` with no extension; nonces must stick to A-Za-z0-9 and hyphen.
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
         && request.resource.size <= 10 * 1024 * 1024
         && request.resource.contentType.matches('image/(jpeg|png|webp)')
-        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]+');
-      allow read: if false;
+        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]{1,80}');
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
     }
 
     match /{allPaths=**} { allow read, write: if false; }
@@ -904,7 +925,7 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { ref, uploadBytes, getBytes } from "firebase/storage";
+import { ref, uploadBytes, getBytes, listAll, deleteObject } from "firebase/storage";
 
 let env: RulesTestEnvironment;
 
@@ -932,6 +953,15 @@ describe("storage: staging/audio", () => {
     await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/t9"), bytes, meta("audio/mpeg")));
     await assertFails(getBytes(ref(alice, "staging/audio/alice/p1/t9")));
   });
+  it("owner cannot delete their own staging object; the trigger owns cleanup", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/t10"), bytes, meta("audio/mpeg")));
+    await assertFails(deleteObject(ref(alice, "staging/audio/alice/p1/t10")));
+  });
+  it("a literal '..' profileId segment is rejected", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertFails(uploadBytes(ref(alice, "staging/audio/alice/../t11"), bytes, meta("audio/mpeg")));
+  });
 });
 
 describe("storage: staging/photos", () => {
@@ -952,6 +982,7 @@ describe("storage: public and review", () => {
     const anon = env.unauthenticatedContext().storage();
     await assertSucceeds(getBytes(ref(anon, "public/tracks/p1/t1.m4a")));
     await assertFails(uploadBytes(ref(anon, "public/tracks/p1/evil.m4a"), bytes, meta("audio/mp4")));
+    await assertFails(listAll(ref(anon, "public")));
     const alice = env.authenticatedContext("alice").storage();
     await assertFails(uploadBytes(ref(alice, "public/photos/p1/avatar-x.jpg"), bytes, meta("image/jpeg")));
   });
@@ -1643,14 +1674,15 @@ async function probeDurationSec(file: string): Promise<number> {
   return d;
 }
 
-async function processAudio(objectName: string): Promise<void> {
+async function processAudio(objectName: string, generation: string): Promise<void> {
   // staging/audio/{uid}/{profileId}/{trackId}
   const [, , uid, profileId, trackId] = objectName.split("/");
   if (!uid || !profileId || !trackId) return;
   const db = getFirestore();
   const trackRef = db.doc(`profiles/${profileId}/tracks/${trackId}`);
   const snap = await trackRef.get();
-  const stagingFile = bucket().file(objectName);
+  // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
+  const stagingFile = bucket().file(objectName, { generation: Number(generation) });
   // Forged/mismatched uploads (no doc, wrong uploader, wrong state): discard the
   // object and do nothing — createTrack is the only path that arms this pipeline.
   if (!snap.exists || snap.data()?.uploaderUid !== uid || snap.data()?.status !== "processing") {
@@ -1698,13 +1730,14 @@ async function processAudio(objectName: string): Promise<void> {
   }
 }
 
-async function processPhoto(objectName: string): Promise<void> {
+async function processPhoto(objectName: string, generation: string): Promise<void> {
   // staging/photos/{uid}/{profileId}/{kind}-{nonce}
   const [, , uid, profileId, fileName] = objectName.split("/");
   if (!uid || !profileId || !fileName) return;
   const kind = fileName.startsWith("avatar-") ? "avatar" : fileName.startsWith("cover-") ? "cover" : null;
   const db = getFirestore();
-  const stagingFile = bucket().file(objectName);
+  // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
+  const stagingFile = bucket().file(objectName, { generation: Number(generation) });
   const member = kind ? await db.doc(`profiles/${profileId}/members/${uid}`).get() : null;
   if (!kind || !member?.exists) {
     await stagingFile.delete().catch(() => {}); // non-member or malformed: discard
@@ -1734,8 +1767,9 @@ export const processUpload = onObjectFinalized(
   { region: "us-central1", bucket: STORAGE_BUCKET, memory: "1GiB", timeoutSeconds: 300 },
   async (event: StorageEvent) => {
     const name = event.data.name ?? "";
-    if (name.startsWith("staging/audio/")) return processAudio(name);
-    if (name.startsWith("staging/photos/")) return processPhoto(name);
+    const generation = event.data.generation;
+    if (name.startsWith("staging/audio/")) return processAudio(name, generation);
+    if (name.startsWith("staging/photos/")) return processPhoto(name, generation);
   });
 ```
 
@@ -3602,6 +3636,7 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
 - Key commands: note the storage emulator (port 9199) now starts with `pnpm emu`, and `emu:test`/`emu:rules` include it.
 - Environment: note `next typegen` for fresh clones (typecheck fails without it) and the corepack/pnpm Windows PATH workaround.
 - Manual follow-ups: **replace** the "native App Check lands in sub-project 2" sentence — EAS production build + native App Check moved to a dedicated launch-prep track (per SP2 spec §1), same must-review list as the admin/internal deferred items. Add: create the production Storage bucket lifecycle rule (24h TTL on `staging/`) in the Firebase console/deploy config before launch — the emulator does not enforce lifecycle rules.
+- Manual follow-ups: the App Check enforcement checklist must cover Cloud Storage, not just Firestore + Functions — and Storage must NOT be flipped to enforce until native mobile App Check ships (mobile currently has no App Check attestation; enforcing early would lock the app out of its own uploads).
 
 - [ ] **Step 2: Commit**
 
