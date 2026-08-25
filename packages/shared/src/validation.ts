@@ -1,4 +1,4 @@
-import type { ProfileDraftInput } from "./types";
+import type { ProfileDraftInput } from "./types.js";
 
 export const RESERVED_HANDLES = [
   "admin", "gatekeep", "support", "help", "api", "www",

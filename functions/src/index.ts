@@ -1,2 +1,4 @@
-// Functions are added task by task; this file re-exports them all.
-export {};
+import { initializeApp } from "firebase-admin/app";
+initializeApp();
+
+export { onUserCreated } from "./authTriggers.js";
