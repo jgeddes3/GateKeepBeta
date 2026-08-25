@@ -9,10 +9,17 @@ import { randomUUID } from "node:crypto";
 import ffmpegPathRaw from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 import sharp from "sharp";
-import { reviewTrackPath, publicPhotoPath, MAX_CLIP_SECONDS } from "@gatekeep/shared";
+import { reviewTrackPath, publicPhotoPath, isValidDocId, MAX_CLIP_SECONDS } from "@gatekeep/shared";
 import { STORAGE_BUCKET, bucket } from "./storage.js";
 
 const run = promisify(execFile);
+
+// A subprocess run against untrusted input (ffprobe/ffmpeg on a user-supplied
+// file) that never returns would otherwise tie up the trigger until the
+// 300s function timeout kills it mid-cleanup, leaving the track stuck in
+// "processing" with no failureReason. Bounding it converts a hang into a
+// clean "failed" status well before that cap.
+const SUBPROCESS_TIMEOUT_MS = 120_000;
 
 // ffmpeg-static's own types/index.d.ts declares `export default: string | null`,
 // but under this package's NodeNext + "type":"module" setup TS resolves the
@@ -34,11 +41,27 @@ function requireFfmpegPath(): string {
   return ffmpegPath;
 }
 
+// Every best-effort storage cleanup in this module goes through here instead
+// of a bare `.catch(() => {})` — a cleanup that silently fails (quota, a
+// permissions drift, an emulator hiccup) previously left no trace anywhere.
+// Still non-fatal: logging, never rethrowing, so a cleanup failure can never
+// turn into a stuck/duplicate-processed object.
+function logDeleteFailure(phase: string, path: string) {
+  return (e: unknown) => console.error(`processUpload: ${phase} cleanup failed`, path, e);
+}
+
+// Thrown only for conditions with a controlled, safe-to-display message (no
+// file paths, no ffmpeg/ffprobe stderr) — every other error in processAudio
+// collapses to a generic failureReason so raw error text (which can carry
+// local tmp paths or 100KB+ of subprocess stderr) never lands in a
+// member-readable track doc.
+class ClipValidationError extends Error {}
+
 async function probeDurationSec(file: string): Promise<number> {
   const { stdout } = await run(ffprobe.path, [
     "-v", "error", "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1", file,
-  ]);
+  ], { timeout: SUBPROCESS_TIMEOUT_MS });
   const d = Number.parseFloat(stdout.trim());
   if (!Number.isFinite(d) || d <= 0) throw new Error("Could not read audio duration.");
   return d;
@@ -47,51 +70,82 @@ async function probeDurationSec(file: string): Promise<number> {
 // generation is typed number in firebase-functions but arrives as a string at
 // runtime (GCS serializes int64 as JSON string) — accept both, coerce at use.
 async function processAudio(objectName: string, generation: string | number): Promise<void> {
-  // staging/audio/{uid}/{profileId}/{trackId}
-  const [, , uid, profileId, trackId] = objectName.split("/");
-  if (!uid || !profileId || !trackId) return;
+  // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
+  const stagingFile = bucket().file(objectName, { generation: Number(generation) });
+
+  // staging/audio/{uid}/{profileId}/{trackId} — validated defensively (not
+  // just trusted from storage.rules) before any of it is used to build
+  // Firestore paths.
+  const segments = objectName.split("/");
+  const [, , uid, profileId, trackId] = segments;
+  if (segments.length !== 5 || !isValidDocId(uid) || !isValidDocId(profileId) || !isValidDocId(trackId)) {
+    await stagingFile.delete().catch(logDeleteFailure("malformed staging audio path", objectName));
+    return;
+  }
+
   const db = getFirestore();
   const trackRef = db.doc(`profiles/${profileId}/tracks/${trackId}`);
   const snap = await trackRef.get();
-  // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
-  const stagingFile = bucket().file(objectName, { generation: Number(generation) });
-  // Forged/mismatched uploads (no doc, wrong uploader, wrong state): discard the
-  // object and do nothing — createTrack is the only path that arms this pipeline.
-  if (!snap.exists || snap.data()?.uploaderUid !== uid || snap.data()?.status !== "processing") {
-    await stagingFile.delete().catch(() => {});
+  const data = snap.data();
+  // Forged/mismatched uploads (no doc, wrong uploader, wrong state, or a
+  // malformed startSec): discard the object and do nothing — createTrack is
+  // the only path that arms this pipeline, and it always writes a numeric
+  // startSec, so a non-number here means a corrupt/tampered doc, not a real
+  // in-flight upload worth reporting back to the musician.
+  if (!snap.exists || data?.uploaderUid !== uid || data?.status !== "processing"
+      || typeof data?.startSec !== "number") {
+    await stagingFile.delete().catch(logDeleteFailure("forged/invalid audio upload", objectName));
     return;
   }
-  const startSec = snap.data()?.startSec as number;
+  const startSec = data.startSec;
 
   const tmp = await mkdtemp(join(tmpdir(), "gk-audio-"));
+  // Set once the review clip is actually uploaded — lets the catch block
+  // clean up an orphaned upload if anything after that point throws
+  // (e.g. the final status update racing a delete).
+  let uploadedReviewPath: string | null = null;
   try {
     const inFile = join(tmp, "in");
     const outFile = join(tmp, "out.m4a");
     await stagingFile.download({ destination: inFile });
     const sourceDuration = await probeDurationSec(inFile);
     if (startSec >= sourceDuration) {
-      throw new Error(`Clip start (${startSec}s) is past the end of the audio (${Math.floor(sourceDuration)}s).`);
+      throw new ClipValidationError(
+        `Clip start (${startSec}s) is past the end of the audio (${Math.floor(sourceDuration)}s).`);
     }
-    // -ss before -i = fast seek; -t caps the clip at 30s; AAC 128k in an mp4
-    // container streams natively in every target player.
+    if (sourceDuration - startSec < 1) {
+      throw new ClipValidationError("Clip window is too close to the end of the audio.");
+    }
+    // -ss before -i = fast seek to the clip start. -t here is an INPUT
+    // option (it precedes -i, so it bounds how much of the input is read
+    // from that seek point) rather than an output duration cap — for a
+    // straight single-stream re-encode like this the practical effect is
+    // the same either way: the clip tops out at MAX_CLIP_SECONDS. -map
+    // 0:a:0 pins the first audio stream explicitly (some containers carry
+    // embedded cover art as a "video" stream ffmpeg would otherwise try to
+    // touch). AAC 128k in an mp4 container streams natively everywhere.
     await run(requireFfmpegPath(), [
       "-hide_banner", "-nostdin", "-y",
       "-ss", String(startSec), "-t", String(MAX_CLIP_SECONDS), "-i", inFile,
-      "-vn", "-acodec", "aac", "-b:a", "128k", "-movflags", "+faststart",
+      "-vn", "-map", "0:a:0", "-acodec", "aac", "-b:a", "128k", "-movflags", "+faststart",
       outFile,
-    ]);
+    ], { timeout: SUBPROCESS_TIMEOUT_MS });
     const clipDuration = await probeDurationSec(outFile);
     const destPath = reviewTrackPath(profileId, trackId);
     await bucket().upload(outFile, { destination: destPath, metadata: { contentType: "audio/mp4" } });
+    uploadedReviewPath = destPath;
 
     // A transcode can take several seconds — long enough for deleteTrack to
     // race it and remove the doc mid-flight. Re-read before writing
     // pending_review; if the doc is gone or someone else already moved it
     // off "processing" (e.g. deleteTrack ran), the upload above is now
-    // orphaned — delete it and bail without writing.
+    // orphaned — delete it and bail without writing. This narrows the race
+    // to the few milliseconds between this read and the update() below,
+    // not closes it outright; any residual orphan in that window is reaped
+    // by deleteTrack's/deleteProfile's own best-effort storage cleanup.
     const postSnap = await trackRef.get();
     if (!postSnap.exists || postSnap.data()?.status !== "processing") {
-      await bucket().file(destPath).delete().catch(() => {});
+      await bucket().file(destPath).delete().catch(logDeleteFailure("orphaned review (race)", destPath));
       return;
     }
 
@@ -103,36 +157,67 @@ async function processAudio(objectName: string, generation: string | number): Pr
       updatedAt: Date.now(),
     });
   } catch (e) {
-    const failureReason = e instanceof Error ? e.message : "Audio processing failed.";
+    console.error("processUpload: audio processing failed", objectName, e);
+    const failureReason = (e instanceof ClipValidationError
+      ? e.message
+      : "Audio processing failed — the file may be corrupt or unsupported."
+    ).slice(0, 500);
+    if (uploadedReviewPath) {
+      await bucket().file(uploadedReviewPath).delete()
+        .catch(logDeleteFailure("orphaned review (failed after upload)", uploadedReviewPath));
+    }
     try {
-      await trackRef.update({ status: "failed", failureReason, updatedAt: Date.now() });
+      // Same status guard as the success path above: only write "failed" if
+      // the doc is still there and still "processing" — never blindly
+      // overwrite a doc that deleteTrack (or a second trigger invocation)
+      // already moved on from.
+      const failSnap = await trackRef.get();
+      if (failSnap.exists && failSnap.data()?.status === "processing") {
+        await trackRef.update({ status: "failed", failureReason, updatedAt: Date.now() });
+      }
     } catch (err) {
-      // The doc can be gone here too (deleteTrack raced the failure path, not
-      // just the success path). update() then throws NOT_FOUND (gRPC code 5,
-      // same mapping as updateTrack in tracks.ts) — swallow only that code;
-      // anything else is a real error and must not be silently dropped.
-      if ((err as { code?: number }).code !== 5) throw err;
+      // gRPC code 5 (NOT_FOUND): the doc vanished between the guard-read
+      // above and this update — expected under the same delete race,
+      // nothing to log. Anything else is unexpected; log it but still
+      // swallow rather than rethrow — storage-trigger retry is off, so
+      // rethrowing here buys nothing and would just strand the doc in
+      // "processing" forever with staging already deleted.
+      if ((err as { code?: number }).code !== 5) {
+        console.error("processUpload: failed-status write failed", objectName, err);
+      }
     }
   } finally {
-    await stagingFile.delete().catch(() => {});
+    await stagingFile.delete().catch(logDeleteFailure("staging (audio, finally)", objectName));
     await rm(tmp, { recursive: true, force: true });
   }
 }
 
+// Mirrors storage.rules' staging/photos filename pattern — validated here
+// too (not just trusted from the rules) before it's used to pick a Firestore
+// field or an output path.
+const PHOTO_FILENAME_RE = /^(avatar|cover)-[A-Za-z0-9-]{1,80}$/;
+
 async function processPhoto(objectName: string, generation: string | number): Promise<void> {
-  // staging/photos/{uid}/{profileId}/{kind}-{nonce}
-  const [, , uid, profileId, fileName] = objectName.split("/");
-  if (!uid || !profileId || !fileName) return;
-  const kind = fileName.startsWith("avatar-") ? "avatar" : fileName.startsWith("cover-") ? "cover" : null;
-  const db = getFirestore();
   // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
   const stagingFile = bucket().file(objectName, { generation: Number(generation) });
+
+  // staging/photos/{uid}/{profileId}/{kind}-{nonce}
+  const segments = objectName.split("/");
+  const [, , uid, profileId, fileName] = segments;
+  const nameMatch = typeof fileName === "string" ? PHOTO_FILENAME_RE.exec(fileName) : null;
+  if (segments.length !== 5 || !isValidDocId(uid) || !isValidDocId(profileId) || !nameMatch) {
+    await stagingFile.delete().catch(logDeleteFailure("malformed staging photo path", objectName));
+    return;
+  }
+  const kind = nameMatch[1] as "avatar" | "cover";
+
+  const db = getFirestore();
   // Membership is derived from the OBJECT PATH's {uid}/{profileId} segments,
   // never from object.metadata (client-controlled and untrusted — see
   // storage.rules' note on staging paths).
-  const member = kind ? await db.doc(`profiles/${profileId}/members/${uid}`).get() : null;
-  if (!kind || !member?.exists) {
-    await stagingFile.delete().catch(() => {}); // non-member or malformed: discard
+  const member = await db.doc(`profiles/${profileId}/members/${uid}`).get();
+  if (!member.exists) {
+    await stagingFile.delete().catch(logDeleteFailure("non-member photo upload", objectName));
     return;
   }
   try {
@@ -141,11 +226,12 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     // failOn: "error" (sharp's default is "warning", the strictest level) —
     // real-world phone/app JPEG encoders commonly emit warning-level defects
     // (e.g. libjpeg's "extraneous bytes before marker") on otherwise-valid
-    // photos; the default "warning" level would reject those uploads. "error"
-    // still rejects truncated/genuinely corrupt data, just not mere warnings.
-    const sharpOpts = { failOn: "error" as const };
+    // photos; the default "warning" level would reject those uploads.
+    // "error" still rejects truncated/genuinely corrupt data, just not mere
+    // warnings. limitInputPixels bounds decompression-bomb-style inputs.
+    const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
     const pipeline = kind === "avatar"
-      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
+      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover", withoutEnlargement: true })
       : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
     const jpeg = await pipeline.jpeg({ quality: 82 }).toBuffer();
     const destPath = publicPhotoPath(profileId, kind, randomUUID());
@@ -154,10 +240,28 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     const profileRef = db.doc(`profiles/${profileId}`);
     const field = kind === "avatar" ? "portfolio.avatarPhotoPath" : "portfolio.coverPhotoPath";
     const prev = (await profileRef.get()).data()?.portfolio?.[`${kind}PhotoPath`] as string | null | undefined;
-    await profileRef.update({ [field]: destPath, updatedAt: Date.now() });
-    if (prev) await bucket().file(prev).delete().catch(() => {});
+    try {
+      await profileRef.update({ [field]: destPath, updatedAt: Date.now() });
+    } catch (err) {
+      // Profile can be deleted mid-flight too (deleteProfile's
+      // recursiveDelete races this trigger) — gRPC code 5 (NOT_FOUND).
+      // There's no live doc to point at destPath any more, so the
+      // freshly-written public object would otherwise survive as an orphan
+      // even after the profile is gone; clean it up regardless of the
+      // error's cause. Same swallow-not-rethrow reasoning as the audio
+      // failure path — only log when the cause wasn't the expected
+      // "doc is gone" case.
+      await bucket().file(destPath).delete().catch(logDeleteFailure("orphaned public photo", destPath));
+      if ((err as { code?: number }).code !== 5) {
+        console.error("processUpload: profile photo update failed", objectName, err);
+      }
+      return;
+    }
+    if (prev) {
+      await bucket().file(prev).delete().catch(logDeleteFailure("old photo", prev));
+    }
   } finally {
-    await stagingFile.delete().catch(() => {});
+    await stagingFile.delete().catch(logDeleteFailure("staging (photo, finally)", objectName));
   }
 }
 
