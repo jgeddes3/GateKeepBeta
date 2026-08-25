@@ -3,7 +3,7 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { doc, getDoc, getDocs, setDoc, updateDoc, collectionGroup, query, where } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, setDoc, updateDoc, collectionGroup, query, where } from "firebase/firestore";
 
 let env: RulesTestEnvironment;
 
@@ -41,18 +41,39 @@ describe("users", () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(updateDoc(doc(alice, "users/alice"), { email: "changed@x.com" }));
   });
+  it("owner update enforces type/size constraints on displayName, photoUrl, homeCity", async () => {
+    await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(81) }));
+    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(80) }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { photoUrl: "http://insecure.example/pic.png" }));
+    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: "https://example.com/pic.png" }));
+    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: null }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "x".repeat(81) }));
+    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" }));
+  });
 });
 
 describe("pushTokens", () => {
-  it("owner reads and writes own pushTokens; stranger cannot", async () => {
+  it("owner reads own pushTokens; stranger cannot", async () => {
     await seed("users/alice", { displayName: "Alice" });
-    await seed("users/alice/pushTokens/t1", { token: "abc123" });
+    await seed("users/alice/pushTokens/ExponentPushToken[abc123]", { createdAt: 1 });
     const alice = env.authenticatedContext("alice").firestore();
     const bob = env.authenticatedContext("bob").firestore();
-    await assertSucceeds(getDoc(doc(alice, "users/alice/pushTokens/t1")));
-    await assertSucceeds(setDoc(doc(alice, "users/alice/pushTokens/t2"), { token: "xyz789" }));
-    await assertFails(getDoc(doc(bob, "users/alice/pushTokens/t1")));
-    await assertFails(setDoc(doc(bob, "users/alice/pushTokens/t3"), { token: "hacked" }));
+    await assertSucceeds(getDoc(doc(alice, "users/alice/pushTokens/ExponentPushToken[abc123]")));
+    await assertFails(getDoc(doc(bob, "users/alice/pushTokens/ExponentPushToken[abc123]")));
+  });
+  it("owner may only write well-formed token ids with a createdAt-only payload; stranger cannot write at all", async () => {
+    await seed("users/alice", { displayName: "Alice" });
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    await assertSucceeds(setDoc(doc(alice, "users/alice/pushTokens/ExponentPushToken[xyz789]"), { createdAt: Date.now() }));
+    await assertFails(setDoc(doc(alice, "users/alice/pushTokens/not-a-token"), { createdAt: Date.now() }));
+    await assertFails(setDoc(
+      doc(alice, "users/alice/pushTokens/ExponentPushToken[extrafield]"),
+      { createdAt: Date.now(), token: "sneaking-in-an-extra-field" },
+    ));
+    await assertFails(setDoc(doc(bob, "users/alice/pushTokens/ExponentPushToken[hacked]"), { createdAt: Date.now() }));
   });
 });
 
@@ -77,11 +98,21 @@ describe("profiles", () => {
     await assertFails(setDoc(doc(alice, "auditLogs/x"), { action: "profile_approved" }));
     await assertFails(setDoc(doc(alice, "invites/i1"), { invitedUid: "alice" }));
   });
-  it("members are readable by profile members and by anyone for approved profiles", async () => {
+  it("members are get-readable by anyone for approved profiles, but LIST is restricted to members/admins", async () => {
     await seed("profiles/p1", { name: "Owls", status: "approved" });
     await seed("profiles/p1/members/alice", { uid: "alice", role: "admin", label: "vocals" });
     const anon = env.unauthenticatedContext().firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const alice = env.authenticatedContext("alice").firestore();
+    const adminCtx = env.authenticatedContext("root", { admin: true }).firestore();
+    // Single-doc get by known id stays world-readable for approved profiles...
     await assertSucceeds(getDoc(doc(anon, "profiles/p1/members/alice")));
+    // ...but listing the whole roster (which would dump every member, even
+    // of an approved profile, to anyone) is restricted to members/admins.
+    await assertFails(getDocs(collection(anon, "profiles/p1/members")));
+    await assertFails(getDocs(collection(bob, "profiles/p1/members")));
+    await assertSucceeds(getDocs(collection(alice, "profiles/p1/members")));
+    await assertSucceeds(getDocs(collection(adminCtx, "profiles/p1/members")));
   });
   it("member self-read: reads own member doc under a non-approved profile; a stranger cannot", async () => {
     await seed("profiles/p3", { name: "Hidden", status: "pending_review" });
@@ -93,12 +124,25 @@ describe("profiles", () => {
   });
 });
 
+describe("handles", () => {
+  it("get succeeds for anyone (the public profile page's lookup path); list is denied", async () => {
+    await seed("handles/owls", { profileId: "p1" });
+    await seed("handles/other", { profileId: "p2" });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "handles/owls")));
+    // Listing would dump every handle, including draft/rejected profiles'
+    // handles, to any unauthenticated caller.
+    await assertFails(getDocs(collection(anon, "handles")));
+  });
+});
+
 describe("collection-group members query", () => {
-  it("member finds their own membership doc via collectionGroup('members'); a stranger's query for someone else's uid fails", async () => {
+  it("member finds their own membership doc via collectionGroup('members'); a stranger's query for someone else's uid fails; admin's query for another uid succeeds", async () => {
     await seed("profiles/p3", { name: "Hidden", status: "pending_review" });
     await seed("profiles/p3/members/alice", { uid: "alice", role: "admin", label: "guitar" });
     const alice = env.authenticatedContext("alice").firestore();
     const bob = env.authenticatedContext("bob").firestore();
+    const adminCtx = env.authenticatedContext("root", { admin: true }).firestore();
 
     const aliceSnap = await assertSucceeds(
       getDocs(query(collectionGroup(alice, "members"), where("uid", "==", "alice")))
@@ -106,6 +150,13 @@ describe("collection-group members query", () => {
     if (aliceSnap.empty) throw new Error("expected alice's membership doc to be returned by the collection-group query");
 
     await assertFails(getDocs(query(collectionGroup(bob, "members"), where("uid", "==", "alice"))));
+
+    // Admin dashboard's per-user "profiles and statuses" lookup relies on
+    // this: an admin can run the same collection-group query for any uid.
+    const adminSnap = await assertSucceeds(
+      getDocs(query(collectionGroup(adminCtx, "members"), where("uid", "==", "alice")))
+    );
+    if (adminSnap.empty) throw new Error("expected admin's collection-group query to return alice's membership doc");
   });
 });
 
