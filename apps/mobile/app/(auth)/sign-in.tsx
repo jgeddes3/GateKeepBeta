@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, Platform, Alert } from "react-native"
 import { Link } from "expo-router";
 import {
   signInWithEmailAndPassword, GoogleAuthProvider, OAuthProvider, signInWithCredential,
+  fetchSignInMethodsForEmail, type Auth,
 } from "firebase/auth";
 import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
@@ -18,8 +19,28 @@ function authMessage(code: string): string {
     case "auth/wrong-password": return "That email and password don't match.";
     case "auth/user-not-found": return "No account with that email. Did you sign up with Google or Apple?";
     case "auth/too-many-requests": return "Too many tries. Wait a minute and try again.";
+    case "auth/account-exists-with-different-credential":
+      return "This email is already registered with a different sign-in method.";
     default: return "Couldn't sign you in. Check your connection and try again.";
   }
+}
+
+// spec §4: when a Google/Apple credential collides with an email already registered under
+// a different provider, tell the user which method to use instead of a generic failure.
+async function accountExistsMessage(auth: Auth, e: any): Promise<string> {
+  const fallback = "This email is already registered with a different sign-in method.";
+  const email = e?.customData?.email as string | undefined;
+  if (!email) return fallback;
+  try {
+    const methods = await fetchSignInMethodsForEmail(auth, email);
+    const label = methods.includes("password") ? "email & password"
+      : methods.includes("google.com") ? "Google"
+      : methods.includes("apple.com") ? "Apple"
+      : undefined;
+    return label
+      ? `This email already has a GateKeep account using ${label}. Sign in with that method instead.`
+      : fallback;
+  } catch { return fallback; }
 }
 
 export default function SignIn() {
@@ -38,7 +59,14 @@ export default function SignIn() {
       const idToken = res.data?.idToken;
       if (!idToken) return;
       await signInWithCredential(auth, GoogleAuthProvider.credential(idToken));
-    } catch { Alert.alert("Sign in", "Google sign-in didn't complete."); }
+    } catch (e: any) {
+      console.warn("sign-in error", e?.code);
+      if (e?.code === "auth/account-exists-with-different-credential") {
+        Alert.alert("Sign in", await accountExistsMessage(auth, e));
+        return;
+      }
+      Alert.alert("Sign in", "Google sign-in didn't complete.");
+    }
   };
   const appleSignIn = async () => {
     try {
@@ -49,7 +77,16 @@ export default function SignIn() {
       if (!cred.identityToken) return;
       const provider = new OAuthProvider("apple.com");
       await signInWithCredential(auth, provider.credential({ idToken: cred.identityToken }));
-    } catch { Alert.alert("Sign in", "Apple sign-in didn't complete."); }
+    } catch (e: any) {
+      // User dismissed the native Apple sheet — not an error worth surfacing.
+      if (e?.code === "ERR_REQUEST_CANCELED") return;
+      console.warn("sign-in error", e?.code);
+      if (e?.code === "auth/account-exists-with-different-credential") {
+        Alert.alert("Sign in", await accountExistsMessage(auth, e));
+        return;
+      }
+      Alert.alert("Sign in", "Apple sign-in didn't complete.");
+    }
   };
 
   return (
