@@ -85,6 +85,7 @@ import { describe, it, expect } from "vitest";
 import {
   validatePortfolioUpdate, validateBookingUpdate, validateTrackCreate,
   GENRES, GIG_TYPES, MAX_TRACKS, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES,
+  ACT_SIZES, AVAILABILITY_PATTERNS, TRACK_STATUSES,
 } from "../src/index.js";
 
 describe("validatePortfolioUpdate", () => {
@@ -116,6 +117,31 @@ describe("validatePortfolioUpdate", () => {
     expect(validatePortfolioUpdate({ profileId: "p1", bio: 42 } as never).ok).toBe(false);
     expect(validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "spotify" }] } as never).ok).toBe(false);
   });
+  it("rejects spotify-lookalike hosts (subdomain suffix, userinfo trick, homograph) and accepts an uppercase scheme", () => {
+    const link = (kind: string, url: string) =>
+      validatePortfolioUpdate({ ...ok, externalLinks: [{ kind: kind as never, url }] });
+    expect(link("spotify", "https://open.spotify.com.evil.example/x").ok).toBe(false);
+    expect(link("spotify", "https://open.spotify.com@evil.example/x").ok).toBe(false);
+    expect(link("spotify", "https://opеn.spotify.com/x").ok).toBe(false); // е is Cyrillic "е", not Latin "e"
+    expect(link("spotify", "HTTPS://OPEN.SPOTIFY.COM/artist/a").ok).toBe(true); // regex has /i — uppercase scheme+host are fine
+  });
+  it("rejects the 'Nothing to update' case when bio/genres/externalLinks are all omitted", () => {
+    expect(validatePortfolioUpdate({ profileId: "p1" }).ok).toBe(false);
+  });
+  it("rejects duplicate genres", () => {
+    expect(validatePortfolioUpdate({ ...ok, genres: [GENRES[0], GENRES[0]] }).ok).toBe(false);
+  });
+  it("rejects duplicate links", () => {
+    const dup = [
+      { kind: "website" as const, url: "https://x.example" },
+      { kind: "website" as const, url: "https://x.example" },
+    ];
+    expect(validatePortfolioUpdate({ ...ok, externalLinks: dup }).ok).toBe(false);
+  });
+  it("rejects an invalid profileId (empty, or containing a path separator)", () => {
+    expect(validatePortfolioUpdate({ profileId: "", bio: "hi" }).ok).toBe(false);
+    expect(validatePortfolioUpdate({ profileId: "p1/members/attacker", bio: "hi" }).ok).toBe(false);
+  });
 });
 
 describe("validateBookingUpdate", () => {
@@ -143,6 +169,25 @@ describe("validateBookingUpdate", () => {
     expect(validateBookingUpdate({ ...ok, preferences: { ...ok.preferences, travelRadiusKm: -1 } }).ok).toBe(false);
     expect(validateBookingUpdate({ ...ok, preferences: { ...ok.preferences, typicalSetMinutes: 5000 } }).ok).toBe(false);
   });
+  it("rejects too many gig types and duplicate gig types", () => {
+    const tooMany = Array.from({ length: GIG_TYPES.length + 1 }, () => GIG_TYPES[0]);
+    expect(validateBookingUpdate({ ...ok, preferences: { ...ok.preferences, gigTypes: tooMany } }).ok).toBe(false);
+    expect(validateBookingUpdate({
+      ...ok, preferences: { ...ok.preferences, gigTypes: [GIG_TYPES[0], GIG_TYPES[0]] },
+    }).ok).toBe(false);
+  });
+  it("treats an omitted rate (undefined, not present in the payload) the same as explicit null", () => {
+    expect(validateBookingUpdate({ profileId: "p1", rates: {} as never, preferences: ok.preferences }).ok).toBe(true);
+  });
+  it("treats an omitted rate note (undefined) the same as explicit null", () => {
+    expect(validateBookingUpdate({
+      ...ok, rates: { ...ok.rates, perHour: { amountCents: 100 } as never },
+    }).ok).toBe(true);
+  });
+  it("rejects an invalid profileId (empty, or containing a path separator)", () => {
+    expect(validateBookingUpdate({ ...ok, profileId: "" }).ok).toBe(false);
+    expect(validateBookingUpdate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
 });
 
 describe("validateTrackCreate", () => {
@@ -161,6 +206,15 @@ describe("validateTrackCreate", () => {
     expect(validateTrackCreate({ ...ok, sizeBytes: MAX_AUDIO_UPLOAD_BYTES + 1 }).ok).toBe(false);
     expect(validateTrackCreate({ ...ok, contentType: "video/mp4" }).ok).toBe(false);
   });
+  it("checks the length bound against the trimmed title, not the raw string", () => {
+    const padded = "  " + "x".repeat(80) + "  "; // trims to exactly 80
+    expect(validateTrackCreate({ ...ok, title: padded }).ok).toBe(true);
+    expect(validateTrackCreate({ ...ok, title: "x".repeat(81) }).ok).toBe(false);
+  });
+  it("rejects an invalid profileId (empty, or containing a path separator)", () => {
+    expect(validateTrackCreate({ ...ok, profileId: "" }).ok).toBe(false);
+    expect(validateTrackCreate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
 });
 
 describe("constants", () => {
@@ -168,6 +222,66 @@ describe("constants", () => {
     expect(MAX_TRACKS).toBe(10);
     expect(MAX_CLIP_SECONDS).toBe(30);
   });
+  it("derives the runtime allowlist arrays that back the ActSize/AvailabilityPattern/TrackStatus unions", () => {
+    expect(ACT_SIZES).toEqual(["solo", "duo", "band"]);
+    expect(AVAILABILITY_PATTERNS).toEqual(["weekends", "weeknights", "anytime", "limited"]);
+    expect(TRACK_STATUSES).toEqual(["processing", "pending_review", "approved", "rejected", "failed"]);
+  });
+});
+
+describe("never throws on hostile payloads (defensive runtime guards)", () => {
+  // Each of these previously either threw (prototype-chain `in` lookup) or
+  // silently validated as ok (missing array/length/id checks). All must now
+  // fail cleanly — no uncaught exception, ok: false.
+  const hostileCases: Array<{ name: string; run: () => { ok: boolean } }> = [
+    {
+      name: "link kind 'constructor' (prototype-chain lookup bypass)",
+      run: () => validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "constructor" as never, url: "https://x.example" }] }),
+    },
+    {
+      name: "link kind 'toString'",
+      run: () => validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "toString" as never, url: "https://x.example" }] }),
+    },
+    {
+      name: "link kind '__proto__'",
+      run: () => validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "__proto__" as never, url: "https://x.example" }] }),
+    },
+    {
+      name: "booking rates as an array",
+      run: () => validateBookingUpdate({
+        profileId: "p1",
+        rates: [] as never,
+        preferences: { gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null },
+      }),
+    },
+    {
+      name: "booking preferences as null",
+      run: () => validateBookingUpdate({
+        profileId: "p1",
+        rates: { perHour: null, perSong: null, perSet: null },
+        preferences: null as never,
+      }),
+    },
+    {
+      name: "portfolio genres as a plain object",
+      run: () => validatePortfolioUpdate({ profileId: "p1", genres: {} as never }),
+    },
+    {
+      name: "track startSec as NaN",
+      run: () => validateTrackCreate({ profileId: "p1", title: "T", startSec: NaN, sizeBytes: 1000, contentType: "audio/mpeg" }),
+    },
+    {
+      name: "profileId containing a path separator",
+      run: () => validatePortfolioUpdate({ profileId: "a/b", bio: "hi" }),
+    },
+  ];
+  for (const { name, run } of hostileCases) {
+    it(`does not throw and reports ok:false — ${name}`, () => {
+      let result: { ok: boolean } | undefined;
+      expect(() => { result = run(); }).not.toThrow();
+      expect(result?.ok).toBe(false);
+    });
+  }
 });
 ```
 
@@ -183,7 +297,8 @@ Append to `packages/shared/src/types.ts`:
 ```ts
 // ---------- Sub-project 2: musician portfolio ----------
 
-export type TrackStatus = "processing" | "pending_review" | "approved" | "rejected" | "failed";
+export const TRACK_STATUSES = ["processing", "pending_review", "approved", "rejected", "failed"] as const;
+export type TrackStatus = (typeof TRACK_STATUSES)[number];
 
 export interface TrackDoc {
   title: string;
@@ -216,8 +331,10 @@ export interface BookingRates {
   perSong: RateAmount | null;    // pay scales with songs requested (e.g. wedding playlists)
   perSet: RateAmount | null;     // flat rate for a defined set
 }
-export type ActSize = "solo" | "duo" | "band";
-export type AvailabilityPattern = "weekends" | "weeknights" | "anytime" | "limited";
+export const ACT_SIZES = ["solo", "duo", "band"] as const;
+export type ActSize = (typeof ACT_SIZES)[number];
+export const AVAILABILITY_PATTERNS = ["weekends", "weeknights", "anytime", "limited"] as const;
+export type AvailabilityPattern = (typeof AVAILABILITY_PATTERNS)[number];
 export interface BookingPreferences {
   gigTypes: string[];            // subset of GIG_TYPES
   travelRadiusKm: number | null;
@@ -310,6 +427,7 @@ Append to `packages/shared/src/validation.ts`:
 ```ts
 import {
   GENRES, GIG_TYPES, AUDIO_CONTENT_TYPES, MAX_AUDIO_UPLOAD_BYTES,
+  ACT_SIZES, AVAILABILITY_PATTERNS,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
 } from "./types.js";
@@ -317,24 +435,39 @@ import {
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
 
+// Guards Firestore document-id-shaped fields (profileId, etc.) against empty
+// strings, path traversal ("a/b"), and absurdly long values before they reach
+// a doc() call — Firestore would throw on "/" in an id, and we want a clean
+// validation failure from an onCall handler, not an uncaught exception.
+export const isValidDocId = (s: unknown): s is string =>
+  typeof s === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(s);
+
 // Domain allowlists per link kind. Regex-based host extraction (not `new URL`)
 // so behavior is identical on Node and React Native/Hermes.
+// NOTE: "website" accepts any https host, which may resolve to localhost,
+// private IPs, or internal hostnames. These links are display-only (rendered
+// as an <a href>) and MUST NEVER be fetched server-side — that would be an
+// SSRF vector.
 const LINK_HOSTS: Record<ExternalLink["kind"], readonly string[] | null> = {
   spotify: ["open.spotify.com"],
   youtube: ["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"],
   instagram: ["instagram.com", "www.instagram.com"],
   website: null, // any https host
 };
-const HTTPS_HOST_RE = /^https:\/\/([a-z0-9.-]+)(\/|$)/i;
+const HTTPS_HOST_RE = /^https:\/\/([a-z0-9.-]+)(?::\d{1,5})?(?=[/?#]|$)/i;
 
 function validateLink(link: unknown): Result {
   const l = link as ExternalLink;
   if (typeof l !== "object" || l === null || typeof l.kind !== "string" || typeof l.url !== "string") {
     return fail("Invalid link.");
   }
-  if (!(l.kind in LINK_HOSTS)) return fail("Unknown link type.");
-  if (l.url.length > 300) return fail("Link URLs must be 300 characters or fewer.");
-  const m = HTTPS_HOST_RE.exec(l.url);
+  // Object.hasOwn, not `in` — `in` walks the prototype chain, so kind values
+  // like "constructor"/"toString"/"__proto__" would otherwise pass this guard
+  // and crash `hosts.includes` below with an uncaught TypeError.
+  if (!Object.hasOwn(LINK_HOSTS, l.kind)) return fail("Unknown link type.");
+  const url = l.url.trim();
+  if (url.length > 300) return fail("Link URLs must be 300 characters or fewer.");
+  const m = HTTPS_HOST_RE.exec(url);
   if (!m) return fail("Links must be https:// URLs.");
   const hosts = LINK_HOSTS[l.kind];
   if (hosts && !hosts.includes(m[1].toLowerCase())) {
@@ -345,9 +478,10 @@ function validateLink(link: unknown): Result {
 
 export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
   // Untrusted onCall payload — same defensive-runtime rationale as validateHandle.
-  if (typeof input !== "object" || input === null || typeof input.profileId !== "string") {
+  if (typeof input !== "object" || input === null) {
     return fail("Invalid portfolio update.");
   }
+  if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
   if (input.bio === undefined && input.genres === undefined && input.externalLinks === undefined) {
     return fail("Nothing to update.");
   }
@@ -360,6 +494,7 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
     if (!Array.isArray(input.genres) || input.genres.length < 1 || input.genres.length > 3) {
       return fail("Pick 1-3 genres.");
     }
+    if (new Set(input.genres).size !== input.genres.length) return fail("Duplicate genres.");
     for (const g of input.genres) {
       if (!(GENRES as readonly string[]).includes(g)) return fail("Unknown genre.");
     }
@@ -372,35 +507,40 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
       const v = validateLink(l);
       if (!v.ok) return v;
     }
+    const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url}`);
+    if (new Set(linkKeys).size !== linkKeys.length) return fail("Duplicate links.");
   }
   return { ok: true };
 }
 
 function validateRate(rate: unknown, label: string): Result {
-  if (rate === null) return { ok: true };
+  if (rate == null) return { ok: true }; // absent (undefined) and explicit null both mean "not set"
   const r = rate as RateAmount;
   if (typeof r !== "object" || typeof r.amountCents !== "number"
       || !Number.isInteger(r.amountCents) || r.amountCents < 1 || r.amountCents > 100_000_000) {
     return fail(`${label} must be a whole number of cents between 1 and 100,000,000.`);
   }
-  if (r.note !== null && (typeof r.note !== "string" || r.note.length > 200)) {
+  if (r.note != null && (typeof r.note !== "string" || r.note.length > 200)) {
     return fail(`${label} note must be at most 200 characters.`);
   }
   return { ok: true };
 }
 
 export function validateBookingUpdate(input: BookingUpdateInput): Result {
-  if (typeof input !== "object" || input === null || typeof input.profileId !== "string"
-      || typeof input.rates !== "object" || input.rates === null
-      || typeof input.preferences !== "object" || input.preferences === null) {
+  if (typeof input !== "object" || input === null
+      || typeof input.rates !== "object" || input.rates === null || Array.isArray(input.rates)
+      || typeof input.preferences !== "object" || input.preferences === null || Array.isArray(input.preferences)) {
     return fail("Invalid booking info.");
   }
+  if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
   for (const [k, label] of [["perHour", "Hourly rate"], ["perSong", "Per-song rate"], ["perSet", "Per-set rate"]] as const) {
     const v = validateRate(input.rates[k], label);
     if (!v.ok) return v;
   }
   const p = input.preferences;
   if (!Array.isArray(p.gigTypes)) return fail("Invalid gig types.");
+  if (p.gigTypes.length > GIG_TYPES.length) return fail("Too many gig types.");
+  if (new Set(p.gigTypes).size !== p.gigTypes.length) return fail("Duplicate gig types.");
   for (const g of p.gigTypes) {
     if (!(GIG_TYPES as readonly string[]).includes(g)) return fail("Unknown gig type.");
   }
@@ -408,7 +548,7 @@ export function validateBookingUpdate(input: BookingUpdateInput): Result {
       || !Number.isInteger(p.travelRadiusKm) || p.travelRadiusKm < 0 || p.travelRadiusKm > 3000)) {
     return fail("Travel radius must be 0-3000 km.");
   }
-  if (p.actSize !== null && !["solo", "duo", "band"].includes(p.actSize as string)) {
+  if (p.actSize !== null && !(ACT_SIZES as readonly string[]).includes(p.actSize)) {
     return fail("Invalid act size.");
   }
   if (p.typicalSetMinutes !== null && (typeof p.typicalSetMinutes !== "number"
@@ -417,17 +557,18 @@ export function validateBookingUpdate(input: BookingUpdateInput): Result {
   }
   if (p.bringsOwnPA !== null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
   if (p.availabilityPattern !== null
-      && !["weekends", "weeknights", "anytime", "limited"].includes(p.availabilityPattern as string)) {
+      && !(AVAILABILITY_PATTERNS as readonly string[]).includes(p.availabilityPattern)) {
     return fail("Invalid availability.");
   }
   return { ok: true };
 }
 
 export function validateTrackCreate(input: CreateTrackInput): Result {
-  if (typeof input !== "object" || input === null || typeof input.profileId !== "string") {
+  if (typeof input !== "object" || input === null) {
     return fail("Invalid track.");
   }
-  if (typeof input.title !== "string" || input.title.trim().length < 1 || input.title.length > 80) {
+  if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
+  if (typeof input.title !== "string" || input.title.trim().length < 1 || input.title.trim().length > 80) {
     return fail("Track titles are 1-80 characters.");
   }
   if (typeof input.startSec !== "number" || !Number.isFinite(input.startSec)

@@ -68,7 +68,8 @@ export interface ProfileDraftInput {
 
 // ---------- Sub-project 2: musician portfolio ----------
 
-export type TrackStatus = "processing" | "pending_review" | "approved" | "rejected" | "failed";
+export const TRACK_STATUSES = ["processing", "pending_review", "approved", "rejected", "failed"] as const;
+export type TrackStatus = (typeof TRACK_STATUSES)[number];
 
 export interface TrackDoc {
   title: string;
@@ -101,8 +102,10 @@ export interface BookingRates {
   perSong: RateAmount | null;    // pay scales with songs requested (e.g. wedding playlists)
   perSet: RateAmount | null;     // flat rate for a defined set
 }
-export type ActSize = "solo" | "duo" | "band";
-export type AvailabilityPattern = "weekends" | "weeknights" | "anytime" | "limited";
+export const ACT_SIZES = ["solo", "duo", "band"] as const;
+export type ActSize = (typeof ACT_SIZES)[number];
+export const AVAILABILITY_PATTERNS = ["weekends", "weeknights", "anytime", "limited"] as const;
+export type AvailabilityPattern = (typeof AVAILABILITY_PATTERNS)[number];
 export interface BookingPreferences {
   gigTypes: string[];            // subset of GIG_TYPES
   travelRadiusKm: number | null;
