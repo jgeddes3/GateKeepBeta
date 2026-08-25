@@ -8,3 +8,4 @@ export { inviteMember, respondToInvite, removeMember, transferAdmin, revokeInvit
 export { deleteAccount } from "./account.js";
 export { updatePortfolio, updateBookingInfo } from "./portfolio.js";
 export { createTrack, updateTrack, deleteTrack, reorderTracks } from "./tracks.js";
+export { processUpload } from "./media.js";
