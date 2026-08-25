@@ -1,5 +1,20 @@
-import { Stack } from "expo-router";
+import { Stack, useRouter, useSegments } from "expo-router";
+import { useEffect } from "react";
+import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
+
+function Gate() {
+  const { user, loading } = useAuth();
+  const segments = useSegments();
+  const router = useRouter();
+  useEffect(() => {
+    if (loading) return;
+    const inAuthGroup = segments[0] === "(auth)";
+    if (!user && !inAuthGroup) router.replace("/(auth)/sign-in");
+    if (user && inAuthGroup) router.replace("/");
+  }, [user, loading, segments]);
+  return <Stack screenOptions={{ headerShown: false }} />;
+}
 
 export default function RootLayout() {
-  return <Stack />;
+  return <AuthProvider><Gate /></AuthProvider>;
 }
