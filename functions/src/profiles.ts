@@ -159,7 +159,8 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   // object means the trigger never fired at all, not that this cascade
   // missed it. Those are backstopped by the Storage bucket's 24h lifecycle
   // rule on staging/, which is a LAUNCH BLOCKER follow-up (not yet
-  // configured — see README).
+  // configured — tracked in the SP2 plan's manual follow-ups; Task 16 owes
+  // the README entry).
   const cascadeTargets = [
     `public/tracks/${profileId}/`,
     `review/tracks/${profileId}/`,
@@ -170,11 +171,13 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   results.forEach((r, i) => {
     if (r.status !== "rejected") return;
     // force: true's rejection reason is an ARRAY of per-object errors
-    // (@google-cloud/storage batches them), not a single Error — log each
+    // (@google-cloud/storage collects them), not a single Error — log each
     // one individually rather than dumping the array as one opaque entry.
+    // The non-array fallback is NOT dead code: a listing failure still
+    // rejects with a single Error even under force: true.
     const errors = Array.isArray(r.reason) ? r.reason : [r.reason];
     for (const e of errors) {
-      logDeleteFailure("deleteProfile", `storage cascade (${cascadeTargets[i]})`, cascadeTargets[i])(e);
+      logDeleteFailure("deleteProfile", "storage cascade", cascadeTargets[i])(e);
     }
   });
 

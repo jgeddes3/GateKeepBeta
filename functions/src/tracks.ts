@@ -10,9 +10,10 @@ import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
 
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
-// docs (for the reason display) but don't count. Exported so Task 9's submit
-// minimum-content gate can import it instead of re-hardcoding the list.
-export const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
+// docs (for the reason display) but don't count. This is slot occupancy for
+// the 10-track cap, NOT listenability — see profiles.ts's
+// LISTENABLE_TRACK_STATUSES, which deliberately excludes "processing".
+const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
 
 export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
