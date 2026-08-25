@@ -1393,7 +1393,7 @@ export const updateTrack = onCall<{ profileId: string; trackId: string; title?: 
     if (title === undefined && order === undefined) {
       throw new HttpsError("invalid-argument", "Nothing to update.");
     }
-    if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.length > 80)) {
+    if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.trim().length > 80)) {
       throw new HttpsError("invalid-argument", "Track titles are 1-80 characters.");
     }
     if (order !== undefined && (typeof order !== "number" || !Number.isInteger(order) || order < 0 || order > 100)) {
