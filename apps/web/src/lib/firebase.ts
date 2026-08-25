@@ -1,4 +1,5 @@
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
+import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 import { getAuth, connectAuthEmulator, type Auth } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator, type Firestore } from "firebase/firestore";
 import { getFunctions, connectFunctionsEmulator, type Functions } from "firebase/functions";
@@ -27,6 +28,15 @@ export function getFirebase() {
     connectAuthEmulator(auth, `http://${EMU_HOST}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, EMU_HOST, 8080);
     connectFunctionsEmulator(functions, EMU_HOST, 5001);
+  }
+  // App Check (spec §8): reCAPTCHA v3, browser-only, production-only, and only once a
+  // site key is configured (Firebase console → App Check → register web app first).
+  const recaptchaSiteKey = process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY ?? "";
+  if (typeof window !== "undefined" && process.env.NODE_ENV === "production" && recaptchaSiteKey !== "") {
+    initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(recaptchaSiteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
   }
   cached = { app, auth, db, functions };
   return cached;

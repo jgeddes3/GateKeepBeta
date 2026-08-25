@@ -5,6 +5,7 @@ packages:
   - "tests-rules"
 allowBuilds:
   '@firebase/util': true
+  '@sentry/cli': false
   esbuild: true
   protobufjs: true
   unrs-resolver: true

@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@gatekeep/shared": "workspace:*",
+    "@sentry/nextjs": "^10.70.0",
     "firebase": "^11.10.0",
     "next": "16.3.2",
     "react": "19.2.8",
