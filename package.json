@@ -1,6 +1,7 @@
 {
   "name": "gatekeep",
   "private": true,
+  "type": "module",
   "packageManager": "pnpm@11.23.0",
   "engines": {
     "node": ">=20",
@@ -14,6 +15,10 @@
     "emu:rules": "firebase emulators:exec --only firestore \"pnpm --filter @gatekeep/tests-rules test\""
   },
   "devDependencies": {
-    "firebase-tools": "^15.28.1"
+    "firebase-tools": "^15.28.1",
+    "tsx": "^4.23.12"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
   }
 }
