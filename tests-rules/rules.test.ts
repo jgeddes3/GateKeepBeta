@@ -109,6 +109,32 @@ describe("collection-group members query", () => {
   });
 });
 
+describe("admin reads", () => {
+  it("admin token reads pending profiles, auditLogs, any user; non-admin cannot", async () => {
+    await seed("profiles/p9", { name: "Pending", status: "pending_review" });
+    await seed("auditLogs/l1", { action: "profile_approved", actorUid: "x" });
+    await seed("users/target", { displayName: "T", email: "t@x.com" });
+    const adminCtx = env.authenticatedContext("root", { admin: true }).firestore();
+    const normal = env.authenticatedContext("norm").firestore();
+    await assertSucceeds(getDoc(doc(adminCtx, "profiles/p9")));
+    await assertSucceeds(getDoc(doc(adminCtx, "auditLogs/l1")));
+    await assertSucceeds(getDoc(doc(adminCtx, "users/target")));
+    await assertFails(getDoc(doc(normal, "auditLogs/l1")));
+  });
+  it("admin token reads a non-member's nested member doc under a non-approved profile; non-admin cannot", async () => {
+    await seed("profiles/p10", { name: "Hidden", status: "pending_review" });
+    await seed("profiles/p10/members/alice", { uid: "alice", role: "admin", label: "guitar" });
+    const adminCtx = env.authenticatedContext("root", { admin: true }).firestore();
+    const normal = env.authenticatedContext("norm").firestore();
+    await assertSucceeds(getDoc(doc(adminCtx, "profiles/p10/members/alice")));
+    await assertFails(getDoc(doc(normal, "profiles/p10/members/alice")));
+  });
+  it("admin cannot write auditLogs (read-only widened, write stays false)", async () => {
+    const adminCtx = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(setDoc(doc(adminCtx, "auditLogs/x"), { action: "profile_approved" }));
+  });
+});
+
 describe("invites and notifications", () => {
   it("invitee reads own invite; others cannot", async () => {
     await seed("invites/i1", { invitedUid: "bob", profileId: "p1", status: "pending" });

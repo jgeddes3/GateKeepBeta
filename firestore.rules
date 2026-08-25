@@ -4,6 +4,7 @@ service cloud.firestore {
 
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
     function isMember(profileId) {
       return signedIn()
         && exists(/databases/$(database)/documents/profiles/$(profileId)/members/$(request.auth.uid));
@@ -13,7 +14,7 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read: if isOwner(uid);
+      allow read: if isOwner(uid) || isAdmin();
       // Created by Cloud Functions; owner may update editable fields only.
       allow update: if isOwner(uid)
         && request.resource.data.diff(resource.data).affectedKeys()
@@ -32,13 +33,13 @@ service cloud.firestore {
     }
 
     match /profiles/{profileId} {
-      allow read: if resource.data.status == 'approved' || isMember(profileId);
+      allow read: if resource.data.status == 'approved' || isMember(profileId) || isAdmin();
       allow write: if false; // Cloud Functions only
 
       match /members/{memberUid} {
         // self-read clause serves the collection-group "my profiles" query
         allow read: if profileApproved(profileId) || isMember(profileId)
-          || (signedIn() && request.auth.uid == resource.data.uid);
+          || (signedIn() && request.auth.uid == resource.data.uid) || isAdmin();
         allow write: if false; // Cloud Functions only
       }
     }
@@ -60,7 +61,7 @@ service cloud.firestore {
     }
 
     match /handles/{handle}   { allow read: if true; allow write: if false; }
-    match /auditLogs/{logId}  { allow read, write: if false; } // admin dashboard reads via Admin SDK API
+    match /auditLogs/{logId}  { allow read: if isAdmin(); allow write: if false; }
     match /{document=**}      { allow read, write: if false; }
   }
 }
