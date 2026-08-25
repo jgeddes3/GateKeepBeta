@@ -2,20 +2,26 @@
   "name": "functions",
   "type": "module",
   "main": "dist/index.js",
-  "engines": { "node": "20" },
+  "engines": {
+    "node": "20"
+  },
   "scripts": {
     "build": "pnpm --filter @gatekeep/shared build && tsc",
     "test": "vitest run --no-file-parallelism",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@gatekeep/shared": "workspace:*",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
     "firebase-admin": "^12.0.0",
     "firebase-functions": "^6.0.0",
-    "@gatekeep/shared": "workspace:*"
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
+    "@types/ffprobe-static": "^2.0.3",
+    "firebase": "^11.0.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.0.0",
-    "firebase": "^11.0.0"
+    "vitest": "^2.0.0"
   }
 }
