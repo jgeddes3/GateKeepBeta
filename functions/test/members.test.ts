@@ -47,6 +47,26 @@ describe("invites", () => {
     await expect(callFn("inviteMember", { profileId, email, role: "member", label: "x" }, stranger.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+  it("inviting an email with no GateKeep account fails not-found", async () => {
+    const { owner, profileId } = await bandWithOwner("inv3");
+    await expect(callFn(
+      "inviteMember", { profileId, email: `no-account-${Date.now()}@test.com`, role: "member", label: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/not-found" });
+  });
+  it("responding twice to the same invite fails on the second call; invite doc fields/status are correct", async () => {
+    const { owner, profileId } = await bandWithOwner("inv4");
+    const email = `dup-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    const inv = (await adb.doc(`invites/${inviteId}`).get()).data();
+    expect(inv?.status).toBe("accepted");
+    expect(inv?.invitedUid).toBe(invitee.uid);
+    expect(inv?.profileId).toBe(profileId);
+    await expect(callFn("respondToInvite", { inviteId, accept: true }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
 });
 
 describe("removal and admin transfer", () => {
@@ -67,5 +87,61 @@ describe("removal and admin transfer", () => {
     expect((await adb.doc(`profiles/${profileId}/members/${co.uid}`).get()).data()?.role).toBe("admin");
     await callFn("removeMember", { profileId, uid: owner.uid }, co.user);
     expect((await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get()).exists).toBe(false);
+  });
+  it("a non-last-admin member can remove themselves", async () => {
+    const { owner, profileId } = await bandWithOwner("rm2");
+    const email = `self-${Date.now()}@test.com`;
+    const member = await signUpTestUser(email);
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    await callFn("respondToInvite", { inviteId, accept: true }, member.user);
+    await callFn("removeMember", { profileId, uid: member.uid }, member.user);
+    expect((await adb.doc(`profiles/${profileId}/members/${member.uid}`).get()).exists).toBe(false);
+  });
+  it("a non-admin member cannot remove another member", async () => {
+    const { owner, profileId } = await bandWithOwner("rm3");
+    const email1 = `m1-${Date.now()}@test.com`;
+    const member1 = await signUpTestUser(email1);
+    const { inviteId: inv1 } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email: email1, role: "member", label: "bass" }, owner.user);
+    await callFn("respondToInvite", { inviteId: inv1, accept: true }, member1.user);
+    const email2 = `m2-${Date.now()}@test.com`;
+    const member2 = await signUpTestUser(email2);
+    const { inviteId: inv2 } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email: email2, role: "member", label: "sax" }, owner.user);
+    await callFn("respondToInvite", { inviteId: inv2, accept: true }, member2.user);
+    await expect(callFn("removeMember", { profileId, uid: member2.uid }, member1.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+  it("a non-admin member cannot transfer admin", async () => {
+    const { owner, profileId } = await bandWithOwner("rm4");
+    const email = `m-${Date.now()}@test.com`;
+    const member = await signUpTestUser(email);
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    await callFn("respondToInvite", { inviteId, accept: true }, member.user);
+    await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, member.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+  it("transferAdmin to a non-member fails not-found", async () => {
+    const { owner, profileId } = await bandWithOwner("rm5");
+    const stranger = await signUpTestUser(`nf-${Date.now()}@test.com`);
+    await expect(callFn("transferAdmin", { profileId, toUid: stranger.uid }, owner.user))
+      .rejects.toMatchObject({ code: "functions/not-found" });
+  });
+  it("transferAdmin promotes the target without demoting the original admin", async () => {
+    const { owner, profileId } = await bandWithOwner("rm6");
+    const email = `co2-${Date.now()}@test.com`;
+    const co = await signUpTestUser(email);
+    const { inviteId } = await callFn<object, { inviteId: string }>(
+      "inviteMember", { profileId, email, role: "member", label: "keys" }, owner.user);
+    await callFn("respondToInvite", { inviteId, accept: true }, co.user);
+    await callFn("transferAdmin", { profileId, toUid: co.uid }, owner.user);
+    const [ownerDoc, coDoc] = await Promise.all([
+      adb.doc(`profiles/${profileId}/members/${owner.uid}`).get(),
+      adb.doc(`profiles/${profileId}/members/${co.uid}`).get(),
+    ]);
+    expect(coDoc.data()?.role).toBe("admin");
+    expect(ownerDoc.data()?.role).toBe("admin");
   });
 });

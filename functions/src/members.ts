@@ -9,12 +9,6 @@ function requireAuth(uid: string | undefined): string {
   return uid;
 }
 
-async function adminCount(profileId: string): Promise<number> {
-  const admins = await getFirestore()
-    .collection(`profiles/${profileId}/members`).where("role", "==", "admin").get();
-  return admins.size;
-}
-
 export const inviteMember = onCall<{ profileId: string; email: string; role: MemberRole; label: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuth(req.auth?.uid);
@@ -56,16 +50,30 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
   { region: "us-central1" }, async (req) => {
     const actor = requireAuth(req.auth?.uid);
     const { profileId, uid } = req.data;
-    // Members may remove themselves; otherwise admin required.
+    // Members may remove themselves; otherwise admin required. This check can
+    // stay outside the transaction — it doesn't participate in the
+    // last-admin race (it only reads the actor's own membership, which
+    // removeMember never mutates on the actor's behalf).
     if (actor !== uid) await requireProfileAdmin(profileId, actor);
     const db = getFirestore();
-    const target = await db.doc(`profiles/${profileId}/members/${uid}`).get();
-    if (!target.exists) throw new HttpsError("not-found", "Not a member.");
-    if (target.data()?.role === "admin" && (await adminCount(profileId)) <= 1) {
-      throw new HttpsError("failed-precondition",
-        "Cannot remove the last admin. Transfer admin first or delete the profile.");
-    }
-    await db.doc(`profiles/${profileId}/members/${uid}`).delete();
+    const memberRef = db.doc(`profiles/${profileId}/members/${uid}`);
+    const adminsQuery = db.collection(`profiles/${profileId}/members`).where("role", "==", "admin");
+    // Transactional: the last-admin check and the delete must be read- and
+    // write-consistent within one transaction, otherwise two concurrent
+    // removals of the last two admins can both read adminCount > 1 and both
+    // proceed, violating the never-zero-admins invariant.
+    await db.runTransaction(async (tx) => {
+      const target = await tx.get(memberRef);
+      if (!target.exists) throw new HttpsError("not-found", "Not a member.");
+      if (target.data()?.role === "admin") {
+        const admins = await tx.get(adminsQuery);
+        if (admins.size <= 1) {
+          throw new HttpsError("failed-precondition",
+            "Cannot remove the last admin. Transfer admin first or delete the profile.");
+        }
+      }
+      tx.delete(memberRef);
+    });
     return { ok: true };
   });
 
