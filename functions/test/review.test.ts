@@ -58,6 +58,13 @@ describe("reviewProfile", () => {
     expect(p?.status).toBe("rejected");
     expect(p?.rejectionReason).toBe("No photos");
   });
+  it("rejects a rejection reason longer than 500 characters", async () => {
+    const { profileId } = await pendingProfile("v2b");
+    const adminUser = await makeAdminUser();
+    const tooLong = "x".repeat(501);
+    await expect(callFn("reviewProfile", { profileId, decision: "rejected", reason: tooLong }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
   it("non-admin callers are denied", async () => {
     const { owner, profileId } = await pendingProfile("v3");
     // The client SDK surfaces the HttpsError code as `functions/<code>` on

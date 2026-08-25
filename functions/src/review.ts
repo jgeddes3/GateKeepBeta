@@ -24,6 +24,9 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     if (decision === "rejected" && !reason?.trim()) {
       throw new HttpsError("invalid-argument", "A rejection reason is required.");
     }
+    if (decision === "rejected" && reason!.trim().length > 500) {
+      throw new HttpsError("invalid-argument", "Rejection reason must be 500 characters or fewer.");
+    }
     const ref = getFirestore().doc(`profiles/${profileId}`);
     const snap = await ref.get();
     if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");

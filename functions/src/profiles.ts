@@ -11,6 +11,12 @@ function requireAuth(uid: string | undefined): string {
   return uid;
 }
 
+function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
+  if (req.auth?.token?.email_verified !== true) {
+    throw new HttpsError("failed-precondition", "Please verify your email address first.");
+  }
+}
+
 export async function requireProfileAdmin(profileId: string, uid: string) {
   const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
   if (!m.exists || m.data()?.role !== "admin") {
@@ -20,6 +26,7 @@ export async function requireProfileAdmin(profileId: string, uid: string) {
 
 export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuth(req.auth?.uid);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validateProfileDraft(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);

@@ -61,3 +61,10 @@ Decisions taken so the build wouldn't stall. Each is reversible; the "cost if wr
 
 ### Manual, non-scriptable steps owed before device testing / launch
 See `README.md` for the full list. In brief: enable Email/Google/Apple auth providers in the Firebase console; register App Check (monitor→enforce, which also needs `enforceAppCheck: true` per callable); set the real Google OAuth web client id in `apps/mobile/src/auth/config.ts`; set Sentry DSNs; verify `firebase deploy --only functions` resolves the `workspace:*` shared dep; confirm Email Enumeration Protection is on; seed first admins (Google accounts) via `scripts/seed-admin.ts`.
+
+## Post-merge security sweep (2026-08-25)
+
+- **Closed the `inviteMember` email-enumeration oracle** — unknown emails now resolve `{ ok: true }` (uniform response), same as known ones, instead of throwing `not-found`.
+- **Enforced email verification on sensitive actions** — `createProfileDraft` and `inviteMember` now require `email_verified === true` on the caller's token, else `failed-precondition`.
+- **Capped the profile-rejection reason** — `reviewProfile` now rejects a trimmed `reason` over 500 characters with `invalid-argument`.
+- **Added a per-profile pending-invite cap (20)** — `inviteMember` now throws `resource-exhausted` once a profile has 20 pending invites; backed by a new `invites` composite index (`profileId` + `status`) in `firestore.indexes.json`.

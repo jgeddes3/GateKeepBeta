@@ -9,9 +9,18 @@ function requireAuth(uid: string | undefined): string {
   return uid;
 }
 
+function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
+  if (req.auth?.token?.email_verified !== true) {
+    throw new HttpsError("failed-precondition", "Please verify your email address first.");
+  }
+}
+
+const MAX_PENDING_INVITES_PER_PROFILE = 20;
+
 export const inviteMember = onCall<{ profileId: string; email: string; role: MemberRole; label: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuth(req.auth?.uid);
+    requireVerifiedEmail(req);
     const { profileId, email, role, label } = req.data;
     // Defensive runtime guards: onCall's generic type parameter does not
     // validate the untrusted request payload at runtime.
@@ -26,20 +35,30 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     }
     const trimmedLabel = label.trim().slice(0, 60);
     await requireProfileAdmin(profileId, uid);
+    // Anti-enumeration: an unknown email must be indistinguishable from a
+    // known one to any signed-up caller. Resolve the email, but on failure
+    // fall through to a uniform { ok: true } rather than throwing — never
+    // reveal via response shape/error code whether an account exists for
+    // a given email.
     let invited;
     try { invited = await getAuth().getUserByEmail(email); }
-    catch { throw new HttpsError("not-found", "No GateKeep account with that email."); }
+    catch { return { ok: true as const }; }
     if (invited.uid === uid) {
       throw new HttpsError("failed-precondition", "You're already on this profile.");
     }
     const db = getFirestore();
+    const pending = await db.collection("invites")
+      .where("profileId", "==", profileId).where("status", "==", "pending").get();
+    if (pending.size >= MAX_PENDING_INVITES_PER_PROFILE) {
+      throw new HttpsError("resource-exhausted", "Too many pending invites for this profile.");
+    }
     const profile = await db.doc(`profiles/${profileId}`).get();
     const invite: InviteDoc = {
       profileId, profileName: profile.data()?.name ?? "", invitedUid: invited.uid,
       role, label: trimmedLabel, invitedByUid: uid, status: "pending", createdAt: Date.now(),
     };
-    const ref = await db.collection("invites").add(invite);
-    return { inviteId: ref.id };
+    await db.collection("invites").add(invite);
+    return { ok: true as const };
   });
 
 const INVITE_MAX_AGE_MS = 14 * 86_400_000; // 14 days

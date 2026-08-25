@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn } from "./helpers";
+import { signUpTestUser, callFn, fetchPendingInviteId } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import type { ProfileDraftInput, MemberRole } from "@gatekeep/shared";
+import type { ProfileDraftInput, MemberRole, InviteDoc } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -27,8 +27,9 @@ describe("invites", () => {
     const { owner, profileId } = await bandWithOwner("inv1");
     const drummerEmail = `drum-${Date.now()}@test.com`;
     const drummer = await signUpTestUser(drummerEmail);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
+    await callFn(
       "inviteMember", { profileId, email: drummerEmail, role: "member" as MemberRole, label: "drummer" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, drummer.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, drummer.user);
     const m = await adb.doc(`profiles/${profileId}/members/${drummer.uid}`).get();
     expect(m.data()?.label).toBe("drummer");
@@ -37,8 +38,8 @@ describe("invites", () => {
     const { owner, profileId } = await bandWithOwner("inv2");
     const email = `p-${Date.now()}@test.com`;
     const invitee = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
     const stranger = await signUpTestUser(`s-${Date.now()}@test.com`);
     await expect(callFn("respondToInvite", { inviteId, accept: true }, stranger.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -47,18 +48,21 @@ describe("invites", () => {
     await expect(callFn("inviteMember", { profileId, email, role: "member", label: "x" }, stranger.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
-  it("inviting an email with no GateKeep account fails not-found", async () => {
+  it("inviting an email with no GateKeep account resolves { ok: true } (anti-enumeration) and creates no invite", async () => {
     const { owner, profileId } = await bandWithOwner("inv3");
-    await expect(callFn(
-      "inviteMember", { profileId, email: `no-account-${Date.now()}@test.com`, role: "member", label: "x" }, owner.user))
-      .rejects.toMatchObject({ code: "functions/not-found" });
+    const before = (await adb.collection("invites").where("profileId", "==", profileId).get()).size;
+    const res = await callFn<object, { ok: true }>(
+      "inviteMember", { profileId, email: `no-account-${Date.now()}@test.com`, role: "member", label: "x" }, owner.user);
+    expect(res).toEqual({ ok: true });
+    const after = (await adb.collection("invites").where("profileId", "==", profileId).get()).size;
+    expect(after).toBe(before);
   });
   it("responding twice to the same invite fails on the second call; invite doc fields/status are correct", async () => {
     const { owner, profileId } = await bandWithOwner("inv4");
     const email = `dup-${Date.now()}@test.com`;
     const invitee = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
     const inv = (await adb.doc(`invites/${inviteId}`).get()).data();
     expect(inv?.status).toBe("accepted");
@@ -72,13 +76,13 @@ describe("invites", () => {
     const { owner, profileId } = await bandWithOwner("inv5");
     const email = `dup2-${Date.now()}@test.com`;
     const invitee = await signUpTestUser(email);
-    const { inviteId: first } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
+    const first = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await callFn("respondToInvite", { inviteId: first, accept: true }, invitee.user);
     // A second, independent invite to the same (now-member) email — accepting
     // it must not blindly .set() over the existing membership doc.
-    const { inviteId: second } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "admin", label: "sax2" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "admin", label: "sax2" }, owner.user);
+    const second = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await expect(callFn("respondToInvite", { inviteId: second, accept: true }, invitee.user))
       .rejects.toMatchObject({ code: "functions/already-exists" });
     const m = await adb.doc(`profiles/${profileId}/members/${invitee.uid}`).get();
@@ -102,8 +106,8 @@ describe("invites", () => {
     const email2 = `longlabel-${Date.now()}@test.com`;
     const invitee2 = await signUpTestUser(email2);
     const longLabel = `  ${"x".repeat(90)}  `;
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email: email2, role: "member", label: longLabel }, owner.user);
+    await callFn("inviteMember", { profileId, email: email2, role: "member", label: longLabel }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee2.uid);
     const inv = (await adb.doc(`invites/${inviteId}`).get()).data();
     expect(inv?.label.length).toBe(60);
     await callFn("respondToInvite", { inviteId, accept: true }, invitee2.user);
@@ -126,8 +130,8 @@ describe("invites", () => {
     const { owner, profileId } = await bandWithOwner("inv9");
     const email = `rev-${Date.now()}@test.com`;
     const invitee = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await callFn("revokeInvite", { inviteId }, owner.user);
     expect((await adb.doc(`invites/${inviteId}`).get()).data()?.status).toBe("revoked");
     await expect(callFn("respondToInvite", { inviteId, accept: true }, invitee.user))
@@ -138,10 +142,29 @@ describe("invites", () => {
     const { owner, profileId } = await bandWithOwner("inv10");
     const email = `rev2-${Date.now()}@test.com`;
     const invitee = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await expect(callFn("revokeInvite", { inviteId }, invitee.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("caps pending invites per profile at 20", async () => {
+    const { owner, profileId } = await bandWithOwner("inv11");
+    const now = Date.now();
+    const batch = adb.batch();
+    for (let i = 0; i < 20; i++) {
+      const ref = adb.collection("invites").doc();
+      const invite: InviteDoc = {
+        profileId, profileName: "Band", invitedUid: `seed-uid-${i}-${now}`,
+        role: "member", label: "seed", invitedByUid: owner.uid, status: "pending", createdAt: now,
+      };
+      batch.set(ref, invite);
+    }
+    await batch.commit();
+    const email = `cap-${now}@test.com`;
+    await signUpTestUser(email);
+    await expect(callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
   });
 });
 
@@ -156,8 +179,8 @@ describe("removal and admin transfer", () => {
       .rejects.toThrow(/last admin/i);
     const email = `co-${Date.now()}@test.com`;
     const co = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "keys" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "keys" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, co.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, co.user);
     await callFn("transferAdmin", { profileId, toUid: co.uid }, owner.user);
     expect((await adb.doc(`profiles/${profileId}/members/${co.uid}`).get()).data()?.role).toBe("admin");
@@ -168,8 +191,8 @@ describe("removal and admin transfer", () => {
     const { owner, profileId } = await bandWithOwner("rm2");
     const email = `self-${Date.now()}@test.com`;
     const member = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, member.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, member.user);
     await callFn("removeMember", { profileId, uid: member.uid }, member.user);
     expect((await adb.doc(`profiles/${profileId}/members/${member.uid}`).get()).exists).toBe(false);
@@ -178,13 +201,13 @@ describe("removal and admin transfer", () => {
     const { owner, profileId } = await bandWithOwner("rm3");
     const email1 = `m1-${Date.now()}@test.com`;
     const member1 = await signUpTestUser(email1);
-    const { inviteId: inv1 } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email: email1, role: "member", label: "bass" }, owner.user);
+    await callFn("inviteMember", { profileId, email: email1, role: "member", label: "bass" }, owner.user);
+    const inv1 = await fetchPendingInviteId(adb, profileId, member1.uid);
     await callFn("respondToInvite", { inviteId: inv1, accept: true }, member1.user);
     const email2 = `m2-${Date.now()}@test.com`;
     const member2 = await signUpTestUser(email2);
-    const { inviteId: inv2 } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email: email2, role: "member", label: "sax" }, owner.user);
+    await callFn("inviteMember", { profileId, email: email2, role: "member", label: "sax" }, owner.user);
+    const inv2 = await fetchPendingInviteId(adb, profileId, member2.uid);
     await callFn("respondToInvite", { inviteId: inv2, accept: true }, member2.user);
     await expect(callFn("removeMember", { profileId, uid: member2.uid }, member1.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -193,8 +216,8 @@ describe("removal and admin transfer", () => {
     const { owner, profileId } = await bandWithOwner("rm4");
     const email = `m-${Date.now()}@test.com`;
     const member = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, member.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, member.user);
     await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, member.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -209,8 +232,8 @@ describe("removal and admin transfer", () => {
     const { owner, profileId } = await bandWithOwner("rm6");
     const email = `co2-${Date.now()}@test.com`;
     const co = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "keys" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "keys" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, co.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, co.user);
     await callFn("transferAdmin", { profileId, toUid: co.uid }, owner.user);
     const [ownerDoc, coDoc] = await Promise.all([

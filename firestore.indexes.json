@@ -1,3 +1,9 @@
-{ "indexes": [], "fieldOverrides": [
+{ "indexes": [
+  { "collectionGroup": "invites", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "profileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] }
+], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
     "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] } ] }

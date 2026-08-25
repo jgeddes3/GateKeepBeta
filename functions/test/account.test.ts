@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn, wait } from "./helpers";
+import { signUpTestUser, callFn, wait, fetchPendingInviteId } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
@@ -55,8 +55,8 @@ describe("deleteAccount", () => {
       { type: "curator", subtype: "venue", name: "Loft", handle: `loft_${Date.now()}` }, owner.user);
     const email = `d4-${Date.now()}@test.com`;
     const co = await signUpTestUser(email);
-    const { inviteId } = await callFn<object, { inviteId: string }>(
-      "inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, co.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, co.user);
     await callFn("transferAdmin", { profileId, toUid: co.uid }, owner.user);
     await callFn("deleteAccount", {}, owner.user);

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn, wait } from "./helpers";
+import { signUpTestUser, signUpUnverifiedTestUser, callFn, wait } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import type { ProfileDraftInput } from "@gatekeep/shared";
@@ -37,6 +37,11 @@ describe("createProfileDraft", () => {
   });
   it("rejects unauthenticated calls", async () => {
     await expect(callFn("createProfileDraft", draft(`x_${Date.now()}`))).rejects.toThrow();
+  });
+  it("rejects an unverified-email caller with failed-precondition", async () => {
+    const { user } = await signUpUnverifiedTestUser(`unverified-${Date.now()}@test.com`);
+    await expect(callFn("createProfileDraft", draft(`unv_${Date.now()}`), user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
   it("caps unsubmitted (draft/rejected) profiles per admin at 3, to prevent handle-squatting via never-submitted drafts", async () => {
     const { user } = await signUpTestUser(`cap-${Date.now()}@test.com`);
