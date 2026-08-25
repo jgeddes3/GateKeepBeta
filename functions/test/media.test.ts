@@ -170,9 +170,12 @@ describe("processUpload: photos", () => {
     throw new Error(`portfolio.${field} not set for profile ${profileId} after ${timeoutMs}ms`);
   }
 
-  it("processes an avatar into public/photos and updates the profile doc", async () => {
+  it("processes an avatar into public/photos, updates the profile doc, and upscales a tiny source to exactly 512x512", async () => {
     const { user, uid, profileId } = await makeMusician("ph1");
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    // tinyJpeg is a 1x1 source — this doubles as the small-source case:
+    // avatars deliberately upscale (no withoutEnlargement) because 512x512
+    // is a fixed-size contract the rest of the app relies on.
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user); // same uploader helper works for any bytes
     const deadline = Date.now() + 30_000;
     let avatarPath: string | null = null;
@@ -181,8 +184,10 @@ describe("processUpload: photos", () => {
       if (!avatarPath) await new Promise((r) => setTimeout(r, 500));
     }
     expect(avatarPath).toMatch(new RegExp(`^public/photos/${profileId}/avatar-`));
-    const [exists] = await abucket.file(avatarPath!).exists();
-    expect(exists).toBe(true);
+    const [bytes] = await abucket.file(avatarPath!).download();
+    const meta = await sharp(bytes).metadata();
+    expect(meta.width).toBe(512);
+    expect(meta.height).toBe(512);
   });
   it("ignores photo uploads from a non-member of the target profile", async () => {
     const { profileId } = await makeMusician("ph2");
@@ -240,24 +245,31 @@ describe("processUpload: photos", () => {
     const [firstStillExists] = await abucket.file(firstPath).exists();
     expect(firstStillExists).toBe(false); // superseded photo cleaned up
   });
-  it("holds the delete-during-photo-processing invariant: no public photo survives a profile doc deleted immediately after upload", async () => {
+  it("holds the delete-during-photo-processing invariant: no public photo survives a profile doc deleted before the upload lands", async () => {
     const { user, uid, profileId } = await makeMusician("ph6");
-    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
-    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
     // Delete only the top-level profile doc (not a full recursiveDelete) so
     // the members subcollection survives — the trigger's membership check
-    // still passes regardless of timing, and the only variable under test
-    // is whether profileRef.update() lands before or after this delete.
-    // Races the trigger under either interleaving; the assertion below is
-    // eventually-consistent (poll up to 15s) rather than a fixed sleep.
+    // still passes. Deleting BEFORE the upload (rather than racing it
+    // afterward) makes profileRef.update() deterministically hit a missing
+    // doc every run, instead of depending on upload/trigger timing: an
+    // earlier version of this test deleted after uploading and asserted
+    // public/photos/{profileId}/ was empty via a poll — that's vacuously
+    // true at iteration 0 (nothing has been written yet) and would have
+    // gone undetected as a false pass if the trigger ever won the race.
     await adb.doc(`profiles/${profileId}`).delete();
-    const deadline = Date.now() + 15_000;
-    let clean = false;
-    while (Date.now() < deadline && !clean) {
-      const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
-      clean = files.length === 0;
-      if (!clean) await new Promise((r) => setTimeout(r, 500));
+    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    // Poll until staging is gone — that's the trigger's finally block
+    // running, proof the whole pipeline (including the post-write cleanup)
+    // has actually completed, not just that nothing has happened yet.
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
     }
-    expect(clean).toBe(true);
+    expect(stagingGone).toBe(true);
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0);
   });
 });

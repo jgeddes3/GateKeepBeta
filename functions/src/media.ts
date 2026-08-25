@@ -29,18 +29,6 @@ const SUBPROCESS_TIMEOUT_MS = 120_000;
 // rather than trust the inferred one.
 const ffmpegPath = ffmpegPathRaw as unknown as string | null;
 
-// ffmpeg-static's default export is `string | null` — null when the package
-// has no prebuilt binary for this platform/arch. Fail loudly (and only) at
-// first use, inside processAudio's try/catch, so a missing binary surfaces
-// as a normal "failed" track with a clear reason instead of crashing every
-// export in this module at deploy time.
-function requireFfmpegPath(): string {
-  if (!ffmpegPath) {
-    throw new Error("ffmpeg-static did not resolve a binary for this platform/architecture.");
-  }
-  return ffmpegPath;
-}
-
 // Every best-effort storage cleanup in this module goes through here instead
 // of a bare `.catch(() => {})` — a cleanup that silently fails (quota, a
 // permissions drift, an emulator hiccup) previously left no trace anywhere.
@@ -55,7 +43,23 @@ function logDeleteFailure(phase: string, path: string) {
 // collapses to a generic failureReason so raw error text (which can carry
 // local tmp paths or 100KB+ of subprocess stderr) never lands in a
 // member-readable track doc.
-class ClipValidationError extends Error {}
+class ClipValidationError extends Error {} // bad input from the musician (the clip window)
+class ServerConfigError extends Error {}   // this deployment is broken, not the musician's upload
+
+// ffmpeg-static's default export is `string | null` — null when the package
+// has no prebuilt binary for this platform/arch. Fail loudly (and only) at
+// first use, inside processAudio's try/catch, so a missing binary surfaces
+// as a normal "failed" track rather than crashing every export in this
+// module at deploy time. Thrown as ServerConfigError (not
+// ClipValidationError): this is a deployment problem, not something wrong
+// with the musician's upload, so it gets its own safe, accurate message
+// instead of collapsing into the generic "file may be corrupt" reason.
+function requireFfmpegPath(): string {
+  if (!ffmpegPath) {
+    throw new ServerConfigError("Audio processing is temporarily unavailable — try again later.");
+  }
+  return ffmpegPath;
+}
 
 async function probeDurationSec(file: string): Promise<number> {
   const { stdout } = await run(ffprobe.path, [
@@ -85,29 +89,51 @@ async function processAudio(objectName: string, generation: string | number): Pr
 
   const db = getFirestore();
   const trackRef = db.doc(`profiles/${profileId}/tracks/${trackId}`);
-  const snap = await trackRef.get();
-  const data = snap.data();
-  // Forged/mismatched uploads (no doc, wrong uploader, wrong state, or a
-  // malformed startSec): discard the object and do nothing — createTrack is
-  // the only path that arms this pipeline, and it always writes a numeric
-  // startSec, so a non-number here means a corrupt/tampered doc, not a real
-  // in-flight upload worth reporting back to the musician.
-  if (!snap.exists || data?.uploaderUid !== uid || data?.status !== "processing"
-      || typeof data?.startSec !== "number") {
-    await stagingFile.delete().catch(logDeleteFailure("forged/invalid audio upload", objectName));
-    return;
-  }
-  const startSec = data.startSec;
 
-  const tmp = await mkdtemp(join(tmpdir(), "gk-audio-"));
-  // Set once the review clip is actually uploaded — lets the catch block
-  // clean up an orphaned upload if anything after that point throws
-  // (e.g. the final status update racing a delete).
+  // tmp/uploadedReviewPath are declared here (not inside the try) so the
+  // shared finally below can always see them. The try now starts BEFORE the
+  // Firestore guard read: a throwing read (network blip, emulator hiccup)
+  // previously skipped the finally entirely and leaked the staging object
+  // forever — now any exception from this point on still runs the cleanup.
+  let tmp: string | null = null;
   let uploadedReviewPath: string | null = null;
   try {
+    const snap = await trackRef.get();
+    const data = snap.data();
+    // Forged/mismatched uploads (no doc, wrong uploader, wrong state, or a
+    // malformed startSec): discard the object and do nothing — createTrack
+    // is the only path that arms this pipeline, and it always writes a
+    // numeric startSec, so a non-number here means a corrupt/tampered doc,
+    // not a real in-flight upload worth reporting back to the musician.
+    if (!snap.exists || data?.uploaderUid !== uid || data?.status !== "processing"
+        || typeof data?.startSec !== "number") {
+      return;
+    }
+    const startSec = data.startSec;
+
+    tmp = await mkdtemp(join(tmpdir(), "gk-audio-"));
     const inFile = join(tmp, "in");
     const outFile = join(tmp, "out.m4a");
-    await stagingFile.download({ destination: inFile });
+    try {
+      await stagingFile.download({ destination: inFile });
+    } catch (err) {
+      if ((err as { code?: number }).code === 5) {
+        // Generation-pinned reads 404 only when the object no longer
+        // exists — and the only thing that ever deletes a staging/audio
+        // object is this trigger itself (storage.rules makes staging
+        // deletes trigger-only). A 404 here means a prior/duplicate
+        // delivery of this same event already consumed and cleaned up
+        // this exact generation — Cloud Functions storage triggers are
+        // at-least-once, so a second delivery racing (or arriving after)
+        // the first is expected, not an error. Writing "failed" here would
+        // risk clobbering whatever terminal status that other invocation
+        // already reached (or is about to reach), so just log and stop —
+        // no track-doc write at all.
+        console.error("processUpload: staging object already consumed by another delivery", objectName, err);
+        return;
+      }
+      throw err;
+    }
     const sourceDuration = await probeDurationSec(inFile);
     if (startSec >= sourceDuration) {
       throw new ClipValidationError(
@@ -158,7 +184,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     });
   } catch (e) {
     console.error("processUpload: audio processing failed", objectName, e);
-    const failureReason = (e instanceof ClipValidationError
+    const failureReason = (e instanceof ClipValidationError || e instanceof ServerConfigError
       ? e.message
       : "Audio processing failed — the file may be corrupt or unsupported."
     ).slice(0, 500);
@@ -188,7 +214,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     }
   } finally {
     await stagingFile.delete().catch(logDeleteFailure("staging (audio, finally)", objectName));
-    await rm(tmp, { recursive: true, force: true });
+    if (tmp) await rm(tmp, { recursive: true, force: true });
   }
 }
 
@@ -210,17 +236,19 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     return;
   }
   const kind = nameMatch[1] as "avatar" | "cover";
-
   const db = getFirestore();
-  // Membership is derived from the OBJECT PATH's {uid}/{profileId} segments,
-  // never from object.metadata (client-controlled and untrusted — see
-  // storage.rules' note on staging paths).
-  const member = await db.doc(`profiles/${profileId}/members/${uid}`).get();
-  if (!member.exists) {
-    await stagingFile.delete().catch(logDeleteFailure("non-member photo upload", objectName));
-    return;
-  }
+
   try {
+    // Membership is derived from the OBJECT PATH's {uid}/{profileId}
+    // segments, never from object.metadata (client-controlled and
+    // untrusted — see storage.rules' note on staging paths). The read is
+    // inside this try/finally (not before it) so a throwing read still
+    // triggers the staging cleanup below, instead of leaking the object.
+    const member = await db.doc(`profiles/${profileId}/members/${uid}`).get();
+    if (!member.exists) {
+      return; // non-member or malformed: discard, no further processing
+    }
+
     const [bytes] = await stagingFile.download();
     // Re-encode via sharp: strips EXIF (GPS!) and bounds dimensions.
     // failOn: "error" (sharp's default is "warning", the strictest level) —
@@ -230,8 +258,13 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     // "error" still rejects truncated/genuinely corrupt data, just not mere
     // warnings. limitInputPixels bounds decompression-bomb-style inputs.
     const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
+    // Avatars intentionally do NOT set withoutEnlargement — the 512x512
+    // output is a contract the rest of the app relies on (fixed-size crop
+    // targets), so a tiny source still gets upscaled to fill it. Covers use
+    // withoutEnlargement since they're display-only and any size up to
+    // 1600x1600 is fine.
     const pipeline = kind === "avatar"
-      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover", withoutEnlargement: true })
+      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
       : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
     const jpeg = await pipeline.jpeg({ quality: 82 }).toBuffer();
     const destPath = publicPhotoPath(profileId, kind, randomUUID());
