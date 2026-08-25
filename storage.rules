@@ -1,0 +1,40 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
+    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+
+    // Serving path: only ever contains approved/instantly-publishable content
+    // (the transcode/photo pipelines are the only writers). World-readable.
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Pending clips awaiting review — admins listen to exactly what would go live.
+    match /review/{allPaths=**} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Owner-only staging. Objects are consumed and deleted by the processUpload
+    // trigger; a 24h lifecycle rule (console/deploy config) reaps strays.
+    // Membership of {profileId} is NOT checkable here — the trigger verifies it
+    // before any content reaches a profile.
+    match /staging/audio/{uid}/{profileId}/{trackId} {
+      allow write: if isOwner(uid)
+        && request.resource.size <= 50 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+      allow read: if false;
+    }
+    match /staging/photos/{uid}/{profileId}/{fileName} {
+      allow write: if isOwner(uid)
+        && request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]+');
+      allow read: if false;
+    }
+
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}
