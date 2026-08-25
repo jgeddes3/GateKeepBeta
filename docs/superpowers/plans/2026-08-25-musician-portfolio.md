@@ -793,7 +793,7 @@ describe("tracks", () => {
     await assertSucceeds(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
     await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t2")));
     await assertSucceeds(getDocs(query(
-      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"))));
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
     await assertFails(getDocs(collection(anon, "profiles/prof1/tracks"))); // unfiltered list
   });
   it("no public track reads on a non-approved profile; members read all their own", async () => {
@@ -803,6 +803,10 @@ describe("tracks", () => {
     const anon = env.unauthenticatedContext().firestore();
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+    // Even the production-shaped filtered+ordered list query must fail here —
+    // the profile itself is not approved, so no list shape helps.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
     await assertSucceeds(getDoc(doc(alice, "profiles/prof1/tracks/t2")));
     await assertSucceeds(getDocs(collection(alice, "profiles/prof1/tracks")));
   });
@@ -813,11 +817,23 @@ describe("tracks", () => {
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
     await assertFails(setDoc(doc(alice, "profiles/prof1/tracks/hax"), { title: "h", status: "approved" }));
     await assertFails(updateDoc(doc(alice, "profiles/prof1/tracks/t1"), { status: "approved" }));
+    // Admins get elevated read, never write — writes stay Cloud Functions only.
+    await assertFails(setDoc(doc(admin, "profiles/prof1/tracks/hax2"), { title: "h", status: "approved" }));
     await assertSucceeds(getDocs(query(
       collectionGroup(admin, "tracks"), where("status", "==", "pending_review"))));
     const bob = env.authenticatedContext("bob").firestore();
     await assertFails(getDocs(query(
       collectionGroup(bob, "tracks"), where("status", "==", "pending_review"))));
+  });
+  it("membership does not leak across profiles", async () => {
+    await seedProfile("approved"); // prof1 / alice, as the existing helper does
+    await seed("profiles/prof2", { type: "musician", name: "B", handle: "b", status: "approved" });
+    await seed("profiles/prof2/tracks/p", { title: "SECRET", status: "pending_review", order: 0 });
+    await seed("profiles/prof2/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDoc(doc(alice, "profiles/prof2/tracks/p")));
+    await assertFails(getDocs(collection(alice, "profiles/prof2/tracks")));
+    await assertFails(getDoc(doc(alice, "profiles/prof2/private/booking")));
   });
 });
 
@@ -826,6 +842,9 @@ describe("private booking subdoc", () => {
     await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
     await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    // A sibling doc under private/ — pins that the rule is scoped to the
+    // literal `booking` doc id, not a wildcard over all of private/.
+    await seed("profiles/prof1/private/secrets", { apiKey: "nope" });
     const alice = env.authenticatedContext("alice").firestore();
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
     const bob = env.authenticatedContext("bob").firestore();
@@ -834,10 +853,15 @@ describe("private booking subdoc", () => {
     await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking")));
     await assertFails(getDoc(doc(bob, "profiles/prof1/private/booking")));
     await assertFails(getDoc(doc(anon, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(alice, "profiles/prof1/private/secrets")));
+    await assertFails(getDoc(doc(admin, "profiles/prof1/private/secrets")));
     await assertFails(setDoc(doc(alice, "profiles/prof1/private/booking"), { rates: {} }));
+    await assertFails(setDoc(doc(admin, "profiles/prof1/private/booking"), { rates: {} }));
   });
 });
 ```
+
+(`orderBy` must be imported alongside the existing `query`/`where` import.)
 
 - [ ] **Step 2: Run to verify failures**
 
@@ -853,8 +877,10 @@ In `firestore.rules`, inside `match /profiles/{profileId} { ... }` after the `me
         // Public track reads require BOTH the profile and the track approved.
         // List queries must filter status == 'approved' (unfiltered lists fail),
         // which keeps pending/rejected titles out of public reach.
-        allow read: if (profileApproved(profileId) && resource.data.status == 'approved')
-          || isMember(profileId) || isAdmin();
+        // Read-free checks first — profileApproved() is a billed get() — so
+        // member/admin reads short-circuit before paying for it.
+        allow read: if isAdmin() || isMember(profileId)
+          || (profileApproved(profileId) && resource.data.status == 'approved');
         allow write: if false; // Cloud Functions only
       }
 
@@ -863,6 +889,21 @@ In `firestore.rules`, inside `match /profiles/{profileId} { ... }` after the `me
         // members of approved curator profiles.
         allow read: if isMember(profileId) || isAdmin();
         allow write: if false; // Cloud Functions only
+      }
+```
+
+Also reorder the existing `members` block's `get` clause for the same read-free-first
+reason (profileApproved() moves last):
+
+```
+      match /members/{memberUid} {
+        // self-read clause serves the collection-group "my profiles" query.
+        // Ordered read-free/cheap checks first — profileApproved() is a
+        // billed get() — so the common non-admin, non-approved-profile
+        // paths short-circuit before paying for it.
+        allow get: if isAdmin() || isMember(profileId)
+          || (signedIn() && request.auth.uid == resource.data.uid) || profileApproved(profileId);
+        ...
       }
 ```
 
@@ -877,6 +918,13 @@ After the existing `/{path=**}/members/` block, add the admin queue's collection
 ```
 
 - [ ] **Step 4: Add indexes to `firestore.indexes.json`**
+
+The `tracks.status` fieldOverride below (COLLECTION + COLLECTION_GROUP) replaces
+the default single-field index Firestore would otherwise auto-create for that
+field — it does not add ordering by `status` on its own; the admin queue's
+`orderBy` (if any is ever added) would need its own composite entry, so don't
+add `orderBy("status", "desc")` to a query without adding the matching index
+back here first.
 
 ```json
 { "indexes": [

@@ -57,9 +57,12 @@ service cloud.firestore {
       allow write: if false; // Cloud Functions only
 
       match /members/{memberUid} {
-        // self-read clause serves the collection-group "my profiles" query
-        allow get: if profileApproved(profileId) || isMember(profileId)
-          || (signedIn() && request.auth.uid == resource.data.uid) || isAdmin();
+        // self-read clause serves the collection-group "my profiles" query.
+        // Ordered read-free/cheap checks first — profileApproved() is a
+        // billed get() — so the common non-admin, non-approved-profile
+        // paths short-circuit before paying for it.
+        allow get: if isAdmin() || isMember(profileId)
+          || (signedIn() && request.auth.uid == resource.data.uid) || profileApproved(profileId);
         // Listing the whole roster is narrower than a single get — an
         // unauthenticated/non-member caller could otherwise page through
         // every member of even an approved profile via a collection list.
@@ -71,8 +74,10 @@ service cloud.firestore {
         // Public track reads require BOTH the profile and the track approved.
         // List queries must filter status == 'approved' (unfiltered lists fail),
         // which keeps pending/rejected titles out of public reach.
-        allow read: if (profileApproved(profileId) && resource.data.status == 'approved')
-          || isMember(profileId) || isAdmin();
+        // Read-free checks first — profileApproved() is a billed get() — so
+        // member/admin reads short-circuit before paying for it.
+        allow read: if isAdmin() || isMember(profileId)
+          || (profileApproved(profileId) && resource.data.status == 'approved');
         allow write: if false; // Cloud Functions only
       }
 

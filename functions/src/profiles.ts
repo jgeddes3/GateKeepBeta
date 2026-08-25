@@ -107,7 +107,7 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const name = snap.data()?.name as string | undefined;
 
   if (handle) await db.doc(`handles/${handle}`).delete();
-  await db.recursiveDelete(profileRef); // deletes the profile doc + its members subcollection
+  await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
 
   await writeAudit({ actorUid: uid, action: "profile_deleted", targetId: profileId, detail: name ?? "" });
   return { ok: true };
