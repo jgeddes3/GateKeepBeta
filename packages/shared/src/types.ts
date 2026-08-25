@@ -37,13 +37,13 @@ export interface InviteDoc {
   role: MemberRole;
   label: string;
   invitedByUid: string;
-  status: "pending" | "accepted" | "declined";
+  status: "pending" | "accepted" | "declined" | "revoked";
   createdAt: number;
 }
 
 export interface AuditLogDoc {
   actorUid: string;
-  action: "profile_approved" | "profile_rejected" | "admin_granted";
+  action: "profile_approved" | "profile_rejected" | "admin_granted" | "profile_deleted";
   targetId: string;          // profileId or uid
   detail: string;
   at: number;
