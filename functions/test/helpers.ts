@@ -19,7 +19,10 @@ export async function signUpTestUser(email: string) {
 }
 
 export async function callFn<T, R>(name: string, data: T, asUser?: User): Promise<R> {
-  if (asUser) await auth.updateCurrentUser(asUser);
+  // Explicitly sign out when no user is given so "unauthenticated" calls are
+  // truly unauthenticated, regardless of which user a prior call in this
+  // file left signed in on the shared `auth` instance.
+  await auth.updateCurrentUser(asUser ?? null);
   const res = await httpsCallable<T, R>(fns, name)(data);
   return res.data;
 }
