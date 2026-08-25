@@ -210,3 +210,61 @@ describe("invites and notifications", () => {
     await assertFails(updateDoc(doc(alice, "users/alice/notifications/n1"), { title: "Hacked!" }));
   });
 });
+
+describe("tracks", () => {
+  const seedProfile = async (status: string) => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+  };
+  it("public reads approved tracks of approved profiles only", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    await seed("profiles/prof1/tracks/t2", { title: "Pending", status: "pending_review", order: 1 });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+    await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t2")));
+    await assertSucceeds(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"))));
+    await assertFails(getDocs(collection(anon, "profiles/prof1/tracks"))); // unfiltered list
+  });
+  it("no public track reads on a non-approved profile; members read all their own", async () => {
+    await seedProfile("draft");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    await seed("profiles/prof1/tracks/t2", { title: "Rejected", status: "rejected", order: 1 });
+    const anon = env.unauthenticatedContext().firestore();
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/tracks/t2")));
+    await assertSucceeds(getDocs(collection(alice, "profiles/prof1/tracks")));
+  });
+  it("clients cannot write tracks; admin collection-group read works", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "x", status: "pending_review", order: 0 });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(setDoc(doc(alice, "profiles/prof1/tracks/hax"), { title: "h", status: "approved" }));
+    await assertFails(updateDoc(doc(alice, "profiles/prof1/tracks/t1"), { status: "approved" }));
+    await assertSucceeds(getDocs(query(
+      collectionGroup(admin, "tracks"), where("status", "==", "pending_review"))));
+    const bob = env.authenticatedContext("bob").firestore();
+    await assertFails(getDocs(query(
+      collectionGroup(bob, "tracks"), where("status", "==", "pending_review"))));
+  });
+});
+
+describe("private booking subdoc", () => {
+  it("members and admins read; strangers and anon cannot; nobody writes", async () => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/booking")));
+    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(bob, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(anon, "profiles/prof1/private/booking")));
+    await assertFails(setDoc(doc(alice, "profiles/prof1/private/booking"), { rates: {} }));
+  });
+});

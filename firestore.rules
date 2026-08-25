@@ -66,6 +66,22 @@ service cloud.firestore {
         allow list: if isMember(profileId) || isAdmin();
         allow write: if false; // Cloud Functions only
       }
+
+      match /tracks/{trackId} {
+        // Public track reads require BOTH the profile and the track approved.
+        // List queries must filter status == 'approved' (unfiltered lists fail),
+        // which keeps pending/rejected titles out of public reach.
+        allow read: if (profileApproved(profileId) && resource.data.status == 'approved')
+          || isMember(profileId) || isAdmin();
+        allow write: if false; // Cloud Functions only
+      }
+
+      match /private/booking {
+        // Rates/preferences: never public. Sub-project 3 widens this to
+        // members of approved curator profiles.
+        allow read: if isMember(profileId) || isAdmin();
+        allow write: if false; // Cloud Functions only
+      }
     }
 
     // Recursive-wildcard match needed for collectionGroup('members') queries —
@@ -78,6 +94,12 @@ service cloud.firestore {
     // lookup (collectionGroup('members').where('uid','==', targetUid)) works.
     match /{path=**}/members/{memberUid} {
       allow read: if signedIn() && (request.auth.uid == resource.data.uid || isAdmin());
+    }
+
+    // Admin review queue: collectionGroup('tracks').where('status','==','pending_review').
+    // The nested tracks rule above does not apply to collection-group queries.
+    match /{path=**}/tracks/{trackId} {
+      allow read: if isAdmin();
     }
 
     match /invites/{inviteId} {
