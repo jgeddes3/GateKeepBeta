@@ -14,7 +14,9 @@ export const bucket = () => getStorage().bucket(STORAGE_BUCKET);
 // otherwise leave no trace anywhere. Still non-fatal: logging, never
 // rethrowing, so a cleanup failure can never turn into a stuck/duplicate
 // object. Originally private to media.ts (processUpload); moved here so
-// tracks.ts's reviewTrack can reuse the same logged-catch pattern.
-export function logDeleteFailure(phase: string, path: string) {
-  return (e: unknown) => console.error(`processUpload: ${phase} cleanup failed`, path, e);
+// tracks.ts's reviewTrack can reuse the same logged-catch pattern — `source`
+// identifies the caller (e.g. "processUpload", "reviewTrack") so the log
+// line doesn't misattribute a cleanup to the wrong pipeline.
+export function logDeleteFailure(source: string, phase: string, path: string) {
+  return (e: unknown) => console.error(`${source}: ${phase} cleanup failed`, path, e);
 }

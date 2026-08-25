@@ -74,7 +74,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
   const segments = objectName.split("/");
   const [, , uid, profileId, trackId] = segments;
   if (segments.length !== 5 || !isValidDocId(uid) || !isValidDocId(profileId) || !isValidDocId(trackId)) {
-    await stagingFile.delete().catch(logDeleteFailure("malformed staging audio path", objectName));
+    await stagingFile.delete().catch(logDeleteFailure("processUpload", "malformed staging audio path", objectName));
     return;
   }
 
@@ -165,7 +165,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     // by deleteTrack's/deleteProfile's own best-effort storage cleanup.
     const postSnap = await trackRef.get();
     if (!postSnap.exists || postSnap.data()?.status !== "processing") {
-      await bucket().file(destPath).delete().catch(logDeleteFailure("orphaned review (race)", destPath));
+      await bucket().file(destPath).delete().catch(logDeleteFailure("processUpload", "orphaned review (race)", destPath));
       return;
     }
 
@@ -184,7 +184,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     ).slice(0, 500);
     if (uploadedReviewPath) {
       await bucket().file(uploadedReviewPath).delete()
-        .catch(logDeleteFailure("orphaned review (failed after upload)", uploadedReviewPath));
+        .catch(logDeleteFailure("processUpload", "orphaned review (failed after upload)", uploadedReviewPath));
     }
     try {
       // Same status guard as the success path above: only write "failed" if
@@ -207,7 +207,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
       }
     }
   } finally {
-    await stagingFile.delete().catch(logDeleteFailure("staging (audio, finally)", objectName));
+    await stagingFile.delete().catch(logDeleteFailure("processUpload", "staging (audio, finally)", objectName));
     if (tmp) await rm(tmp, { recursive: true, force: true });
   }
 }
@@ -226,7 +226,7 @@ async function processPhoto(objectName: string, generation: string | number): Pr
   const [, , uid, profileId, fileName] = segments;
   const nameMatch = typeof fileName === "string" ? PHOTO_FILENAME_RE.exec(fileName) : null;
   if (segments.length !== 5 || !isValidDocId(uid) || !isValidDocId(profileId) || !nameMatch) {
-    await stagingFile.delete().catch(logDeleteFailure("malformed staging photo path", objectName));
+    await stagingFile.delete().catch(logDeleteFailure("processUpload", "malformed staging photo path", objectName));
     return;
   }
   const kind = nameMatch[1] as "avatar" | "cover";
@@ -278,17 +278,17 @@ async function processPhoto(objectName: string, generation: string | number): Pr
       // error's cause. Same swallow-not-rethrow reasoning as the audio
       // failure path — only log when the cause wasn't the expected
       // "doc is gone" case.
-      await bucket().file(destPath).delete().catch(logDeleteFailure("orphaned public photo", destPath));
+      await bucket().file(destPath).delete().catch(logDeleteFailure("processUpload", "orphaned public photo", destPath));
       if ((err as { code?: number }).code !== 5) {
         console.error("processUpload: profile photo update failed", objectName, err);
       }
       return;
     }
     if (prev) {
-      await bucket().file(prev).delete().catch(logDeleteFailure("old photo", prev));
+      await bucket().file(prev).delete().catch(logDeleteFailure("processUpload", "old photo", prev));
     }
   } finally {
-    await stagingFile.delete().catch(logDeleteFailure("staging (photo, finally)", objectName));
+    await stagingFile.delete().catch(logDeleteFailure("processUpload", "staging (photo, finally)", objectName));
   }
 }
 

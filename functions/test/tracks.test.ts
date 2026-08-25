@@ -303,14 +303,35 @@ describe("reviewTrack", () => {
     await expect(callFn("reviewTrack", { profileId: p2, trackId: t2, decision: "rejected", reason: "x".repeat(501) }, adminUser))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
-  it("rejecting an already-rejected track is an idempotent retry: ok:true, doc stays rejected", async () => {
-    const { profileId, trackId } = await makePendingTrack("rv7");
+  it("rejecting an already-rejected track is an idempotent retry: storage re-attempted, no duplicate audit/notification", async () => {
+    const { uid, profileId, trackId } = await makePendingTrack("rv7");
     const { user: adminUser } = await makeAdminUser("rv7a");
     await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+
+    // Simulates storage drift after the first reject (e.g. a stray copy that
+    // landed here despite the doc already saying "rejected") — the retry
+    // must still find and remove it, proving the retry re-attempts storage
+    // work rather than short-circuiting on "already rejected".
+    await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).save(Buffer.from([9]), { contentType: "audio/mp4" });
+
+    const auditBefore = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    const notifsBefore = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+
     const res = await callFn<{ profileId: string; trackId: string; decision: "rejected"; reason: string },
       { ok: boolean }>("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
     expect(res.ok).toBe(true);
     const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
     expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "First reason.", storagePath: null });
+
+    // Storage work was re-attempted: the stray public object is gone.
+    const [pubExists] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(pubExists).toBe(false);
+
+    const auditAfter = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    expect(auditAfter.size).toBe(auditBefore.size); // no duplicate audit row
+    const notifsAfter = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifsAfter.size).toBe(notifsBefore.size); // no duplicate notification
   });
 });

@@ -202,6 +202,24 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
       return data;
     });
 
+    // Reject's decision is final the instant the transaction above commits —
+    // unlike approve (which can still be rolled back below if the copy
+    // fails), nothing downstream undoes "rejected". Write the audit right
+    // here, not gated on the storage outcome. Guarded on
+    // prior.status !== "rejected" so an idempotent reject-from-rejected
+    // retry doesn't produce a duplicate audit row for the same decision.
+    if (decision === "rejected" && prior.status !== "rejected") {
+      await writeAudit({
+        actorUid,
+        action: "track_rejected",
+        // Detail records the prior status too — a takedown trail (was
+        // "approved" and live, vs. a routine first-time reject from
+        // "pending_review") is worth more to an auditor than the reason alone.
+        detail: `[was ${prior.status}] ${reason!.trim()}`,
+        targetId: `${profileId}/${trackId}`,
+      });
+    }
+
     const reviewFile = bucket().file(reviewTrackPath(profileId, trackId));
     const publicFile = bucket().file(publicTrackPath(profileId, trackId));
 
@@ -212,12 +230,20 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         await reviewFile.copy(publicFile);
       } catch (err) {
         // The Firestore claim above already committed "approved" — if the
-        // copy itself fails, roll the doc back to pending_review (and its
-        // prior storagePath) so the track isn't left stuck "approved" with
-        // no public object behind it.
-        await ref.update({
-          status: "pending_review", storagePath: prior.storagePath ?? null, updatedAt: Date.now(),
-        }).catch(logDeleteFailure("approve rollback", `${profileId}/${trackId}`));
+        // copy itself fails, roll the doc back to pending_review inside its
+        // own transaction, and only if it's still OUR claim: a concurrent
+        // reject (often the very thing that deleted the review clip and
+        // made this copy fail) may have already taken the track down, and
+        // that decision must stand rather than being clobbered back to
+        // pending_review by a plain unconditional update.
+        await db.runTransaction(async (tx) => {
+          const s = await tx.get(ref);
+          // Only roll back OUR claim. If another admin has since taken the
+          // track down — often the very thing that deleted the clip and
+          // made the copy fail — their decision stands.
+          if (!s.exists || s.data()?.status !== "approved") return;
+          tx.update(ref, { status: "pending_review", storagePath: prior.storagePath ?? null, updatedAt: Date.now() });
+        }).catch((e) => console.error("reviewTrack: approve rollback failed", `${profileId}/${trackId}`, e));
         // @google-cloud/storage surfaces a missing source object as an
         // ApiError with HTTP code 404 (unlike Firestore's gRPC code 5 used
         // elsewhere) — the review clip was already gone (a race, or a prior
@@ -230,67 +256,78 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         throw err;
       }
       await reviewFile.delete()
-        .catch(logDeleteFailure("review copy after approve", reviewTrackPath(profileId, trackId)));
+        .catch(logDeleteFailure("reviewTrack", "review copy after approve", reviewTrackPath(profileId, trackId)));
     } else {
       const [reviewResult, publicResult] = await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
       if (reviewResult.status === "rejected" && (reviewResult.reason as { code?: number })?.code !== 404) {
-        logDeleteFailure("reject: review delete", reviewTrackPath(profileId, trackId))(reviewResult.reason);
+        logDeleteFailure("reviewTrack", "reject: review delete", reviewTrackPath(profileId, trackId))(reviewResult.reason);
       }
       if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
-        logDeleteFailure("reject: public delete", publicTrackPath(profileId, trackId))(publicResult.reason);
+        logDeleteFailure("reviewTrack", "reject: public delete", publicTrackPath(profileId, trackId))(publicResult.reason);
       }
-      // The doc already says "rejected" (the claim above committed it) — but
-      // if this track was previously "approved" and the PUBLIC object failed
-      // to delete for a reason other than "already gone" (404), the clip may
-      // still be publicly reachable even though the doc says otherwise.
-      // Surface that to the admin as a retryable failure instead of quietly
-      // reporting success: the transactional claim above accepts
-      // reject-from-rejected, so a second reviewTrack("rejected") call
-      // safely re-attempts the same delete.
-      if (prior.status === "approved" && publicResult.status === "rejected"
-          && (publicResult.reason as { code?: number })?.code !== 404) {
+      // A pending track's public object shouldn't exist, so its delete 404s
+      // harmlessly. If the public delete fails for any OTHER reason — for
+      // ANY prior status, not just a retroactive takedown from "approved" —
+      // the object may still exist and be publicly reachable even though
+      // the doc says "rejected"; surface that to the admin as a retryable
+      // failure instead of quietly reporting success. The audit row for
+      // this decision is already written above; the transactional claim
+      // accepts reject-from-rejected, so a second reviewTrack("rejected")
+      // call safely re-attempts the same delete without duplicating it.
+      if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
         throw new HttpsError("unavailable",
           "Takedown incomplete — the public clip could not be removed. Try again.");
       }
     }
 
     // Storage work finishes asynchronously after the transactional claim
-    // committed — deleteTrack (or deleteProfile's cascade) can race in
-    // between and remove the doc entirely. Re-read before writing an audit
-    // entry or notifying members about a track that's already gone; on
-    // approve, also clean up the public object just written (any cleanup
-    // deleteTrack/deleteProfile already did ran before this copy landed, so
-    // it can't have caught this one).
+    // committed — a concurrent review of the SAME track (e.g. another admin
+    // rejects it while this approve's copy is still in flight) can move the
+    // status again before we get here, or deleteTrack/deleteProfile's
+    // cascade can remove the doc entirely. Re-read and require the status to
+    // still match what THIS call claimed, not just that the doc exists — an
+    // existence-only check would let a superseded approve still write its
+    // audit/notification and leave the public object it just copied behind
+    // as the only trace of a decision that no longer stands.
     const postSnap = await ref.get();
-    if (!postSnap.exists) {
+    const stillOurs = postSnap.exists && postSnap.data()?.status === decision;
+    if (!stillOurs) {
       if (decision === "approved") {
         await publicFile.delete()
-          .catch(logDeleteFailure("orphaned public (post-review race)", publicTrackPath(profileId, trackId)));
+          .catch(logDeleteFailure("reviewTrack", "superseded public (post-review race)", publicTrackPath(profileId, trackId)));
       }
-      return { ok: true };
+      return { ok: true }; // no audit/notify — the other admin's decision stands
     }
 
-    await writeAudit({
-      actorUid,
-      action: decision === "approved" ? "track_approved" : "track_rejected",
-      // Reject's detail records the prior status too — a takedown trail
-      // (was "approved" and live, vs. a routine first-time reject from
-      // "pending_review") is worth more to an auditor than the reason alone.
-      detail: decision === "approved" ? (prior.title ?? "") : `[was ${prior.status}] ${reason!.trim()}`,
-      targetId: `${profileId}/${trackId}`,
-    });
-    const title = prior.title ?? "Your track";
-    const wasApproved = prior.status === "approved";
-    await notifyProfileMembers(profileId, {
-      kind: "track_review",
-      title: decision === "approved"
-        ? `"${title}" is live!`
-        : wasApproved ? `"${title}" was removed from your portfolio` : `"${title}" needs attention`,
-      body: decision === "approved"
-        ? "Your track passed review and now plays on your public portfolio."
-        : wasApproved
-          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
-          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
-    });
+    // Reject's audit already ran (right after the transaction, above) —
+    // approve's is gated here because approve can still be superseded by a
+    // concurrent reject between the copy finishing and this re-read.
+    if (decision === "approved") {
+      await writeAudit({
+        actorUid,
+        action: "track_approved",
+        detail: prior.title ?? "",
+        targetId: `${profileId}/${trackId}`,
+      });
+    }
+    // Suppresses the notification on an idempotent retry (prior.status
+    // already equals decision — e.g. reject-from-rejected): the member was
+    // already told once. For approve this condition is always true anyway
+    // (prior.status is always "pending_review" there, never "approved").
+    if (prior.status !== decision) {
+      const title = prior.title ?? "Your track";
+      const wasApproved = prior.status === "approved";
+      await notifyProfileMembers(profileId, {
+        kind: "track_review",
+        title: decision === "approved"
+          ? `"${title}" is live!`
+          : wasApproved ? `"${title}" was removed from your portfolio` : `"${title}" needs attention`,
+        body: decision === "approved"
+          ? "Your track passed review and now plays on your public portfolio."
+          : wasApproved
+            ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
+            : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+      });
+    }
     return { ok: true };
   });
