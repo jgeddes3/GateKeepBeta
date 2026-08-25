@@ -1,6 +1,7 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect } from "react";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
+import { ProfileProvider } from "../src/shell/ProfileContext";
 
 function Gate() {
   const { user, loading } = useAuth();
@@ -16,5 +17,5 @@ function Gate() {
 }
 
 export default function RootLayout() {
-  return <AuthProvider><Gate /></AuthProvider>;
+  return <AuthProvider><ProfileProvider><Gate /></ProfileProvider></AuthProvider>;
 }
