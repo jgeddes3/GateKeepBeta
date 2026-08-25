@@ -7,4 +7,4 @@ export { reviewProfile, grantAdmin } from "./review.js";
 export { inviteMember, respondToInvite, removeMember, transferAdmin, revokeInvite } from "./members.js";
 export { deleteAccount } from "./account.js";
 export { updatePortfolio, updateBookingInfo } from "./portfolio.js";
-export { createTrack, updateTrack, deleteTrack } from "./tracks.js";
+export { createTrack, updateTrack, deleteTrack, reorderTracks } from "./tracks.js";

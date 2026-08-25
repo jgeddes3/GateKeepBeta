@@ -4,5 +4,6 @@ import { getStorage } from "firebase-admin/storage";
 // bucket the processUpload trigger listens on — the emulator namespaces buckets
 // by name, so a bare getStorage().bucket() (projectId.appspot.com) would watch
 // a different, empty bucket than the one clients upload to.
-export const STORAGE_BUCKET = "gatekeep-dev-jg.firebasestorage.app";
+// env override so a future prod deploy can't silently write to the dev bucket.
+export const STORAGE_BUCKET = process.env.STORAGE_BUCKET ?? "gatekeep-dev-jg.firebasestorage.app";
 export const bucket = () => getStorage().bucket(STORAGE_BUCKET);

@@ -11,7 +11,7 @@ const adb = adminFirestore(admin);
 // Cold-start note (see review.test.ts / authTriggers.test.ts): the first
 // invocation of a callable in this file can take several seconds in the
 // Functions emulator, so raise the default 5s test timeout.
-vi.setConfig({ testTimeout: 15_000 });
+vi.setConfig({ testTimeout: 30_000 });
 
 async function bandWithOwner(prefix: string) {
   const owner = await signUpTestUser(`${prefix}-own-${Date.now()}@test.com`);

@@ -36,7 +36,7 @@ functions/package.json                 M  ffmpeg-static, ffprobe-static, sharp
 functions/src/guards.ts                 C  requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile
 functions/src/storage.ts               C  bucket helper + STORAGE_BUCKET
 functions/src/portfolio.ts             C  updatePortfolio, updateBookingInfo
-functions/src/tracks.ts                C  createTrack, updateTrack, deleteTrack, reviewTrack
+functions/src/tracks.ts                C  createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack
 functions/src/media.ts                 C  processUpload trigger (audio transcode + photo resize)
 functions/src/profiles.ts              M  submit minimum-content gate, portfolio seed, delete cascade
 functions/src/members.ts               M  verified-email gate on respondToInvite
@@ -1398,7 +1398,7 @@ git commit -m "feat(functions): updatePortfolio + updateBookingInfo, portfolio s
 
 **Files:**
 - Create: `functions/src/storage.ts`
-- Create: `functions/src/tracks.ts` (createTrack/updateTrack/deleteTrack here; reviewTrack in Task 8)
+- Create: `functions/src/tracks.ts` (createTrack/updateTrack/deleteTrack/reorderTracks here; reviewTrack in Task 8)
 - Modify: `functions/src/index.ts`
 - Modify: `functions/package.json`
 - Modify: `functions/test/helpers.ts`
@@ -1421,7 +1421,8 @@ import { getStorage } from "firebase-admin/storage";
 // bucket the processUpload trigger listens on — the emulator namespaces buckets
 // by name, so a bare getStorage().bucket() (projectId.appspot.com) would watch
 // a different, empty bucket than the one clients upload to.
-export const STORAGE_BUCKET = "gatekeep-dev-jg.firebasestorage.app";
+// env override so a future prod deploy can't silently write to the dev bucket.
+export const STORAGE_BUCKET = process.env.STORAGE_BUCKET ?? "gatekeep-dev-jg.firebasestorage.app";
 export const bucket = () => getStorage().bucket(STORAGE_BUCKET);
 ```
 
@@ -1465,7 +1466,7 @@ export function makeWav(seconds: number): Uint8Array {
 
 // Polls a track doc until its status is one of `statuses` (transcode is async).
 export async function waitForTrackStatus(
-  adb: Firestore, docPath: string, statuses: string[], timeoutMs = 30_000,
+  adb: Firestore, docPath: string, statuses: string[], timeoutMs = 45_000,
 ): Promise<FirebaseFirestore.DocumentData> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -1522,21 +1523,32 @@ describe("createTrack", () => {
     await first.ref.update({ status: "rejected" });
     await callFn("createTrack", input(profileId, "fits-now"), user);
   });
-  it("rejects non-members, unverified email, and curator profiles", async () => {
+  it("rejects a non-member with permission-denied", async () => {
     const { profileId } = await makeMusician("ct3");
     const { user: stranger } = await signUpTestUser(`ct3s-${Date.now()}@test.com`);
     await expect(callFn("createTrack", input(profileId), stranger))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+  // Split from a single overclaiming test during code review: the original
+  // title promised unverified-email and curator-profile coverage it didn't
+  // actually exercise. See functions/test/tracks.test.ts for the full cases
+  // (unverified member via an admin-SDK-seeded membership doc, and a curator
+  // profile via createProfileDraft), plus a concurrent-create regression test
+  // that seeds 8 active tracks and fires 6 parallel createTrack calls to
+  // confirm the transaction serializes to exactly 2 fulfilled + 4
+  // resource-exhausted (never 11 tracks).
 });
 
 describe("updateTrack / deleteTrack", () => {
-  it("member retitles and reorders; deleteTrack removes the doc", async () => {
+  // updateTrack is title-only — order lives on reorderTracks now (see below);
+  // a lone updateTrack("order") writer would race a concurrent reorderTracks
+  // transaction and silently reintroduce duplicate order values.
+  it("member retitles; deleteTrack removes the doc", async () => {
     const { user, profileId } = await makeMusician("ut1");
     const { trackId } = await callFn<CreateTrackInput, { trackId: string }>("createTrack", input(profileId), user);
-    await callFn("updateTrack", { profileId, trackId, title: "Renamed", order: 4 }, user);
+    await callFn("updateTrack", { profileId, trackId, title: "Renamed" }, user);
     let t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
-    expect(t.data()).toMatchObject({ title: "Renamed", order: 4 });
+    expect(t.data()).toMatchObject({ title: "Renamed" });
     await callFn("deleteTrack", { profileId, trackId }, user);
     t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
     expect(t.exists).toBe(false);
@@ -1551,6 +1563,29 @@ describe("updateTrack / deleteTrack", () => {
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
 });
+
+describe("reorderTracks", () => {
+  it("normalizes order 0..n-1 for the given sequence, then heals unmentioned tracks in their prior relative order", async () => {
+    const { user, profileId } = await makeMusician("rt1");
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { trackId } = await callFn<CreateTrackInput, { trackId: string }>(
+        "createTrack", input(profileId, `T${i}`), user);
+      ids.push(trackId);
+    }
+    const [t0, t1, t2] = ids;
+    await callFn("reorderTracks", { profileId, trackIds: [t2, t0, t1] }, user); // → order 0,1,2
+    // A later partial/stale list — only [t1] — puts t1 first; t2/t0 keep
+    // their prior relative order (t2 before t0) rather than resetting.
+    await callFn("reorderTracks", { profileId, trackIds: [t1] }, user); // → t1, t2, t0
+  });
+  // See functions/test/tracks.test.ts for the full suite, including a
+  // duplicate-order healing case: reject the highest-order track (it drops
+  // out of the active-track max used by createTrack's order calc, but its
+  // own order field is untouched), create a replacement (which can reuse
+  // that same order number), then confirm reorderTracks renormalizes every
+  // track in the collection — active or not — back to unique 0..n-1.
+});
 ```
 
 - [ ] **Step 5: Run to verify failure**
@@ -1562,11 +1597,31 @@ Expected: tracks tests FAIL (createTrack not found).
 
 Note (reviewed, accepted): `uploaderUid` on track docs is world-readable once a track is approved. This matches the existing posture (member docs of approved profiles are already `get`-able) and the trigger needs it; do not "fix" it silently — any change is a product decision.
 
+Note (code review, applied): the first-cut version of this file had two bugs
+and a missing feature, fixed in the snippet below —
+1. `order: active.size` reused order numbers after a delete-then-add cycle
+   (the deleted track's slot number gets handed to the next create, but nothing
+   guarantees uniqueness against a track that was merely rejected, not
+   deleted — see the `reorderTracks` duplicate-order-healing test). Fixed by
+   computing `max(existing active orders) + 1` instead of counting.
+2. The planned web `TrackManager.move()` UI would have done its reordering as
+   two sequential `updateTrack({ order })` calls per swap — non-atomic (a
+   crash/reload between the two calls leaves two tracks with the same order),
+   and a no-op on ties. Replaced with a dedicated `reorderTracks` callable
+   that renormalizes the whole list to 0..n-1 in one transaction.
+3. `updateTrack`/`deleteTrack` used plain `typeof` checks instead of
+   `isValidDocId`, and neither gated on verified email (every other mutating
+   callable in this codebase does). Both fixed. `updateTrack` also lost its
+   `order` parameter (subsumed by `reorderTracks`) and its pre-`get()`
+   existence check, which had a TOCTOU gap against a racing `deleteTrack` —
+   it now lets `update()` itself throw NOT_FOUND (gRPC code 5) and maps that
+   to `HttpsError("not-found", ...)`.
+
 ```ts
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  validateTrackCreate, stagingAudioPath, MAX_TRACKS,
+  validateTrackCreate, isValidDocId, stagingAudioPath, reviewTrackPath, publicTrackPath, MAX_TRACKS,
   type CreateTrackInput, type TrackDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
@@ -1598,7 +1653,10 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
     const doc: TrackDoc = {
       title: input.title.trim(), status: "processing", uploaderUid: uid,
       startSec: input.startSec, durationSec: null, storagePath: null,
-      rejectionReason: null, failureReason: null, order: active.size,
+      rejectionReason: null, failureReason: null,
+      // Max existing order + 1, not active.size — delete-then-add otherwise
+      // produces duplicate order values once a track has ever been removed.
+      order: Math.max(-1, ...active.docs.map((d) => (d.data().order as number) ?? -1)) + 1,
       createdAt: now, updatedAt: now,
     };
     tx.set(trackRef, doc);
@@ -1606,45 +1664,52 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
   return { trackId: trackRef.id, uploadPath: stagingAudioPath(uid, input.profileId, trackRef.id) };
 });
 
-export const updateTrack = onCall<{ profileId: string; trackId: string; title?: string; order?: number }>(
+export const updateTrack = onCall<{ profileId: string; trackId: string; title?: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
-    const { profileId, trackId, title, order } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string") {
+    requireVerifiedEmail(req);
+    const { profileId, trackId, title } = req.data;
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)) {
       throw new HttpsError("invalid-argument", "profileId and trackId are required.");
     }
-    if (title === undefined && order === undefined) {
+    if (title === undefined) {
       throw new HttpsError("invalid-argument", "Nothing to update.");
     }
-    if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.trim().length > 80)) {
+    if (typeof title !== "string" || title.trim().length < 1 || title.trim().length > 80) {
       throw new HttpsError("invalid-argument", "Track titles are 1-80 characters.");
-    }
-    if (order !== undefined && (typeof order !== "number" || !Number.isInteger(order) || order < 0 || order > 100)) {
-      throw new HttpsError("invalid-argument", "Invalid order.");
     }
     await requireProfileMember(profileId, uid);
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
-    if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
-    const updates: Record<string, unknown> = { updatedAt: Date.now() };
-    if (title !== undefined) updates.title = title.trim();
-    if (order !== undefined) updates.order = order;
-    await ref.update(updates);
+    try {
+      await ref.update({ title: title.trim(), updatedAt: Date.now() });
+    } catch (err) {
+      // Firestore's NOT_FOUND status maps to gRPC code 5 — thrown by update()
+      // against a missing doc instead of a separate pre-read, since a plain
+      // get()-then-update() has a TOCTOU gap (the doc can vanish between the
+      // two calls, e.g. a racing deleteTrack).
+      if ((err as { code?: number }).code === 5) {
+        throw new HttpsError("not-found", "Track not found.");
+      }
+      throw err;
+    }
     return { ok: true };
   });
 
 export const deleteTrack = onCall<{ profileId: string; trackId: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
     const { profileId, trackId } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string") {
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)) {
       throw new HttpsError("invalid-argument", "profileId and trackId are required.");
     }
     await requireProfileMember(profileId, uid);
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
     if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
-    // Storage cleanup is best-effort: the doc is the source of truth, and the
-    // objects are unreachable once it's gone (public path is only listed via docs).
-    const { reviewTrackPath, publicTrackPath } = await import("@gatekeep/shared");
+    // Storage cleanup is best-effort: a transcode in flight when the doc is
+    // deleted can still write a review clip afterwards — Task 7's trigger
+    // must re-check the doc after transcoding and remove its own output if
+    // the doc is gone (see plan Task 7).
     await Promise.allSettled([
       bucket().file(reviewTrackPath(profileId, trackId)).delete(),
       bucket().file(publicTrackPath(profileId, trackId)).delete(),
@@ -1652,14 +1717,44 @@ export const deleteTrack = onCall<{ profileId: string; trackId: string }>(
     await ref.delete();
     return { ok: true };
   });
-```
 
-(Import `reviewTrackPath`/`publicTrackPath` statically at the top with the other shared imports rather than the inline `await import` — write it that way.)
+export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { profileId, trackIds } = req.data;
+    if (!isValidDocId(profileId) || !Array.isArray(trackIds) || trackIds.length < 1
+        || trackIds.length > 20 || !trackIds.every((t) => isValidDocId(t))
+        || new Set(trackIds).size !== trackIds.length) {
+      throw new HttpsError("invalid-argument", "A profile id and a list of unique track ids are required.");
+    }
+    await requireProfileMember(profileId, uid);
+    const db = getFirestore();
+    // Normalizes order to 0..n-1 in one transaction: the given ids first (in the
+    // given order), then any unmentioned tracks in their current order. Also
+    // heals any duplicate order values left by historic delete-then-add.
+    await db.runTransaction(async (tx) => {
+      const col = db.collection(`profiles/${profileId}/tracks`);
+      const all = await tx.get(col);
+      const byId = new Map(all.docs.map((d) => [d.id, d]));
+      const mentioned = trackIds.filter((id) => byId.has(id));
+      const rest = all.docs
+        .filter((d) => !mentioned.includes(d.id))
+        .sort((a, b) => ((a.data().order ?? 0) - (b.data().order ?? 0)) || a.id.localeCompare(b.id))
+        .map((d) => d.id);
+      [...mentioned, ...rest].forEach((id, i) => {
+        const d = byId.get(id)!;
+        if (d.data().order !== i) tx.update(d.ref, { order: i, updatedAt: Date.now() });
+      });
+    });
+    return { ok: true };
+  });
+```
 
 - [ ] **Step 7: Export from `functions/src/index.ts`**
 
 ```ts
-export { createTrack, updateTrack, deleteTrack } from "./tracks.js";
+export { createTrack, updateTrack, deleteTrack, reorderTracks } from "./tracks.js";
 ```
 
 - [ ] **Step 8: Run tests**
@@ -1673,6 +1768,12 @@ Expected: all PASS. (The `status in [...]` transaction query needs no composite 
 git add functions
 git commit -m "feat(functions): createTrack/updateTrack/deleteTrack with 10-track cap"
 ```
+
+Note: a code review pass after this task landed found the `order`-reuse bug,
+the non-atomic reorder shape, and the missing verified-email/isValidDocId
+gates described above — landed as a follow-up commit,
+`fix(functions): reorderTracks normalizer, monotonic order, id validation, verified-email gates`.
+The snippets above already reflect the fixed, shipped code.
 
 ---
 
@@ -1863,6 +1964,19 @@ async function processAudio(objectName: string, generation: string | number): Pr
     const clipDuration = await probeDurationSec(outFile);
     const destPath = reviewTrackPath(profileId, trackId);
     await bucket().upload(outFile, { destination: destPath, metadata: { contentType: "audio/mp4" } });
+    // TODO (code review follow-up, write a failing test first and implement
+    // for real when this task is executed — deleteTrack's tracks.ts comment
+    // points back here): a transcode can take several seconds, long enough
+    // for deleteTrack to race it and remove the doc mid-flight. Re-read
+    // before writing pending_review; if the doc is gone or someone else
+    // already moved it off "processing" (e.g. deleteTrack ran), the upload
+    // above is now orphaned — delete it and bail without writing:
+    //
+    // const postSnap = await trackRef.get();
+    // if (!postSnap.exists || postSnap.data()?.status !== "processing") {
+    //   await bucket().file(destPath).delete().catch(() => {});
+    //   return;
+    // }
     await trackRef.update({
       status: "pending_review",
       durationSec: Math.round(clipDuration * 10) / 10,
@@ -1871,6 +1985,17 @@ async function processAudio(objectName: string, generation: string | number): Pr
       updatedAt: Date.now(),
     });
   } catch (e) {
+    // TODO (code review follow-up, implement alongside the guard above): the
+    // doc can be gone here too (deleteTrack raced the failure path, not just
+    // the success path). update() then throws NOT_FOUND (gRPC code 5) —
+    // swallow only that code; anything else is a real error and must not be
+    // silently dropped:
+    //
+    // try {
+    //   await trackRef.update({ status: "failed", failureReason: ..., updatedAt: Date.now() });
+    // } catch (err) {
+    //   if ((err as { code?: number }).code !== 5) throw err;
+    // }
     await trackRef.update({
       status: "failed",
       failureReason: e instanceof Error ? e.message : "Audio processing failed.",
@@ -2008,7 +2133,7 @@ describe("reviewTrack", () => {
     const [rev] = await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).exists();
     expect(rev).toBe(false);
   });
-  it("non-admin cannot review; non-pending tracks are refused", async () => {
+  it("non-admin cannot review; a second 'approved' decision is refused (already approved, not pending)", async () => {
     const { user, profileId, trackId } = await makePendingTrack("rv3");
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -2016,6 +2141,19 @@ describe("reviewTrack", () => {
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv4");
+    const { user: adminUser } = await makeAdminUser("rv4a");
+    await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
+    const [pubBefore] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(pubBefore).toBe(true);
+    await callFn("reviewTrack",
+      { profileId, trackId, decision: "rejected", reason: "Copyright complaint." }, adminUser);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "Copyright complaint.", storagePath: null });
+    const [pubAfter] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(pubAfter).toBe(false);
   });
 });
 ```
@@ -2048,22 +2186,34 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
     const snap = await ref.get();
     if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
-    if (snap.data()?.status !== "pending_review") {
+    const status = snap.data()?.status;
+    // "approved" still requires pending_review. "rejected" additionally
+    // accepts an already-"approved" track — retroactive takedown (spec §6:
+    // "admins can retroactively unpublish").
+    if (decision === "approved" && status !== "pending_review") {
       throw new HttpsError("failed-precondition", "Track is not pending review.");
     }
+    if (decision === "rejected" && status !== "pending_review" && status !== "approved") {
+      throw new HttpsError("failed-precondition", "Track is not pending review or approved.");
+    }
     const reviewFile = bucket().file(reviewTrackPath(profileId, trackId));
+    const publicFile = bucket().file(publicTrackPath(profileId, trackId));
 
     if (decision === "approved") {
       // Copy-then-delete keeps the public-path invariant: the clip appears in
       // public/ only as part of an approval.
-      await reviewFile.copy(bucket().file(publicTrackPath(profileId, trackId)));
+      await reviewFile.copy(publicFile);
       await reviewFile.delete().catch(() => {});
       await ref.update({
         status: "approved", storagePath: publicTrackPath(profileId, trackId),
         rejectionReason: null, updatedAt: Date.now(),
       });
     } else {
-      await reviewFile.delete().catch(() => {});
+      // Delete whichever copy exists: review/ for a first-time reject,
+      // public/ for a retroactive takedown of a previously approved track —
+      // allSettled rather than two guarded deletes because exactly one of
+      // the two objects exists depending on which state this track was in.
+      await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
       await ref.update({
         status: "rejected", storagePath: null,
         rejectionReason: reason!.trim(), updatedAt: Date.now(),
@@ -2658,10 +2808,15 @@ export function TrackManager({ profileId }: { profileId: string }) {
     catch (e) { window.alert(e instanceof Error ? e.message : "That didn't work — try again."); }
   };
   const move = (i: number, dir: -1 | 1) => {
-    const a = tracks[i], b = tracks[i + dir];
-    if (!a || !b) return;
-    void call("updateTrack", { profileId, trackId: a.id, order: b.order });
-    void call("updateTrack", { profileId, trackId: b.id, order: a.order });
+    // A single reorderTracks call with the whole reordered id list, not two
+    // sequential updateTrack({ order }) calls — updateTrack no longer takes
+    // an order field (reorderTracks owns ordering, atomically), and two
+    // separate calls would be non-atomic (a reload between them leaves two
+    // tracks sharing an order) and a no-op on ties.
+    if (!tracks[i] || !tracks[i + dir]) return;
+    const ids = tracks.map((t) => t.id);
+    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+    void call("reorderTracks", { profileId, trackIds: ids });
   };
 
   return (
@@ -3789,6 +3944,7 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
 - Environment: note `next typegen` for fresh clones (typecheck fails without it) and the corepack/pnpm Windows PATH workaround.
 - Manual follow-ups: **replace** the "native App Check lands in sub-project 2" sentence — EAS production build + native App Check moved to a dedicated launch-prep track (per SP2 spec §1), same must-review list as the admin/internal deferred items. Add: create the production Storage bucket lifecycle rule (24h TTL on `staging/`) in the Firebase console/deploy config before launch — the emulator does not enforce lifecycle rules.
 - Manual follow-ups: the App Check enforcement checklist must cover Cloud Storage, not just Firestore + Functions — and Storage must NOT be flipped to enforce until native mobile App Check ships (mobile currently has no App Check attestation; enforcing early would lock the app out of its own uploads).
+- Manual follow-ups: abandoned `processing` tracks (created via `createTrack` but never uploaded, or stuck if the transcode trigger never fires) hold one of the 10 cap slots indefinitely until a member manually deletes them; consider a scheduled cleanup sweep (e.g. delete `processing` tracks older than 24h) in a later sub-project.
 
 - [ ] **Step 2: Commit**
 

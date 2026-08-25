@@ -1,7 +1,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  validateTrackCreate, stagingAudioPath, reviewTrackPath, publicTrackPath, MAX_TRACKS,
+  validateTrackCreate, isValidDocId, stagingAudioPath, reviewTrackPath, publicTrackPath, MAX_TRACKS,
   type CreateTrackInput, type TrackDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
@@ -33,7 +33,10 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
     const doc: TrackDoc = {
       title: input.title.trim(), status: "processing", uploaderUid: uid,
       startSec: input.startSec, durationSec: null, storagePath: null,
-      rejectionReason: null, failureReason: null, order: active.size,
+      rejectionReason: null, failureReason: null,
+      // Max existing order + 1, not active.size — delete-then-add otherwise
+      // produces duplicate order values once a track has ever been removed.
+      order: Math.max(-1, ...active.docs.map((d) => (d.data().order as number) ?? -1)) + 1,
       createdAt: now, updatedAt: now,
     };
     tx.set(trackRef, doc);
@@ -41,48 +44,88 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
   return { trackId: trackRef.id, uploadPath: stagingAudioPath(uid, input.profileId, trackRef.id) };
 });
 
-export const updateTrack = onCall<{ profileId: string; trackId: string; title?: string; order?: number }>(
+export const updateTrack = onCall<{ profileId: string; trackId: string; title?: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
-    const { profileId, trackId, title, order } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string") {
+    requireVerifiedEmail(req);
+    const { profileId, trackId, title } = req.data;
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)) {
       throw new HttpsError("invalid-argument", "profileId and trackId are required.");
     }
-    if (title === undefined && order === undefined) {
+    if (title === undefined) {
       throw new HttpsError("invalid-argument", "Nothing to update.");
     }
-    if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.trim().length > 80)) {
+    if (typeof title !== "string" || title.trim().length < 1 || title.trim().length > 80) {
       throw new HttpsError("invalid-argument", "Track titles are 1-80 characters.");
-    }
-    if (order !== undefined && (typeof order !== "number" || !Number.isInteger(order) || order < 0 || order > 100)) {
-      throw new HttpsError("invalid-argument", "Invalid order.");
     }
     await requireProfileMember(profileId, uid);
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
-    if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
-    const updates: Record<string, unknown> = { updatedAt: Date.now() };
-    if (title !== undefined) updates.title = title.trim();
-    if (order !== undefined) updates.order = order;
-    await ref.update(updates);
+    try {
+      await ref.update({ title: title.trim(), updatedAt: Date.now() });
+    } catch (err) {
+      // Firestore's NOT_FOUND status maps to gRPC code 5 — thrown by update()
+      // against a missing doc instead of a separate pre-read, since a plain
+      // get()-then-update() has a TOCTOU gap (the doc can vanish between the
+      // two calls, e.g. a racing deleteTrack).
+      if ((err as { code?: number }).code === 5) {
+        throw new HttpsError("not-found", "Track not found.");
+      }
+      throw err;
+    }
     return { ok: true };
   });
 
 export const deleteTrack = onCall<{ profileId: string; trackId: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
     const { profileId, trackId } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string") {
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)) {
       throw new HttpsError("invalid-argument", "profileId and trackId are required.");
     }
     await requireProfileMember(profileId, uid);
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
     if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
-    // Storage cleanup is best-effort: the doc is the source of truth, and the
-    // objects are unreachable once it's gone (public path is only listed via docs).
+    // Storage cleanup is best-effort: a transcode in flight when the doc is
+    // deleted can still write a review clip afterwards — Task 7's trigger
+    // must re-check the doc after transcoding and remove its own output if
+    // the doc is gone (see plan Task 7).
     await Promise.allSettled([
       bucket().file(reviewTrackPath(profileId, trackId)).delete(),
       bucket().file(publicTrackPath(profileId, trackId)).delete(),
     ]);
     await ref.delete();
+    return { ok: true };
+  });
+
+export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { profileId, trackIds } = req.data;
+    if (!isValidDocId(profileId) || !Array.isArray(trackIds) || trackIds.length < 1
+        || trackIds.length > 20 || !trackIds.every((t) => isValidDocId(t))
+        || new Set(trackIds).size !== trackIds.length) {
+      throw new HttpsError("invalid-argument", "A profile id and a list of unique track ids are required.");
+    }
+    await requireProfileMember(profileId, uid);
+    const db = getFirestore();
+    // Normalizes order to 0..n-1 in one transaction: the given ids first (in the
+    // given order), then any unmentioned tracks in their current order. Also
+    // heals any duplicate order values left by historic delete-then-add.
+    await db.runTransaction(async (tx) => {
+      const col = db.collection(`profiles/${profileId}/tracks`);
+      const all = await tx.get(col);
+      const byId = new Map(all.docs.map((d) => [d.id, d]));
+      const mentioned = trackIds.filter((id) => byId.has(id));
+      const rest = all.docs
+        .filter((d) => !mentioned.includes(d.id))
+        .sort((a, b) => ((a.data().order ?? 0) - (b.data().order ?? 0)) || a.id.localeCompare(b.id))
+        .map((d) => d.id);
+      [...mentioned, ...rest].forEach((id, i) => {
+        const d = byId.get(id)!;
+        if (d.data().order !== i) tx.update(d.ref, { order: i, updatedAt: Date.now() });
+      });
+    });
     return { ok: true };
   });

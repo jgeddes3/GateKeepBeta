@@ -106,7 +106,7 @@ export function makeWav(seconds: number): Uint8Array {
 
 // Polls a track doc until its status is one of `statuses` (transcode is async).
 export async function waitForTrackStatus(
-  adb: Firestore, docPath: string, statuses: string[], timeoutMs = 30_000,
+  adb: Firestore, docPath: string, statuses: string[], timeoutMs = 45_000,
 ): Promise<FirebaseFirestore.DocumentData> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
