@@ -2220,7 +2220,10 @@ async function processAudio(objectName: string, generation: string | number): Pr
     try {
       await stagingFile.download({ destination: inFile });
     } catch (err) {
-      if ((err as { code?: number }).code === 5) {
+      // NOTE: this is a STORAGE error — @google-cloud/storage ApiError carries
+      // HTTP codes (404), unlike the Firestore gRPC code 5 checked elsewhere
+      // in this file. Do not "fix" this back to 5.
+      if ((err as { code?: number }).code === 404) {
         // Generation-pinned reads 404 only when the object no longer
         // exists — and the only thing that ever deletes a staging/audio
         // object is this trigger itself (storage.rules makes staging
