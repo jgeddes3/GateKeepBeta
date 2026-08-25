@@ -1419,6 +1419,8 @@ Expected: tracks tests FAIL (createTrack not found).
 
 - [ ] **Step 6: Create `functions/src/tracks.ts` (CRUD part)**
 
+Note (reviewed, accepted): `uploaderUid` on track docs is world-readable once a track is approved. This matches the existing posture (member docs of approved profiles are already `get`-able) and the trigger needs it; do not "fix" it silently — any change is a product decision.
+
 ```ts
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
