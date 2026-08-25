@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
@@ -9,6 +9,16 @@ process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_AUTH_EMULATOR_HOST = "localhost:9099";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
+
+// This file's tests are the first to invoke "reviewProfile"/"grantAdmin" in
+// the suite, so — like the cold-start note in authTriggers.test.ts — the
+// Functions emulator's first invocation of each of those callables can take
+// several seconds. Verified via `firebase emulators:exec ... vitest run
+// test/review.test.ts --testTimeout=30000`: the emulator work itself
+// completes (function execution logged at 20-100ms), the wall-clock cost is
+// emulator cold start, not a hang — so raise the default 5s test timeout
+// rather than mask a real failure.
+vi.setConfig({ testTimeout: 15_000 });
 
 async function makeAdminUser() {
   const t = await signUpTestUser(`admin-${Date.now()}@test.com`);
@@ -57,6 +67,14 @@ describe("reviewProfile", () => {
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, owner.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+  it("rejects re-reviewing a profile that is no longer pending_review", async () => {
+    const { profileId } = await pendingProfile("v4");
+    const adminUser = await makeAdminUser();
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("approved");
+    await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
 });
 
 describe("grantAdmin", () => {
@@ -66,6 +84,10 @@ describe("grantAdmin", () => {
     await callFn("grantAdmin", { uid: target.uid }, adminUser.user);
     const rec = await adminAuth(admin).getUser(target.uid);
     expect(rec.customClaims?.admin).toBe(true);
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", target.uid).where("action", "==", "admin_granted").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().actorUid).toBe(adminUser.uid);
     const stranger = await signUpTestUser(`s-${Date.now()}@test.com`);
     await expect(callFn("grantAdmin", { uid: stranger.uid }, stranger.user)).rejects.toThrow();
   });
