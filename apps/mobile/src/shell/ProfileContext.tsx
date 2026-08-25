@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { collectionGroup, query, where, onSnapshot, doc, getDoc, documentId } from "firebase/firestore";
+import { collectionGroup, query, where, onSnapshot, doc, getDoc } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
 import type { ProfileType, ProfileStatus } from "@gatekeep/shared";
@@ -17,19 +17,23 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!user) { setMyProfiles([]); setActiveContext("fan"); return; }
+    let cancelled = false;
     const { db } = getFirebase();
-    return onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", user.uid)), async (snap) => {
+    const unsubscribe = onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", user.uid)), async (snap) => {
       const results: ProfileSummary[] = [];
       for (const m of snap.docs) {
+        if (cancelled) return;
         const profileRef = m.ref.parent.parent!;
         const p = await getDoc(doc(db, "profiles", profileRef.id));
+        if (cancelled) return;
         if (p.exists()) {
           const d = p.data();
           results.push({ profileId: p.id, type: d.type, name: d.name, status: d.status });
         }
       }
-      setMyProfiles(results);
+      if (!cancelled) setMyProfiles(results);
     });
+    return () => { cancelled = true; unsubscribe(); };
   }, [user?.uid]);
 
   return (

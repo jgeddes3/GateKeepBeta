@@ -8,6 +8,7 @@
     "pnpm": ">=9"
   },
   "scripts": {
+    "postinstall": "pnpm --filter @gatekeep/shared build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "emu": "firebase emulators:start",

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "prepare:shared": "pnpm --filter @gatekeep/shared build",
+    "predev": "pnpm run prepare:shared",
+    "prebuild": "pnpm run prepare:shared",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
