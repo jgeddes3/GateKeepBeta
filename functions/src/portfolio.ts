@@ -2,7 +2,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount,
+  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount, type PortfolioData,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 
@@ -37,17 +37,18 @@ export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-centra
     updates["portfolio.externalLinks"] = input.externalLinks.map((l) => ({ kind: l.kind, url: l.url.trim() }));
   }
 
-  // Legacy data: profiles created before the portfolio seed (Task 5) lack
-  // the portfolio map entirely. A partial dotted-key update against a
-  // missing map would create a partial map that violates PortfolioData —
-  // backfill defaults for every field this call isn't already writing.
-  if (snap.data()?.portfolio == null) {
-    if (input.bio === undefined) updates["portfolio.bio"] = "";
-    if (input.genres === undefined) updates["portfolio.genres"] = [];
-    if (input.externalLinks === undefined) updates["portfolio.externalLinks"] = [];
-    updates["portfolio.avatarPhotoPath"] = null;
-    updates["portfolio.coverPhotoPath"] = null;
-  }
+  // Legacy data: profiles created before the portfolio seed (Task 5) may lack
+  // the portfolio map entirely, or hold only a partial map (e.g. the media
+  // pipeline wrote avatarPhotoPath before any updatePortfolio call ever
+  // ran). Backfill is field-wise, not map-level, so a partial legacy map
+  // still ends up complete — and photo paths are only null-defaulted when
+  // genuinely absent, never clobbered.
+  const pf = snap.data()?.portfolio as Partial<PortfolioData> | undefined;
+  if (input.bio === undefined && pf?.bio === undefined) updates["portfolio.bio"] = "";
+  if (input.genres === undefined && pf?.genres === undefined) updates["portfolio.genres"] = [];
+  if (input.externalLinks === undefined && pf?.externalLinks === undefined) updates["portfolio.externalLinks"] = [];
+  if (pf?.avatarPhotoPath === undefined) updates["portfolio.avatarPhotoPath"] = null;
+  if (pf?.coverPhotoPath === undefined) updates["portfolio.coverPhotoPath"] = null;
 
   await getFirestore().doc(`profiles/${input.profileId}`).update(updates);
   return { ok: true };

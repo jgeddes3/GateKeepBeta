@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, signUpUnverifiedTestUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
-import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import type { ProfileDraftInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -122,6 +122,29 @@ describe("updatePortfolio preserves fields not being updated", () => {
     expect(p.data()?.portfolio.avatarPhotoPath).toBe("public/photos/p1/avatar-abc.jpg");
     expect(p.data()?.portfolio.genres).toEqual(["soul"]);
     expect(p.data()?.portfolio.externalLinks).toEqual([{ kind: "website", url: "https://example.com" }]);
+  });
+});
+
+describe("updatePortfolio backfills a legacy/partial portfolio map field-wise", () => {
+  it("completes a map that only has avatarPhotoPath (media pipeline landed first) without clobbering it", async () => {
+    const { user } = await signUpTestUser(`legacy1-${Date.now()}@test.com`);
+    const profileId = await makeMusicianProfile(user);
+    // Simulate a legacy profile: portfolio map removed entirely, then only
+    // the media pipeline's avatarPhotoPath write landed — a partial map,
+    // not simply a missing one.
+    await adb.doc(`profiles/${profileId}`).update({ portfolio: FieldValue.delete() });
+    await adb.doc(`profiles/${profileId}`).update({
+      "portfolio.avatarPhotoPath": "public/photos/p1/avatar-legacy.jpg",
+    });
+    await callFn("updatePortfolio", { profileId, bio: "Legacy backfill test." }, user);
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.portfolio).toEqual({
+      bio: "Legacy backfill test.",
+      genres: [],
+      externalLinks: [],
+      avatarPhotoPath: "public/photos/p1/avatar-legacy.jpg", // preserved, not clobbered
+      coverPhotoPath: null,
+    });
   });
 });
 
