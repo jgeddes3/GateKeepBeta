@@ -1,6 +1,6 @@
 {
   "firestore": { "rules": "firestore.rules", "indexes": "firestore.indexes.json" },
-  "functions": { "source": "functions", "runtime": "nodejs20" },
+  "functions": { "source": "functions", "runtime": "nodejs20", "predeploy": ["pnpm --filter functions build"] },
   "emulators": {
     "auth": { "port": 9099 },
     "firestore": { "port": 8080 },

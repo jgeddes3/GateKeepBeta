@@ -45,4 +45,30 @@ describe("submitProfileForReview", () => {
     const { user: outsider } = await signUpTestUser(`m4-${Date.now()}@test.com`);
     await expect(callFn("submitProfileForReview", { profileId }, outsider)).rejects.toThrow();
   });
+
+  it("rejects re-submitting a profile already in pending_review", async () => {
+    const { user } = await signUpTestUser(`m5-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", draft(`resub_${Date.now()}`), user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/pending_review|failed-precondition|Cannot submit/i);
+  });
+
+  it("rejects a non-admin member (role: member) trying to submit", async () => {
+    const { user: admin } = await signUpTestUser(`m6-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", draft(`memb_${Date.now()}`), admin);
+    const { uid: memberUid, user: member } = await signUpTestUser(`m7-${Date.now()}@test.com`);
+    // Invite flow doesn't exist until Task 8 — seed the membership directly.
+    await adb.doc(`profiles/${profileId}/members/${memberUid}`).set({
+      uid: memberUid, role: "member", label: "x", joinedAt: Date.now(),
+    });
+    // The client SDK surfaces the HttpsError code as `functions/<code>` on
+    // the rejected error's `.code`, not in `.message` — assert on that
+    // rather than a message regex.
+    await expect(callFn("submitProfileForReview", { profileId }, member))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
 });

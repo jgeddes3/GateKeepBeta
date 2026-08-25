@@ -10,7 +10,7 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "emu": "firebase emulators:start",
-    "emu:test": "firebase emulators:exec --only auth,firestore,functions \"pnpm --filter functions test\"",
+    "emu:test": "pnpm --filter functions build && firebase emulators:exec --only auth,firestore,functions \"pnpm --filter functions test\"",
     "emu:rules": "firebase emulators:exec --only firestore \"pnpm --filter @gatekeep/tests-rules test\""
   },
   "devDependencies": {
