@@ -1892,6 +1892,13 @@ describe("processUpload: photos", () => {
     "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
     "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
     "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
+  // Same 1x1 image, 3 bytes longer — decodes fine but trips libjpeg's
+  // "extraneous bytes" warning, as many real phone encoders do; pins
+  // failOn:"error" tolerance (media.ts must not reject on this).
+  const warnJpeg = () => Uint8Array.from(atob(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
+    "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
   it("processes an avatar into public/photos and updates the profile doc", async () => {
     const { user, uid, profileId } = await makeMusician("ph1");
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
@@ -1914,6 +1921,20 @@ describe("processUpload: photos", () => {
     await new Promise((r) => setTimeout(r, 4000));
     const p = await adb.doc(`profiles/${profileId}`).get();
     expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull();
+  });
+  it("processes a warning-tripping-but-valid cover JPEG successfully", async () => {
+    const { user, uid, profileId } = await makeMusician("ph3");
+    const path = `staging/photos/${uid}/${profileId}/cover-${Date.now()}`;
+    await uploadTestAudio(path, warnJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let coverPath: string | null = null;
+    while (Date.now() < deadline && !coverPath) {
+      coverPath = (await adb.doc(`profiles/${profileId}`).get()).data()?.portfolio?.coverPhotoPath ?? null;
+      if (!coverPath) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(coverPath).toMatch(new RegExp(`^public/photos/${profileId}/cover-`));
+    const [exists] = await abucket.file(coverPath!).exists();
+    expect(exists).toBe(true);
   });
 });
 ```
@@ -2050,9 +2071,15 @@ async function processPhoto(objectName: string, generation: string | number): Pr
   try {
     const [bytes] = await stagingFile.download();
     // Re-encode via sharp: strips EXIF (GPS!) and bounds dimensions.
+    // failOn: "error" (sharp's default is "warning", the strictest level) —
+    // real-world phone/app JPEG encoders commonly emit warning-level defects
+    // (e.g. libjpeg's "extraneous bytes before marker") on otherwise-valid
+    // photos; the default "warning" level would reject those uploads. "error"
+    // still rejects truncated/genuinely corrupt data, just not mere warnings.
+    const sharpOpts = { failOn: "error" as const };
     const pipeline = kind === "avatar"
-      ? sharp(bytes).rotate().resize(512, 512, { fit: "cover" })
-      : sharp(bytes).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
+      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
+      : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
     const jpeg = await pipeline.jpeg({ quality: 82 }).toBuffer();
     const destPath = publicPhotoPath(profileId, kind, randomUUID());
     await bucket().file(destPath).save(jpeg, { contentType: "image/jpeg" });
