@@ -260,11 +260,15 @@ describe("tracks", () => {
     await seedProfile("approved"); // prof1 / alice, as the existing helper does
     await seed("profiles/prof2", { type: "musician", name: "B", handle: "b", status: "approved" });
     await seed("profiles/prof2/tracks/p", { title: "SECRET", status: "pending_review", order: 0 });
+    await seed("profiles/prof2/tracks/pub", { title: "Public", status: "approved", order: 1 });
     await seed("profiles/prof2/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(getDoc(doc(alice, "profiles/prof2/tracks/p")));
     await assertFails(getDocs(collection(alice, "profiles/prof2/tracks")));
     await assertFails(getDoc(doc(alice, "profiles/prof2/private/booking")));
+    // Positive control: alice is not a member of prof2, but prof2 is approved,
+    // so the public-approved path (not membership) is what allows this read.
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof2/tracks/pub")));
   });
 });
 
