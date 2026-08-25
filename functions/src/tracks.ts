@@ -6,6 +6,8 @@ import {
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 import { bucket } from "./storage.js";
+import { requireAdmin, writeAudit } from "./review.js";
+import { notifyProfileMembers } from "./notifications.js";
 
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
 // docs (for the reason display) but don't count.
@@ -139,6 +141,73 @@ export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
         const d = byId.get(id)!;
         if (d.data().order !== i) tx.update(d.ref, { order: i, updatedAt: Date.now() });
       });
+    });
+    return { ok: true };
+  });
+
+export const reviewTrack = onCall<{ profileId: string; trackId: string; decision: "approved" | "rejected"; reason?: string }>(
+  { region: "us-central1" }, async (req) => {
+    const actorUid = requireAdmin(req);
+    const { profileId, trackId, decision, reason } = req.data;
+    if (typeof profileId !== "string" || typeof trackId !== "string"
+        || (decision !== "approved" && decision !== "rejected")) {
+      throw new HttpsError("invalid-argument", "profileId, trackId, and a decision are required.");
+    }
+    if (decision === "rejected" && !reason?.trim()) {
+      throw new HttpsError("invalid-argument", "A rejection reason is required.");
+    }
+    if (decision === "rejected" && reason!.trim().length > 500) {
+      throw new HttpsError("invalid-argument", "Rejection reason must be 500 characters or fewer.");
+    }
+    const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
+    const status = snap.data()?.status;
+    // "approved" still requires pending_review. "rejected" additionally
+    // accepts an already-"approved" track — retroactive takedown (spec §6:
+    // "admins can retroactively unpublish").
+    if (decision === "approved" && status !== "pending_review") {
+      throw new HttpsError("failed-precondition", "Track is not pending review.");
+    }
+    if (decision === "rejected" && status !== "pending_review" && status !== "approved") {
+      throw new HttpsError("failed-precondition", "Track is not pending review or approved.");
+    }
+    const reviewFile = bucket().file(reviewTrackPath(profileId, trackId));
+    const publicFile = bucket().file(publicTrackPath(profileId, trackId));
+
+    if (decision === "approved") {
+      // Copy-then-delete keeps the public-path invariant: the clip appears in
+      // public/ only as part of an approval.
+      await reviewFile.copy(publicFile);
+      await reviewFile.delete().catch(() => {});
+      await ref.update({
+        status: "approved", storagePath: publicTrackPath(profileId, trackId),
+        rejectionReason: null, updatedAt: Date.now(),
+      });
+    } else {
+      // Delete whichever copy exists: review/ for a first-time reject,
+      // public/ for a retroactive takedown of a previously approved track —
+      // allSettled rather than two guarded deletes because exactly one of
+      // the two objects exists depending on which state this track was in.
+      await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
+      await ref.update({
+        status: "rejected", storagePath: null,
+        rejectionReason: reason!.trim(), updatedAt: Date.now(),
+      });
+    }
+    await writeAudit({
+      actorUid,
+      action: decision === "approved" ? "track_approved" : "track_rejected",
+      targetId: `${profileId}/${trackId}`,
+      detail: decision === "rejected" ? reason!.trim() : (snap.data()?.title ?? ""),
+    });
+    const title = snap.data()?.title ?? "Your track";
+    await notifyProfileMembers(profileId, {
+      kind: "track_review",
+      title: decision === "approved" ? `"${title}" is live!` : `"${title}" needs attention`,
+      body: decision === "approved"
+        ? "Your track passed review and now plays on your public portfolio."
+        : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
     });
     return { ok: true };
   });

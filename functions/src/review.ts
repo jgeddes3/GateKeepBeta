@@ -4,7 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import type { AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
 
-function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
+export function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
   if (!uid || req.auth?.token?.admin !== true) {
     throw new HttpsError("permission-denied", "Admin access required.");
