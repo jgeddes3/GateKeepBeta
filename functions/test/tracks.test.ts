@@ -168,4 +168,33 @@ describe("reorderTracks", () => {
     expect(healedOrders).toEqual(Array.from({ length: healed.size }, (_, i) => i));
     expect(new Set(healedOrders).size).toBe(healedOrders.length);
   });
+  it("accepts a list spanning all docs beyond the old 20-id cap (10 active + 11 dead) and normalizes orders 0..20", async () => {
+    const { user, profileId } = await makeMusician("big1");
+    const tracksCol = adb.collection(`profiles/${profileId}/tracks`);
+    const now = Date.now();
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const ref = await tracksCol.add({
+        title: `Active${i}`, status: "processing", uploaderUid: "seed",
+        startSec: 0, durationSec: null, storagePath: null,
+        rejectionReason: null, failureReason: null, order: i,
+        createdAt: now, updatedAt: now,
+      });
+      ids.push(ref.id);
+    }
+    for (let i = 0; i < 11; i++) {
+      const ref = await tracksCol.add({
+        title: `Dead${i}`, status: "failed", uploaderUid: "seed",
+        startSec: 0, durationSec: null, storagePath: null,
+        rejectionReason: null, failureReason: "boom", order: i,
+        createdAt: now, updatedAt: now,
+      });
+      ids.push(ref.id);
+    }
+    expect(ids.length).toBe(21);
+    await callFn("reorderTracks", { profileId, trackIds: ids }, user);
+    const after = await tracksCol.get();
+    const orders = after.docs.map((d) => d.data().order as number).sort((a, b) => a - b);
+    expect(orders).toEqual(Array.from({ length: 21 }, (_, i) => i));
+  });
 });

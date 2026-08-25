@@ -1584,7 +1584,9 @@ describe("reorderTracks", () => {
   // out of the active-track max used by createTrack's order calc, but its
   // own order field is untouched), create a replacement (which can reuse
   // that same order number), then confirm reorderTracks renormalizes every
-  // track in the collection — active or not — back to unique 0..n-1.
+  // track in the collection — active or not — back to unique 0..n-1. Also a
+  // 21-doc case (10 active + 11 dead, seeded via the admin SDK) confirming
+  // the 200-id bound comfortably clears real-world reject/create churn.
 });
 ```
 
@@ -1603,7 +1605,10 @@ and a missing feature, fixed in the snippet below —
    (the deleted track's slot number gets handed to the next create, but nothing
    guarantees uniqueness against a track that was merely rejected, not
    deleted — see the `reorderTracks` duplicate-order-healing test). Fixed by
-   computing `max(existing active orders) + 1` instead of counting.
+   computing `max(existing ACTIVE orders) + 1` instead of counting. Note this
+   max is only over active docs, so a reject-then-create can still collide
+   with a dead (rejected/failed) doc's leftover order value — accepted,
+   since `reorderTracks` heals it on the next reorder.
 2. The planned web `TrackManager.move()` UI would have done its reordering as
    two sequential `updateTrack({ order })` calls per swap — non-atomic (a
    crash/reload between the two calls leaves two tracks with the same order),
@@ -1616,6 +1621,15 @@ and a missing feature, fixed in the snippet below —
    existence check, which had a TOCTOU gap against a racing `deleteTrack` —
    it now lets `update()` itself throw NOT_FOUND (gRPC code 5) and maps that
    to `HttpsError("not-found", ...)`.
+
+Note (second review pass, applied): `reorderTracks`'s id-count bound was
+originally 20, matching `MAX_TRACKS`-ish intuition — but the list it validates
+is every doc in the collection (the web `TrackManager` sends `tracks.map(t =>
+t.id)` for its full onSnapshot result, not just the 10 active ones), and
+rejected/failed docs persist by design. Ordinary reject-then-create churn can
+reach 21+ docs over a profile's lifetime, so the bound is now 200 (comfortably
+under Firestore's 500-writes-per-transaction limit) with its own error
+message, split out from the other (non-empty/unique/valid-id) checks.
 
 ```ts
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -1654,8 +1668,12 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
       title: input.title.trim(), status: "processing", uploaderUid: uid,
       startSec: input.startSec, durationSec: null, storagePath: null,
       rejectionReason: null, failureReason: null,
-      // Max existing order + 1, not active.size — delete-then-add otherwise
+      // Max ACTIVE order + 1, not active.size — delete-then-add otherwise
       // produces duplicate order values once a track has ever been removed.
+      // The max is only over active docs, so a reject-then-create can still
+      // collide with a dead (rejected/failed) doc's leftover order value —
+      // accepted, since reorderTracks heals it on the next reorder (see the
+      // duplicate-order-healing test).
       order: Math.max(-1, ...active.docs.map((d) => (d.data().order as number) ?? -1)) + 1,
       createdAt: now, updatedAt: now,
     };
@@ -1724,9 +1742,17 @@ export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
     requireVerifiedEmail(req);
     const { profileId, trackIds } = req.data;
     if (!isValidDocId(profileId) || !Array.isArray(trackIds) || trackIds.length < 1
-        || trackIds.length > 20 || !trackIds.every((t) => isValidDocId(t))
+        || !trackIds.every((t) => isValidDocId(t))
         || new Set(trackIds).size !== trackIds.length) {
       throw new HttpsError("invalid-argument", "A profile id and a list of unique track ids are required.");
+    }
+    // The reordered list spans every doc in the collection, not just the 10
+    // active ones — rejected/failed tracks persist by design (for the reason
+    // display), so ordinary reject-then-create churn can reach 21+ docs over
+    // a profile's lifetime. 200 stays comfortably clear of Firestore's
+    // 500-writes-per-transaction limit.
+    if (trackIds.length > 200) {
+      throw new HttpsError("invalid-argument", "Too many tracks to reorder at once.");
     }
     await requireProfileMember(profileId, uid);
     const db = getFirestore();
@@ -1738,8 +1764,9 @@ export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
       const all = await tx.get(col);
       const byId = new Map(all.docs.map((d) => [d.id, d]));
       const mentioned = trackIds.filter((id) => byId.has(id));
+      const mentionedSet = new Set(mentioned);
       const rest = all.docs
-        .filter((d) => !mentioned.includes(d.id))
+        .filter((d) => !mentionedSet.has(d.id))
         .sort((a, b) => ((a.data().order ?? 0) - (b.data().order ?? 0)) || a.id.localeCompare(b.id))
         .map((d) => d.id);
       [...mentioned, ...rest].forEach((id, i) => {

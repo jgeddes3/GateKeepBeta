@@ -34,8 +34,12 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
       title: input.title.trim(), status: "processing", uploaderUid: uid,
       startSec: input.startSec, durationSec: null, storagePath: null,
       rejectionReason: null, failureReason: null,
-      // Max existing order + 1, not active.size — delete-then-add otherwise
+      // Max ACTIVE order + 1, not active.size — delete-then-add otherwise
       // produces duplicate order values once a track has ever been removed.
+      // The max is only over active docs, so a reject-then-create can still
+      // collide with a dead (rejected/failed) doc's leftover order value —
+      // accepted, since reorderTracks heals it on the next reorder (see the
+      // duplicate-order-healing test).
       order: Math.max(-1, ...active.docs.map((d) => (d.data().order as number) ?? -1)) + 1,
       createdAt: now, updatedAt: now,
     };
@@ -104,9 +108,17 @@ export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
     requireVerifiedEmail(req);
     const { profileId, trackIds } = req.data;
     if (!isValidDocId(profileId) || !Array.isArray(trackIds) || trackIds.length < 1
-        || trackIds.length > 20 || !trackIds.every((t) => isValidDocId(t))
+        || !trackIds.every((t) => isValidDocId(t))
         || new Set(trackIds).size !== trackIds.length) {
       throw new HttpsError("invalid-argument", "A profile id and a list of unique track ids are required.");
+    }
+    // The reordered list spans every doc in the collection, not just the 10
+    // active ones — rejected/failed tracks persist by design (for the reason
+    // display), so ordinary reject-then-create churn can reach 21+ docs over
+    // a profile's lifetime. 200 stays comfortably clear of Firestore's
+    // 500-writes-per-transaction limit.
+    if (trackIds.length > 200) {
+      throw new HttpsError("invalid-argument", "Too many tracks to reorder at once.");
     }
     await requireProfileMember(profileId, uid);
     const db = getFirestore();
@@ -118,8 +130,9 @@ export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
       const all = await tx.get(col);
       const byId = new Map(all.docs.map((d) => [d.id, d]));
       const mentioned = trackIds.filter((id) => byId.has(id));
+      const mentionedSet = new Set(mentioned);
       const rest = all.docs
-        .filter((d) => !mentioned.includes(d.id))
+        .filter((d) => !mentionedSet.has(d.id))
         .sort((a, b) => ((a.data().order ?? 0) - (b.data().order ?? 0)) || a.id.localeCompare(b.id))
         .map((d) => d.id);
       [...mentioned, ...rest].forEach((id, i) => {
