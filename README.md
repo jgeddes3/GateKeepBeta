@@ -25,9 +25,9 @@ GateKeepBeta/
 ├── functions/                    # Cloud Functions (v2 callables + triggers)
 │   ├── src/index.ts              # exports all functions
 │   ├── src/authTriggers.ts       # onUserCreated → users doc
-│   ├── src/profiles.ts           # createProfileDraft, submitProfileForReview
+│   ├── src/profiles.ts           # createProfileDraft, submitProfileForReview, deleteProfile
 │   ├── src/review.ts             # reviewProfile, grantAdmin, audit logging
-│   ├── src/members.ts            # inviteMember, respondToInvite, removeMember, transferAdmin
+│   ├── src/members.ts            # inviteMember, respondToInvite, revokeInvite, removeMember, transferAdmin
 │   ├── src/account.ts            # deleteAccount
 │   ├── src/notifications.ts      # push token helpers, notifyUser, approval trigger
 │   └── test/*.test.ts            # emulator integration tests
@@ -114,6 +114,21 @@ before a real launch:
   `Constants.expoConfig?.extra?.eas?.projectId` for push token registration. Run `eas init` (or
   set `expo.extra.eas.projectId` in `apps/mobile/app.json` manually) once an EAS project exists;
   this also unblocks EAS builds in sub-project 2.
+- **Deploy-time `workspace:*` resolution**: `functions/package.json` depends on
+  `@gatekeep/shared` via `"workspace:*"`. Before relying on `firebase deploy --only functions`,
+  verify that command actually resolves the workspace dependency into a deployable package (rather
+  than failing or publishing a broken reference) — this hasn't been exercised yet, only
+  `pnpm --filter functions build` against the local workspace symlink.
+- **App Check enforcement is two changes, not one**: flipping Firestore/Functions App Check from
+  monitor to enforce mode in the console does **not** by itself make callables reject
+  unattested requests — each `onCall` also needs `enforceAppCheck: true` in its handler options
+  (a code change in `functions/src/*.ts`). Both must land together at the launch-checklist step
+  called out above, or enforcement is a no-op for callables.
+- **Firebase Email Enumeration Protection**: confirm this is enabled (Firebase console →
+  Authentication → Settings) on both the `gatekeep-dev-jg` project and whatever project id
+  production uses. The app's sign-in error handling degrades gracefully either way, but it
+  currently assumes the protection is on rather than asserting it — verify the console toggle
+  before launch instead of relying on that assumption.
 
 ## Design docs
 
