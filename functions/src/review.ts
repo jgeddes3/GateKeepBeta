@@ -2,6 +2,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import type { AuditLogDoc } from "@gatekeep/shared";
+import { notifyProfileMembers } from "./notifications.js";
 
 function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
@@ -39,6 +40,14 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       action: decision === "approved" ? "profile_approved" : "profile_rejected",
       targetId: profileId,
       detail: decision === "rejected" ? reason!.trim() : snap.data()?.name ?? "",
+    });
+    const profileName = snap.data()?.name ?? "Your profile";
+    await notifyProfileMembers(profileId, {
+      kind: "profile_review",
+      title: decision === "approved" ? `${profileName} is approved!` : `${profileName} needs changes`,
+      body: decision === "approved"
+        ? "Your profile is live on GateKeep."
+        : `Reviewer note: ${reason!.trim()} — update and resubmit anytime.`,
     });
     return { ok: true };
   });

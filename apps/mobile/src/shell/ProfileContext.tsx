@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { collectionGroup, query, where, onSnapshot, doc, getDoc } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
+import { registerForPush } from "../notifications/push";
 import type { ProfileType, ProfileStatus } from "@gatekeep/shared";
 
 export type ProfileSummary = { profileId: string; type: ProfileType; name: string; status: ProfileStatus };
@@ -34,6 +35,15 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
       if (!cancelled) setMyProfiles(results);
     });
     return () => { cancelled = true; unsubscribe(); };
+  }, [user?.uid]);
+
+  // Separate, standalone effect: registering the Expo push token is fire-and-forget
+  // and doesn't feed any state in this provider, so it must not share the "my
+  // profiles" effect above (that one's cancellation guard exists specifically to
+  // sequence async setState calls against unmount/uid-change).
+  useEffect(() => {
+    if (!user) return;
+    void registerForPush(user.uid);
   }, [user?.uid]);
 
   return (
