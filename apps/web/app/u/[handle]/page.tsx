@@ -1,13 +1,21 @@
 import { cache } from "react";
 import type { Metadata } from "next";
-import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
+import { notFound } from "next/navigation";
+import {
+  doc, getDoc, getDocs, collection, query, where, orderBy, FirestoreError,
+} from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
 import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
 import { TrackPlayer } from "./TrackPlayer";
 import styles from "./portfolio.module.css";
 
-export const dynamic = "force-dynamic"; // live approval state on every request
+// Takedowns/approvals need to propagate within about a minute, and this page
+// can't be gated behind App Check (it's plain SSR, no client attestation) —
+// so bound the Firestore/Storage reads to once per handle per revalidate
+// window instead of `force-dynamic`'s unbounded per-request reads, which was
+// an unauthenticated crawl-storm DoS surface.
+export const revalidate = 60;
 
 type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 type Loaded = {
@@ -24,9 +32,10 @@ async function storageUrl(path: string | null | undefined): Promise<string | nul
 // cache() dedupes this per-request across generateMetadata and the page body —
 // both call loadProfile(handle) with the same argument, so React's per-request
 // cache means the Firestore/Storage reads only actually happen once.
-const loadProfile = cache(async (handle: string): Promise<Loaded | null> => {
-  const { db } = getServerFirebase();
+const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
+  const handle = rawHandle.toLowerCase(); // handles are stored lowercase
   try {
+    const { db } = getServerFirebase();
     const h = await getDoc(doc(db, "handles", handle));
     if (!h.exists()) return null;
     const profileId = h.data().profileId as string;
@@ -37,32 +46,47 @@ const loadProfile = cache(async (handle: string): Promise<Loaded | null> => {
     const trackSnap = await getDocs(query(
       collection(db, `profiles/${profileId}/tracks`),
       where("status", "==", "approved"), orderBy("order")));
-    const tracks = (await Promise.all(trackSnap.docs.map(async (t) => {
-      const d = t.data() as TrackDoc;
-      const url = await storageUrl(d.storagePath);
-      return url ? { id: t.id, title: d.title, durationSec: d.durationSec, url } : null;
-    }))).filter((t): t is LoadedTrack => t !== null);
-    return {
-      profile, tracks,
-      avatarUrl: await storageUrl(profile.portfolio?.avatarPhotoPath),
-      coverUrl: await storageUrl(profile.portfolio?.coverPhotoPath),
-    };
-  } catch { return null; } // permission-denied = not approved = not found
+    const [tracks, avatarUrl, coverUrl] = await Promise.all([
+      Promise.all(trackSnap.docs.map(async (t) => {
+        const d = t.data() as TrackDoc;
+        const url = await storageUrl(d.storagePath);
+        return url ? { id: t.id, title: d.title, durationSec: d.durationSec, url } : null;
+      })).then((rows) => rows.filter((t): t is LoadedTrack => t !== null)),
+      storageUrl(profile.portfolio?.avatarPhotoPath),
+      storageUrl(profile.portfolio?.coverPhotoPath),
+    ]);
+    return { profile, tracks, avatarUrl, coverUrl };
+  } catch (e) {
+    // permission-denied = the profile/track isn't approved (rules deny the
+    // read) — that's a legitimate "not found" from the public's point of
+    // view. not-found only fires if a doc vanishes between reads. Anything
+    // else (offline, a missing index, a backend outage) is a real failure —
+    // surface it as a truthful 500, not a silent "Not found" 200.
+    const code = e instanceof FirestoreError ? e.code : undefined;
+    if (code === "permission-denied" || code === "not-found") return null;
+    console.error("portfolio load failed", handle, e);
+    throw e;
+  }
 });
 
 export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise<Metadata> {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
-  if (!data) return { title: "Not found · GateKeep" };
+  if (!data) return { title: "Not found · GateKeep", robots: { index: false } };
   const { profile } = data;
-  const description = profile.portfolio?.bio?.slice(0, 160)
-    || `${profile.name} on GateKeep — ${profile.portfolio?.genres?.join(", ")}`;
+  const pf = profile.portfolio;
+  const description = pf?.bio?.slice(0, 160)
+    || [`${profile.name} on GateKeep`, pf?.genres?.length ? pf.genres.join(", ") : null]
+      .filter(Boolean).join(" — ");
   return {
     title: `${profile.name} (@${profile.handle}) · GateKeep`,
     description,
+    alternates: { canonical: `/@${profile.handle}` },
     openGraph: {
       title: `${profile.name} on GateKeep`,
       description,
+      url: `/@${profile.handle}`,
+      type: "profile",
       ...(data.coverUrl ? { images: [data.coverUrl] } : {}),
     },
   };
@@ -71,11 +95,10 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
 export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
-  if (!data) {
-    return <main className={styles.page}><h1>Not found</h1><p>No profile at @{handle}.</p></main>;
-  }
+  if (!data) notFound();
   const { profile, tracks, avatarUrl, coverUrl } = data;
   const pf = profile.portfolio;
+  const links = (pf?.externalLinks ?? []).filter((l) => l.url.startsWith("https://"));
   return (
     <main className={styles.page}>
       {coverUrl
@@ -87,10 +110,10 @@ export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
           <h1>{profile.name}</h1>
           <p>@{profile.handle}</p>
           {pf?.genres && pf.genres.length > 0 && <p className={styles.genres}>{pf.genres.join(" · ")}</p>}
-          {pf?.externalLinks && pf.externalLinks.length > 0 && (
+          {links.length > 0 && (
             <div className={styles.links}>
-              {pf.externalLinks.map((l) => (
-                <a key={l.url} href={l.url} rel="noopener noreferrer nofollow" target="_blank">{l.kind}</a>
+              {links.map((l) => (
+                <a key={`${l.kind}:${l.url}`} href={l.url} rel="noopener noreferrer nofollow" target="_blank">{l.kind}</a>
               ))}
             </div>
           )}
@@ -107,6 +130,9 @@ export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
               <h2>About</h2>
               <p className={styles.bio}>{pf.bio}</p>
             </section>
+          )}
+          {tracks.length === 0 && !pf?.bio && (
+            <p className={styles.empty}>This artist hasn&apos;t added content yet.</p>
           )}
           {/* Shows: platform events only (spec §2). The events collection ships in
               sub-projects 4/6 — this section stays hidden until it has data. */}

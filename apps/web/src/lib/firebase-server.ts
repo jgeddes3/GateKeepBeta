@@ -21,7 +21,10 @@ export function getServerFirebase() {
     ? getApp("server") : initializeApp(firebaseConfig, "server");
   const db = getFirestore(app);
   const storage = getStorage(app);
-  if (process.env.NODE_ENV !== "production") {
+  // FIREBASE_EMULATORS=1 lets `next start` (a production build) still target
+  // the emulators locally — useful for testing the production bundle without
+  // pointing it at real Firebase.
+  if (process.env.NODE_ENV !== "production" || process.env.FIREBASE_EMULATORS === "1") {
     connectFirestoreEmulator(db, "localhost", 8080);
     connectStorageEmulator(storage, "localhost", 9199);
   }

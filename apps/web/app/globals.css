@@ -14,10 +14,16 @@ html {
   height: 100%;
 }
 
-html,
-body {
+html {
   max-width: 100vw;
   overflow-x: hidden;
+}
+
+body {
+  /* No overflow-x here: it's inherited from html, and a second copy on body
+     silently breaks position: sticky in any descendant (measured on the
+     public portfolio page's sticky identity sidebar). */
+  max-width: 100vw;
 }
 
 body {
