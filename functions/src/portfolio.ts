@@ -2,68 +2,75 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc,
+  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount,
 } from "@gatekeep/shared";
+import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 
-export function requireAuthUid(req: { auth?: { uid?: string } }): string {
-  const uid = req.auth?.uid;
-  if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
-  return uid;
-}
-
-// Any member may edit portfolio content (spec §6) — contrast requireProfileAdmin
-// in profiles.ts, which gates membership/deletion actions.
-export async function requireProfileMember(profileId: string, uid: string) {
-  const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
-  if (!m.exists) throw new HttpsError("permission-denied", "Only profile members can do that.");
-}
-
-export async function requireMusicianProfile(profileId: string) {
-  const p = await getFirestore().doc(`profiles/${profileId}`).get();
-  if (!p.exists) throw new HttpsError("not-found", "Profile not found.");
-  if (p.data()?.type !== "musician") {
-    throw new HttpsError("failed-precondition", "Portfolios belong to musician profiles.");
-  }
-  return p;
-}
+// Strips any extra/untrusted keys off a rate object and normalizes an
+// absent (undefined) rate the same as an explicit null. Without this, a
+// member could persist arbitrary extra keys/nested JSON into
+// private/booking by reference — and `note` could end up absent from the
+// stored doc even though RateAmount promises it present-and-nullable.
+const rate = (r: RateAmount | null | undefined): RateAmount | null =>
+  r == null ? null : { amountCents: r.amountCents, note: r.note ?? null };
 
 export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validatePortfolioUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+  // sequential is deliberate — parallelizing makes rejection order
+  // nondeterministic and would leak profile existence/type to non-members
   await requireProfileMember(input.profileId, uid);
-  await requireMusicianProfile(input.profileId);
+  const snap = await requireMusicianProfile(input.profileId);
 
   // Dotted-string-keys form: the Admin SDK treats dotted string keys in a
   // plain object passed to update() as field paths, so this merges into the
   // portfolio map without clobbering the photo paths the media pipeline owns.
   const updates: Record<string, unknown> = { updatedAt: Date.now() };
-  if (input.bio !== undefined) updates["portfolio.bio"] = input.bio;
+  if (input.bio !== undefined) updates["portfolio.bio"] = input.bio.trim();
   if (input.genres !== undefined) updates["portfolio.genres"] = input.genres;
   // Explicit mapping: stores only the validated fields (an untrusted link object
   // could carry extra keys) and the trimmed URL the validator actually checked.
   if (input.externalLinks !== undefined) {
     updates["portfolio.externalLinks"] = input.externalLinks.map((l) => ({ kind: l.kind, url: l.url.trim() }));
   }
+
+  // Legacy data: profiles created before the portfolio seed (Task 5) lack
+  // the portfolio map entirely. A partial dotted-key update against a
+  // missing map would create a partial map that violates PortfolioData —
+  // backfill defaults for every field this call isn't already writing.
+  if (snap.data()?.portfolio == null) {
+    if (input.bio === undefined) updates["portfolio.bio"] = "";
+    if (input.genres === undefined) updates["portfolio.genres"] = [];
+    if (input.externalLinks === undefined) updates["portfolio.externalLinks"] = [];
+    updates["portfolio.avatarPhotoPath"] = null;
+    updates["portfolio.coverPhotoPath"] = null;
+  }
+
   await getFirestore().doc(`profiles/${input.profileId}`).update(updates);
   return { ok: true };
 });
 
 export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validateBookingUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+  // sequential is deliberate — parallelizing makes rejection order
+  // nondeterministic and would leak profile existence/type to non-members
   await requireProfileMember(input.profileId, uid);
   await requireMusicianProfile(input.profileId);
-  // Normalize absent → null: the validator accepts omitted keys, the stored
-  // BookingDoc promises present-and-nullable, and Firestore rejects `undefined`.
+  // Normalize absent → null and strip untrusted extra keys via `rate()`:
+  // the validator accepts omitted keys, the stored BookingDoc promises
+  // present-and-nullable, and Firestore rejects `undefined`.
   const docData: BookingDoc = {
     rates: {
-      perHour: input.rates.perHour ?? null,
-      perSong: input.rates.perSong ?? null,
-      perSet: input.rates.perSet ?? null,
+      perHour: rate(input.rates.perHour),
+      perSong: rate(input.rates.perSong),
+      perSet: rate(input.rates.perSet),
     },
     preferences: {
       gigTypes: input.preferences.gigTypes,
@@ -75,6 +82,9 @@ export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-centra
     },
     updatedAt: Date.now(),
   };
+  // full-doc last-write-wins between members is accepted for v1; a delete
+  // racing this write can recreate an orphaned booking doc — accepted,
+  // mirrors account.ts's documented-race precedent
   await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
   return { ok: true };
 });

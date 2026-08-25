@@ -74,6 +74,10 @@ const INVITE_MAX_AGE_MS = 14 * 86_400_000; // 14 days
 export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuth(req.auth?.uid);
+    // Closes a pre-existing gap: an unverified pre-registered account could
+    // otherwise accept an invite and immediately edit content. Foundation
+    // already gates createProfileDraft/inviteMember the same way.
+    requireVerifiedEmail(req);
     const { inviteId, accept } = req.data;
     const db = getFirestore();
     const ref = db.doc(`invites/${inviteId}`);

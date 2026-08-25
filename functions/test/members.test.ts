@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn, fetchPendingInviteId } from "./helpers";
+import { signUpTestUser, signUpUnverifiedTestUser, callFn, fetchPendingInviteId } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import type { ProfileDraftInput, MemberRole, InviteDoc } from "@gatekeep/shared";
@@ -146,6 +146,16 @@ describe("invites", () => {
     const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await expect(callFn("revokeInvite", { inviteId }, invitee.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("an unverified invitee cannot accept an invite (email verification required)", async () => {
+    const { owner, profileId } = await bandWithOwner("inv12");
+    const email = `unv-${Date.now()}@test.com`;
+    const invitee = await signUpUnverifiedTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await expect(callFn("respondToInvite", { inviteId, accept: true }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
   it("caps pending invites per profile at 20", async () => {

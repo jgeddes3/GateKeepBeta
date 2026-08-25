@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn } from "./helpers";
+import { signUpTestUser, signUpUnverifiedTestUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import type { ProfileDraftInput } from "@gatekeep/shared";
@@ -104,5 +104,80 @@ describe("updateBookingInfo", () => {
     bad.rates.perHour = { amountCents: -5, note: null } as never;
     await expect(callFn("updateBookingInfo", bad, user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+});
+
+describe("updatePortfolio preserves fields not being updated", () => {
+  it("preserves avatarPhotoPath, genres, and externalLinks when only bio is updated (the reason dotted keys exist)", async () => {
+    const { user } = await signUpTestUser(`pp1-${Date.now()}@test.com`);
+    const profileId = await makeMusicianProfile(user);
+    await adb.doc(`profiles/${profileId}`).update({
+      "portfolio.avatarPhotoPath": "public/photos/p1/avatar-abc.jpg",
+      "portfolio.genres": ["soul"],
+      "portfolio.externalLinks": [{ kind: "website", url: "https://example.com" }],
+    });
+    await callFn("updatePortfolio", { profileId, bio: "Just a bio update." }, user);
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.portfolio.bio).toBe("Just a bio update.");
+    expect(p.data()?.portfolio.avatarPhotoPath).toBe("public/photos/p1/avatar-abc.jpg");
+    expect(p.data()?.portfolio.genres).toEqual(["soul"]);
+    expect(p.data()?.portfolio.externalLinks).toEqual([{ kind: "website", url: "https://example.com" }]);
+  });
+});
+
+describe("updatePortfolio on a non-musician profile", () => {
+  it("rejects a curator profile with failed-precondition", async () => {
+    const { user } = await signUpTestUser(`cur1-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft",
+      { type: "curator", subtype: "venue", name: "The Venue", handle: `cur_${Date.now()}` },
+      user);
+    await expect(callFn("updatePortfolio", { profileId, bio: "hi" }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+});
+
+describe("strips untrusted extra keys (defense against reference-stored injection)", () => {
+  it("updatePortfolio keeps only {kind, url} on a link, trimmed, dropping any junk key", async () => {
+    const { user } = await signUpTestUser(`junk1-${Date.now()}@test.com`);
+    const profileId = await makeMusicianProfile(user);
+    await callFn("updatePortfolio", {
+      profileId,
+      externalLinks: [{ kind: "spotify", url: "  https://open.spotify.com/artist/a1  ", junk: "X" } as never],
+    }, user);
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.portfolio.externalLinks).toEqual([
+      { kind: "spotify", url: "https://open.spotify.com/artist/a1" },
+    ]);
+  });
+  it("updateBookingInfo keeps only {amountCents, note} on a rate, dropping any junk key", async () => {
+    const { user } = await signUpTestUser(`junk2-${Date.now()}@test.com`);
+    const profileId = await makeMusicianProfile(user);
+    await callFn("updateBookingInfo", {
+      profileId,
+      rates: { perHour: { amountCents: 5000, note: null, junk: "X" } as never, perSong: null, perSet: null },
+      preferences: { gigTypes: [] },
+    }, user);
+    const b = await adb.doc(`profiles/${profileId}/private/booking`).get();
+    expect(b.data()?.rates.perHour).toEqual({ amountCents: 5000, note: null });
+  });
+});
+
+describe("unverified-email member is rejected", () => {
+  it("updatePortfolio and updateBookingInfo both reject with failed-precondition", async () => {
+    const { user: owner } = await signUpTestUser(`unv1-${Date.now()}@test.com`);
+    const profileId = await makeMusicianProfile(owner);
+    // signUpUnverifiedTestUser leaves the account unverified — can't create a
+    // profile itself (createProfileDraft gates on it), so a verified owner
+    // creates the profile and the admin SDK seeds the membership directly.
+    const { uid: memberUid, user: memberUser } = await signUpUnverifiedTestUser(`unv2-${Date.now()}@test.com`);
+    await adb.doc(`profiles/${profileId}/members/${memberUid}`).set({
+      uid: memberUid, role: "member", label: "x", joinedAt: Date.now(),
+    });
+    await expect(callFn("updatePortfolio", { profileId, bio: "hi" }, memberUser))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    await expect(callFn("updateBookingInfo", {
+      profileId, rates: {}, preferences: { gigTypes: [] },
+    }, memberUser)).rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 });

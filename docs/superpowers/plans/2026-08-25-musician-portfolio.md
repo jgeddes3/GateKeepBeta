@@ -33,11 +33,13 @@ firestore.rules                        M  tracks + private/booking rules
 firestore.indexes.json                 M  tracks indexes
 package.json                           M  emu scripts gain storage
 functions/package.json                 M  ffmpeg-static, ffprobe-static, sharp
+functions/src/guards.ts                 C  requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile
 functions/src/storage.ts               C  bucket helper + STORAGE_BUCKET
-functions/src/portfolio.ts             C  updatePortfolio, updateBookingInfo, requireProfileMember
+functions/src/portfolio.ts             C  updatePortfolio, updateBookingInfo
 functions/src/tracks.ts                C  createTrack, updateTrack, deleteTrack, reviewTrack
 functions/src/media.ts                 C  processUpload trigger (audio transcode + photo resize)
 functions/src/profiles.ts              M  submit minimum-content gate, portfolio seed, delete cascade
+functions/src/members.ts               M  verified-email gate on respondToInvite
 functions/src/review.ts                M  export requireAdmin
 functions/src/index.ts                 M  new exports
 functions/test/helpers.ts              M  storage emulator wiring, wav fixture, poll helper
@@ -1102,10 +1104,13 @@ git commit -m "test(rules): mutation-killing storage cases — admin write denia
 ### Task 5: Functions — portfolio + booking callables
 
 **Files:**
+- Create: `functions/src/guards.ts` (requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile)
 - Create: `functions/src/portfolio.ts`
+- Modify: `functions/src/members.ts` (verified-email gate on `respondToInvite`)
 - Modify: `functions/src/index.ts`
 - Modify: `functions/src/profiles.ts` (seed empty portfolio on musician drafts)
 - Test: `functions/test/portfolio.test.ts`
+- Test: `functions/test/members.test.ts` (unverified invitee case)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1202,15 +1207,16 @@ describe("updateBookingInfo", () => {
 Run: `pnpm emu:test`
 Expected: new file FAILS (functions not found / portfolio undefined); existing suites PASS.
 
-- [ ] **Step 3: Create `functions/src/portfolio.ts`**
+- [ ] **Step 3: Create `functions/src/guards.ts`**
+
+Shared onCall guards used by portfolio.ts (and, from Task 6 on, tracks.ts).
+`profiles.ts`/`members.ts` keep their own local `requireAuth`/`requireVerifiedEmail`
+copies for now — consolidating those is deferred to sub-project 3 — except that
+`members.ts` gains one new call site (Step 4a below) reusing its existing local copy.
 
 ```ts
-import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, FieldPath } from "firebase-admin/firestore";
-import {
-  validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc,
-} from "@gatekeep/shared";
+import { HttpsError } from "firebase-functions/v2/https";
+import { getFirestore, type DocumentSnapshot } from "firebase-admin/firestore";
 
 export function requireAuthUid(req: { auth?: { uid?: string } }): string {
   const uid = req.auth?.uid;
@@ -1218,14 +1224,20 @@ export function requireAuthUid(req: { auth?: { uid?: string } }): string {
   return uid;
 }
 
+export function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
+  if (req.auth?.token?.email_verified !== true) {
+    throw new HttpsError("failed-precondition", "Please verify your email address first.");
+  }
+}
+
 // Any member may edit portfolio content (spec §6) — contrast requireProfileAdmin
 // in profiles.ts, which gates membership/deletion actions.
-export async function requireProfileMember(profileId: string, uid: string) {
+export async function requireProfileMember(profileId: string, uid: string): Promise<void> {
   const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
   if (!m.exists) throw new HttpsError("permission-denied", "Only profile members can do that.");
 }
 
-export async function requireMusicianProfile(profileId: string) {
+export async function requireMusicianProfile(profileId: string): Promise<DocumentSnapshot> {
   const p = await getFirestore().doc(`profiles/${profileId}`).get();
   if (!p.exists) throw new HttpsError("not-found", "Profile not found.");
   if (p.data()?.type !== "musician") {
@@ -1233,45 +1245,84 @@ export async function requireMusicianProfile(profileId: string) {
   }
   return p;
 }
+```
+
+- [ ] **Step 4: Create `functions/src/portfolio.ts`**
+
+```ts
+import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { getFirestore } from "firebase-admin/firestore";
+import {
+  validatePortfolioUpdate, validateBookingUpdate,
+  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount,
+} from "@gatekeep/shared";
+import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
+
+// Strips any extra/untrusted keys off a rate object and normalizes an
+// absent (undefined) rate the same as an explicit null. Without this, a
+// member could persist arbitrary extra keys/nested JSON into
+// private/booking by reference — and `note` could end up absent from the
+// stored doc even though RateAmount promises it present-and-nullable.
+const rate = (r: RateAmount | null | undefined): RateAmount | null =>
+  r == null ? null : { amountCents: r.amountCents, note: r.note ?? null };
 
 export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validatePortfolioUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+  // sequential is deliberate — parallelizing makes rejection order
+  // nondeterministic and would leak profile existence/type to non-members
   await requireProfileMember(input.profileId, uid);
-  await requireMusicianProfile(input.profileId);
+  const snap = await requireMusicianProfile(input.profileId);
 
-  // Dotted-path updates merge into the portfolio map without clobbering the
-  // photo paths the media pipeline owns.
+  // Dotted-string-keys form: the Admin SDK treats dotted string keys in a
+  // plain object passed to update() as field paths, so this merges into the
+  // portfolio map without clobbering the photo paths the media pipeline owns.
   const updates: Record<string, unknown> = { updatedAt: Date.now() };
-  if (input.bio !== undefined) updates["portfolio.bio"] = input.bio;
+  if (input.bio !== undefined) updates["portfolio.bio"] = input.bio.trim();
   if (input.genres !== undefined) updates["portfolio.genres"] = input.genres;
   // Explicit mapping: stores only the validated fields (an untrusted link object
   // could carry extra keys) and the trimmed URL the validator actually checked.
   if (input.externalLinks !== undefined) {
     updates["portfolio.externalLinks"] = input.externalLinks.map((l) => ({ kind: l.kind, url: l.url.trim() }));
   }
-  const ref = getFirestore().doc(`profiles/${input.profileId}`);
-  const pairs = Object.entries(updates).flatMap(([k, val]) => [new FieldPath(...k.split(".")), val] as const);
-  await ref.update(pairs[0] as FieldPath, pairs[1], ...pairs.slice(2));
+
+  // Legacy data: profiles created before the portfolio seed (this task) lack
+  // the portfolio map entirely. A partial dotted-key update against a
+  // missing map would create a partial map that violates PortfolioData —
+  // backfill defaults for every field this call isn't already writing.
+  if (snap.data()?.portfolio == null) {
+    if (input.bio === undefined) updates["portfolio.bio"] = "";
+    if (input.genres === undefined) updates["portfolio.genres"] = [];
+    if (input.externalLinks === undefined) updates["portfolio.externalLinks"] = [];
+    updates["portfolio.avatarPhotoPath"] = null;
+    updates["portfolio.coverPhotoPath"] = null;
+  }
+
+  await getFirestore().doc(`profiles/${input.profileId}`).update(updates);
   return { ok: true };
 });
 
 export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validateBookingUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+  // sequential is deliberate — parallelizing makes rejection order
+  // nondeterministic and would leak profile existence/type to non-members
   await requireProfileMember(input.profileId, uid);
   await requireMusicianProfile(input.profileId);
-  // Normalize absent → null: the validator accepts omitted keys, the stored
-  // BookingDoc promises present-and-nullable, and Firestore rejects `undefined`.
+  // Normalize absent → null and strip untrusted extra keys via `rate()`:
+  // the validator accepts omitted keys, the stored BookingDoc promises
+  // present-and-nullable, and Firestore rejects `undefined`.
   const docData: BookingDoc = {
     rates: {
-      perHour: input.rates.perHour ?? null,
-      perSong: input.rates.perSong ?? null,
-      perSet: input.rates.perSet ?? null,
+      perHour: rate(input.rates.perHour),
+      perSong: rate(input.rates.perSong),
+      perSet: rate(input.rates.perSet),
     },
     preferences: {
       gigTypes: input.preferences.gigTypes,
@@ -1283,14 +1334,31 @@ export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-centra
     },
     updatedAt: Date.now(),
   };
+  // full-doc last-write-wins between members is accepted for v1; a delete
+  // racing this write can recreate an orphaned booking doc — accepted,
+  // mirrors account.ts's documented-race precedent
   await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
   return { ok: true };
 });
 ```
 
-(If the `FieldPath` spread reads awkward during implementation, the simpler equivalent is fine: build a plain object keyed by dotted strings and call `ref.update(updatesObject)` — the Admin SDK treats dotted string keys as field paths. Use that form.)
+- [ ] **Step 4a: Gate `respondToInvite` on verified email in `functions/src/members.ts`**
 
-- [ ] **Step 4: Seed empty portfolio in `functions/src/profiles.ts`**
+Closes a pre-existing gap: an unverified pre-registered account could otherwise
+accept an invite and immediately edit content. `members.ts` already defines a
+local `requireVerifiedEmail` (used by `inviteMember`) — reuse it rather than
+duplicating; add one call at the top of `respondToInvite`:
+
+```ts
+export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuth(req.auth?.uid);
+    requireVerifiedEmail(req);
+    const { inviteId, accept } = req.data;
+    // ...unchanged...
+```
+
+- [ ] **Step 4b: Seed empty portfolio in `functions/src/profiles.ts`**
 
 In `createProfileDraft`'s transaction, extend the `profile` literal:
 
@@ -1500,14 +1568,8 @@ import {
   validateTrackCreate, stagingAudioPath, MAX_TRACKS,
   type CreateTrackInput, type TrackDoc,
 } from "@gatekeep/shared";
-import { requireAuthUid, requireProfileMember, requireMusicianProfile } from "./portfolio.js";
+import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 import { bucket } from "./storage.js";
-
-function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
-  if (req.auth?.token?.email_verified !== true) {
-    throw new HttpsError("failed-precondition", "Please verify your email address first.");
-  }
-}
 
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
 // docs (for the reason display) but don't count.
