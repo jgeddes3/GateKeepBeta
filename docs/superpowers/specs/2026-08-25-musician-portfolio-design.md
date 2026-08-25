@@ -68,7 +68,7 @@ All shapes defined in `@gatekeep/shared`; no local redefinitions.
 
 ## 6. Client surfaces
 
-- **Wizard (both apps):** identity → bio + photos → first track upload/trim → optional rates/preferences → submit. Resumable. Submit locked until minimum content: **bio, avatar photo, ≥1 track** (plus foundation's identity fields). Track review can happen in the same admin pass as profile review.
+- **Wizard (both apps):** identity → bio + photos → first track upload/trim → optional rates/preferences → submit. Resumable. Submit locked until minimum content: **bio, at least one genre, avatar photo, ≥1 uploaded track** (transcoded — a `processing` placeholder with no uploaded bytes doesn't count) (plus foundation's identity fields). Track review can happen in the same admin pass as profile review.
 - **Editor (both apps):** Portfolio tab edits everything post-approval. **Edits go live instantly except tracks** (per-track review); admins can retroactively unpublish anything. Track manager shows per-track status chips (processing / in review / live / rejected+reason / failed+retry) with reorder/retitle/delete.
 - **Public page:** Next.js `/u/[handle]` becomes **server-rendered** (SEO + OG meta). **Layout: hero-first on mobile, EPK split (identity card left, content right) on desktop.** `@handle` vanity rewrite lands; `/u/[handle]` redirects to it. Mobile app renders hero-first natively. Shows section hidden while empty.
 - **Rejected-profile resubmit (both apps):** show reason, revise via wizard, resubmit (server complete since foundation).

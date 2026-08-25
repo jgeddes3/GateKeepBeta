@@ -2956,22 +2956,26 @@ no duplicate audit row or notification is produced.
 - Modify: `functions/src/profiles.ts`
 - Test: append to `functions/test/profiles.test.ts`
 
+**As-built note:** the snippets below are the final shape (post quality-review
+fixes) — `LISTENABLE_TRACK_STATUSES` (not `ACTIVE_TRACK_STATUSES`), `force:
+true` on the storage cascade, `Intl.ListFormat` for the gate message, and the
+`firebase-admin/storage`/helpers imports live at the top of
+`functions/test/profiles.test.ts`, not mid-file. The original TDD-draft
+snippets have been replaced in place rather than kept as a stale historical
+record.
+
 - [ ] **Step 1: Write failing tests**
 
-Append to `functions/test/profiles.test.ts`:
+Append to `functions/test/profiles.test.ts` (imports/env-var setup folded
+into the file's existing top-of-file block — `uploadTestAudio`, `makeWav`,
+`waitForTrackStatus` added to the existing `./helpers` import;
+`getStorage as adminStorage` and `abucket` added alongside the existing
+`adb`; `FIREBASE_STORAGE_EMULATOR_HOST` set alongside `FIRESTORE_EMULATOR_HOST`):
 
 ```ts
-import { getStorage as adminStorage } from "firebase-admin/storage";
-import { uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
-import type { CreateTrackInput } from "@gatekeep/shared";
-
-process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
-const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
-
 describe("submitProfileForReview minimum content (musicians)", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("refuses an empty musician draft, listing what's missing; passes once bio+genre+avatar+track exist", async () => {
-    const { user, uid } = await signUpTestUser(`gate-${Date.now()}@test.com`);
+    const { user } = await signUpTestUser(`gate-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "musician", subtype: "solo", name: "Ava", handle: `gate_${Date.now()}` }, user);
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -2990,7 +2994,31 @@ describe("submitProfileForReview minimum content (musicians)", () => {
     await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  }, 60_000); // per-test timeout for the slow gate test, not a file-wide vi.setConfig bump
+
+  it("lists all four missing items when nothing has been filled in", async () => {
+    const { user } = await signUpTestUser(`gatem-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Empty", handle: `gatem_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/bio.*genre.*photo.*track/i);
   });
+
+  it("a track stuck in 'processing' (upload never completed) does not satisfy the gate", async () => {
+    const { user } = await signUpTestUser(`gatep-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Stalled", handle: `gatep_${Date.now()}` }, user);
+    await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    // createTrack writes the doc (status: "processing") before any bytes are
+    // uploaded — abandon it here. LISTENABLE_TRACK_STATUSES excludes
+    // "processing", so this must not satisfy the gate.
+    await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: 1000, contentType: "audio/wav" }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/track/i);
+  });
+
   it("curator drafts submit without portfolio checks (unchanged from foundation)", async () => {
     const { user } = await signUpTestUser(`gatec-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
@@ -3001,7 +3029,6 @@ describe("submitProfileForReview minimum content (musicians)", () => {
 });
 
 describe("deleteProfile storage cascade", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("deletes the profile's public/review storage objects along with the docs", async () => {
     const { user } = await signUpTestUser(`delc-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
@@ -3016,7 +3043,20 @@ describe("deleteProfile storage cascade", () => {
       const [exists] = await abucket.file(p).exists();
       expect(exists).toBe(false);
     }
-  });
+  }, 60_000);
+
+  it("does not touch another profile's storage objects — negative control on the prefix sweep", async () => {
+    const { user } = await signUpTestUser(`delcn-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava2", handle: `delcn_${Date.now()}` }, user);
+    const { profileId: otherProfileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Bystander", handle: `delcn2_${Date.now()}` }, user);
+    const survivor = `public/tracks/${otherProfileId}/t9.m4a`;
+    await abucket.file(survivor).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await callFn("deleteProfile", { profileId }, user);
+    const [exists] = await abucket.file(survivor).exists();
+    expect(exists).toBe(true);
+  }, 60_000);
 });
 ```
 
@@ -3031,8 +3071,18 @@ Add imports:
 
 ```ts
 import type { PortfolioData } from "@gatekeep/shared";
-import { bucket } from "./storage.js";
-import { ACTIVE_TRACK_STATUSES } from "./tracks.js";
+import { bucket, logDeleteFailure } from "./storage.js";
+```
+
+Add a module-level constant, distinct from tracks.ts's `ACTIVE_TRACK_STATUSES`
+(slot-occupancy — a `processing` track still counts against the 10-track
+cap). This gate cares about actually-uploaded, listenable content:
+`createTrack` writes the doc *before* the client uploads bytes, so a
+`processing` track can be an abandoned upload with nothing behind it — that
+must not satisfy the gate:
+
+```ts
+const LISTENABLE_TRACK_STATUSES = ["pending_review", "approved"] as const;
 ```
 
 In `submitProfileForReview`, after the status check and before the `ref.update`:
@@ -3046,14 +3096,18 @@ In `submitProfileForReview`, after the status check and before the `ref.update`:
     if (!p?.bio?.trim()) missing.push("a bio");
     if (!p?.genres?.length) missing.push("at least one genre");
     if (!p?.avatarPhotoPath) missing.push("a profile photo");
-    const tracks = await ref.collection("tracks").get();
-    // ACTIVE_TRACK_STATUSES (imported from tracks.ts, not re-hardcoded here)
-    // is the same "occupies one of the 10 slots" list createTrack enforces.
-    if (!tracks.docs.some((t) => (ACTIVE_TRACK_STATUSES as readonly string[]).includes(t.data().status))) {
-      missing.push("at least one track");
-    }
+    // This read (and the status check above) is not transactional with the
+    // ref.update below — a deleteTrack racing this call could remove the
+    // one qualifying track between the query and the update. That leaves
+    // the profile pending_review with no listenable content, which
+    // self-heals: an admin rejects it as empty and the musician resubmits.
+    // Accepted rather than wrapping the whole gate in a transaction.
+    const tracksSnap = await ref.collection("tracks")
+      .where("status", "in", [...LISTENABLE_TRACK_STATUSES]).limit(1).get();
+    if (tracksSnap.empty) missing.push("at least one track");
     if (missing.length > 0) {
-      throw new HttpsError("failed-precondition", `Add ${missing.join(", ")} before submitting.`);
+      const list = new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(missing);
+      throw new HttpsError("failed-precondition", `Add ${list} before submitting.`);
     }
   }
 ```
@@ -3061,13 +3115,37 @@ In `submitProfileForReview`, after the status check and before the `ref.update`:
 In `deleteProfile`, after `recursiveDelete` (which already removes the tracks subcollection and `private/booking`):
 
 ```ts
-  // Storage cascade — best-effort: any stragglers are unreachable (their doc
-  // paths are gone) and carry no PII beyond the content itself.
-  await Promise.allSettled([
-    bucket().deleteFiles({ prefix: `public/tracks/${profileId}/` }),
-    bucket().deleteFiles({ prefix: `review/tracks/${profileId}/` }),
-    bucket().deleteFiles({ prefix: `public/photos/${profileId}/` }),
-  ]);
+  // Storage cascade — best-effort. force: true is required: without it,
+  // deleteFiles aborts the ENTIRE prefix sweep on the first per-object
+  // error, silently abandoning every remaining object in that prefix; with
+  // it, deletion continues past individual failures and collects them
+  // instead. staging/audio/{uid}/... and staging/photos/{uid}/... are
+  // deliberately NOT swept here even though every {uid} is technically
+  // reachable — a members subcollection query, run before recursiveDelete
+  // removes it, would enumerate them — but the processUpload trigger always
+  // deletes its own staging object in a `finally` on every path (success,
+  // validation failure, or a crash-recovery retry), so a residual staging
+  // object means the trigger never fired at all, not that this cascade
+  // missed it. Those are backstopped by the Storage bucket's 24h lifecycle
+  // rule on staging/, which is a LAUNCH BLOCKER follow-up (not yet
+  // configured — see README).
+  const cascadeTargets = [
+    `public/tracks/${profileId}/`,
+    `review/tracks/${profileId}/`,
+    `public/photos/${profileId}/`,
+  ];
+  const results = await Promise.allSettled(
+    cascadeTargets.map((prefix) => bucket().deleteFiles({ prefix, force: true })));
+  results.forEach((r, i) => {
+    if (r.status !== "rejected") return;
+    // force: true's rejection reason is an ARRAY of per-object errors
+    // (@google-cloud/storage batches them), not a single Error — log each
+    // one individually rather than dumping the array as one opaque entry.
+    const errors = Array.isArray(r.reason) ? r.reason : [r.reason];
+    for (const e of errors) {
+      logDeleteFailure("deleteProfile", `storage cascade (${cascadeTargets[i]})`, cascadeTargets[i])(e);
+    }
+  });
 ```
 
 **Race-closing note (added post Task-8 hardening):** this storage cascade and
@@ -3085,7 +3163,7 @@ delete; the guard handles one that lands mid-flight during it.
 - [ ] **Step 4: Run tests**
 
 Run: `pnpm emu:test`
-Expected: all PASS, including foundation's existing profiles tests (curator path untouched; existing musician-draft tests in `profiles.test.ts` submit without portfolio content — **check**: foundation's `submitProfileForReview` tests use musician drafts. Update those existing tests to seed the minimum content the same way the new test does, or switch their fixtures to curator profiles — prefer curator fixtures where the test's subject is the status transition, not the gate.)
+Expected: all PASS, including foundation's existing profiles tests (curator path untouched; existing musician-draft tests in `profiles.test.ts` submit without portfolio content — **check**: foundation's `submitProfileForReview` tests use musician drafts. Update those existing tests to seed the minimum content the same way the new test does, or switch their fixtures to curator profiles — prefer curator fixtures where the test's subject is the status transition, not the gate. **As-built:** `profiles.test.ts`'s "moves draft to pending_review..." and "rejects re-submitting..." tests switched to a `curatorDraft()` fixture; `notifications.test.ts`'s three review-notification tests (approve/reject/multi-member fan-out) switched from musician to curator drafts for the same reason — their subject is notification behavior, not the gate.)
 
 - [ ] **Step 5: Commit**
 
@@ -3372,6 +3450,35 @@ git commit -m "feat(web): server-rendered public portfolio with @handle vanity U
 - Create: `apps/web/app/dashboard/portfolio/[profileId]/page.tsx`
 - Create: `apps/web/app/join/page.tsx`
 - Modify: `apps/web/app/dashboard/page.tsx`
+
+**Handoff from Task 9 (server gate — `functions/src/profiles.ts`):**
+`submitProfileForReview` now rejects a musician submit unless the profile has
+a bio, at least one genre, an avatar photo, AND at least one track whose
+status is `pending_review` or `approved` — explicitly NOT `processing` (a
+track doc that's still transcoding, or whose upload was abandoned, does not
+count). If this task's "Submit for review" button implements any client-side
+disable/lock state ahead of clicking submit (the current step snippets below
+render the button unconditionally on `status === "draft"` and surface the
+server's rejection message via `window.alert`), that lock must mirror the
+server gate exactly: bio non-empty, ≥1 genre, avatar set, AND ≥1 track in
+`pending_review`/`approved` — which means waiting for a just-uploaded track's
+transcode to finish (poll or listen for status leaving `processing`) before
+the lock releases, not merely confirming the upload request succeeded.
+Getting this wrong in either direction is a real UX bug: locking on
+`processing` alone lets the button unlock before there's anything to
+review; not polling at all leaves the button clickable through a doomed
+submit with no feedback until the round-trip fails. Also see Task 14's
+handoff note — this same lock must be replicated on mobile, not just web.
+
+**Delete-draft affordance:** `deleteProfile` (built in Task 9's foundation
+work, before this plan) has zero client call sites as of this task —
+foundation-rulings.md names it the intended cleanup path for an
+orphaned/unwanted draft, but nothing in either app surfaces it yet. This
+wizard (and/or the editor page, for a draft that's gone stale) should offer
+a "delete this draft" action wired to `deleteProfile`, so a musician who
+bails partway through onboarding isn't stuck with a permanent handle-holding
+draft and no way to release it short of an admin/support action. See Task
+14's handoff note — mobile needs the same affordance.
 
 - [ ] **Step 1: Create `apps/web/src/portfolio/TrimUploader.tsx`**
 
@@ -4476,6 +4583,39 @@ git commit -m "feat(mobile): portfolio components — trim uploader, track manag
 - Modify: `apps/mobile/app/(musician)/portfolio.tsx`
 - Modify: `apps/mobile/app/join.tsx`
 - Create: `apps/mobile/app/artist/[handle].tsx`
+
+**Handoff from Task 9 (server gate — `functions/src/profiles.ts`), mirrors
+the Task 11 note:** `submitProfileForReview` rejects a musician submit
+unless bio, ≥1 genre, avatar, AND ≥1 track with status `pending_review` or
+`approved` are all present — `processing` (still transcoding, or an
+abandoned upload) does not count. Any client-side submit-lock/disable state
+this task adds to the portfolio tab must mirror that exactly, which means
+waiting for a track's status to leave `processing` before the lock
+releases, not just confirming the upload call succeeded. Keep mobile and
+web (Task 11) in sync on this — a lock that's looser on one platform than
+the other means musicians get a different (and confusing) submit
+experience depending which app they used.
+
+**MUST FIX — mobile join is currently broken for musicians.** As of
+foundation, `apps/mobile/app/join.tsx` calls `createProfileDraft` and
+`submitProfileForReview` back-to-back in one flow for every profile type,
+musician included. That was fine pre-SP2 (there was no portfolio content to
+gate on), but Task 9's minimum-content gate means that auto-submit will now
+ALWAYS fail with `failed-precondition` for a brand-new musician draft (no
+bio/genre/avatar/track exists yet at the moment of creation) — the join flow
+is broken for musicians until this task lands. This task MUST rewrite
+`join.tsx` so a musician draft, after `createProfileDraft`, routes straight
+into the portfolio tab / wizard steps to collect the minimum content instead
+of auto-submitting (mirroring the web wizard's Task 11 `createDraft` →
+`router.push` handoff, not a create-then-submit call). Curator joins are
+unaffected (no gate) and can keep the existing create-then-submit behavior.
+
+**Delete-draft affordance (both wizards):** same as the Task 11 note —
+`deleteProfile` has zero client call sites today; foundation-rulings.md
+names it the orphaned-draft cleanup path. The mobile wizard/portfolio tab
+needs a "delete this draft" action wired to `deleteProfile` alongside web's,
+so a musician who abandons onboarding partway through isn't stuck holding a
+handle with no self-service way to release it.
 
 - [ ] **Step 1: Rewrite `apps/mobile/app/(musician)/portfolio.tsx`**
 

@@ -1,12 +1,17 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, signUpUnverifiedTestUser, callFn, wait } from "./helpers";
+import { signUpTestUser, signUpUnverifiedTestUser, callFn, wait, uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import type { ProfileDraftInput } from "@gatekeep/shared";
+import { getStorage as adminStorage } from "firebase-admin/storage";
+import type { ProfileDraftInput, CreateTrackInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
+// Admin SDK must target the storage emulator (mirrors helpers.ts) — needed
+// by the deleteProfile storage cascade tests below.
+process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
+const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
 
 // The draft-cap and deleteProfile tests below make several sequential
 // callable invocations per test; give them the same cold-start headroom
@@ -134,17 +139,9 @@ describe("submitProfileForReview", () => {
   });
 });
 
-import { getStorage as adminStorage } from "firebase-admin/storage";
-import { uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
-import type { CreateTrackInput } from "@gatekeep/shared";
-
-process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
-const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
-
 describe("submitProfileForReview minimum content (musicians)", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("refuses an empty musician draft, listing what's missing; passes once bio+genre+avatar+track exist", async () => {
-    const { user, uid } = await signUpTestUser(`gate-${Date.now()}@test.com`);
+    const { user } = await signUpTestUser(`gate-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "musician", subtype: "solo", name: "Ava", handle: `gate_${Date.now()}` }, user);
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -163,7 +160,32 @@ describe("submitProfileForReview minimum content (musicians)", () => {
     await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  }, 60_000);
+
+  it("lists all four missing items when nothing has been filled in", async () => {
+    const { user } = await signUpTestUser(`gatem-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Empty", handle: `gatem_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/bio.*genre.*photo.*track/i);
   });
+
+  it("a track stuck in 'processing' (upload never completed) does not satisfy the gate", async () => {
+    const { user } = await signUpTestUser(`gatep-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Stalled", handle: `gatep_${Date.now()}` }, user);
+    await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    // createTrack writes the doc (status: "processing") before any bytes are
+    // uploaded — abandon it here, exactly as a musician who never finishes
+    // the upload would. LISTENABLE_TRACK_STATUSES excludes "processing", so
+    // this must not satisfy the gate.
+    await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: 1000, contentType: "audio/wav" }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/track/i);
+  });
+
   it("curator drafts submit without portfolio checks (unchanged from foundation)", async () => {
     const { user } = await signUpTestUser(`gatec-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
@@ -174,7 +196,6 @@ describe("submitProfileForReview minimum content (musicians)", () => {
 });
 
 describe("deleteProfile storage cascade", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("deletes the profile's public/review storage objects along with the docs", async () => {
     const { user } = await signUpTestUser(`delc-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
@@ -189,5 +210,18 @@ describe("deleteProfile storage cascade", () => {
       const [exists] = await abucket.file(p).exists();
       expect(exists).toBe(false);
     }
-  });
+  }, 60_000);
+
+  it("does not touch another profile's storage objects — negative control on the prefix sweep", async () => {
+    const { user } = await signUpTestUser(`delcn-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava2", handle: `delcn_${Date.now()}` }, user);
+    const { profileId: otherProfileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Bystander", handle: `delcn2_${Date.now()}` }, user);
+    const survivor = `public/tracks/${otherProfileId}/t9.m4a`;
+    await abucket.file(survivor).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await callFn("deleteProfile", { profileId }, user);
+    const [exists] = await abucket.file(survivor).exists();
+    expect(exists).toBe(true);
+  }, 60_000);
 });
