@@ -86,11 +86,14 @@ export default function Dashboard() {
     if (!window.confirm("This permanently deletes your account and data. Continue?")) return;
     try {
       await httpsCallable(getFirebase().functions, "deleteAccount")({});
-      // The callable already deleted the auth user server-side; sign out
-      // locally too so client state doesn't depend on onAuthStateChanged
-      // noticing the now-invalid token before we navigate away.
-      await signOutUser();
+      // Navigate away first: this unmounts Dashboard (and its auth-guard
+      // effect above), so that effect can't race signOutUser() below and
+      // redirect to /sign-in first — landing the user somewhere other than
+      // "/". The callable already deleted the auth user server-side; sign
+      // out locally afterward so client state doesn't depend on
+      // onAuthStateChanged noticing the now-invalid token on its own.
       router.push("/");
+      await signOutUser();
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Can't delete yet.");
     }

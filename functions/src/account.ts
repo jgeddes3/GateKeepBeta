@@ -32,9 +32,30 @@ export const deleteAccount = onCall({ region: "us-central1" }, async (req) => {
       `You are the only admin of: ${soleAdminOf.join(", ")}. Transfer admin or delete those profiles first.`);
   }
 
-  // Remove memberships, then the user doc tree, then the auth account.
-  await Promise.all(memberships.docs.map((m) => m.ref.delete()));
-  await db.recursiveDelete(db.doc(`users/${uid}`));
-  await getAuth().deleteUser(uid);
+  // Remove memberships, then the user doc tree, then the auth account. Each
+  // phase is independently retry-idempotent (re-deleting an already-deleted
+  // membership/doc, or re-deleting an already-deleted auth user, is a no-op
+  // or a clean not-found) — so on partial failure we don't attempt a
+  // compensating rollback. Instead we log which phase failed for diagnosis
+  // and tell the client it's safe to call deleteAccount again, rather than
+  // surfacing a raw internal error or silently leaving things half-deleted.
+  try {
+    await Promise.all(memberships.docs.map((m) => m.ref.delete()));
+  } catch (e) {
+    console.error("deleteAccount phase failed", { uid, phase: "memberships" }, e);
+    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+  }
+  try {
+    await db.recursiveDelete(db.doc(`users/${uid}`));
+  } catch (e) {
+    console.error("deleteAccount phase failed", { uid, phase: "firestore" }, e);
+    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+  }
+  try {
+    await getAuth().deleteUser(uid);
+  } catch (e) {
+    console.error("deleteAccount phase failed", { uid, phase: "auth" }, e);
+    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+  }
   return { ok: true };
 });

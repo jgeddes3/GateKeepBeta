@@ -16,6 +16,10 @@ const adb = adminFirestore(admin);
 vi.setConfig({ testTimeout: 15_000 });
 
 describe("deleteAccount", () => {
+  it("rejects unauthenticated calls", async () => {
+    await expect(callFn("deleteAccount", {})).rejects.toThrow();
+  });
+
   it("deletes a plain fan account: auth user, users doc, subcollections", async () => {
     const fan = await signUpTestUser(`d1-${Date.now()}@test.com`);
 
