@@ -35,6 +35,20 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     }
     const trimmedLabel = label.trim().slice(0, 60);
     await requireProfileAdmin(profileId, uid);
+    const db = getFirestore();
+    // Cap check runs BEFORE email resolution, and unconditionally (does not
+    // depend on whether the email resolves). If it ran after resolution —
+    // or only on the resolved-email path — then at/over the cap a caller
+    // could distinguish a resolving email (resource-exhausted) from an
+    // unknown one ({ ok: true }), reopening the anti-enumeration oracle
+    // this endpoint is otherwise closed against. Running it here keeps the
+    // response uniform at the cap: every call gets resource-exhausted,
+    // known email or not.
+    const pending = await db.collection("invites")
+      .where("profileId", "==", profileId).where("status", "==", "pending").get();
+    if (pending.size >= MAX_PENDING_INVITES_PER_PROFILE) {
+      throw new HttpsError("resource-exhausted", "Too many pending invites for this profile.");
+    }
     // Anti-enumeration: an unknown email must be indistinguishable from a
     // known one to any signed-up caller. Resolve the email, but on failure
     // fall through to a uniform { ok: true } rather than throwing — never
@@ -45,12 +59,6 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     catch { return { ok: true as const }; }
     if (invited.uid === uid) {
       throw new HttpsError("failed-precondition", "You're already on this profile.");
-    }
-    const db = getFirestore();
-    const pending = await db.collection("invites")
-      .where("profileId", "==", profileId).where("status", "==", "pending").get();
-    if (pending.size >= MAX_PENDING_INVITES_PER_PROFILE) {
-      throw new HttpsError("resource-exhausted", "Too many pending invites for this profile.");
     }
     const profile = await db.doc(`profiles/${profileId}`).get();
     const invite: InviteDoc = {

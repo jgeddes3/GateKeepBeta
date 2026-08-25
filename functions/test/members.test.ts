@@ -165,6 +165,16 @@ describe("invites", () => {
     await signUpTestUser(email);
     await expect(callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user))
       .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+    // The cap check runs before email resolution, so it fires uniformly —
+    // an email with no account gets resource-exhausted too, not { ok: true
+    // }, at/over the cap. Otherwise a caller could distinguish a resolving
+    // email from an unknown one once 20 pending invites exist, reopening
+    // the anti-enumeration oracle this endpoint is otherwise closed
+    // against (see the "no GateKeep account" test above for the
+    // below-cap behavior).
+    await expect(callFn(
+      "inviteMember", { profileId, email: `no-account-cap-${now}@test.com`, role: "member", label: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
   });
 });
 
