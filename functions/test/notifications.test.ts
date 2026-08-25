@@ -40,9 +40,12 @@ async function makeAdminUser() {
 describe("review notifications", () => {
   it("approving a profile writes an inbox notification for each member", async () => {
     const owner = await signUpTestUser(`n1-${Date.now()}@test.com`);
+    // Curator, not musician: this test's subject is notification fan-out on a
+    // review decision, not the Task 9 musician minimum-content gate — a
+    // curator draft submits with no portfolio content required.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
-      { type: "musician", subtype: "solo", name: "Nova", handle: `nova_${Date.now()}` }, owner.user);
+      { type: "curator", subtype: "venue", name: "Nova", handle: `nova_${Date.now()}` }, owner.user);
     await callFn("submitProfileForReview", { profileId }, owner.user);
     const adminUser = await makeAdminUser();
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
@@ -57,9 +60,10 @@ describe("review notifications", () => {
 
   it("rejecting a profile writes a notification whose title and body reflect the decision and reason", async () => {
     const owner = await signUpTestUser(`n2-${Date.now()}@test.com`);
+    // Curator, not musician — see the fixture note above.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
-      { type: "musician", subtype: "solo", name: "Comet", handle: `comet_${Date.now()}` }, owner.user);
+      { type: "curator", subtype: "venue", name: "Comet", handle: `comet_${Date.now()}` }, owner.user);
     await callFn("submitProfileForReview", { profileId }, owner.user);
     const adminUser = await makeAdminUser();
     const reason = "Please add at least 3 photos and a bio";
@@ -76,9 +80,11 @@ describe("review notifications", () => {
 
   it("approving a profile with multiple members notifies every member's inbox", async () => {
     const owner = await signUpTestUser(`n3-${Date.now()}@test.com`);
+    // Curator, not musician — see the fixture note above; this test's subject
+    // is member fan-out, unrelated to profile type.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
-      { type: "musician", subtype: "band", name: "Lunar Sound", handle: `lunar_${Date.now()}` }, owner.user);
+      { type: "curator", subtype: "venue", name: "Lunar Sound", handle: `lunar_${Date.now()}` }, owner.user);
 
     // Add a second member directly via the admin SDK, bypassing the invite-accept
     // callable flow — equivalent end state (a members subcollection doc), simpler

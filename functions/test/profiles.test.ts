@@ -16,6 +16,13 @@ vi.setConfig({ testTimeout: 15_000 });
 const draft = (handle: string): ProfileDraftInput =>
   ({ type: "musician", subtype: "band", name: "The Midnight Owls", handle });
 
+// For submitProfileForReview tests whose subject is the status transition
+// itself (not the Task 9 musician minimum-content gate) — curators have no
+// portfolio gate, so this fixture keeps those tests focused on submit/resubmit
+// mechanics instead of needing to seed bio/genre/avatar/track content.
+const curatorDraft = (handle: string): ProfileDraftInput =>
+  ({ type: "curator", subtype: "venue", name: "The Rooftop", handle });
+
 describe("createProfileDraft", () => {
   it("creates draft profile, claims handle, adds creator as admin member", async () => {
     const { user, uid } = await signUpTestUser(`m1-${Date.now()}@test.com`);
@@ -93,7 +100,7 @@ describe("submitProfileForReview", () => {
   it("moves draft to pending_review; only member admins may submit", async () => {
     const { user } = await signUpTestUser(`m3-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
-      "createProfileDraft", draft(`sub_${Date.now()}`), user);
+      "createProfileDraft", curatorDraft(`sub_${Date.now()}`), user);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
     const { user: outsider } = await signUpTestUser(`m4-${Date.now()}@test.com`);
@@ -103,7 +110,7 @@ describe("submitProfileForReview", () => {
   it("rejects re-submitting a profile already in pending_review", async () => {
     const { user } = await signUpTestUser(`m5-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
-      "createProfileDraft", draft(`resub_${Date.now()}`), user);
+      "createProfileDraft", curatorDraft(`resub_${Date.now()}`), user);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -124,5 +131,63 @@ describe("submitProfileForReview", () => {
     // rather than a message regex.
     await expect(callFn("submitProfileForReview", { profileId }, member))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+});
+
+import { getStorage as adminStorage } from "firebase-admin/storage";
+import { uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
+import type { CreateTrackInput } from "@gatekeep/shared";
+
+process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
+const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
+
+describe("submitProfileForReview minimum content (musicians)", () => {
+  vi.setConfig({ testTimeout: 60_000 });
+  it("refuses an empty musician draft, listing what's missing; passes once bio+genre+avatar+track exist", async () => {
+    const { user, uid } = await signUpTestUser(`gate-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava", handle: `gate_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
+    // avatar via admin SDK shortcut (photo pipeline has its own tests)
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/track/i); // still no track
+
+    const wav = makeWav(12);
+    const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
+    await uploadTestAudio(uploadPath, wav, "audio/wav", user);
+    await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  });
+  it("curator drafts submit without portfolio checks (unchanged from foundation)", async () => {
+    const { user } = await signUpTestUser(`gatec-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "The Room", handle: `gatec_${Date.now()}` }, user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  });
+});
+
+describe("deleteProfile storage cascade", () => {
+  vi.setConfig({ testTimeout: 60_000 });
+  it("deletes the profile's public/review storage objects along with the docs", async () => {
+    const { user } = await signUpTestUser(`delc-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava", handle: `delc_${Date.now()}` }, user);
+    // Seed storage objects directly — exercising the full pipeline is Task 7's job.
+    await abucket.file(`review/tracks/${profileId}/t1.m4a`).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await abucket.file(`public/tracks/${profileId}/t2.m4a`).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await abucket.file(`public/photos/${profileId}/avatar-x.jpg`).save(Buffer.from([1]), { contentType: "image/jpeg" });
+    await callFn("deleteProfile", { profileId }, user);
+    for (const p of [`review/tracks/${profileId}/t1.m4a`, `public/tracks/${profileId}/t2.m4a`,
+                     `public/photos/${profileId}/avatar-x.jpg`]) {
+      const [exists] = await abucket.file(p).exists();
+      expect(exists).toBe(false);
+    }
   });
 });

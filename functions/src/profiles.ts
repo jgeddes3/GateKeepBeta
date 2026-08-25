@@ -1,7 +1,11 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
-import { validateProfileDraft, type ProfileDraftInput, type ProfileDoc, type MemberDoc } from "@gatekeep/shared";
+import {
+  validateProfileDraft, type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
+} from "@gatekeep/shared";
 import { writeAudit } from "./review.js";
+import { bucket } from "./storage.js";
+import { ACTIVE_TRACK_STATUSES } from "./tracks.js";
 
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
@@ -86,6 +90,26 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
   if (status !== "draft" && status !== "rejected") {
     throw new HttpsError("failed-precondition", `Cannot submit a profile in status "${status}".`);
   }
+
+  // Spec §6 minimum content: reviewers approve a *portfolio* — there must be
+  // something to look at and listen to. Musicians only; curators are sub-3.
+  if (snap.data()?.type === "musician") {
+    const p = snap.data()?.portfolio as PortfolioData | undefined;
+    const missing: string[] = [];
+    if (!p?.bio?.trim()) missing.push("a bio");
+    if (!p?.genres?.length) missing.push("at least one genre");
+    if (!p?.avatarPhotoPath) missing.push("a profile photo");
+    const tracks = await ref.collection("tracks").get();
+    // ACTIVE_TRACK_STATUSES (imported from tracks.ts, not re-hardcoded here)
+    // is the same "occupies one of the 10 slots" list createTrack enforces.
+    if (!tracks.docs.some((t) => (ACTIVE_TRACK_STATUSES as readonly string[]).includes(t.data().status))) {
+      missing.push("at least one track");
+    }
+    if (missing.length > 0) {
+      throw new HttpsError("failed-precondition", `Add ${missing.join(", ")} before submitting.`);
+    }
+  }
+
   await ref.update({ status: "pending_review", rejectionReason: null, updatedAt: Date.now() });
   return { ok: true };
 });
@@ -111,6 +135,14 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
 
   if (handle) await db.doc(`handles/${handle}`).delete();
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
+
+  // Storage cascade — best-effort: any stragglers are unreachable (their doc
+  // paths are gone) and carry no PII beyond the content itself.
+  await Promise.allSettled([
+    bucket().deleteFiles({ prefix: `public/tracks/${profileId}/` }),
+    bucket().deleteFiles({ prefix: `review/tracks/${profileId}/` }),
+    bucket().deleteFiles({ prefix: `public/photos/${profileId}/` }),
+  ]);
 
   await writeAudit({ actorUid: uid, action: "profile_deleted", targetId: profileId, detail: name ?? "" });
   return { ok: true };
