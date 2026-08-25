@@ -1,0 +1,11 @@
+{
+  "name": "@gatekeep/tests-rules",
+  "type": "module",
+  "scripts": { "test": "vitest run --no-file-parallelism" },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.0",
+    "firebase": "^11.0.0",
+    "vitest": "^2.0.0",
+    "typescript": "^5.6.0"
+  }
+}

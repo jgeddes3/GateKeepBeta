@@ -1,6 +1,57 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} { allow read, write: if false; }
+
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function isMember(profileId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/profiles/$(profileId)/members/$(request.auth.uid));
+    }
+    function profileApproved(profileId) {
+      return get(/databases/$(database)/documents/profiles/$(profileId)).data.status == 'approved';
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      // Created by Cloud Functions; owner may update editable fields only.
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['displayName', 'photoUrl', 'homeCity']);
+      allow create, delete: if false;
+
+      match /notifications/{noteId} {
+        allow read: if isOwner(uid);
+        allow update: if isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+        allow create, delete: if false;
+      }
+      match /pushTokens/{tokenId} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    match /profiles/{profileId} {
+      allow read: if resource.data.status == 'approved' || isMember(profileId);
+      allow write: if false; // Cloud Functions only
+
+      match /members/{memberUid} {
+        // self-read clause serves the collection-group "my profiles" query
+        allow read: if profileApproved(profileId) || isMember(profileId)
+          || (signedIn() && request.auth.uid == resource.data.uid);
+        allow write: if false; // Cloud Functions only
+      }
+    }
+
+    match /invites/{inviteId} {
+      allow read: if signedIn()
+        && (request.auth.uid == resource.data.invitedUid
+            || request.auth.uid == resource.data.invitedByUid);
+      allow write: if false; // Cloud Functions only
+    }
+
+    match /handles/{handle}   { allow read: if true; allow write: if false; }
+    match /auditLogs/{logId}  { allow read, write: if false; } // admin dashboard reads via Admin SDK API
+    match /{document=**}      { allow read, write: if false; }
   }
 }
