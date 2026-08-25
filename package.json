@@ -2,9 +2,17 @@
   "name": "gatekeep",
   "private": true,
   "packageManager": "pnpm@11.23.0",
-  "engines": { "node": ">=20", "pnpm": ">=9" },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
   "scripts": {
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "emu": "firebase emulators:start",
+    "emu:test": "firebase emulators:exec --only auth,firestore,functions \"pnpm --filter functions test\""
+  },
+  "devDependencies": {
+    "firebase-tools": "^15.28.1"
   }
 }

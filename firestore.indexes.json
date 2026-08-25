@@ -1,0 +1,3 @@
+{ "indexes": [], "fieldOverrides": [
+  { "collectionGroup": "members", "fieldPath": "uid",
+    "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] } ] }
