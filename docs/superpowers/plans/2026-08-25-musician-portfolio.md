@@ -925,7 +925,7 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { ref, uploadBytes, getBytes, listAll, deleteObject } from "firebase/storage";
+import { ref, uploadBytes, getBytes, getDownloadURL, listAll, deleteObject } from "firebase/storage";
 
 let env: RulesTestEnvironment;
 
@@ -996,6 +996,19 @@ describe("storage: public and review", () => {
     await assertSucceeds(getBytes(ref(admin, "review/tracks/p1/t1.m4a")));
     await assertFails(getBytes(ref(alice, "review/tracks/p1/t1.m4a")));
     await assertFails(getBytes(ref(anon, "review/tracks/p1/t1.m4a")));
+  });
+  it("regression guards: public getDownloadURL works, staging retry-overwrite allowed, photo delete denied", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), "public/tracks/p1/t2.m4a"), bytes, meta("audio/mp4"));
+    });
+    const anon = env.unauthenticatedContext().storage();
+    // The app's real read path — must survive any future tightening of the get/list split.
+    await assertSucceeds(getDownloadURL(ref(anon, "public/tracks/p1/t2.m4a")));
+    const alice = env.authenticatedContext("alice").storage();
+    await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/retry1"), bytes, meta("audio/mpeg")));
+    await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/retry1"), bytes, meta("audio/mpeg"))); // retry = update
+    await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/avatar-del1"), bytes, meta("image/jpeg")));
+    await assertFails(deleteObject(ref(alice, "staging/photos/alice/p1/avatar-del1")));
   });
 });
 ```
@@ -1674,7 +1687,9 @@ async function probeDurationSec(file: string): Promise<number> {
   return d;
 }
 
-async function processAudio(objectName: string, generation: string): Promise<void> {
+// generation is typed number in firebase-functions but arrives as a string at
+// runtime (GCS serializes int64 as JSON string) — accept both, coerce at use.
+async function processAudio(objectName: string, generation: string | number): Promise<void> {
   // staging/audio/{uid}/{profileId}/{trackId}
   const [, , uid, profileId, trackId] = objectName.split("/");
   if (!uid || !profileId || !trackId) return;
@@ -1730,7 +1745,7 @@ async function processAudio(objectName: string, generation: string): Promise<voi
   }
 }
 
-async function processPhoto(objectName: string, generation: string): Promise<void> {
+async function processPhoto(objectName: string, generation: string | number): Promise<void> {
   // staging/photos/{uid}/{profileId}/{kind}-{nonce}
   const [, , uid, profileId, fileName] = objectName.split("/");
   if (!uid || !profileId || !fileName) return;
