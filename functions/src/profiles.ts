@@ -64,6 +64,9 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
       type: input.type, subtype: input.subtype as ProfileDoc["subtype"],
       name: input.name.trim(), handle: input.handle,
       status: "draft", rejectionReason: null, createdAt: now, updatedAt: now,
+      ...(input.type === "musician"
+        ? { portfolio: { bio: "", genres: [], externalLinks: [], avatarPhotoPath: null, coverPhotoPath: null } }
+        : {}),
     };
     const member: MemberDoc = { uid, role: "admin", label: "owner", joinedAt: now };
     tx.set(profileRef, profile);
