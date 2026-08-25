@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { collectionGroup, collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import type { ProfileType, ProfileStatus, ProfileDoc, NotificationDoc } from "@gatekeep/shared";
@@ -81,10 +82,27 @@ export default function Dashboard() {
   const router = useRouter();
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   if (loading || !user) return null;
+  const deleteAccount = async () => {
+    if (!window.confirm("This permanently deletes your account and data. Continue?")) return;
+    try {
+      await httpsCallable(getFirebase().functions, "deleteAccount")({});
+      // The callable already deleted the auth user server-side; sign out
+      // locally too so client state doesn't depend on onAuthStateChanged
+      // noticing the now-invalid token before we navigate away.
+      await signOutUser();
+      router.push("/");
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Can't delete yet.");
+    }
+  };
   return (
     <main style={{ maxWidth: 760, margin: "40px auto" }}>
       <h1>Dashboard</h1>
-      <p>{user.email} · <button onClick={signOutUser}>Sign out</button></p>
+      <p>
+        {user.email} · <button onClick={signOutUser}>Sign out</button>
+        {" · "}
+        <button onClick={deleteAccount} style={{ color: "#dc2626" }}>Delete account</button>
+      </p>
       <h2>Your profiles</h2>
       <ProfilesList key={user.uid} uid={user.uid} />
       <h2>Notifications</h2>
