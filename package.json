@@ -1,7 +1,8 @@
 {
   "name": "gatekeep",
   "private": true,
-  "engines": { "node": ">=20" },
+  "packageManager": "pnpm@11.23.0",
+  "engines": { "node": ">=20", "pnpm": ">=9" },
   "scripts": {
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
