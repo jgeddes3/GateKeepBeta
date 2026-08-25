@@ -1110,7 +1110,11 @@ export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-centra
   const updates: Record<string, unknown> = { updatedAt: Date.now() };
   if (input.bio !== undefined) updates["portfolio.bio"] = input.bio;
   if (input.genres !== undefined) updates["portfolio.genres"] = input.genres;
-  if (input.externalLinks !== undefined) updates["portfolio.externalLinks"] = input.externalLinks;
+  // Explicit mapping: stores only the validated fields (an untrusted link object
+  // could carry extra keys) and the trimmed URL the validator actually checked.
+  if (input.externalLinks !== undefined) {
+    updates["portfolio.externalLinks"] = input.externalLinks.map((l) => ({ kind: l.kind, url: l.url.trim() }));
+  }
   const ref = getFirestore().doc(`profiles/${input.profileId}`);
   const pairs = Object.entries(updates).flatMap(([k, val]) => [new FieldPath(...k.split(".")), val] as const);
   await ref.update(pairs[0] as FieldPath, pairs[1], ...pairs.slice(2));
@@ -1124,7 +1128,24 @@ export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-centra
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
   await requireProfileMember(input.profileId, uid);
   await requireMusicianProfile(input.profileId);
-  const docData: BookingDoc = { rates: input.rates, preferences: input.preferences, updatedAt: Date.now() };
+  // Normalize absent → null: the validator accepts omitted keys, the stored
+  // BookingDoc promises present-and-nullable, and Firestore rejects `undefined`.
+  const docData: BookingDoc = {
+    rates: {
+      perHour: input.rates.perHour ?? null,
+      perSong: input.rates.perSong ?? null,
+      perSet: input.rates.perSet ?? null,
+    },
+    preferences: {
+      gigTypes: input.preferences.gigTypes,
+      travelRadiusKm: input.preferences.travelRadiusKm ?? null,
+      actSize: input.preferences.actSize ?? null,
+      typicalSetMinutes: input.preferences.typicalSetMinutes ?? null,
+      bringsOwnPA: input.preferences.bringsOwnPA ?? null,
+      availabilityPattern: input.preferences.availabilityPattern ?? null,
+    },
+    updatedAt: Date.now(),
+  };
   await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
   return { ok: true };
 });
