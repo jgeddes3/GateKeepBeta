@@ -46,6 +46,18 @@ export async function signUpUnverifiedTestUser(email: string) {
   return { uid: cred.user.uid, idToken: await cred.user.getIdToken(), user: cred.user };
 }
 
+// Signs up a fresh test user and grants the `admin` custom claim directly via
+// the Admin SDK — bypasses grantAdmin's Google-linked-account-only rule,
+// which is fine for tests (every review-flow test needs an admin caller
+// without wiring up a fake Google OAuth provider). Centralized here so
+// review.test.ts and tracks.test.ts share one implementation.
+export async function makeAdminUser(prefix: string) {
+  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
+  await getAdminAuth(adminAppInstance).setCustomUserClaims(uid, { admin: true });
+  await user.getIdToken(true); // refresh claims
+  return { user, uid };
+}
+
 export async function callFn<T, R>(name: string, data: T, asUser?: User): Promise<R> {
   // Explicitly sign out when no user is given so "unauthenticated" calls are
   // truly unauthenticated, regardless of which user a prior call in this

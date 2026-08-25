@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  signUpTestUser, signUpUnverifiedTestUser, callFn, uploadTestAudio, makeWav, waitForTrackStatus,
+  signUpTestUser, signUpUnverifiedTestUser, callFn, uploadTestAudio, makeWav, waitForTrackStatus, makeAdminUser,
 } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import { getAuth as adminAuth } from "firebase-admin/auth";
 import { getStorage as adminStorage } from "firebase-admin/storage";
 import { stagingAudioPath, type ProfileDraftInput, type CreateTrackInput, MAX_TRACKS } from "@gatekeep/shared";
 
@@ -13,7 +12,9 @@ process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
 const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
-vi.setConfig({ testTimeout: 20_000 });
+// 60s (not the file's original 20s): the reviewTrack tests below upload and
+// wait on a real ffmpeg transcode via makePendingTrack, same as media.test.ts.
+vi.setConfig({ testTimeout: 60_000 });
 
 async function makeMusician(prefix: string) {
   const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
@@ -205,27 +206,19 @@ describe("reorderTracks", () => {
   });
 });
 
-async function makeAdminUser(prefix: string) {
-  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
-  await adminAuth(admin).setCustomUserClaims(uid, { admin: true });
-  await user.getIdToken(true); // refresh claims
-  return { user, uid };
-}
-
 async function makePendingTrack(prefix: string) {
-  const { user, profileId } = await makeMusician(prefix);
+  const { user, uid, profileId } = await makeMusician(prefix);
   const wav = makeWav(35);
   const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
     "createTrack", { profileId, title: "For review", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
   await uploadTestAudio(uploadPath, wav, "audio/wav", user);
   await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
-  return { user, profileId, trackId };
+  return { user, uid, profileId, trackId };
 }
 
 describe("reviewTrack", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("approve copies the clip to public, deletes review copy, flips status, audits, notifies", async () => {
-    const { profileId, trackId } = await makePendingTrack("rv1");
+    const { uid, profileId, trackId } = await makePendingTrack("rv1");
     const { user: adminUser } = await makeAdminUser("rv1a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
@@ -237,6 +230,10 @@ describe("reviewTrack", () => {
     expect(rev).toBe(false);
     const audit = await adb.collection("auditLogs").where("targetId", "==", `${profileId}/${trackId}`).get();
     expect(audit.docs.some((d) => d.data().action === "track_approved")).toBe(true);
+    // Pins the notification path: notifyProfileMembers writes an inbox
+    // notification for every member (the sole musician member here).
+    const notifs = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifs.empty).toBe(false);
   });
   it("reject requires a reason ≤500, deletes the clip, keeps the doc with the reason", async () => {
     const { profileId, trackId } = await makePendingTrack("rv2");
@@ -258,9 +255,9 @@ describe("reviewTrack", () => {
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
-  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared", async () => {
+  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state", async () => {
     const { profileId, trackId } = await makePendingTrack("rv4");
-    const { user: adminUser } = await makeAdminUser("rv4a");
+    const { user: adminUser, uid: adminUid } = await makeAdminUser("rv4a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const [pubBefore] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
     expect(pubBefore).toBe(true);
@@ -270,5 +267,50 @@ describe("reviewTrack", () => {
     expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "Copyright complaint.", storagePath: null });
     const [pubAfter] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
     expect(pubAfter).toBe(false);
+    const audit = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    expect(audit.size).toBe(1);
+    expect(audit.docs[0].data().actorUid).toBe(adminUid);
+    expect(audit.docs[0].data().detail).toMatch(/^\[was approved\]/);
+  });
+  it("approve fails cleanly when the review clip is already gone: failed-precondition, doc rolled back to pending_review", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv5");
+    const { user: adminUser } = await makeAdminUser("rv5a");
+    // Simulates storage/doc drift (e.g. a prior partial failure, or a
+    // hand-edited emulator state) — the doc says pending_review but the
+    // review object backing it is gone.
+    await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).delete();
+    let err: unknown;
+    try {
+      await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({ code: "functions/failed-precondition" });
+    expect((err as Error).message).toMatch(/review clip is missing/i);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()?.status).toBe("pending_review");
+  });
+  it("accepts a rejection reason of exactly 500 characters (checked/stored trimmed); 501 is invalid-argument", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv6");
+    const { user: adminUser } = await makeAdminUser("rv6a");
+    const padded = "  " + "x".repeat(500) + "  "; // trims to exactly 500
+    await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: padded }, adminUser);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()?.rejectionReason).toBe("x".repeat(500));
+
+    const { profileId: p2, trackId: t2 } = await makePendingTrack("rv6b");
+    await expect(callFn("reviewTrack", { profileId: p2, trackId: t2, decision: "rejected", reason: "x".repeat(501) }, adminUser))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+  it("rejecting an already-rejected track is an idempotent retry: ok:true, doc stays rejected", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv7");
+    const { user: adminUser } = await makeAdminUser("rv7a");
+    await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+    const res = await callFn<{ profileId: string; trackId: string; decision: "rejected"; reason: string },
+      { ok: boolean }>("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+    expect(res.ok).toBe(true);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "First reason.", storagePath: null });
   });
 });

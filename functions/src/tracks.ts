@@ -5,13 +5,14 @@ import {
   type CreateTrackInput, type TrackDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
-import { bucket } from "./storage.js";
+import { bucket, logDeleteFailure } from "./storage.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
 
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
-// docs (for the reason display) but don't count.
-const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
+// docs (for the reason display) but don't count. Exported so Task 9's submit
+// minimum-content gate can import it instead of re-hardcoding the list.
+export const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
 
 export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
@@ -149,7 +150,7 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
   { region: "us-central1" }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, trackId, decision, reason } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string"
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)
         || (decision !== "approved" && decision !== "rejected")) {
       throw new HttpsError("invalid-argument", "profileId, trackId, and a decision are required.");
     }
@@ -159,55 +160,137 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
     if (decision === "rejected" && reason!.trim().length > 500) {
       throw new HttpsError("invalid-argument", "Rejection reason must be 500 characters or fewer.");
     }
-    const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
-    const snap = await ref.get();
-    if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
-    const status = snap.data()?.status;
-    // "approved" still requires pending_review. "rejected" additionally
-    // accepts an already-"approved" track — retroactive takedown (spec §6:
-    // "admins can retroactively unpublish").
-    if (decision === "approved" && status !== "pending_review") {
-      throw new HttpsError("failed-precondition", "Track is not pending review.");
-    }
-    if (decision === "rejected" && status !== "pending_review" && status !== "approved") {
-      throw new HttpsError("failed-precondition", "Track is not pending review or approved.");
-    }
+
+    const db = getFirestore();
+    const ref = db.doc(`profiles/${profileId}/tracks/${trackId}`);
+
+    // Claims the decision (flips status/storagePath/rejectionReason) inside a
+    // transaction BEFORE any storage work, so two concurrent reviews of the
+    // same track can't both pass their precondition check and both go on to
+    // touch storage. Whichever transaction commits first claims the track;
+    // Firestore silently retries the loser's read against the now-updated
+    // doc, so it sees the new status and fails its own precondition check.
+    // The Functions emulator serializes concurrent invocations of the same
+    // callable, so this race is untestable there — the transaction itself is
+    // the guarantee, deliberately with no accompanying test.
+    const prior = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
+      const data = snap.data() as TrackDoc;
+      if (decision === "approved" && data.status !== "pending_review") {
+        throw new HttpsError("failed-precondition", "Track is not pending review.");
+      }
+      // Reject also accepts "approved" (retroactive takedown, spec §6) AND a
+      // second "rejected" (idempotent retry — lets an admin re-run a
+      // takedown whose storage cleanup failed the first time; see the
+      // "unavailable" throw below).
+      if (decision === "rejected" && data.status !== "pending_review"
+          && data.status !== "approved" && data.status !== "rejected") {
+        throw new HttpsError("failed-precondition", "Track is not reviewable.");
+      }
+      if (decision === "approved") {
+        tx.update(ref, {
+          status: "approved", storagePath: publicTrackPath(profileId, trackId),
+          rejectionReason: null, updatedAt: Date.now(),
+        });
+      } else {
+        tx.update(ref, {
+          status: "rejected", storagePath: null,
+          rejectionReason: reason!.trim(), updatedAt: Date.now(),
+        });
+      }
+      return data;
+    });
+
     const reviewFile = bucket().file(reviewTrackPath(profileId, trackId));
     const publicFile = bucket().file(publicTrackPath(profileId, trackId));
 
     if (decision === "approved") {
-      // Copy-then-delete keeps the public-path invariant: the clip appears in
-      // public/ only as part of an approval.
-      await reviewFile.copy(publicFile);
-      await reviewFile.delete().catch(() => {});
-      await ref.update({
-        status: "approved", storagePath: publicTrackPath(profileId, trackId),
-        rejectionReason: null, updatedAt: Date.now(),
-      });
+      try {
+        // Copy-then-delete keeps the public-path invariant: the clip appears
+        // in public/ only as part of an approval that already committed.
+        await reviewFile.copy(publicFile);
+      } catch (err) {
+        // The Firestore claim above already committed "approved" — if the
+        // copy itself fails, roll the doc back to pending_review (and its
+        // prior storagePath) so the track isn't left stuck "approved" with
+        // no public object behind it.
+        await ref.update({
+          status: "pending_review", storagePath: prior.storagePath ?? null, updatedAt: Date.now(),
+        }).catch(logDeleteFailure("approve rollback", `${profileId}/${trackId}`));
+        // @google-cloud/storage surfaces a missing source object as an
+        // ApiError with HTTP code 404 (unlike Firestore's gRPC code 5 used
+        // elsewhere) — the review clip was already gone (a race, or a prior
+        // partial failure that already consumed it). That's a recoverable
+        // admin action (reject + ask for a re-upload), not a server error.
+        if ((err as { code?: number }).code === 404) {
+          throw new HttpsError("failed-precondition",
+            "The review clip is missing — reject this track and ask the musician to re-upload.");
+        }
+        throw err;
+      }
+      await reviewFile.delete()
+        .catch(logDeleteFailure("review copy after approve", reviewTrackPath(profileId, trackId)));
     } else {
-      // Delete whichever copy exists: review/ for a first-time reject,
-      // public/ for a retroactive takedown of a previously approved track —
-      // allSettled rather than two guarded deletes because exactly one of
-      // the two objects exists depending on which state this track was in.
-      await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
-      await ref.update({
-        status: "rejected", storagePath: null,
-        rejectionReason: reason!.trim(), updatedAt: Date.now(),
-      });
+      const [reviewResult, publicResult] = await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
+      if (reviewResult.status === "rejected" && (reviewResult.reason as { code?: number })?.code !== 404) {
+        logDeleteFailure("reject: review delete", reviewTrackPath(profileId, trackId))(reviewResult.reason);
+      }
+      if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
+        logDeleteFailure("reject: public delete", publicTrackPath(profileId, trackId))(publicResult.reason);
+      }
+      // The doc already says "rejected" (the claim above committed it) — but
+      // if this track was previously "approved" and the PUBLIC object failed
+      // to delete for a reason other than "already gone" (404), the clip may
+      // still be publicly reachable even though the doc says otherwise.
+      // Surface that to the admin as a retryable failure instead of quietly
+      // reporting success: the transactional claim above accepts
+      // reject-from-rejected, so a second reviewTrack("rejected") call
+      // safely re-attempts the same delete.
+      if (prior.status === "approved" && publicResult.status === "rejected"
+          && (publicResult.reason as { code?: number })?.code !== 404) {
+        throw new HttpsError("unavailable",
+          "Takedown incomplete — the public clip could not be removed. Try again.");
+      }
     }
+
+    // Storage work finishes asynchronously after the transactional claim
+    // committed — deleteTrack (or deleteProfile's cascade) can race in
+    // between and remove the doc entirely. Re-read before writing an audit
+    // entry or notifying members about a track that's already gone; on
+    // approve, also clean up the public object just written (any cleanup
+    // deleteTrack/deleteProfile already did ran before this copy landed, so
+    // it can't have caught this one).
+    const postSnap = await ref.get();
+    if (!postSnap.exists) {
+      if (decision === "approved") {
+        await publicFile.delete()
+          .catch(logDeleteFailure("orphaned public (post-review race)", publicTrackPath(profileId, trackId)));
+      }
+      return { ok: true };
+    }
+
     await writeAudit({
       actorUid,
       action: decision === "approved" ? "track_approved" : "track_rejected",
+      // Reject's detail records the prior status too — a takedown trail
+      // (was "approved" and live, vs. a routine first-time reject from
+      // "pending_review") is worth more to an auditor than the reason alone.
+      detail: decision === "approved" ? (prior.title ?? "") : `[was ${prior.status}] ${reason!.trim()}`,
       targetId: `${profileId}/${trackId}`,
-      detail: decision === "rejected" ? reason!.trim() : (snap.data()?.title ?? ""),
     });
-    const title = snap.data()?.title ?? "Your track";
+    const title = prior.title ?? "Your track";
+    const wasApproved = prior.status === "approved";
     await notifyProfileMembers(profileId, {
       kind: "track_review",
-      title: decision === "approved" ? `"${title}" is live!` : `"${title}" needs attention`,
+      title: decision === "approved"
+        ? `"${title}" is live!`
+        : wasApproved ? `"${title}" was removed from your portfolio` : `"${title}" needs attention`,
       body: decision === "approved"
         ? "Your track passed review and now plays on your public portfolio."
-        : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+        : wasApproved
+          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
+          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
     });
     return { ok: true };
   });

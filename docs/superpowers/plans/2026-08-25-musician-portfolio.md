@@ -2436,44 +2436,40 @@ git commit -m "feat(functions): processUpload — ffmpeg 30s clip transcode + sh
 
 ### Task 8: Functions — `reviewTrack` (admin gate)
 
+> **Post-review revision:** this section documents the FINAL shipped code
+> after a quality-review pass hardened the naive first cut (see "Quality-review
+> hardening" below the original steps). The steps below are kept in their
+> original TDD order but their code blocks now show the final, byte-exact
+> implementation — not the version that first went green.
+
 **Files:**
 - Modify: `functions/src/tracks.ts`
 - Modify: `functions/src/review.ts` (export `requireAdmin`)
 - Modify: `functions/src/index.ts`
+- Modify: `functions/src/storage.ts` (export `logDeleteFailure`, moved here from `media.ts` so `reviewTrack` can reuse the same logged-catch pattern)
+- Modify: `functions/src/media.ts` (imports `logDeleteFailure` instead of defining it locally — behavior unchanged)
+- Modify: `functions/test/helpers.ts` (export `makeAdminUser`, lifted out of this task's test file so `review.test.ts` can share it too)
+- Modify: `functions/test/review.test.ts` (drops its local `makeAdminUser` copy for the shared one)
 - Test: append to `functions/test/tracks.test.ts`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `functions/test/tracks.test.ts` (grantAdmin needs a Google-linked account — mirror the existing pattern in `functions/test/review.test.ts` for minting an admin user; reuse its helper if one exists, otherwise set the claim directly via the Admin SDK):
+Append to `functions/test/tracks.test.ts` (imports `makeAdminUser` from `./helpers` instead of defining it locally):
 
 ```ts
-import { getAuth as adminAuth } from "firebase-admin/auth";
-import { getStorage as adminStorage } from "firebase-admin/storage";
-import { uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
-
-const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
-
-async function makeAdminUser(prefix: string) {
-  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
-  await adminAuth(admin).setCustomUserClaims(uid, { admin: true });
-  await user.getIdToken(true); // refresh claims
-  return { user, uid };
-}
-
 async function makePendingTrack(prefix: string) {
-  const { user, profileId } = await makeMusician(prefix);
+  const { user, uid, profileId } = await makeMusician(prefix);
   const wav = makeWav(35);
   const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
     "createTrack", { profileId, title: "For review", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
   await uploadTestAudio(uploadPath, wav, "audio/wav", user);
   await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
-  return { user, profileId, trackId };
+  return { user, uid, profileId, trackId };
 }
 
 describe("reviewTrack", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("approve copies the clip to public, deletes review copy, flips status, audits, notifies", async () => {
-    const { profileId, trackId } = await makePendingTrack("rv1");
+    const { uid, profileId, trackId } = await makePendingTrack("rv1");
     const { user: adminUser } = await makeAdminUser("rv1a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
@@ -2485,6 +2481,10 @@ describe("reviewTrack", () => {
     expect(rev).toBe(false);
     const audit = await adb.collection("auditLogs").where("targetId", "==", `${profileId}/${trackId}`).get();
     expect(audit.docs.some((d) => d.data().action === "track_approved")).toBe(true);
+    // Pins the notification path: notifyProfileMembers writes an inbox
+    // notification for every member (the sole musician member here).
+    const notifs = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifs.empty).toBe(false);
   });
   it("reject requires a reason ≤500, deletes the clip, keeps the doc with the reason", async () => {
     const { profileId, trackId } = await makePendingTrack("rv2");
@@ -2506,9 +2506,9 @@ describe("reviewTrack", () => {
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
-  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared", async () => {
+  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state", async () => {
     const { profileId, trackId } = await makePendingTrack("rv4");
-    const { user: adminUser } = await makeAdminUser("rv4a");
+    const { user: adminUser, uid: adminUid } = await makeAdminUser("rv4a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const [pubBefore] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
     expect(pubBefore).toBe(true);
@@ -2518,9 +2518,74 @@ describe("reviewTrack", () => {
     expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "Copyright complaint.", storagePath: null });
     const [pubAfter] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
     expect(pubAfter).toBe(false);
+    const audit = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    expect(audit.size).toBe(1);
+    expect(audit.docs[0].data().actorUid).toBe(adminUid);
+    expect(audit.docs[0].data().detail).toMatch(/^\[was approved\]/);
+  });
+  it("approve fails cleanly when the review clip is already gone: failed-precondition, doc rolled back to pending_review", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv5");
+    const { user: adminUser } = await makeAdminUser("rv5a");
+    // Simulates storage/doc drift (e.g. a prior partial failure, or a
+    // hand-edited emulator state) — the doc says pending_review but the
+    // review object backing it is gone.
+    await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).delete();
+    let err: unknown;
+    try {
+      await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({ code: "functions/failed-precondition" });
+    expect((err as Error).message).toMatch(/review clip is missing/i);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()?.status).toBe("pending_review");
+  });
+  it("accepts a rejection reason of exactly 500 characters (checked/stored trimmed); 501 is invalid-argument", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv6");
+    const { user: adminUser } = await makeAdminUser("rv6a");
+    const padded = "  " + "x".repeat(500) + "  "; // trims to exactly 500
+    await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: padded }, adminUser);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()?.rejectionReason).toBe("x".repeat(500));
+
+    const { profileId: p2, trackId: t2 } = await makePendingTrack("rv6b");
+    await expect(callFn("reviewTrack", { profileId: p2, trackId: t2, decision: "rejected", reason: "x".repeat(501) }, adminUser))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+  it("rejecting an already-rejected track is an idempotent retry: ok:true, doc stays rejected", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv7");
+    const { user: adminUser } = await makeAdminUser("rv7a");
+    await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+    const res = await callFn<{ profileId: string; trackId: string; decision: "rejected"; reason: string },
+      { ok: boolean }>("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+    expect(res.ok).toBe(true);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "First reason.", storagePath: null });
   });
 });
 ```
+
+The test file's top also changes: the local `makeAdminUser` function is deleted, `makeAdminUser` is added to the `./helpers` import, the now-unused `getAuth as adminAuth` import is dropped, and the file-level `vi.setConfig({ testTimeout: 20_000 })` becomes `60_000` (the reviewTrack tests upload and wait on a real ffmpeg transcode via `makePendingTrack`, same as `media.test.ts`) — the block's own nested `vi.setConfig` is removed rather than duplicated.
+
+`functions/test/helpers.ts` gains (placed after `signUpUnverifiedTestUser`, using the file's existing `getAdminAuth`/`adminAppInstance`):
+
+```ts
+// Signs up a fresh test user and grants the `admin` custom claim directly via
+// the Admin SDK — bypasses grantAdmin's Google-linked-account-only rule,
+// which is fine for tests (every review-flow test needs an admin caller
+// without wiring up a fake Google OAuth provider). Centralized here so
+// review.test.ts and tracks.test.ts share one implementation.
+export async function makeAdminUser(prefix: string) {
+  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
+  await getAdminAuth(adminAppInstance).setCustomUserClaims(uid, { admin: true });
+  await user.getIdToken(true); // refresh claims
+  return { user, uid };
+}
+```
+
+`functions/test/review.test.ts` drops its own local `makeAdminUser()` (no-arg) function, imports the shared one from `./helpers`, and every call site becomes `makeAdminUser("admin")` (its `getAuth as adminAuth` import stays — `grantAdmin`'s own tests still use it directly for `importUsers`/`getUser`).
 
 - [ ] **Step 2: Export `requireAdmin` from `functions/src/review.ts`**
 
@@ -2528,16 +2593,41 @@ Change `function requireAdmin(` to `export function requireAdmin(`.
 
 - [ ] **Step 3: Add `reviewTrack` to `functions/src/tracks.ts`**
 
+First, move the storage-cleanup logger out of `media.ts` into `functions/src/storage.ts` (it was private to `processUpload`; `reviewTrack` needs the same logged-catch pattern):
+
 ```ts
+// functions/src/storage.ts — appended after `bucket`
+// Every best-effort storage cleanup across the media/tracks pipelines goes
+// through here instead of a bare `.catch(() => {})` — a cleanup that
+// silently fails (quota, a permissions drift, an emulator hiccup) would
+// otherwise leave no trace anywhere. Still non-fatal: logging, never
+// rethrowing, so a cleanup failure can never turn into a stuck/duplicate
+// object. Originally private to media.ts (processUpload); moved here so
+// tracks.ts's reviewTrack can reuse the same logged-catch pattern.
+export function logDeleteFailure(phase: string, path: string) {
+  return (e: unknown) => console.error(`processUpload: ${phase} cleanup failed`, path, e);
+}
+```
+
+In `media.ts`: delete the local `logDeleteFailure` definition (and its now-redundant leading comment) and add it to the existing `./storage.js` import: `import { STORAGE_BUCKET, bucket, logDeleteFailure } from "./storage.js";`. Every call site (`.catch(logDeleteFailure(...))`) is unchanged — behavior is identical, only the definition moved.
+
+Then, in `functions/src/tracks.ts`:
+
+```ts
+import { bucket, logDeleteFailure } from "./storage.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { reviewTrackPath, publicTrackPath } from "@gatekeep/shared";
+
+// Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
+// docs (for the reason display) but don't count. Exported so Task 9's submit
+// minimum-content gate can import it instead of re-hardcoding the list.
+export const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
 
 export const reviewTrack = onCall<{ profileId: string; trackId: string; decision: "approved" | "rejected"; reason?: string }>(
   { region: "us-central1" }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, trackId, decision, reason } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string"
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)
         || (decision !== "approved" && decision !== "rejected")) {
       throw new HttpsError("invalid-argument", "profileId, trackId, and a decision are required.");
     }
@@ -2547,70 +2637,154 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
     if (decision === "rejected" && reason!.trim().length > 500) {
       throw new HttpsError("invalid-argument", "Rejection reason must be 500 characters or fewer.");
     }
-    const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
-    const snap = await ref.get();
-    if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
-    const status = snap.data()?.status;
-    // "approved" still requires pending_review. "rejected" additionally
-    // accepts an already-"approved" track — retroactive takedown (spec §6:
-    // "admins can retroactively unpublish").
-    if (decision === "approved" && status !== "pending_review") {
-      throw new HttpsError("failed-precondition", "Track is not pending review.");
-    }
-    if (decision === "rejected" && status !== "pending_review" && status !== "approved") {
-      throw new HttpsError("failed-precondition", "Track is not pending review or approved.");
-    }
+
+    const db = getFirestore();
+    const ref = db.doc(`profiles/${profileId}/tracks/${trackId}`);
+
+    // Claims the decision (flips status/storagePath/rejectionReason) inside a
+    // transaction BEFORE any storage work, so two concurrent reviews of the
+    // same track can't both pass their precondition check and both go on to
+    // touch storage. Whichever transaction commits first claims the track;
+    // Firestore silently retries the loser's read against the now-updated
+    // doc, so it sees the new status and fails its own precondition check.
+    // The Functions emulator serializes concurrent invocations of the same
+    // callable, so this race is untestable there — the transaction itself is
+    // the guarantee, deliberately with no accompanying test.
+    const prior = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
+      const data = snap.data() as TrackDoc;
+      if (decision === "approved" && data.status !== "pending_review") {
+        throw new HttpsError("failed-precondition", "Track is not pending review.");
+      }
+      // Reject also accepts "approved" (retroactive takedown, spec §6) AND a
+      // second "rejected" (idempotent retry — lets an admin re-run a
+      // takedown whose storage cleanup failed the first time; see the
+      // "unavailable" throw below).
+      if (decision === "rejected" && data.status !== "pending_review"
+          && data.status !== "approved" && data.status !== "rejected") {
+        throw new HttpsError("failed-precondition", "Track is not reviewable.");
+      }
+      if (decision === "approved") {
+        tx.update(ref, {
+          status: "approved", storagePath: publicTrackPath(profileId, trackId),
+          rejectionReason: null, updatedAt: Date.now(),
+        });
+      } else {
+        tx.update(ref, {
+          status: "rejected", storagePath: null,
+          rejectionReason: reason!.trim(), updatedAt: Date.now(),
+        });
+      }
+      return data;
+    });
+
     const reviewFile = bucket().file(reviewTrackPath(profileId, trackId));
     const publicFile = bucket().file(publicTrackPath(profileId, trackId));
 
     if (decision === "approved") {
-      // Copy-then-delete keeps the public-path invariant: the clip appears in
-      // public/ only as part of an approval.
-      await reviewFile.copy(publicFile);
-      await reviewFile.delete().catch(() => {});
-      await ref.update({
-        status: "approved", storagePath: publicTrackPath(profileId, trackId),
-        rejectionReason: null, updatedAt: Date.now(),
-      });
+      try {
+        // Copy-then-delete keeps the public-path invariant: the clip appears
+        // in public/ only as part of an approval that already committed.
+        await reviewFile.copy(publicFile);
+      } catch (err) {
+        // The Firestore claim above already committed "approved" — if the
+        // copy itself fails, roll the doc back to pending_review (and its
+        // prior storagePath) so the track isn't left stuck "approved" with
+        // no public object behind it.
+        await ref.update({
+          status: "pending_review", storagePath: prior.storagePath ?? null, updatedAt: Date.now(),
+        }).catch(logDeleteFailure("approve rollback", `${profileId}/${trackId}`));
+        // @google-cloud/storage surfaces a missing source object as an
+        // ApiError with HTTP code 404 (unlike Firestore's gRPC code 5 used
+        // elsewhere) — the review clip was already gone (a race, or a prior
+        // partial failure that already consumed it). That's a recoverable
+        // admin action (reject + ask for a re-upload), not a server error.
+        if ((err as { code?: number }).code === 404) {
+          throw new HttpsError("failed-precondition",
+            "The review clip is missing — reject this track and ask the musician to re-upload.");
+        }
+        throw err;
+      }
+      await reviewFile.delete()
+        .catch(logDeleteFailure("review copy after approve", reviewTrackPath(profileId, trackId)));
     } else {
-      // Delete whichever copy exists: review/ for a first-time reject,
-      // public/ for a retroactive takedown of a previously approved track —
-      // allSettled rather than two guarded deletes because exactly one of
-      // the two objects exists depending on which state this track was in.
-      await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
-      await ref.update({
-        status: "rejected", storagePath: null,
-        rejectionReason: reason!.trim(), updatedAt: Date.now(),
-      });
+      const [reviewResult, publicResult] = await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
+      if (reviewResult.status === "rejected" && (reviewResult.reason as { code?: number })?.code !== 404) {
+        logDeleteFailure("reject: review delete", reviewTrackPath(profileId, trackId))(reviewResult.reason);
+      }
+      if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
+        logDeleteFailure("reject: public delete", publicTrackPath(profileId, trackId))(publicResult.reason);
+      }
+      // The doc already says "rejected" (the claim above committed it) — but
+      // if this track was previously "approved" and the PUBLIC object failed
+      // to delete for a reason other than "already gone" (404), the clip may
+      // still be publicly reachable even though the doc says otherwise.
+      // Surface that to the admin as a retryable failure instead of quietly
+      // reporting success: the transactional claim above accepts
+      // reject-from-rejected, so a second reviewTrack("rejected") call
+      // safely re-attempts the same delete.
+      if (prior.status === "approved" && publicResult.status === "rejected"
+          && (publicResult.reason as { code?: number })?.code !== 404) {
+        throw new HttpsError("unavailable",
+          "Takedown incomplete — the public clip could not be removed. Try again.");
+      }
     }
+
+    // Storage work finishes asynchronously after the transactional claim
+    // committed — deleteTrack (or deleteProfile's cascade) can race in
+    // between and remove the doc entirely. Re-read before writing an audit
+    // entry or notifying members about a track that's already gone; on
+    // approve, also clean up the public object just written (any cleanup
+    // deleteTrack/deleteProfile already did ran before this copy landed, so
+    // it can't have caught this one).
+    const postSnap = await ref.get();
+    if (!postSnap.exists) {
+      if (decision === "approved") {
+        await publicFile.delete()
+          .catch(logDeleteFailure("orphaned public (post-review race)", publicTrackPath(profileId, trackId)));
+      }
+      return { ok: true };
+    }
+
     await writeAudit({
       actorUid,
       action: decision === "approved" ? "track_approved" : "track_rejected",
+      // Reject's detail records the prior status too — a takedown trail
+      // (was "approved" and live, vs. a routine first-time reject from
+      // "pending_review") is worth more to an auditor than the reason alone.
+      detail: decision === "approved" ? (prior.title ?? "") : `[was ${prior.status}] ${reason!.trim()}`,
       targetId: `${profileId}/${trackId}`,
-      detail: decision === "rejected" ? reason!.trim() : (snap.data()?.title ?? ""),
     });
-    const title = snap.data()?.title ?? "Your track";
+    const title = prior.title ?? "Your track";
+    const wasApproved = prior.status === "approved";
     await notifyProfileMembers(profileId, {
       kind: "track_review",
-      title: decision === "approved" ? `"${title}" is live!` : `"${title}" needs attention`,
+      title: decision === "approved"
+        ? `"${title}" is live!`
+        : wasApproved ? `"${title}" was removed from your portfolio` : `"${title}" needs attention`,
       body: decision === "approved"
         ? "Your track passed review and now plays on your public portfolio."
-        : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+        : wasApproved
+          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
+          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
     });
     return { ok: true };
   });
 ```
 
+(`getFirestore`, `HttpsError`, `isValidDocId`, `reviewTrackPath`, `publicTrackPath`, and the `TrackDoc` type were already imported at the top of `tracks.ts` by Task 6.)
+
 - [ ] **Step 4: Export from `functions/src/index.ts`**
 
 ```ts
-export { createTrack, updateTrack, deleteTrack, reviewTrack } from "./tracks.js";
+export { createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack } from "./tracks.js";
 ```
 
 - [ ] **Step 5: Run tests**
 
 Run: `pnpm emu:test`
-Expected: all PASS.
+Expected: all PASS (9 test files, 89 tests once this task's 7 `reviewTrack` cases land).
 
 - [ ] **Step 6: Commit**
 
@@ -2618,6 +2792,46 @@ Expected: all PASS.
 git add functions
 git commit -m "feat(functions): reviewTrack — admin approve/reject with audit + notification"
 ```
+
+#### Quality-review hardening (folded into the Step 3/Step 1 code above)
+
+A review pass on the first cut found three gaps, closed in a single follow-up
+commit (`fix(functions): transactional review claim, recoverable approve
+failures, takedown integrity`) — the code blocks above already reflect the
+fix, not the original:
+
+1. **TOCTOU between the read-then-write precondition check and storage work.**
+   The original code did a plain `get()`, checked `status`, then did storage
+   work, then `update()` — two concurrent `reviewTrack` calls on the same
+   track could both pass the precondition check before either wrote. Fixed by
+   moving the read-check-write into a Firestore transaction that runs BEFORE
+   any storage I/O and returns the prior doc data; storage work (and any
+   rollback) happens after the claim has already committed.
+2. **Approve had no failure path.** `reviewFile.copy(publicFile)` was
+   unguarded — a failed copy (e.g. the review clip already gone) left the doc
+   permanently `approved` with no object behind it, and the caller got an
+   opaque 500. Fixed by wrapping the copy in try/catch: on any failure the
+   transactional claim is rolled back to `pending_review` (restoring the
+   prior `storagePath`), and a missing-source (HTTP 404) collapses to a
+   specific, actionable `failed-precondition`.
+3. **Reject could silently under-deliver on a retroactive takedown.** The
+   original reject path used `Promise.allSettled` and never inspected the
+   results — if the PUBLIC object's delete failed (not 404) after an
+   already-approved track was rejected, the doc would say "rejected" while
+   the clip stayed live, with nothing surfaced to the admin. Fixed by
+   inspecting both delete results, logging non-404 failures, and throwing
+   `unavailable` specifically when the previously-live public object failed
+   to delete — recoverable because the transactional claim now also accepts
+   reject-from-rejected as an idempotent retry.
+
+**Accepted product decision (v1):** a retroactive takedown (`reviewTrack`
+`rejected` on a previously `approved` track) can drop an approved *profile*
+below the submit-time minimum-content bar that Task 9 adds (e.g. rejecting a
+musician's only track leaves zero tracks). The profile itself stays
+`approved`/public regardless — the minimum-content gate in Task 9 only runs
+at submit time, not continuously. Re-enforcing it on every track mutation is
+out of scope for this sub-project; noted here for whoever picks up curator
+discovery/quality signals later.
 
 ---
 
@@ -2703,6 +2917,7 @@ Add imports:
 ```ts
 import type { PortfolioData } from "@gatekeep/shared";
 import { bucket } from "./storage.js";
+import { ACTIVE_TRACK_STATUSES } from "./tracks.js";
 ```
 
 In `submitProfileForReview`, after the status check and before the `ref.update`:
@@ -2717,7 +2932,9 @@ In `submitProfileForReview`, after the status check and before the `ref.update`:
     if (!p?.genres?.length) missing.push("at least one genre");
     if (!p?.avatarPhotoPath) missing.push("a profile photo");
     const tracks = await ref.collection("tracks").get();
-    if (!tracks.docs.some((t) => ["processing", "pending_review", "approved"].includes(t.data().status))) {
+    // ACTIVE_TRACK_STATUSES (imported from tracks.ts, not re-hardcoded here)
+    // is the same "occupies one of the 10 slots" list createTrack enforces.
+    if (!tracks.docs.some((t) => (ACTIVE_TRACK_STATUSES as readonly string[]).includes(t.data().status))) {
       missing.push("at least one track");
     }
     if (missing.length > 0) {
@@ -2737,6 +2954,18 @@ In `deleteProfile`, after `recursiveDelete` (which already removes the tracks su
     bucket().deleteFiles({ prefix: `public/photos/${profileId}/` }),
   ]);
 ```
+
+**Race-closing note (added post Task-8 hardening):** this storage cascade and
+Task 8's `reviewTrack` post-storage-guard are a matched pair. Without the
+guard, a `reviewTrack("approved")` that's mid-copy when `deleteProfile` runs
+here could land a new object in `public/tracks/{profileId}/` *after* this
+`deleteFiles({ prefix: ... })` sweep already ran, orphaning it forever (the
+doc — and thus every other cleanup path that keys off it — is already gone).
+`reviewTrack`'s post-storage guard (re-read the track doc; if it no longer
+exists, delete the public object it just wrote) closes that specific
+approve-after-delete window from the other side. Neither half is sufficient
+alone: this cascade handles tracks that were already public before the
+delete; the guard handles one that lands mid-flight during it.
 
 - [ ] **Step 4: Run tests**
 
@@ -3664,7 +3893,68 @@ function TracksQueue() {
 }
 ```
 
-Render it in `AdminPage` between `<Queue />` and `<UserLookup />`: `<Queue /><TracksQueue /><UserLookup /><AuditLog />`.
+- [ ] **Step 1b: Add a `TakedownsPanel` section (sketch — refine when this task is actually implemented)**
+
+`reviewTrack` (Task 8) accepts `decision: "rejected"` on an already-`approved`
+track as a retroactive takedown (spec §6: "admins can retroactively
+unpublish"), but as of Task 8 that path is backend-only — nothing in the
+admin UI can reach it, since `TracksQueue` above only ever lists
+`pending_review` tracks. Below the pending queue, add a small handle-lookup
+panel: type a profile's `@handle`, see its currently-`approved` tracks, and
+remove one with a reason (same `reviewTrack` call, `decision: "rejected"`).
+Concise sketch — not production code, full implementation is this task's job:
+
+```tsx
+function TakedownsPanel() {
+  const [handle, setHandle] = useState("");
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [tracks, setTracks] = useState<(TrackDoc & { id: string })[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const lookup = async () => {
+    const { db } = getFirebase();
+    const h = await getDoc(doc(db, `handles/${handle.trim().toLowerCase()}`));
+    if (!h.exists()) { window.alert("No profile with that handle."); return; }
+    const pid = (h.data() as { profileId: string }).profileId;
+    setProfileId(pid);
+    const snap = await getDocs(query(
+      collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved")));
+    setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+  };
+
+  const remove = async (trackId: string) => {
+    if (!profileId) return;
+    const reason = window.prompt("Takedown reason (shown to the musician):");
+    if (!reason) return;
+    setBusyId(trackId);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewTrack")(
+        { profileId, trackId, decision: "rejected", reason });
+      setTracks((ts) => ts.filter((t) => t.id !== trackId));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
+    } finally { setBusyId(null); }
+  };
+
+  return (
+    <section>
+      <h2>Takedowns</h2>
+      <p>Retroactively remove a live track from an approved profile (spec §6).</p>
+      <input value={handle} onChange={(e) => setHandle(e.target.value)} placeholder="@handle" />
+      <button onClick={lookup}>Look up</button>
+      {tracks.map((t) => (
+        <div key={t.id} style={{ marginTop: 4 }}>
+          {t.title}{" "}
+          <button disabled={busyId === t.id} onClick={() => remove(t.id)}>Remove…</button>
+        </div>
+      ))}
+      {profileId && tracks.length === 0 && <p>No approved tracks.</p>}
+    </section>
+  );
+}
+```
+
+Render it in `AdminPage` between `<Queue />` and `<UserLookup />`, after `TracksQueue`: `<Queue /><TracksQueue /><TakedownsPanel /><UserLookup /><AuditLog />`.
 
 - [ ] **Step 2: Verify**
 

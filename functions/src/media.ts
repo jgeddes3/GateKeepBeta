@@ -10,7 +10,7 @@ import ffmpegPathRaw from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 import sharp from "sharp";
 import { reviewTrackPath, publicPhotoPath, isValidDocId, MAX_CLIP_SECONDS } from "@gatekeep/shared";
-import { STORAGE_BUCKET, bucket } from "./storage.js";
+import { STORAGE_BUCKET, bucket, logDeleteFailure } from "./storage.js";
 
 const run = promisify(execFile);
 
@@ -28,15 +28,6 @@ const SUBPROCESS_TIMEOUT_MS = 120_000;
 // string (or null) per Node's CJS/ESM interop, so assert the real type here
 // rather than trust the inferred one.
 const ffmpegPath = ffmpegPathRaw as unknown as string | null;
-
-// Every best-effort storage cleanup in this module goes through here instead
-// of a bare `.catch(() => {})` — a cleanup that silently fails (quota, a
-// permissions drift, an emulator hiccup) previously left no trace anywhere.
-// Still non-fatal: logging, never rethrowing, so a cleanup failure can never
-// turn into a stuck/duplicate-processed object.
-function logDeleteFailure(phase: string, path: string) {
-  return (e: unknown) => console.error(`processUpload: ${phase} cleanup failed`, path, e);
-}
 
 // Thrown only for conditions with a controlled, safe-to-display message (no
 // file paths, no ffmpeg/ffprobe stderr) — every other error in processAudio
