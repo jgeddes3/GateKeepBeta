@@ -320,6 +320,17 @@ Same base environment as sub-project 2 (see `sp2-rulings.md`), plus:
   warnings only), web build, mobile `npx expo export --platform ios`. Full evidence in Task 14's
   report (`.superpowers/sdd/2026-08-26-curator-gigs/task-14-report.md`).
 
+## USER DECISION (2026-08-26): booking visibility is musician-controlled — resolves M-13
+
+Sub-project 4 MUST implement musician-controlled booking visibility: musicians set their own
+booking rates/preferences AND mark which parts they want public. Public-marked parts are openly
+visible; everything else stays restricted. This supersedes the blanket
+`isApprovedCuratorMember()` read on `profiles/{id}/private/booking` as the long-term model — the
+curatorAccess mechanism becomes (at most) the access tier for non-public fields, and the one-hop
+delegation concern (M-13) is resolved by the musician, not the platform, deciding exposure.
+Design the visibility split (per-rate? per-field? public/curators-only/private tiers?) during
+sub-4 brainstorming.
+
 ## Post-gate follow-ups (from the fix-wave re-review — file with sub-4)
 
 - Sweep step 5 (curatorAccess retries): add a per-doc try/catch inside the drain loop — a
