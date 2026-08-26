@@ -1,19 +1,40 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystemLegacy from "expo-file-system/legacy";
 import Slider from "@react-native-community/slider";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
-  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput,
+  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, type CreateTrackInput,
 } from "@gatekeep/shared";
 
 const UNREADABLE_MSG = "Couldn't read that audio file — try mp3, wav, m4a, aac, flac, or ogg.";
 const UNSUPPORTED_MSG = "Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.";
+// RULING (mobile-only, v1): upload() has no native streaming yet — it reads
+// the whole picked file into memory via fetch().blob(), and the Firebase JS
+// SDK's chunked resumable upload roughly doubles peak memory while that
+// blob is in flight. That's a real Android OOM risk well under the
+// SERVER's actual 50 MB cap (MAX_AUDIO_UPLOAD_BYTES, enforced by
+// validateTrackCreate/shared and unchanged), so mobile enforces a
+// stricter, client-only ceiling for now. Web is unchanged. Follow-up (Task
+// 16): switch to expo-file-system's uploadAsync for native streaming and
+// lift this cap.
+const MOBILE_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MOBILE_SIZE_MSG = "On this device, audio files must be under 25 MB — use the web app for larger files.";
+// How long to wait, after a pick, for expo-audio to report either a real
+// duration or an error before giving up on a file that's silently stuck.
+const LOAD_TIMEOUT_MS = 15_000;
 
-type Picked = { uri: string; name: string; size: number; mimeType: string };
+type Picked = {
+  uri: string; name: string; mimeType: string;
+  // null when neither expo-file-system nor the picker itself could confirm
+  // a byte count at pick time (rare) — upload() resolves it from the
+  // actually-fetched blob before doing anything server-side.
+  size: number | null;
+};
 
 // Pick a local audio file, preview it, drag the 30s window, upload the original.
 // The server pipeline trims/transcodes; we never keep the full track.
@@ -28,8 +49,16 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   // "loaded, but permanently unusable" so the effect fires its alert exactly
   // once per bad pick instead of on every subsequent status tick.
   const [invalid, setInvalid] = useState(false);
+  // Persistent, visible alongside the (dismissable) Alert — a musician who
+  // dismissed the alert shouldn't be left staring at a picker with no clue
+  // why nothing happened next. Cleared whenever a new pick attempt starts.
+  const [error, setError] = useState<string | null>(null);
 
-  const player = useAudioPlayer(picked ? { uri: picked.uri } : null);
+  // updateInterval: 100, not the 500ms default — the preview-stop effect
+  // below compares status.currentTime against the window end every tick;
+  // the default interval lets playback run up to half a second past the
+  // 30s boundary before it notices.
+  const player = useAudioPlayer(picked ? { uri: picked.uri } : null, { updateInterval: 100 });
   const status = useAudioPlayerStatus(player);
 
   // A NEW `picked.uri` always produces a brand-new native AudioPlayer instance
@@ -49,18 +78,37 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   // "clip" isn't practically previewable or trimmable either.
   const duration = !invalid && Number.isFinite(rawDuration) && rawDuration >= 1 ? rawDuration : 0;
 
+  const flagInvalid = useCallback((msg: string) => {
+    setInvalid(true);
+    setError(msg);
+    Alert.alert("Couldn't read that file", msg);
+  }, []);
+
   useEffect(() => {
     if (!picked || invalid) return;
-    if (status.error) {
-      setInvalid(true);
-      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
-      return;
+    if (status.error) { flagInvalid(UNREADABLE_MSG); return; }
+    // expo-audio's AudioStatus.duration is 0 "until determined" — that can
+    // still be true even after isLoaded flips (per expo-audio's docs), so a
+    // bare `duration < 1` check would misjudge a file that just hasn't
+    // reported its length YET as unreadable. Only judge validity once a
+    // REAL (nonzero) duration has actually come back.
+    if (status.duration > 0 && (!Number.isFinite(status.duration) || status.duration < 1)) {
+      flagInvalid(UNREADABLE_MSG);
     }
-    if (status.isLoaded && (!Number.isFinite(status.duration) || status.duration < 1)) {
-      setInvalid(true);
-      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
-    }
-  }, [picked, invalid, status.error, status.isLoaded, status.duration]);
+  }, [picked, invalid, status.error, status.duration, flagInvalid]);
+
+  // Bounds the wait: a file that's neither erroring nor reporting a usable
+  // duration within 15s (e.g. a container expo-audio can open but never
+  // finishes probing) would otherwise leave the picker showing nothing,
+  // forever, with no feedback — the same silent-dead-UI risk PhotoUploader's
+  // 60s timeout guards against. Cleared as soon as the file resolves either
+  // way (duration > 0, or the effect above already flagged it invalid) or a
+  // new file is picked.
+  useEffect(() => {
+    if (!picked || invalid || duration > 0) return;
+    const t = setTimeout(() => flagInvalid(UNREADABLE_MSG), LOAD_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [picked, invalid, duration, flagInvalid]);
 
   // Stop preview at the end of the 30s window.
   useEffect(() => {
@@ -70,6 +118,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   }, [status.currentTime, status.playing, startSec, duration, player]);
 
   const pick = async () => {
+    setError(null);
     const res = await DocumentPicker.getDocumentAsync({ type: "audio/*", copyToCacheDirectory: true });
     if (res.canceled || !res.assets[0]) return;
     const a = res.assets[0];
@@ -80,15 +129,33 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
     // actual container/codec from the bytes. This is only a cheap
     // client-side triage.
     if (a.mimeType && !(AUDIO_CONTENT_TYPES as readonly string[]).includes(a.mimeType)) {
+      setError(UNSUPPORTED_MSG);
       Alert.alert("Unsupported format", UNSUPPORTED_MSG);
       return;
     }
-    if ((a.size ?? 0) > MAX_AUDIO_UPLOAD_BYTES) {
-      Alert.alert("Too big", "Audio files must be under 50 MB.");
+    // DocumentPickerAsset.size is OPTIONAL on Android — `a.size ?? 0` would
+    // silently bypass the cap below and go on to send sizeBytes: 0 to
+    // createTrack, producing a confusing "at most 50 MB" server error for a
+    // file that was never actually oversized. The file was just copied to
+    // cache (copyToCacheDirectory: true), so it's guaranteed to exist
+    // locally — ask expo-file-system for its real, authoritative byte
+    // count instead of trusting the picker's self-reported size.
+    let size: number | null = null;
+    try {
+      const info = await FileSystemLegacy.getInfoAsync(a.uri);
+      if (info.exists && info.size) size = info.size;
+    } catch {
+      // Fall through to the picker's own size, then to upload()'s
+      // blob.size re-check.
+    }
+    if (size === null && typeof a.size === "number" && a.size > 0) size = a.size;
+    if (size !== null && size > MOBILE_MAX_AUDIO_BYTES) {
+      setError(MOBILE_SIZE_MSG);
+      Alert.alert("Too big", MOBILE_SIZE_MSG);
       return;
     }
     setInvalid(false);
-    setPicked({ uri: a.uri, name: a.name, size: a.size ?? 0, mimeType: a.mimeType ?? "" });
+    setPicked({ uri: a.uri, name: a.name, size, mimeType: a.mimeType ?? "" });
     setStartSec(0);
     if (!title) setTitle(a.name.replace(/\.[^.]+$/, ""));
   };
@@ -99,12 +166,35 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
 
   const upload = async () => {
     if (!picked) return;
+    // Neither expo-file-system nor the picker could confirm a byte count at
+    // pick time (rare) — resolve it now from the actual fetched bytes and
+    // re-check the mobile cap BEFORE ever asking the server to create a
+    // track doc for a file that turns out to be oversized.
+    let sizeBytes = picked.size;
+    let prefetchedBlob: Blob | null = null;
+    if (sizeBytes === null) {
+      prefetchedBlob = await (await fetch(picked.uri)).blob();
+      sizeBytes = prefetchedBlob.size;
+      if (sizeBytes > MOBILE_MAX_AUDIO_BYTES) {
+        setError(MOBILE_SIZE_MSG);
+        Alert.alert("Too big", MOBILE_SIZE_MSG);
+        return;
+      }
+    }
+    // Never send a non-positive size — createTrack's validator would reject
+    // it anyway, but catching it here keeps the message specific to what
+    // actually went wrong instead of a generic validation failure.
+    if (sizeBytes < 1) {
+      setError(UNREADABLE_MSG);
+      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
+      return;
+    }
     const input: CreateTrackInput = {
       profileId, title: title.trim(), startSec: Math.floor(startSec),
       // picked.mimeType can legitimately be "" (see pick()'s comment above) —
       // fall back to a generic-but-sniffable contentType rather than sending
       // an empty string the server would reject outright.
-      sizeBytes: picked.size, contentType: picked.mimeType || "audio/mpeg",
+      sizeBytes, contentType: picked.mimeType || "audio/mpeg",
     };
     const v = validateTrackCreate(input);
     if (!v.ok) { Alert.alert("Check your track", v.reason); return; }
@@ -120,7 +210,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
       const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
         functions, "createTrack")(input);
       created = data;
-      const blob = await (await fetch(picked.uri)).blob();
+      const blob = prefetchedBlob ?? await (await fetch(picked.uri)).blob();
       const task = uploadBytesResumable(storageRef(storage, data.uploadPath), blob,
         { contentType: input.contentType });
       task.on("state_changed",
@@ -151,7 +241,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
       }
       return;
     }
-    setBusy(null); setPicked(null); setTitle(""); setInvalid(false);
+    setBusy(null); setPicked(null); setTitle(""); setInvalid(false); setError(null);
     onDone?.();
   };
 
@@ -170,6 +260,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
         style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
         <Text>{picked ? picked.name : "Choose audio file…"}</Text>
       </Pressable>
+      {error && <Text style={{ color: "#dc2626" }}>{error}</Text>}
       {picked && duration > 0 && (
         <>
           <TextInput placeholder="Track title" value={title} onChangeText={setTitle} maxLength={80}
@@ -180,7 +271,8 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
             <>
               <Text>Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})</Text>
               <Slider minimumValue={0} maximumValue={sliderMax} step={1}
-                value={startSec} onValueChange={setStartSec} />
+                value={startSec} onValueChange={setStartSec}
+                accessibilityLabel="Clip window start time" accessibilityRole="adjustable" />
             </>
           )}
           <View style={{ flexDirection: "row", gap: 8 }}>

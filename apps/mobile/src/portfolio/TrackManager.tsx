@@ -35,10 +35,13 @@ export function TrackManager({ profileId }: { profileId: string }) {
       (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
   }, [profileId]);
 
-  const call = async (name: string, data: object) => {
+  // Returns whether the call succeeded so callers that need to react to a
+  // failure (saveRename re-opening its edit UI below) can, without every
+  // fire-and-forget caller having to handle a return value it doesn't need.
+  const call = async (name: string, data: object): Promise<boolean> => {
     setBusy(true);
-    try { await httpsCallable(getFirebase().functions, name)(data); }
-    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); }
+    try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); return false; }
     finally { setBusy(false); }
   };
 
@@ -55,13 +58,18 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
   const startRename = (t: Row) => { setRenamingId(t.id); setRenameText(t.title); };
   // Exits rename mode immediately (mirroring a native prompt dismissing
-  // itself synchronously) rather than waiting on the async call — if it
-  // fails, the Alert inside call() explains why and the musician can tap
-  // Rename again.
+  // itself synchronously) rather than waiting on the async call — the Alert
+  // inside call() explains a failure, and re-opening below (pre-filled with
+  // exactly what was typed, stashed BEFORE closing) means the musician
+  // doesn't have to retype it after a transient network/server error.
   const saveRename = (trackId: string) => {
-    const title = renameText.trim();
+    const typed = renameText;
+    const title = typed.trim();
     setRenamingId(null);
-    if (title) void call("updateTrack", { profileId, trackId, title });
+    if (!title) return;
+    void call("updateTrack", { profileId, trackId, title }).then((ok) => {
+      if (!ok) { setRenamingId(trackId); setRenameText(typed); }
+    });
   };
 
   return (
@@ -83,6 +91,7 @@ export function TrackManager({ profileId }: { profileId: string }) {
           {renamingId === t.id ? (
             <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
               <TextInput value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
+                returnKeyType="done" onSubmitEditing={() => saveRename(t.id)}
                 style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
               <Pressable disabled={busy} onPress={() => saveRename(t.id)}>
                 <Text style={{ fontWeight: "600" }}>Save</Text>

@@ -5135,41 +5135,107 @@ shipped, `expo install` auto-registered an `"expo-audio"` entry in
 no plugin changes for playback-only use, that's what `expo install` did on
 SDK 57, so it was kept.)
 
+A later quality-review fix pass (see Step 2's `TrimUploader.tsx` below) also
+needed `expo-file-system`, added the same way:
+```bash
+npx expo install expo-file-system
+```
+No `app.json` plugin registration resulted from this one.
+
 - [ ] **Step 2: Create `apps/mobile/src/portfolio/TrimUploader.tsx`**
 
-Final code — ported from the review-hardened web components; see the
-DO-NOT-COPY checklist above. Decode errors and non-finite/sub-1s durations
-are detected via expo-audio's `status.error`/`status.isLoaded` (folded
-into a derived `duration`, so a bad file renders as "still loading,"
-never as usable); there is no separate local duration state to go stale
-on a re-pick, since a new `picked.uri` always spins up a fresh native
-`AudioPlayer` (unlike web's single `<audio>` element, whose `duration`
-state had to be manually reset); the trim window is clamped to
-`duration - MAX_CLIP_SECONDS` with a whole-file branch (covers the
-duration-just-over-30s degenerate case too); and `upload()`'s `try`
-closes immediately after the storage upload resolves, with every
-success-path side effect — including `onDone()` — outside it, so the
-`catch` only runs `deleteTrack` cleanup when `created` is set (the
-upload itself didn't finish), never for a downstream throw after a
-completed upload:
+Final code — ported from the review-hardened web components, plus a
+mobile-only fix pass (quality review after the first cut of this file);
+see the DO-NOT-COPY checklist above. Decode errors and non-finite/
+sub-1s durations are detected via expo-audio's `status.error` and
+`status.duration` (folded into a derived `duration`, so a bad file
+renders as "still loading," never as usable) — but validity is only
+judged once `status.duration > 0`: expo-audio's `AudioStatus.duration`
+is 0 "until determined," including for a while after `isLoaded` flips,
+so gating on `isLoaded` alone (an earlier version of this file did)
+misjudges a file that simply hasn't reported its length YET as
+unreadable. A 15s bounded timer (mirroring `PhotoUploader`'s 60s
+timeout) catches the remaining case — a file that's neither erroring
+nor resolving a duration at all — instead of leaving the picker dead
+with no feedback. There is no separate local duration state to go
+stale on a re-pick, since a new `picked.uri` always spins up a fresh
+native `AudioPlayer` (unlike web's single `<audio>` element, whose
+`duration` state had to be manually reset). `useAudioPlayer` is called
+with `{ updateInterval: 100 }` (not the 500ms default) so the
+preview-stop effect can't overrun the 30s window by up to half a
+second. The trim window is clamped to `duration - MAX_CLIP_SECONDS`
+with a whole-file branch (covers the duration-just-over-30s degenerate
+case too). `upload()`'s `try` closes immediately after the storage
+upload resolves, with every success-path side effect — including
+`onDone()` — outside it, so the `catch` only runs `deleteTrack` cleanup
+when `created` is set (the upload itself didn't finish), never for a
+downstream throw after a completed upload.
+
+Two more things worth flagging for whoever reads this later:
+- **File size.** `DocumentPickerAsset.size` is optional on Android —
+  trusting `a.size ?? 0` would silently bypass every size check below
+  and could send `sizeBytes: 0` to `createTrack`. `pick()` instead asks
+  `expo-file-system`'s legacy `getInfoAsync` (imported from
+  `"expo-file-system/legacy"` — the un-suffixed `expo-file-system`
+  entry point's `getInfoAsync` is a deprecated shim that throws at
+  runtime in this SDK) for the real byte count on disk, falls back to
+  the picker's own `a.size`, and — if NEITHER is available — defers to
+  `blob.size` after the fetch inside `upload()`, re-checking the cap
+  there before `createTrack` is ever called.
+- **Mobile cap is 25 MB, not 50 MB.** RULING: `upload()` has no native
+  streaming yet — it reads the whole file into memory via
+  `fetch().blob()`, and the Firebase JS SDK's chunked resumable upload
+  roughly doubles peak memory while that blob is in flight. That's a
+  real Android OOM risk well under the server's actual 50 MB cap
+  (`MAX_AUDIO_UPLOAD_BYTES`, shared/enforced server-side, unchanged;
+  web is unchanged too). `MOBILE_MAX_AUDIO_BYTES` is a client-only 25 MB
+  ceiling for v1. Follow-up in Task 16: switch to expo-file-system's
+  `uploadAsync` for native streaming and lift this cap.
+
+A persistent inline error `<Text>` under the picker (cleared on every
+new pick attempt) backs up the Alert for the unsupported/unreadable/
+oversize cases, so dismissing the alert doesn't leave the musician
+staring at a picker with no visible explanation. The trim `Slider` also
+carries an `accessibilityLabel`:
 
 ```tsx
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystemLegacy from "expo-file-system/legacy";
 import Slider from "@react-native-community/slider";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
-  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput,
+  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, type CreateTrackInput,
 } from "@gatekeep/shared";
 
 const UNREADABLE_MSG = "Couldn't read that audio file — try mp3, wav, m4a, aac, flac, or ogg.";
 const UNSUPPORTED_MSG = "Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.";
+// RULING (mobile-only, v1): upload() has no native streaming yet — it reads
+// the whole picked file into memory via fetch().blob(), and the Firebase JS
+// SDK's chunked resumable upload roughly doubles peak memory while that
+// blob is in flight. That's a real Android OOM risk well under the
+// SERVER's actual 50 MB cap (MAX_AUDIO_UPLOAD_BYTES, enforced by
+// validateTrackCreate/shared and unchanged), so mobile enforces a
+// stricter, client-only ceiling for now. Web is unchanged. Follow-up (Task
+// 16): switch to expo-file-system's uploadAsync for native streaming and
+// lift this cap.
+const MOBILE_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MOBILE_SIZE_MSG = "On this device, audio files must be under 25 MB — use the web app for larger files.";
+// How long to wait, after a pick, for expo-audio to report either a real
+// duration or an error before giving up on a file that's silently stuck.
+const LOAD_TIMEOUT_MS = 15_000;
 
-type Picked = { uri: string; name: string; size: number; mimeType: string };
+type Picked = {
+  uri: string; name: string; mimeType: string;
+  // null when neither expo-file-system nor the picker itself could confirm
+  // a byte count at pick time (rare) — upload() resolves it from the
+  // actually-fetched blob before doing anything server-side.
+  size: number | null;
+};
 
 // Pick a local audio file, preview it, drag the 30s window, upload the original.
 // The server pipeline trims/transcodes; we never keep the full track.
@@ -5184,8 +5250,16 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   // "loaded, but permanently unusable" so the effect fires its alert exactly
   // once per bad pick instead of on every subsequent status tick.
   const [invalid, setInvalid] = useState(false);
+  // Persistent, visible alongside the (dismissable) Alert — a musician who
+  // dismissed the alert shouldn't be left staring at a picker with no clue
+  // why nothing happened next. Cleared whenever a new pick attempt starts.
+  const [error, setError] = useState<string | null>(null);
 
-  const player = useAudioPlayer(picked ? { uri: picked.uri } : null);
+  // updateInterval: 100, not the 500ms default — the preview-stop effect
+  // below compares status.currentTime against the window end every tick;
+  // the default interval lets playback run up to half a second past the
+  // 30s boundary before it notices.
+  const player = useAudioPlayer(picked ? { uri: picked.uri } : null, { updateInterval: 100 });
   const status = useAudioPlayerStatus(player);
 
   // A NEW `picked.uri` always produces a brand-new native AudioPlayer instance
@@ -5205,18 +5279,37 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   // "clip" isn't practically previewable or trimmable either.
   const duration = !invalid && Number.isFinite(rawDuration) && rawDuration >= 1 ? rawDuration : 0;
 
+  const flagInvalid = useCallback((msg: string) => {
+    setInvalid(true);
+    setError(msg);
+    Alert.alert("Couldn't read that file", msg);
+  }, []);
+
   useEffect(() => {
     if (!picked || invalid) return;
-    if (status.error) {
-      setInvalid(true);
-      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
-      return;
+    if (status.error) { flagInvalid(UNREADABLE_MSG); return; }
+    // expo-audio's AudioStatus.duration is 0 "until determined" — that can
+    // still be true even after isLoaded flips (per expo-audio's docs), so a
+    // bare `duration < 1` check would misjudge a file that just hasn't
+    // reported its length YET as unreadable. Only judge validity once a
+    // REAL (nonzero) duration has actually come back.
+    if (status.duration > 0 && (!Number.isFinite(status.duration) || status.duration < 1)) {
+      flagInvalid(UNREADABLE_MSG);
     }
-    if (status.isLoaded && (!Number.isFinite(status.duration) || status.duration < 1)) {
-      setInvalid(true);
-      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
-    }
-  }, [picked, invalid, status.error, status.isLoaded, status.duration]);
+  }, [picked, invalid, status.error, status.duration, flagInvalid]);
+
+  // Bounds the wait: a file that's neither erroring nor reporting a usable
+  // duration within 15s (e.g. a container expo-audio can open but never
+  // finishes probing) would otherwise leave the picker showing nothing,
+  // forever, with no feedback — the same silent-dead-UI risk PhotoUploader's
+  // 60s timeout guards against. Cleared as soon as the file resolves either
+  // way (duration > 0, or the effect above already flagged it invalid) or a
+  // new file is picked.
+  useEffect(() => {
+    if (!picked || invalid || duration > 0) return;
+    const t = setTimeout(() => flagInvalid(UNREADABLE_MSG), LOAD_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [picked, invalid, duration, flagInvalid]);
 
   // Stop preview at the end of the 30s window.
   useEffect(() => {
@@ -5226,6 +5319,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   }, [status.currentTime, status.playing, startSec, duration, player]);
 
   const pick = async () => {
+    setError(null);
     const res = await DocumentPicker.getDocumentAsync({ type: "audio/*", copyToCacheDirectory: true });
     if (res.canceled || !res.assets[0]) return;
     const a = res.assets[0];
@@ -5236,15 +5330,33 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
     // actual container/codec from the bytes. This is only a cheap
     // client-side triage.
     if (a.mimeType && !(AUDIO_CONTENT_TYPES as readonly string[]).includes(a.mimeType)) {
+      setError(UNSUPPORTED_MSG);
       Alert.alert("Unsupported format", UNSUPPORTED_MSG);
       return;
     }
-    if ((a.size ?? 0) > MAX_AUDIO_UPLOAD_BYTES) {
-      Alert.alert("Too big", "Audio files must be under 50 MB.");
+    // DocumentPickerAsset.size is OPTIONAL on Android — `a.size ?? 0` would
+    // silently bypass the cap below and go on to send sizeBytes: 0 to
+    // createTrack, producing a confusing "at most 50 MB" server error for a
+    // file that was never actually oversized. The file was just copied to
+    // cache (copyToCacheDirectory: true), so it's guaranteed to exist
+    // locally — ask expo-file-system for its real, authoritative byte
+    // count instead of trusting the picker's self-reported size.
+    let size: number | null = null;
+    try {
+      const info = await FileSystemLegacy.getInfoAsync(a.uri);
+      if (info.exists && info.size) size = info.size;
+    } catch {
+      // Fall through to the picker's own size, then to upload()'s
+      // blob.size re-check.
+    }
+    if (size === null && typeof a.size === "number" && a.size > 0) size = a.size;
+    if (size !== null && size > MOBILE_MAX_AUDIO_BYTES) {
+      setError(MOBILE_SIZE_MSG);
+      Alert.alert("Too big", MOBILE_SIZE_MSG);
       return;
     }
     setInvalid(false);
-    setPicked({ uri: a.uri, name: a.name, size: a.size ?? 0, mimeType: a.mimeType ?? "" });
+    setPicked({ uri: a.uri, name: a.name, size, mimeType: a.mimeType ?? "" });
     setStartSec(0);
     if (!title) setTitle(a.name.replace(/\.[^.]+$/, ""));
   };
@@ -5255,12 +5367,35 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
 
   const upload = async () => {
     if (!picked) return;
+    // Neither expo-file-system nor the picker could confirm a byte count at
+    // pick time (rare) — resolve it now from the actual fetched bytes and
+    // re-check the mobile cap BEFORE ever asking the server to create a
+    // track doc for a file that turns out to be oversized.
+    let sizeBytes = picked.size;
+    let prefetchedBlob: Blob | null = null;
+    if (sizeBytes === null) {
+      prefetchedBlob = await (await fetch(picked.uri)).blob();
+      sizeBytes = prefetchedBlob.size;
+      if (sizeBytes > MOBILE_MAX_AUDIO_BYTES) {
+        setError(MOBILE_SIZE_MSG);
+        Alert.alert("Too big", MOBILE_SIZE_MSG);
+        return;
+      }
+    }
+    // Never send a non-positive size — createTrack's validator would reject
+    // it anyway, but catching it here keeps the message specific to what
+    // actually went wrong instead of a generic validation failure.
+    if (sizeBytes < 1) {
+      setError(UNREADABLE_MSG);
+      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
+      return;
+    }
     const input: CreateTrackInput = {
       profileId, title: title.trim(), startSec: Math.floor(startSec),
       // picked.mimeType can legitimately be "" (see pick()'s comment above) —
       // fall back to a generic-but-sniffable contentType rather than sending
       // an empty string the server would reject outright.
-      sizeBytes: picked.size, contentType: picked.mimeType || "audio/mpeg",
+      sizeBytes, contentType: picked.mimeType || "audio/mpeg",
     };
     const v = validateTrackCreate(input);
     if (!v.ok) { Alert.alert("Check your track", v.reason); return; }
@@ -5276,7 +5411,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
       const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
         functions, "createTrack")(input);
       created = data;
-      const blob = await (await fetch(picked.uri)).blob();
+      const blob = prefetchedBlob ?? await (await fetch(picked.uri)).blob();
       const task = uploadBytesResumable(storageRef(storage, data.uploadPath), blob,
         { contentType: input.contentType });
       task.on("state_changed",
@@ -5307,7 +5442,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
       }
       return;
     }
-    setBusy(null); setPicked(null); setTitle(""); setInvalid(false);
+    setBusy(null); setPicked(null); setTitle(""); setInvalid(false); setError(null);
     onDone?.();
   };
 
@@ -5326,6 +5461,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
         style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
         <Text>{picked ? picked.name : "Choose audio file…"}</Text>
       </Pressable>
+      {error && <Text style={{ color: "#dc2626" }}>{error}</Text>}
       {picked && duration > 0 && (
         <>
           <TextInput placeholder="Track title" value={title} onChangeText={setTitle} maxLength={80}
@@ -5336,7 +5472,8 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
             <>
               <Text>Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})</Text>
               <Slider minimumValue={0} maximumValue={sliderMax} step={1}
-                value={startSec} onValueChange={setStartSec} />
+                value={startSec} onValueChange={setStartSec}
+                accessibilityLabel="Clip window start time" accessibilityRole="adjustable" />
             </>
           )}
           <View style={{ flexDirection: "row", gap: 8 }}>
@@ -5360,15 +5497,24 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
 
 - [ ] **Step 3: Create `apps/mobile/src/portfolio/TrackManager.tsx`**
 
-Final code — ported from the review-hardened web components; see the
-DO-NOT-COPY checklist above. `MAX_TRACKS` comes from `@gatekeep/shared`
-instead of a hardcoded `10`. A single `busy` flag locks every row action
-(reorder/rename/delete) while any call is in flight, for the same reason
-web's `TrackManager` does: `reorderTracks` swaps two rows at once, so a
-per-row lock wouldn't stop a second tap from racing the first move's
-still-in-flight call against a still-stale `tracks` array. Rename is an
-inline `TextInput` edit, not a ported `window.prompt` — RN's
-`Alert.prompt` is iOS-only and silently no-ops on Android:
+Final code — ported from the review-hardened web components, plus a
+mobile-only fix pass; see the DO-NOT-COPY checklist above.
+`MAX_TRACKS` comes from `@gatekeep/shared` instead of a hardcoded `10`.
+A single `busy` flag locks every row action (reorder/rename/delete)
+while any call is in flight, for the same reason web's `TrackManager`
+does: `reorderTracks` swaps two rows at once, so a per-row lock
+wouldn't stop a second tap from racing the first move's still-in-flight
+call against a still-stale `tracks` array. Rename is an inline
+`TextInput` edit, not a ported `window.prompt` — RN's `Alert.prompt` is
+iOS-only and silently no-ops on Android. `call()` returns whether it
+succeeded so `saveRename` can react to a failure: it stashes exactly
+what the musician typed BEFORE closing the edit UI (mirroring a native
+prompt dismissing itself synchronously), and if `updateTrack` then
+fails, re-opens the same row pre-filled with that stashed text instead
+of silently dropping it — a musician who typed a rename during a
+network blip shouldn't have to retype it. The rename `TextInput` also
+wires `returnKeyType="done"` + `onSubmitEditing` to save without an
+extra tap to dismiss the keyboard first:
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -5408,10 +5554,13 @@ export function TrackManager({ profileId }: { profileId: string }) {
       (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
   }, [profileId]);
 
-  const call = async (name: string, data: object) => {
+  // Returns whether the call succeeded so callers that need to react to a
+  // failure (saveRename re-opening its edit UI below) can, without every
+  // fire-and-forget caller having to handle a return value it doesn't need.
+  const call = async (name: string, data: object): Promise<boolean> => {
     setBusy(true);
-    try { await httpsCallable(getFirebase().functions, name)(data); }
-    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); }
+    try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); return false; }
     finally { setBusy(false); }
   };
 
@@ -5428,13 +5577,18 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
   const startRename = (t: Row) => { setRenamingId(t.id); setRenameText(t.title); };
   // Exits rename mode immediately (mirroring a native prompt dismissing
-  // itself synchronously) rather than waiting on the async call — if it
-  // fails, the Alert inside call() explains why and the musician can tap
-  // Rename again.
+  // itself synchronously) rather than waiting on the async call — the Alert
+  // inside call() explains a failure, and re-opening below (pre-filled with
+  // exactly what was typed, stashed BEFORE closing) means the musician
+  // doesn't have to retype it after a transient network/server error.
   const saveRename = (trackId: string) => {
-    const title = renameText.trim();
+    const typed = renameText;
+    const title = typed.trim();
     setRenamingId(null);
-    if (title) void call("updateTrack", { profileId, trackId, title });
+    if (!title) return;
+    void call("updateTrack", { profileId, trackId, title }).then((ok) => {
+      if (!ok) { setRenamingId(trackId); setRenameText(typed); }
+    });
   };
 
   return (
@@ -5456,6 +5610,7 @@ export function TrackManager({ profileId }: { profileId: string }) {
           {renamingId === t.id ? (
             <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
               <TextInput value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
+                returnKeyType="done" onSubmitEditing={() => saveRename(t.id)}
                 style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
               <Pressable disabled={busy} onPress={() => saveRename(t.id)}>
                 <Text style={{ fontWeight: "600" }}>Save</Text>
@@ -5873,6 +6028,34 @@ git commit -m "feat(mobile): portfolio components — trim uploader, track manag
 - Modify: `apps/mobile/app/join.tsx`
 - Create: `apps/mobile/app/artist/[handle].tsx`
 
+**Wiring requirements** (things this task will hit the moment it imports
+Task 13's components or plays anything):
+- **NATIVE REBUILD REQUIRED.** `expo-audio`, `expo-document-picker`,
+  `@react-native-community/slider`, and `expo-file-system` all ship native
+  code — an existing dev client built before Task 13 landed does NOT have
+  them linked in, and will crash (not just warn) the first time
+  `useAudioPlayer` runs. Rebuild the dev client (`expo run:ios` /
+  `expo run:android`, or a new EAS dev build) before manually testing this
+  task; a plain `expo start` reload of an old client is not enough.
+- **Silent preview on iOS.** Call `setAudioModeAsync({ playsInSilentMode:
+  true })` once at app start (e.g. in the root layout, alongside other
+  startup setup) — without it, `TrimUploader`'s preview and
+  `/artist/[handle]`'s track playback are silent on a device with the
+  ringer switch off, which looks like a broken player rather than an
+  unset audio mode.
+- **Keyboard vs. scroll.** Wrap the portfolio screen's content in a
+  `ScrollView` with `keyboardShouldPersistTaps="handled"` — several of
+  Task 13's controls are `TextInput`s inside `Pressable`-heavy forms
+  (rename's inline edit, the bio/links/rates fields), and without
+  `keyboardShouldPersistTaps`, a tap on a button while the keyboard is up
+  gets eaten by the dismiss instead of reaching the button.
+- **`TrimUploader`'s `onDone` is optional here.** Unlike web's
+  `TrimUploader` (where `onDone` is required — the editor page always
+  passes one), Task 13's RN version made it `onDone?: () => void` since
+  `TrackManager` already refreshes its own track list via `onSnapshot`
+  regardless. Don't feel obligated to thread a completion callback through
+  this screen just to satisfy a required prop — there isn't one.
+
 **Handoff from Task 9 (server gate — `functions/src/profiles.ts`), mirrors
 the Task 11 note:** `submitProfileForReview` rejects a musician submit
 unless bio, ≥1 genre, avatar, AND ≥1 track with status `pending_review` or
@@ -6167,6 +6350,18 @@ git commit -m "feat(mobile): portfolio editor tab, wizard flow, native artist pa
 
 **Files:** whatever the two pre-existing errors touch (foundation ruling: "Mobile lint has 2 pre-existing errors").
 
+**No ESLint config exists in `apps/mobile` yet.** `expo lint`'s first run
+scaffolds one (Expo's flat-config default, `eslint-config-expo`) rather than
+just running against a pre-existing setup — that's expected, not a sign
+something's broken; commit the generated config alongside whatever fixes
+this task makes. Note too that mobile has been running with the React
+Compiler enabled (`experiments.reactCompiler` in `app.json`) this entire
+sub-project with no lint net at all — every hook-dependency habit Tasks 13
+and 14 leaned on (the `useCallback`-wrapped `flagInvalid` in
+`TrimUploader`, `PhotoUploader`'s render-time state adjustment, etc.) has
+only been checked by hand and by `tsc`, not by
+`react-hooks/exhaustive-deps`, until this task's first lint run.
+
 - [ ] **Step 1:** Run `pnpm --filter @gatekeep/mobile lint`. Record every error.
 - [ ] **Step 2:** Fix each error at root cause (no eslint-disable unless the rule is genuinely wrong for the line, and then with a comment saying why). Re-run until: 0 errors. Warnings: fix those introduced by this sub-project; pre-existing warnings may stay.
 - [ ] **Step 3:** Also run `pnpm --filter @gatekeep/web lint` — must stay green.
@@ -6243,6 +6438,14 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
     confirm-dialog delete shouldn't short-circuit. Revisit if support requests show this is a
     real gap — likely wants an admin-mediated or cool-down-gated path rather than the same
     one-click confirm used for a never-published draft.
+- Manual follow-ups (mobile, from Task 13's quality review):
+  - `TrimUploader`'s `upload()` has no native streaming yet — it reads the whole picked file
+    into memory via `fetch().blob()` before handing it to `uploadBytesResumable`, and the
+    Firebase JS SDK's chunked resumable upload roughly doubles peak memory while that blob is
+    in flight. Switch to `expo-file-system`'s `uploadAsync` (native streaming, no full-file
+    `Blob` materialized in JS) and then lift the mobile-only 25 MB cap
+    (`MOBILE_MAX_AUDIO_BYTES` in `TrimUploader.tsx`) back up toward the server's real 50 MB
+    limit once that lands.
 
 - [ ] **Step 2: Commit**
 
