@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, signUpUnverifiedTestUser, callFn, wait, uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
+import {
+  signUpTestUser, signUpUnverifiedTestUser, callFn, wait, uploadTestAudio, makeWav, waitForTrackStatus, makeAdminUser,
+} from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getStorage as adminStorage } from "firebase-admin/storage";
@@ -98,6 +100,67 @@ describe("deleteProfile", () => {
     await expect(callFn("deleteAccount", {}, user)).rejects.toThrow(/admin/i);
     await callFn("deleteProfile", { profileId }, user);
     await expect(callFn("deleteAccount", {}, user)).resolves.toMatchObject({ ok: true });
+  });
+
+  // Finding 3: deleteProfile used to be client-gated only — a co-admin could
+  // delete a LIVE approved profile server-side and immediately free the
+  // handle for takeover. The server must enforce the same draft/rejected-only
+  // gate the UI already assumes.
+  it("refuses to delete an approved profile with failed-precondition; the profile, handle, and members all survive", async () => {
+    const { user } = await signUpTestUser(`del5-${Date.now()}@test.com`);
+    const handle = `del5p_${Date.now()}`;
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(handle), user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("del5admin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+    expect((await adb.doc(`handles/${handle}`).get()).exists).toBe(true);
+  });
+
+  it("refuses to delete a pending_review profile with failed-precondition", async () => {
+    const { user } = await signUpTestUser(`del6-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del6p_${Date.now()}`), user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+  });
+
+  it("still allows deleting a draft profile and a rejected profile", async () => {
+    const { user } = await signUpTestUser(`del7-${Date.now()}@test.com`);
+    const { profileId: draftId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del7d_${Date.now()}`), user);
+    await callFn("deleteProfile", { profileId: draftId }, user);
+    expect((await adb.doc(`profiles/${draftId}`).get()).exists).toBe(false);
+
+    const { profileId: rejId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del7r_${Date.now()}`), user);
+    await callFn("submitProfileForReview", { profileId: rejId }, user);
+    const adminUser = await makeAdminUser("del7admin");
+    await callFn("reviewProfile", { profileId: rejId, decision: "rejected", reason: "No thanks" }, adminUser.user);
+    await callFn("deleteProfile", { profileId: rejId }, user);
+    expect((await adb.doc(`profiles/${rejId}`).get()).exists).toBe(false);
+  });
+
+  it("rejects an unverified-email caller with failed-precondition", async () => {
+    const { user } = await signUpTestUser(`del8-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del8_${Date.now()}`), user);
+    const { user: unverified } = await signUpUnverifiedTestUser(`del8u-${Date.now()}@test.com`);
+    // unverified isn't even a member here, but the email-verification guard
+    // must run (and fail) before that membership check is reached.
+    await expect(callFn("deleteProfile", { profileId }, unverified))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("rejects a malformed profile id with invalid-argument", async () => {
+    const { user } = await signUpTestUser(`del9-${Date.now()}@test.com`);
+    await expect(callFn("deleteProfile", { profileId: "../etc" }, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
 });
 

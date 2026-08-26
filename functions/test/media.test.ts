@@ -245,6 +245,48 @@ describe("processUpload: photos", () => {
     const [firstStillExists] = await abucket.file(firstPath).exists();
     expect(firstStillExists).toBe(false); // superseded photo cleaned up
   });
+  it("rejects a disallowed image format (GIF) — nothing is written to public/, staging is still cleaned up, portfolio untouched", async () => {
+    const { user, uid, profileId } = await makeMusician("ph7");
+    // storage.rules only checks the client-DECLARED contentType metadata
+    // ('image/(jpeg|png|webp)') — it never inspects the actual bytes, so
+    // "image/gif" bytes alone would be rejected at the rules layer before
+    // ever reaching this trigger. The real attack (and what media.ts's
+    // format allowlist must catch) is a spoofed declared type: real GIF
+    // bytes uploaded claiming to be "image/jpeg", which sails past
+    // storage.rules and lands here for sharp to actually decode.
+    const gif = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 1, g: 2, b: 3 } } })
+      .gif().toBuffer();
+    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    await uploadTestAudio(path, gif, "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true); // finally still cleans up staging
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull(); // profile doc untouched
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0); // nothing written to public/
+  });
+  it("still accepts valid PNG and WebP avatars (the allowlist, not just JPEG)", async () => {
+    const { user, uid, profileId } = await makeMusician("ph8");
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 5, b: 6 } } })
+      .png().toBuffer();
+    await uploadTestAudio(`staging/photos/${uid}/${profileId}/avatar-${Date.now()}-png`, png, "image/png", user);
+    const avatarPath = await waitForPortfolioField(profileId, "avatarPhotoPath");
+    const [bytes] = await abucket.file(avatarPath).download();
+    expect((await sharp(bytes).metadata()).format).toBe("jpeg"); // pipeline always re-encodes to jpeg
+
+    const { uid: uid2, profileId: profileId2, user: user2 } = await makeMusician("ph8b");
+    const webp = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 7, g: 8, b: 9 } } })
+      .webp().toBuffer();
+    await uploadTestAudio(`staging/photos/${uid2}/${profileId2}/cover-${Date.now()}-webp`, webp, "image/webp", user2);
+    const coverPath = await waitForPortfolioField(profileId2, "coverPhotoPath");
+    const [exists] = await abucket.file(coverPath).exists();
+    expect(exists).toBe(true);
+  });
   it("holds the delete-during-photo-processing invariant: no public photo survives a profile doc deleted before the upload lands", async () => {
     const { user, uid, profileId } = await makeMusician("ph6");
     // Delete only the top-level profile doc (not a full recursiveDelete) so

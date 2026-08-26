@@ -252,6 +252,22 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     // "error" still rejects truncated/genuinely corrupt data, just not mere
     // warnings. limitInputPixels bounds decompression-bomb-style inputs.
     const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
+
+    // Format allowlist: sharp/libvips happily decodes SVG (an XML format with
+    // real parser/XXE-class attack surface), GIF, TIFF, and HEIF too — none
+    // of that is gated by the staging upload's declared contentType, which
+    // storage.rules only checks against the client-set Content-Type header,
+    // not the actual bytes (trivially spoofable — upload arbitrary bytes
+    // with `contentType: "image/jpeg"`). Probe the real decoded format
+    // before running attacker-controlled bytes through the full
+    // resize/encode pipeline below, and refuse anything outside the three
+    // formats this app actually intends to accept.
+    const { format } = await sharp(bytes, sharpOpts).metadata();
+    if (!["jpeg", "png", "webp"].includes(format ?? "")) {
+      console.error("processUpload: rejected disallowed photo format", objectName, format);
+      return; // finally below still deletes the staging object
+    }
+
     // Avatars intentionally do NOT set withoutEnlargement — the 512x512
     // output is a contract the rest of the app relies on (fixed-size crop
     // targets), so a tiny source still gets upscaled to fill it. Covers use

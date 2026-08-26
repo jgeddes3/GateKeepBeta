@@ -30,9 +30,20 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     const ref = getFirestore().doc(`profiles/${profileId}`);
     const snap = await ref.get();
     if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
-    if (snap.data()?.status !== "pending_review") {
+    const priorStatus = snap.data()?.status;
+    if (decision === "approved" && priorStatus !== "pending_review") {
       throw new HttpsError("failed-precondition", "Profile is not pending review.");
     }
+    // Reject also accepts "approved" — spec §6's "admins can retroactively
+    // unpublish anything", which reviewTrack already supports for tracks but
+    // profiles didn't. Flipping an approved profile to rejected is enough:
+    // firestore.rules' profileApproved()-gated reads then hide the profile
+    // AND (via the same check) every one of its tracks from public
+    // automatically, with no separate takedown of each track needed.
+    if (decision === "rejected" && priorStatus !== "pending_review" && priorStatus !== "approved") {
+      throw new HttpsError("failed-precondition", "Profile is not pending review or approved.");
+    }
+    const wasApproved = priorStatus === "approved";
     await ref.update({
       status: decision,
       rejectionReason: decision === "rejected" ? reason!.trim() : null,
@@ -42,7 +53,12 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       actorUid,
       action: decision === "approved" ? "profile_approved" : "profile_rejected",
       targetId: profileId,
-      detail: decision === "rejected" ? reason!.trim() : snap.data()?.name ?? "",
+      // Mirrors reviewTrack's retroactive-takedown detail shape: recording
+      // the prior status distinguishes a takedown of a live profile from a
+      // routine first-time reject from pending_review.
+      detail: decision === "rejected"
+        ? (wasApproved ? `[was approved] ${reason!.trim()}` : reason!.trim())
+        : snap.data()?.name ?? "",
     });
     const profileName = snap.data()?.name ?? "Your profile";
     await notifyProfileMembers(profileId, {

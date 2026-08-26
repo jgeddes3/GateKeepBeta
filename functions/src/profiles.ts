@@ -1,7 +1,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  validateProfileDraft, type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
+  validateProfileDraft, isValidDocId, type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
 } from "@gatekeep/shared";
 import { writeAudit } from "./review.js";
 import { bucket, logDeleteFailure } from "./storage.js";
@@ -131,8 +131,9 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
 // to remediate handle-squatting drafts.
 export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
   const uid = requireAuth(req.auth?.uid);
+  requireVerifiedEmail(req);
   const { profileId } = req.data;
-  if (typeof profileId !== "string" || profileId.trim().length === 0) {
+  if (!isValidDocId(profileId)) {
     throw new HttpsError("invalid-argument", "A profile id is required.");
   }
   await requireProfileAdmin(profileId, uid);
@@ -140,6 +141,17 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const profileRef = db.doc(`profiles/${profileId}`);
   const snap = await profileRef.get();
   if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
+  // Finding 3: this used to be enforced client-side only — a co-admin could
+  // call deleteProfile directly on a LIVE approved profile and immediately
+  // free its handle for takeover. draft/rejected are the only statuses with
+  // nothing publicly live to lose; pending_review and approved profiles must
+  // go through reviewProfile's reject (which now supports retroactive
+  // unpublish of an approved profile too) before they're deletable.
+  const status = snap.data()?.status;
+  if (status !== "draft" && status !== "rejected") {
+    throw new HttpsError("failed-precondition",
+      "Approved or in-review profiles can't be deleted — contact support / unpublish first.");
+  }
   const handle = snap.data()?.handle as string | undefined;
   const name = snap.data()?.name as string | undefined;
 

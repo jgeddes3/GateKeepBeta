@@ -75,6 +75,31 @@ describe("reviewProfile", () => {
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+  // Spec §6: "admins can retroactively unpublish anything" — profiles didn't
+  // have this path before (only reviewTrack did); reject now also accepts an
+  // already-approved profile, flipping it to rejected so firestore.rules
+  // hides it (and all its tracks, via profileApproved()) from public reads.
+  it("retroactive unpublish: rejecting an approved profile flips it to rejected and records the prior status in the audit detail", async () => {
+    const { profileId } = await pendingProfile("v5");
+    const adminUser = await makeAdminUser("admin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("approved");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Impersonation report" }, adminUser.user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(p?.status).toBe("rejected");
+    expect(p?.rejectionReason).toBe("Impersonation report");
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", profileId).where("action", "==", "profile_rejected").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().detail).toBe("[was approved] Impersonation report");
+  });
+  it("approving an already-approved profile still fails failed-precondition (approve stays pending_review-only)", async () => {
+    const { profileId } = await pendingProfile("v6");
+    const adminUser = await makeAdminUser("admin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
 });
 
 describe("grantAdmin", () => {
