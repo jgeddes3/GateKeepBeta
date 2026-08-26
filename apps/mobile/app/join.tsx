@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, Alert, ScrollView } from "react-nativ
 import { httpsCallable } from "firebase/functions";
 import { useRouter } from "expo-router";
 import { getFirebase } from "../src/lib/firebase";
+import { useProfileContext } from "../src/shell/ProfileContext";
 import { validateProfileDraft, type ProfileType } from "@gatekeep/shared";
 
 const SUBTYPES: Record<ProfileType, { value: string; label: string }[]> = {
@@ -17,6 +18,7 @@ export default function Join() {
   const [name, setName] = useState("");
   const [handle, setHandle] = useState("");
   const router = useRouter();
+  const { switchTo } = useProfileContext();
 
   const submit = async () => {
     const input = { type, subtype, name, handle: handle.toLowerCase() };
@@ -26,6 +28,20 @@ export default function Join() {
       const { functions } = getFirebase();
       const { data } = await httpsCallable<typeof input, { profileId: string }>(
         functions, "createProfileDraft")(input);
+      if (type === "musician") {
+        // MUST FIX (Task 14): do NOT auto-submit a musician draft. Task 9's
+        // minimum-content gate (bio, >=1 genre, avatar, >=1 listenable
+        // track) means a brand-new draft can NEVER pass
+        // submitProfileForReview — every auto-submit here would always fail
+        // with failed-precondition. Route into the portfolio tab to collect
+        // that content instead, mirroring web's join/page.tsx createDraft ->
+        // router.push handoff. Curator joins (below) are unaffected — there's
+        // no gate for them — and keep the old create-then-submit behavior.
+        switchTo({ profileId: data.profileId, type: "musician", name: name.trim(), status: "draft" });
+        Alert.alert("Draft created", "Add a bio, photo, and a track next, then submit for review.");
+        router.replace("/(musician)/portfolio");
+        return;
+      }
       await httpsCallable(functions, "submitProfileForReview")({ profileId: data.profileId });
       Alert.alert("Submitted!", "Our team will review your profile. We'll notify you.");
       router.back();
@@ -35,7 +51,7 @@ export default function Join() {
   };
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 24, gap: 12 }}>
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 12 }} keyboardShouldPersistTaps="handled">
       <Text style={{ fontSize: 24, fontWeight: "700" }}>Join GateKeep</Text>
       <View style={{ flexDirection: "row", gap: 8 }}>
         {(["musician", "curator"] as const).map((t) => (
@@ -58,7 +74,11 @@ export default function Join() {
       <TextInput placeholder="Handle (yourname — lowercase, no spaces)" autoCapitalize="none"
         value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
       <Pressable onPress={submit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>Submit for review</Text>
+        {/* Musician: create-only now (see the MUST FIX comment above) —
+            "Submit for review" would be a lie until the portfolio tab's own
+            gated button actually does that. Curator: unchanged, still
+            submits immediately. */}
+        <Text style={{ color: "#fff", textAlign: "center" }}>{type === "musician" ? "Create my profile" : "Submit for review"}</Text>
       </Pressable>
     </ScrollView>
   );
