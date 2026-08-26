@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ScrollView, View, Text, Pressable, Alert, Linking } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, onSnapshot, getDoc, collection, query, orderBy } from "firebase/firestore";
@@ -52,17 +52,45 @@ export default function Portfolio() {
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  // Three states, not two: "loading" is load-bearing, not just a nicety.
-  // BookingForm seeds its local rate inputs from `initial` on mount — if
-  // `initial` were `null` for the ordinary "getDoc hasn't resolved yet" case
+  // Four states. "loading" is load-bearing, not just a nicety: BookingForm
+  // seeds its local rate inputs from `initial` on mount — if `initial` were
+  // `null` for the ordinary "getDoc hasn't resolved yet" case
   // (indistinguishable from "no booking doc saved"), a musician who already
   // has saved rates would see the form mount blank, and its very next save
   // would full-document-set() all-null rates over the real ones. Silent data
-  // loss. Mirrors web's Task 11 page.tsx exactly.
-  const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
+  // loss. Mirrors web's Task 11 page.tsx exactly. "error" is separate from
+  // `null` for the SAME reason, one level down: a getDoc that FAILED
+  // (offline, a transient read error) is not "no doc exists" either — same
+  // failure-vs-empty distinction as PhotoUploader's `awaiting`/timeout state
+  // and TrackQueueRow's clip-URL-failed state elsewhere in this codebase.
+  // Collapsing "error" into `null` would mount BookingForm blank over rates
+  // that are still there server-side the read simply didn't reach.
+  const [booking, setBooking] = useState<BookingDoc | null | "loading" | "error">("loading");
+  // Bumped by the "Retry" row's Retry button (see the booking === "error"
+  // render branch below) to force the booking effect below to re-run
+  // without also needing its own separate effect.
+  const [bookingRetry, setBookingRetry] = useState(0);
   const [tracks, setTracks] = useState<TrackRow[]>([]);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Identity check for the effects below, closing a sub-frame race the
+  // render-time reset alone doesn't: React runs effect CLEANUP at the
+  // passive-effect flush, which happens AFTER commit and paint — not
+  // synchronously during the render-time reset. That leaves a real window
+  // where profile A's already-in-flight onSnapshot/getDoc callbacks can
+  // still resolve and call setState AFTER the reset below has already run
+  // (profileId changed to B) but BEFORE A's effect cleanup has unsubscribed
+  // them. Without this check, one of those late A-callbacks repopulates the
+  // just-reset state, and BookingForm ends up mounted under profile B seeded
+  // with A's rates — the same silent-data-loss shape as the missing
+  // sentinel above, just from a narrower window. `activeIdRef` is kept in
+  // sync with whichever profileId is CURRENTLY active — updated inside the
+  // render-time reset block below, and correct from the very first render
+  // via useRef's initializer here — so every effect callback can check
+  // "is my profileId still the active one" instead of trusting its own
+  // closure (which is fixed to whichever profileId it was created under).
+  const activeIdRef = useRef(profileId);
 
   // Render-time reset, mirroring PhotoUploader's `baseline` pattern (Task
   // 13) and web's `bookingProfileId` sentinel (Task 11): Expo Router's Tabs
@@ -80,6 +108,7 @@ export default function Portfolio() {
   const [lastProfileId, setLastProfileId] = useState(profileId);
   if (profileId !== lastProfileId) {
     setLastProfileId(profileId);
+    activeIdRef.current = profileId;
     setProfile(null);
     setBooking("loading");
     setTracks([]);
@@ -87,25 +116,40 @@ export default function Portfolio() {
 
   useEffect(() => {
     if (!profileId) { setProfile(null); return; }
+    // Captured once per effect instance (one per profileId, since this
+    // effect is keyed on it) — the identity check below compares against
+    // whichever profileId is CURRENTLY active, not this closure's own,
+    // fixed-at-creation value.
+    const forId = profileId;
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, "profiles", profileId),
-      (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
+      (s) => {
+        if (activeIdRef.current !== forId) return;
+        setProfile(s.exists() ? (s.data() as ProfileDoc) : null);
+      },
       // A read failure (offline, a rules edge case) is treated as "gone"
       // rather than left stale — same as web's page.tsx.
-      () => setProfile(null));
+      () => {
+        if (activeIdRef.current !== forId) return;
+        setProfile(null);
+      });
     let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
-      .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
+      .then((s) => {
+        if (cancelled || activeIdRef.current !== forId) return;
+        setBooking(s.exists() ? (s.data() as BookingDoc) : null);
+      })
       .catch((e) => {
+        console.error("booking getDoc failed", e);
         // MUST resolve the sentinel here too, not just on success — an
         // unresolved "loading" left hanging after a failed read is exactly
         // the state BookingForm's seed-from-initial bug above needs to stay
-        // safe from.
-        console.error("booking getDoc failed", e);
-        if (!cancelled) setBooking(null);
+        // safe from. "error", not `null`: see the state comment above.
+        if (cancelled || activeIdRef.current !== forId) return;
+        setBooking("error");
       });
     return () => { cancelled = true; unsub(); };
-  }, [profileId]);
+  }, [profileId, bookingRetry]);
 
   // Own subscription, separate from TrackManager's below: the submit-lock
   // gate needs live track statuses at THIS level (to enable/disable the
@@ -114,17 +158,29 @@ export default function Portfolio() {
   // "processing" without polling.
   useEffect(() => {
     if (!profileId) { setTracks([]); return; }
+    const forId = profileId;
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
-      (e) => console.error("tracks onSnapshot failed", e));
+      (s) => {
+        if (activeIdRef.current !== forId) return;
+        setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+      },
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("tracks onSnapshot failed", e);
+      });
   }, [profileId]);
 
   if (!user || !profileId || !profile || booking === "loading") {
     return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
       <Text>{!user || !profileId ? "Switch to a musician profile to edit its portfolio." : "Loading…"}</Text></View>;
   }
+
+  const retryBooking = () => {
+    setBooking("loading");
+    setBookingRetry((n) => n + 1);
+  };
 
   const missing = missingForSubmit(profile, tracks);
   const canSubmit = missing.length === 0;
@@ -206,7 +262,24 @@ export default function Portfolio() {
       <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
-      <BookingForm key={profileId} profileId={profileId} initial={booking} />
+      {booking === "error" ? (
+        <View style={{ gap: 8 }}>
+          <Text style={{ fontSize: 18, fontWeight: "700" }}>Rates & preferences</Text>
+          {/* "error" is distinct from the ordinary null-means-"no doc yet"
+              case above on purpose — same failure-vs-empty distinction as
+              PhotoUploader's awaiting/timeout state and TrackQueueRow's
+              clip-URL-failed state. Rendering BookingForm here with
+              initial={null} would mount it blank over rates that are still
+              saved server-side; the read just didn't reach them. */}
+          <Text style={{ color: "#92400e" }}>Couldn&#39;t load your rates.</Text>
+          <Pressable onPress={retryBooking}
+            style={{ borderWidth: 1, borderColor: "#bbb", borderRadius: 8, padding: 10, alignSelf: "flex-start" }}>
+            <Text>Retry</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <BookingForm key={profileId} profileId={profileId} initial={booking} />
+      )}
       {showSubmit && (
         <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
           <Pressable onPress={() => void submit()} disabled={!canSubmit || submitBusy}
