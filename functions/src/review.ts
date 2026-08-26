@@ -40,6 +40,17 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     // firestore.rules' profileApproved()-gated reads then hide the profile
     // AND (via the same check) every one of its tracks from public
     // automatically, with no separate takedown of each track needed.
+    //
+    // Deliberately does NOT delete the public/ track+photo objects: this same
+    // path is the routine "please revise and resubmit" editorial reject, where
+    // scrubbing the musician's transcoded clips would force a full re-upload +
+    // re-transcode + re-review on resubmit (and orphan the still-"approved"
+    // track docs that point at them). Unpublish here removes DISCOVERY (page
+    // 404s, listing denied); a true abuse/impersonation takedown is the
+    // deliberate two-step reject → deleteProfile, whose cascade scrubs the
+    // public/review objects (unblocked now that the profile is rejected).
+    // Residual: a direct getDownloadURL obtained while live keeps working
+    // between the two steps — accepted; the admin performs both promptly.
     if (decision === "rejected" && priorStatus !== "pending_review" && priorStatus !== "approved") {
       throw new HttpsError("failed-precondition", "Profile is not pending review or approved.");
     }

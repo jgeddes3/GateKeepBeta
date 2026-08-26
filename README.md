@@ -182,6 +182,15 @@ before a real launch:
   called out above, or enforcement is a no-op for callables. Cloud Storage doesn't have this
   second step — its enforcement toggle applies directly — but it still can't flip until native
   mobile App Check ships, per the bullet above.
+- **Content takedown is a two-step for a full scrub**: an admin unpublishing an approved profile
+  (`reviewProfile` reject, or the admin "Unpublish profile" button) instantly removes it from
+  discovery — the public page 404s and Storage listing is denied — but deliberately leaves the
+  transcoded clips and photos in the `public/` bucket, because the same reject path is also the
+  routine "please revise and resubmit" flow (scrubbing them would force a full re-upload on
+  resubmit). For an abuse/impersonation takedown where the raw objects must be gone, follow the
+  unpublish with `deleteProfile` (unblocked once the profile is `rejected`), whose cascade sweeps
+  `public/tracks`, `review/tracks`, and `public/photos`. Between the two steps a direct
+  `getDownloadURL` obtained while the profile was live still resolves — do both promptly.
 - **Firebase Email Enumeration Protection**: confirm this is enabled (Firebase console →
   Authentication → Settings) on both the `gatekeep-dev-jg` project and whatever project id
   production uses. The app's sign-in error handling degrades gracefully either way, but it
