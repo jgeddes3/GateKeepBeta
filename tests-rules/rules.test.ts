@@ -594,3 +594,32 @@ describe("curatorAccess", () => {
     await assertFails(setDoc(doc(admin, "curatorAccess/alice"), {}));
   });
 });
+
+// S2: geocodeBudgets/{uid} — internal rate-limit bookkeeping, never read or
+// written by any client, not even the owner or an admin (mirrors the
+// catch-all's default-deny, but explicit per the security gate's fix-wave
+// item so the intent is unambiguous in the rules file itself).
+describe("geocodeBudgets", () => {
+  it("nobody reads or writes — not even the owner or an admin", async () => {
+    await seed("geocodeBudgets/alice", { date: "2026-08-26", count: 1 });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(getDoc(doc(alice, "geocodeBudgets/alice")));
+    await assertFails(getDoc(doc(admin, "geocodeBudgets/alice")));
+    await assertFails(setDoc(doc(alice, "geocodeBudgets/alice"), { date: "2026-08-26", count: 99 }));
+    await assertFails(setDoc(doc(admin, "geocodeBudgets/alice"), { date: "2026-08-26", count: 99 }));
+  });
+});
+
+// S4: curatorAccessRetries/{uid} — same internal-only shape as geocodeBudgets.
+describe("curatorAccessRetries", () => {
+  it("nobody reads or writes — not even the owner or an admin", async () => {
+    await seed("curatorAccessRetries/alice", { createdAt: 1 });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(getDoc(doc(alice, "curatorAccessRetries/alice")));
+    await assertFails(getDoc(doc(admin, "curatorAccessRetries/alice")));
+    await assertFails(setDoc(doc(alice, "curatorAccessRetries/alice"), { createdAt: 2 }));
+    await assertFails(setDoc(doc(admin, "curatorAccessRetries/alice"), { createdAt: 2 }));
+  });
+});
