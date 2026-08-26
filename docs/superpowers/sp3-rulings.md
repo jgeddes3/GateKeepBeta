@@ -75,7 +75,22 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
     as a possible `profileId` mismatch during Task 2's review): plan Task 8's `flagAccount` keys
     `adminNotes/{uid}` by the USER's uid, not a profile id — Task 2's reviewer's `profileId` reading
     was the error, not the rule.
-16. **Task 14 — processPhoto corrupt-upload hardening**: a pre-existing SP2 bug found live during
+16. **Task 14 — `MAX_CAPACITY` included in the shared constants export (controller adjudication)**:
+    the dispatch's item 3 named only the literal `MAX_*_LENGTH` constants ("MAX_ABOUT_LENGTH etc."),
+    but `MAX_CAPACITY` is the identical duplicated-soft-cap pattern — a numeric bound re-declared
+    verbatim in `functions/src/curator.ts`, `apps/web/src/curator/CuratorForms.tsx`, and
+    `apps/mobile/src/curator/CuratorForms.tsx`, one line away from the others. Task review
+    adjudicated including it: **accepted — strictly better than the literal `MAX_*_LENGTH` list**,
+    since leaving it out would have left one soft cap still able to drift while the other four
+    couldn't. `INDOOR_OUTDOOR_VALUES` (an enum, not a numeric cap) was deliberately left as a local
+    per-file mirror — out of scope for the same reason `MAX_CAPACITY` was in scope: it isn't a
+    "soft cap." Separately (noted here since it's adjacent context to this same export): the
+    curator `MAX_ADDRESS_LENGTH` now in `@gatekeep/shared` (300) and `functions/src/gigs.ts`'s own
+    module-private `MAX_ADDRESS_LENGTH` (300, mirrored in both `GigForms.tsx` clients) share a name
+    and value by coincidence, not by a real shared invariant — a gig's location and a curator's
+    profile location are different domains with independent validators, so the two constants were
+    deliberately left un-unified rather than force-coupled just because they currently agree.
+17. **Task 14 — processPhoto corrupt-upload hardening**: a pre-existing SP2 bug found live during
     Task 9's walkthrough — a corrupt/undecodable image buffer made `sharp(...).metadata()` (or the
     subsequent resize/encode) throw, escaping `processPhoto` unhandled instead of being discarded
     the way every OTHER rejection path in that function already is (disallowed format, non-member,
@@ -84,7 +99,7 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
     follows the same discard-with-log pattern; there is no per-photo "failed" status doc the way
     `processAudio`'s tracks have one, so silent discard-with-log IS this pipeline's existing failure
     style, not a divergence from it.
-17. **Task 14 — admin flag-checkbox hint over hard gating**: the "also flag this account" checkbox
+18. **Task 14 — admin flag-checkbox hint over hard gating**: the "also flag this account" checkbox
     (Task 12) sits next to both Approve and Reject but only ever takes effect on Reject (silent-drop
     ambiguity flagged as a Task 12 minor). Task 14 chose an inline hint (`(Reject only)` label text
     + a `title` tooltip) over disabling/hiding the control outside a "reject flow," since the
@@ -114,13 +129,30 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
 - **Name-search UX iteration** — `searchUsersByName` (Task 8) is a working prefix-match callable
   (case-insensitive, limit 10) with a plain admin-UI text input consuming it; there's room for
   debounce, pagination past 10, and a zero-results empty state (Task 8's minor: "zero-results
-  search test" was never added — worth adding alongside any UX pass).
+  search test" was never added — worth adding alongside any UX pass). Two further Task 8 minors,
+  not UX but worth the same triage pass: `backfillDisplayNameLower` uses `batch.update`, which
+  throws if a legacy user doc is ever deleted mid-backfill — a `set({...}, {merge:true})` would be
+  more resilient to that race; and the backfill's actual Firestore write path has no test isolating
+  it from the rest of the callable (today it's only exercised end-to-end via the "converges legacy
+  users" test).
 - **`processPhoto` 3-read optimization** — every avatar/cover/gallery upload currently does 3
   separate profile reads (membership check, profile-type check, and — for avatar/cover — the
   previous-photo-path read before overwrite). Acceptable today (human-triggered, low volume); worth
   collapsing if upload volume grows.
-- **Task 5/6/7 deferred minors worth carrying forward** (none block anything today, listed for
+- **Task 3/5/6/7 deferred minors worth carrying forward** (none block anything today, listed for
   triage if ever touched):
+  - Task 3: `StubGeocoder`'s deterministic hash bounds its fake lat/lng to a US-centric bounding box
+    (25–50°N, 66–125°W) — fine for dev/test (never used once `GEOCODER_PROVIDER=google` is set for
+    a real deploy, see README) but worth documenting loudly if the stub is ever reused outside dev.
+    Separately, `parseGoogleResponse` throws when it can't extract a city from
+    `address_components` — real Google Geocoding responses for plus-codes and some other
+    city-less results hit this; noted as a real-traffic hardening item (return a partial result or
+    a typed "no city" error instead of throwing) rather than something dev/test traffic would ever
+    surface.
+  - Task 4b: the one-line path-prefix assertion in `removeCuratorPhoto` — deferred at Task 4b's
+    close as "fold into Task 6's `curator.ts` touch" — **landed as planned**, in Task 6 (commit
+    `efde194`; see the "Defense-in-depth path-prefix assertion" comment in
+    `functions/src/curator.ts`). Recorded here only to close the loop — nothing outstanding.
   - Task 5: non-transactional cap reads on gig/series creation (established tier — `tracks.ts` has
     the stricter transactional precedent if ever needed); an empty `location: {}` patch is a
     no-op rewrite rather than a rejected/ignored input; the Google-provider geocoder's null-branch
