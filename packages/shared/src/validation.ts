@@ -2,7 +2,7 @@ import type { ProfileDraftInput } from "./types.js";
 import {
   GENRES, GIG_TYPES, AUDIO_CONTENT_TYPES, MAX_AUDIO_UPLOAD_BYTES,
   ACT_SIZES, AVAILABILITY_PATTERNS, SERIES_CADENCES,
-  MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_NOTE_LENGTH, DEPOSIT_PERCENT,
+  MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
   type LookingFor, type GigDoc, type GigBudget, type GigSeriesDoc, type BudgetStructure,
@@ -192,6 +192,7 @@ export function validateBookingUpdate(input: BookingUpdateInput): Result {
       && !(AVAILABILITY_PATTERNS as readonly string[]).includes(p.availabilityPattern)) {
     return fail("Invalid availability.");
   }
+  if (!validateBookingVisibility(input.visibility)) return fail("Invalid visibility.");
   return { ok: true };
 }
 
@@ -378,15 +379,18 @@ export function validateOfferInput(
   if (typeof input !== "object" || input === null) return "Invalid offer.";
   if (typeof input.amountCents !== "number" || !Number.isInteger(input.amountCents)
       || input.amountCents <= 0 || input.amountCents > MAX_OFFER_AMOUNT_CENTS) {
-    return `Amount must be a whole number of cents, more than 0 and at most ${MAX_OFFER_AMOUNT_CENTS}.`;
+    // Comma-formatted literal, matching validateRate's "100,000,000" style
+    // in this same file, rather than interpolating the raw constant (which
+    // would render as the unreadable "10000000").
+    return "Amount must be a whole number of cents, more than 0 and at most 10,000,000.";
   }
   if (input.note != null && (typeof input.note !== "string" || input.note.length > MAX_OFFER_NOTE_LENGTH)) {
     return `Note must be at most ${MAX_OFFER_NOTE_LENGTH} characters.`;
   }
   if (structure === "perSong") {
     if (typeof input.expectedQuantity !== "number" || !Number.isInteger(input.expectedQuantity)
-        || input.expectedQuantity < 1 || input.expectedQuantity > 500) {
-      return "Song count must be a whole number between 1 and 500.";
+        || input.expectedQuantity < 1 || input.expectedQuantity > MAX_OFFER_SONG_COUNT) {
+      return `Song count must be a whole number between 1 and ${MAX_OFFER_SONG_COUNT}.`;
     }
   } else if (input.expectedQuantity != null) {
     // perHour/perSet: the server derives (perHour) or ignores (perSet) this

@@ -198,6 +198,7 @@ describe("publishGig", () => {
         provisions: { hasPA: null, hasBackline: null, notes: null },
         location: seedLocation as GigDoc["location"],
         status: "open", createdAt: Date.now(), updatedAt: Date.now(),
+        bookingId: null, bookedMusicianProfileId: null,
       };
       batch.set(ref, doc);
     }

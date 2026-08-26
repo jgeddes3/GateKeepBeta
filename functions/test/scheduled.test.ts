@@ -58,6 +58,7 @@ async function seedSeries(
     templatePrivateLocation: SEED_PRIVATE_LOCATION,
     status: "active", materializedThrough: 0,
     createdAt, updatedAt: createdAt,
+    activeBookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   };
   await ref.set(doc);
@@ -80,6 +81,7 @@ async function seedOccurrence(seriesId: string, profileId: string, overrides: Pa
     provisions: { hasPA: null, hasBackline: null, notes: null },
     location: SEED_LOCATION,
     status: "open", createdAt: now, updatedAt: now,
+    bookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   };
   await ref.set(doc);
@@ -394,6 +396,7 @@ describe("runDailySweep — P4 materializer cap guard + TOCTOU re-read", () => {
         startsAt: createdAt, durationMinutes: 60,
         provisions: { hasPA: null, hasBackline: null, notes: null },
         location: SEED_LOCATION, status: "open", createdAt, updatedAt: createdAt,
+        bookingId: null, bookedMusicianProfileId: null,
       };
       batch.set(ref, doc);
     }

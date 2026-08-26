@@ -74,6 +74,7 @@ async function seedOccurrence(
       geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: SEED_ADDRESS,
     },
     status: "open", createdAt: now, updatedAt: now,
+    bookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   };
   await ref.set(doc);
@@ -177,6 +178,7 @@ describe("createSeries", () => {
         },
         templatePrivateLocation: { address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 } },
         status: "active", materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+        activeBookingId: null, bookedMusicianProfileId: null,
       };
       batch.set(ref, doc);
     }

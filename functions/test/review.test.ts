@@ -153,6 +153,7 @@ async function seedOpenGig(curatorProfileId: string, overrides: Partial<GigDoc> 
     provisions: { hasPA: null, hasBackline: null, notes: null },
     location: SEED_LOCATION as GigDoc["location"],
     status: "open", createdAt: now, updatedAt: now,
+    bookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   };
   await ref.set(doc);
@@ -174,6 +175,7 @@ async function seedSeries(curatorProfileId: string, overrides: Partial<GigSeries
     },
     templatePrivateLocation: { address: SEED_LOCATION.address, geo: SEED_LOCATION.geo },
     status: "active", materializedThrough: 0, createdAt: now, updatedAt: now,
+    activeBookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   };
   await ref.set(doc);

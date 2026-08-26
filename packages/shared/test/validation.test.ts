@@ -10,7 +10,7 @@ import {
   MAX_OPEN_GIGS_PER_PROFILE, MAX_ACTIVE_SERIES_PER_PROFILE, MAX_PENDING_CURATOR_PROFILES,
   RESUBMIT_COOLDOWN_MS, SERIES_MATERIALIZE_WEEKS,
   BOOKING_STATUSES, MAX_BOOKING_THREAD_ENTRIES, MAX_OFFER_NOTE_LENGTH, MAX_CANCEL_REASON_LENGTH,
-  MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_OFFER_AMOUNT_CENTS, DEPOSIT_PERCENT,
+  MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_RELIABILITY_MARKS,
   NO_SHOW_REPORT_WINDOW_DAYS,
 } from "../src/index";
@@ -188,6 +188,9 @@ describe("validateBookingUpdate", () => {
   it("rejects an invalid profileId (empty, or containing a path separator)", () => {
     expect(validateBookingUpdate({ ...ok, profileId: "" }).ok).toBe(false);
     expect(validateBookingUpdate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
+  it("delegates to validateBookingVisibility — rejects a garbage visibility payload", () => {
+    expect(validateBookingUpdate({ ...ok, visibility: { perHour: "public" } as never }).ok).toBe(false);
   });
   it("treats preferences with all scalar fields omitted (undefined, not just explicit null) as valid", () => {
     expect(validateBookingUpdate({
@@ -642,11 +645,11 @@ describe("validateOfferInput", () => {
   it("rejects a non-string note", () => {
     expect(validateOfferInput("perSet", { ...perSetOk, note: 42 as never })).not.toBeNull();
   });
-  it("perSong requires an integer expectedQuantity 1-500", () => {
+  it("perSong requires an integer expectedQuantity 1-MAX_OFFER_SONG_COUNT", () => {
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 1 })).toBeNull();
-    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 500 })).toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: MAX_OFFER_SONG_COUNT })).toBeNull();
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 0 })).not.toBeNull();
-    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 501 })).not.toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: MAX_OFFER_SONG_COUNT + 1 })).not.toBeNull();
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 1.5 })).not.toBeNull();
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: "12" as never })).not.toBeNull();
   });
@@ -682,6 +685,13 @@ describe("validateBookingVisibility", () => {
   it("rejects an extra key even when the four required keys are all valid", () => {
     expect(validateBookingVisibility({ ...ok, extra: "x" })).toBe(false);
   });
+  it("rejects a swapped-in alien key: exactly 4 own keys, but one required key (preferences) is missing", () => {
+    // Same key COUNT as a valid object (so the length check alone can't
+    // catch it) — this is the only input shape that reaches (and exercises)
+    // the hasOwnProperty loop's own reject branch.
+    const { preferences: _preferences, ...rest } = ok;
+    expect(validateBookingVisibility({ ...rest, alien: "curators" })).toBe(false);
+  });
   it('rejects "public" on a rate field (rates are never public — spec decision 4)', () => {
     expect(validateBookingVisibility({ ...ok, perHour: "public" })).toBe(false);
   });
@@ -711,6 +721,7 @@ describe("sub-4 booking constants", () => {
     expect(MAX_CANCEL_REASON_LENGTH).toBe(500);
     expect(MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE).toBe(25);
     expect(MAX_OFFER_AMOUNT_CENTS).toBe(10_000_000);
+    expect(MAX_OFFER_SONG_COUNT).toBe(500);
     expect(DEPOSIT_PERCENT).toBe(35);
     expect(CURATOR_FORFEIT_WINDOW_HOURS).toBe(72);
     expect(MUSICIAN_MARK_WINDOW_HOURS).toBe(24);

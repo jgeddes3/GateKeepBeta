@@ -43,8 +43,12 @@ export interface ProfileDoc {
   // SP4: mirrors profiles/{id}/private/booking's `preferences` iff that
   // doc's `visibility.preferences == "public"` — rebuildBookingProjections
   // is the sole writer; NEVER rates (rates are never public, spec decision
-  // 4). null while unset or while visibility keeps preferences private.
-  publicBooking: BookingPreferences | null;
+  // 4). Optional (not `publicBooking:`) so pre-SP4 docs/fixtures stay
+  // type-valid, mirroring BookingDoc.visibility's migration strategy —
+  // readers must treat an absent value the same as null (`?? null`).
+  // Server writers (createProfileDraft, rebuildBookingProjections) always
+  // stamp it explicitly, present-and-nullable, going forward.
+  publicBooking?: BookingPreferences | null;
 }
 
 export interface MemberDoc {
@@ -356,6 +360,7 @@ export const MAX_OFFER_NOTE_LENGTH = 280;
 export const MAX_CANCEL_REASON_LENGTH = 500;
 export const MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE = 25;
 export const MAX_OFFER_AMOUNT_CENTS = 10_000_000;       // $100k
+export const MAX_OFFER_SONG_COUNT = 500;                // perSong expectedQuantity upper bound
 export const DEPOSIT_PERCENT = 35;
 export const CURATOR_FORFEIT_WINDOW_HOURS = 72;
 export const MUSICIAN_MARK_WINDOW_HOURS = 24;
