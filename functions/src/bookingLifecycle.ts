@@ -3,8 +3,8 @@ import { getFirestore } from "firebase-admin/firestore";
 import {
   isValidDocId, MAX_CANCEL_REASON_LENGTH, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
   MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS,
-  type BookingRequestDoc, type BookingSide, type GigDoc, type ReliabilityDoc, type ReliabilityMark,
-  type OccurrenceCancellation,
+  type BookingRequestDoc, type BookingSide, type GigDoc, type GigSeriesDoc,
+  type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
@@ -55,32 +55,16 @@ async function resolveBookingSideStrict(booking: BookingRequestDoc, uid: string)
 // for hitting a ceiling (contrast flagAccount's reject-when-full moderation
 // notes, which is a different kind of unbounded-growth problem); the most
 // recent MAX_RELIABILITY_MARKS marks are what matters for a reliability
-// history, so the oldest is silently dropped instead.
+// history, so the oldest is silently dropped instead. Pure — every callable
+// below reads profiles/{id}/private/reliability in its OWN transaction's
+// read phase, calls this to build the next array, then tx.set()s it in the
+// same transaction's write phase (atomic with the booking/gig write it
+// accompanies — a crash between the two must never lose a mark that a
+// committed cancellation/no-show already implies, since nothing else would
+// ever re-add it).
 function appendMarkCapped(marks: ReliabilityMark[], mark: ReliabilityMark): ReliabilityMark[] {
   const next = [...marks, mark];
   return next.length > MAX_RELIABILITY_MARKS ? next.slice(next.length - MAX_RELIABILITY_MARKS) : next;
-}
-
-// Read-modify-write transaction (mirrors flagAccount's rationale in
-// adminTools.ts for the same reason: not FieldValue.arrayUnion(), which
-// dedupes by deep-equality and could silently collapse two marks that land
-// in the same millisecond). Used for the two mark-appends that run POST the
-// main state-machine transaction (cancelBooking, cancelOccurrence) — those
-// marks are purely additive and safe to apply slightly out-of-band of the
-// booking/gig write: a crash between the two leaves the booking correctly
-// cancelled with the mark simply missing, which is a reconcilable gap (an
-// admin can re-add it) rather than a corrupted invariant. reportNoShow is
-// the one exception — see its own comment on why its mark append happens
-// INSIDE its transaction instead.
-async function appendReliabilityMark(musicianProfileId: string, mark: ReliabilityMark): Promise<void> {
-  const db = getFirestore();
-  const ref = db.doc(`profiles/${musicianProfileId}/private/reliability`);
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const existing = snap.data() as ReliabilityDoc | undefined;
-    const marks = appendMarkCapped(existing?.marks ?? [], mark);
-    tx.set(ref, { marks, completedCount: existing?.completedCount ?? 0, updatedAt: Date.now() });
-  });
 }
 
 // Recounts profiles/{id}/private/reliability into the noShowCount/
@@ -111,16 +95,29 @@ export async function recomputeReliability(musicianProfileId: string): Promise<v
   );
 }
 
-// Every FUTURE, currently-filled occurrence of a whole-run series (via the
-// (seriesId,status,startsAt) composite index — see firestore.indexes.json).
-// A past/started occurrence (startsAt <= now) is excluded — it keeps its
-// "filled" status untouched (Task 8's sweep is what eventually resolves it
-// to completed/no-show, not these callables). Shared by cancelBooking's
-// "next affected occurrence" lookup and reportNoShow's post-no-show unwind
-// of a whole-run booking's remaining dates. Read-only — must be called
-// during the transaction's read phase, before any tx.update/tx.set.
+// Every FUTURE, currently-filled occurrence of a whole-run series that is
+// STILL this specific booking's own (via the (seriesId,status,startsAt)
+// composite index — see firestore.indexes.json — then filtered to
+// bookingId==bookingId in application code, rather than adding a fourth
+// composite-index field). A past/started occurrence (startsAt <= now) is
+// excluded — it keeps its "filled" status untouched (Task 8's sweep is what
+// eventually resolves it to completed/no-show, not these callables).
+//
+// The bookingId filter matters once a series has had more than one
+// whole-run booking over its life — e.g. an earlier booking's date was
+// reopened via cancelOccurrence and a LATER booking re-filled it while the
+// earlier booking is still "confirmed" for its own remaining dates. Without
+// this filter, a cancelBooking/reportNoShow call against the OLDER booking
+// could reopen occurrences that actually belong to the NEWER, still-active
+// booking.
+//
+// Shared by cancelBooking's "next affected occurrence" lookup and
+// reportNoShow's post-no-show unwind of a whole-run booking's remaining
+// dates. Read-only — must be called during the transaction's read phase,
+// before any tx.update/tx.set.
 async function getFutureFilledOccurrences(
-  tx: FirebaseFirestore.Transaction, db: FirebaseFirestore.Firestore, seriesId: string, now: number,
+  tx: FirebaseFirestore.Transaction, db: FirebaseFirestore.Firestore,
+  seriesId: string, bookingId: string, now: number,
 ): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
   const snap = await tx.get(
     db.collection("gigs")
@@ -128,41 +125,57 @@ async function getFutureFilledOccurrences(
       .where("status", "==", "filled")
       .where("startsAt", ">", now)
       .orderBy("startsAt", "asc"));
-  return snap.docs;
+  return snap.docs.filter((doc) => doc.data().bookingId === bookingId);
 }
 
 // Write-side counterpart to getFutureFilledOccurrences: reopens every given
 // occurrence (filled -> open, clear bookingId/bookedMusicianProfileId) and
-// unconditionally clears the series' own activeBookingId/
-// bookedMusicianProfileId — the run is over for this booking either way,
-// even when `occurrenceDocs` is empty (e.g. reportNoShow called on the
-// run's very last date, with no future dates left to reopen). Shared by
-// cancelBooking and reportNoShow's whole-run unwind.
+// clears the series' own activeBookingId/bookedMusicianProfileId ONLY when
+// the series still names THIS booking as its active one
+// (`seriesActiveBookingId === bookingId`, read by the caller during the
+// transaction's read phase) — never unconditionally: a later, still-active
+// booking of the same series (see getFutureFilledOccurrences' comment above)
+// must not have its own series-level linkage clobbered by an older
+// booking's cancel/no-show. `occurrenceDocs` being empty (e.g. reportNoShow
+// called on the run's very last date, with no future dates left to reopen)
+// does not change this — the series-linkage clear still runs, still gated
+// on the same ownership check. Shared by cancelBooking and reportNoShow's
+// whole-run unwind.
 function reopenSeriesOccurrences(
   tx: FirebaseFirestore.Transaction, db: FirebaseFirestore.Firestore,
-  seriesId: string, occurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[], now: number,
+  seriesId: string, bookingId: string, seriesActiveBookingId: string | null,
+  occurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[], now: number,
 ): void {
   for (const doc of occurrenceDocs) {
     tx.update(doc.ref, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
   }
-  tx.update(db.doc(`gigSeries/${seriesId}`), {
-    activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now,
-  });
+  if (seriesActiveBookingId === bookingId) {
+    tx.update(db.doc(`gigSeries/${seriesId}`), {
+      activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now,
+    });
+  }
 }
 
 // Shared outcome-dependent notification copy for cancelBooking/
 // cancelOccurrence — NOT reportNoShow (that one is always the same shape:
 // musician-side-only, no forfeiture branch) or removeReliabilityMark (also
-// single-shape). `by` is who initiated the cancellation.
+// single-shape). `by` is who initiated the cancellation. `scope` disambiguates
+// the forfeiture message's deposit reference: cancelBooking's "booking"
+// forfeits the run-level deposit (booking.deposit.forfeitedTo), while
+// cancelOccurrence's "occurrence" is a per-date OUTCOME RECORD only
+// (occurrenceCancellations entry) — no separate deposit actually moves per
+// date, so its copy must not read as if it does.
 function cancellationCopy(
-  by: BookingSide, outcome: CancelOutcome, markApplied: boolean, gigTitle?: string,
+  by: BookingSide, outcome: CancelOutcome, markApplied: boolean,
+  scope: "booking" | "occurrence", gigTitle?: string,
 ): { curatorBody: string; musicianBody: string } {
   const forGig = gigTitle ? ` for "${gigTitle}"` : "";
+  const depositRef = scope === "occurrence" ? "the deposit for that date" : "the deposit";
   if (by === "curator") {
     if (outcome === "deposit_forfeited") {
       return {
-        curatorBody: `You cancelled${forGig} less than ${CURATOR_FORFEIT_WINDOW_HOURS} hours before the start — the deposit was forfeited to the musician.`,
-        musicianBody: `The curator cancelled${forGig} less than ${CURATOR_FORFEIT_WINDOW_HOURS} hours before the start — deposit forfeited to you.`,
+        curatorBody: `You cancelled${forGig} less than ${CURATOR_FORFEIT_WINDOW_HOURS} hours before the start — ${depositRef} was forfeited to the musician.`,
+        musicianBody: `The curator cancelled${forGig} less than ${CURATOR_FORFEIT_WINDOW_HOURS} hours before the start — ${depositRef} forfeited to you.`,
       };
     }
     return {
@@ -202,13 +215,25 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
   // in bookings.ts).
   const callerSide = await resolveBookingSideStrict(booking, uid);
 
+  // Captured once, before the transaction — every check below (the window
+  // math, the record we persist) reads this SAME instant, so a `now` no
+  // longer current by commit time (a transaction retry, or a slow commit)
+  // can never disagree with what actually gets written. A boundary case may
+  // therefore favor the canceller by a few seconds — accepted.
   const now = Date.now();
+  const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
   // Status check, the "next affected occurrence" read (a query for
-  // whole-run, a direct doc read for single), and every write this callable
-  // makes (booking, gig(s), series) share ONE transaction — same rationale
-  // as acceptBooking's transaction in bookings.ts: nothing here may act on
-  // a status/occurrence-set that could have shifted underneath a
-  // multi-step read-then-write.
+  // whole-run, a direct doc read for single), the reliability doc (needed
+  // up front in case a mark ends up applying — see the write phase below),
+  // and every write this callable makes (booking, gig(s), series,
+  // conditionally reliability) share ONE transaction — same rationale as
+  // acceptBooking's transaction in bookings.ts: nothing here may act on a
+  // status/occurrence-set that could have shifted underneath a multi-step
+  // read-then-write. The reliability mark append in particular MUST be
+  // in-txn (not a separate post-commit call): a crash between two
+  // transactions would leave `cancellation.markApplied: true` on the
+  // committed booking with no mark ever recorded, and nothing else would
+  // ever re-add it — an unrecoverable, silently-wrong reliability history.
   const result = await db.runTransaction(async (tx) => {
     // ---- READS ----
     const freshSnap = await tx.get(bookingRef);
@@ -218,17 +243,25 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
       throw new HttpsError("failed-precondition", `Cannot cancel a booking in status "${freshBooking.status}".`);
     }
 
+    const reliabilitySnap = await tx.get(reliabilityRef);
+    const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
+    const existingMarks = reliability?.marks ?? [];
+
     let occurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
     let nextGigId: string;
     let nextStartsAt: number;
     let singleGigRef: FirebaseFirestore.DocumentReference | null = null;
+    let seriesActiveBookingId: string | null = null;
 
     if (freshBooking.seriesId) {
+      const seriesSnap = await tx.get(db.doc(`gigSeries/${freshBooking.seriesId}`));
+      seriesActiveBookingId = (seriesSnap.data() as GigSeriesDoc | undefined)?.activeBookingId ?? null;
       // The earliest (by startsAt) of every future, currently-filled
-      // occurrence is the "next affected occurrence" the window math is
-      // computed against; ALL of them get reopened below (see
-      // getFutureFilledOccurrences/reopenSeriesOccurrences).
-      occurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, now);
+      // occurrence STILL OWNED BY THIS BOOKING is the "next affected
+      // occurrence" the window math is computed against; ALL of them get
+      // reopened below (see getFutureFilledOccurrences/
+      // reopenSeriesOccurrences).
+      occurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, bookingId, now);
       if (occurrenceDocs.length === 0) throw new HttpsError("failed-precondition", ALREADY_STARTED_MESSAGE);
       nextGigId = occurrenceDocs[0].id;
       nextStartsAt = occurrenceDocs[0].data().startsAt as number;
@@ -274,21 +307,27 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
     // ---- WRITES ----
     tx.update(bookingRef, bookingUpdate);
     if (freshBooking.seriesId) {
-      reopenSeriesOccurrences(tx, db, freshBooking.seriesId, occurrenceDocs, now);
+      reopenSeriesOccurrences(tx, db, freshBooking.seriesId, bookingId, seriesActiveBookingId, occurrenceDocs, now);
     } else {
       tx.update(singleGigRef!, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
     }
+    if (markApplied) {
+      const mark: ReliabilityMark = {
+        bookingId, gigId: nextGigId, kind: "late_cancel", at: now, reportedByProfileId: null, removedByAdmin: false,
+      };
+      const marks = appendMarkCapped(existingMarks, mark);
+      tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
+    }
 
-    return { outcome, markApplied, nextGigId };
+    return { outcome, markApplied };
   });
 
-  // ---- POST-TRANSACTION: mark append + recompute — see
-  // appendReliabilityMark's comment for why this is safe to run out-of-band. ----
+  // recomputeReliability stays post-transaction — it's a pure re-derivation
+  // from the reliability doc's current marks (self-healing: a failure here
+  // just leaves a stale curatorBooking.reliability summary until the next
+  // mark-affecting event recomputes it), unlike the mark append itself,
+  // which is only safe INSIDE the transaction above (see its comment).
   if (result.markApplied) {
-    await appendReliabilityMark(booking.musicianProfileId, {
-      bookingId, gigId: result.nextGigId, kind: "late_cancel",
-      at: now, reportedByProfileId: null, removedByAdmin: false,
-    });
     await recomputeReliability(booking.musicianProfileId);
   }
 
@@ -298,7 +337,8 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
   try {
     const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
     const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
-    const { curatorBody, musicianBody } = cancellationCopy(callerSide, result.outcome, result.markApplied, gigTitle);
+    const { curatorBody, musicianBody } =
+      cancellationCopy(callerSide, result.outcome, result.markApplied, "booking", gigTitle);
     await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", title: "Booking cancelled", body: curatorBody });
     await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", title: "Booking cancelled", body: musicianBody });
   } catch (e) {
@@ -334,9 +374,20 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
 
   const callerSide = await resolveBookingSideStrict(booking, uid);
 
+  // Captured once, before the transaction — see cancelBooking's identical
+  // comment on why this matters (the window math and the persisted record
+  // must always agree, even across a retry or a slow commit).
   const now = Date.now();
   const gigRef = db.doc(`gigs/${gigId}`);
+  const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
+  // The reliability doc is read here (up front, alongside the booking/gig)
+  // and, when a mark applies, written in the SAME transaction's write phase
+  // — not a separate post-commit call. See cancelBooking's identical
+  // rationale: a crash between two transactions would leave a committed
+  // occurrenceCancellations entry with markApplied:true and no mark ever
+  // recorded, which nothing would ever re-add.
   const result = await db.runTransaction(async (tx) => {
+    // ---- READS ----
     const freshSnap = await tx.get(bookingRef);
     if (!freshSnap.exists) throw new HttpsError("not-found", "Booking not found.");
     const freshBooking = freshSnap.data() as BookingRequestDoc;
@@ -344,6 +395,10 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
       throw new HttpsError("failed-precondition",
         `Cannot cancel a date of a booking in status "${freshBooking.status}".`);
     }
+
+    const reliabilitySnap = await tx.get(reliabilityRef);
+    const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
+    const existingMarks = reliability?.marks ?? [];
 
     const gigSnap = await tx.get(gigRef);
     const gig = gigSnap.data() as GigDoc | undefined;
@@ -379,25 +434,34 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
     const cappedEntries = nextEntries.length > MAX_OCCURRENCE_CANCELLATIONS
       ? nextEntries.slice(nextEntries.length - MAX_OCCURRENCE_CANCELLATIONS) : nextEntries;
 
+    // ---- WRITES ----
     // Booking itself stays "confirmed" — only this one date is affected;
     // the run continues with its remaining occurrences.
     tx.update(bookingRef, { occurrenceCancellations: cappedEntries, updatedAt: now });
     tx.update(gigRef, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
+    if (markApplied) {
+      const mark: ReliabilityMark = {
+        bookingId, gigId, kind: "late_cancel", at: now, reportedByProfileId: null, removedByAdmin: false,
+      };
+      const marks = appendMarkCapped(existingMarks, mark);
+      tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
+    }
 
     return { outcome, markApplied };
   });
 
+  // recomputeReliability stays post-transaction — see cancelBooking's
+  // identical rationale (a pure, self-healing re-derivation; only the mark
+  // append itself needed to be inside the transaction).
   if (result.markApplied) {
-    await appendReliabilityMark(booking.musicianProfileId, {
-      bookingId, gigId, kind: "late_cancel", at: now, reportedByProfileId: null, removedByAdmin: false,
-    });
     await recomputeReliability(booking.musicianProfileId);
   }
 
   try {
     const gigSnap = await db.doc(`gigs/${gigId}`).get();
     const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
-    const { curatorBody, musicianBody } = cancellationCopy(callerSide, result.outcome, result.markApplied, gigTitle);
+    const { curatorBody, musicianBody } =
+      cancellationCopy(callerSide, result.outcome, result.markApplied, "occurrence", gigTitle);
     await notifyProfileMembers(booking.curatorProfileId,
       { kind: "booking", title: "One date of your booking was cancelled", body: curatorBody });
     await notifyProfileMembers(booking.musicianProfileId,
@@ -429,15 +493,18 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
     throw new HttpsError("permission-denied", "Only the curator side can report a no-show.");
   }
 
+  // Captured once, before the transaction — see cancelBooking's identical
+  // comment on why this matters (the window/day-count math and the
+  // persisted record must always agree, even across a retry or a slow commit).
   const now = Date.now();
   const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
-  // Unlike cancelBooking/cancelOccurrence's mark append (which runs
-  // POST-transaction — see appendReliabilityMark's comment), reportNoShow's
-  // mark append happens INSIDE this transaction: the "once per booking"
-  // invariant is enforced by checking for an existing reported_no_show mark
-  // for this bookingId, and that check must be atomic with the write, or a
-  // second concurrent call could read "no mark yet" and double-report
-  // before the first call's post-transaction append lands.
+  // Unlike cancelBooking/cancelOccurrence's mark append (also in-txn as of
+  // this same fix), reportNoShow's mark append has always needed to be
+  // INSIDE this transaction for its own, additional reason: the "once per
+  // booking" invariant is enforced by checking for an existing
+  // reported_no_show mark for this bookingId, and that check must be atomic
+  // with the write, or a second concurrent call could read "no mark yet"
+  // and double-report before the first call's write lands.
   const result = await db.runTransaction(async (tx) => {
     // ---- READS ----
     const freshSnap = await tx.get(bookingRef);
@@ -461,52 +528,56 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
         `Cannot report a no-show for a booking in status "${freshBooking.status}".`);
     }
 
-    let occurrenceGigId: string;
-    let occurrenceStartsAt: number;
-    // Whole-run only: every future filled occurrence gets reopened below,
-    // since the no-show ends this run for this booking exactly the way a
-    // cancelBooking does — a plan amendment (see docs/superpowers/plans/
-    // 2026-08-26-booking-flow.md's Task 6 reportNoShow bullet) closing a gap
-    // where the run's remaining dates were otherwise left "filled" against a
-    // booking that had already flipped to cancelled_by_musician. Read here
-    // (transaction read phase); reopened in the write phase below via
-    // reopenSeriesOccurrences.
+    // The reported occurrence — scoped to THIS booking's own gigId
+    // (bookingId==bookingId), never merely "any occurrence of the series
+    // that has passed": a seriesId-scoped query could otherwise select a
+    // never-booked open date, or a validly-cancelled date belonging to a
+    // DIFFERENT (earlier or later) booking of the same run — mis-attributing
+    // the mark's gigId, computing the window against the wrong date, and
+    // making the NO_SHOW_REPORT_WINDOW_DAYS check effectively unbounded on
+    // an ongoing run (the series keeps materializing new "most recent past
+    // occurrence" candidates regardless of which booking is being reported
+    // on). Needs the new (bookingId,startsAt) composite index — see
+    // firestore.indexes.json. Correct for BOTH single-gig bookings (exactly
+    // one gig ever carries this bookingId) and whole-run bookings (the most
+    // recent occurrence THIS booking actually filled and that has since
+    // started) — no seriesId branch needed here.
+    const pastSnap = await tx.get(
+      db.collection("gigs")
+        .where("bookingId", "==", bookingId)
+        .where("startsAt", "<=", now)
+        .orderBy("startsAt", "desc")
+        .limit(1));
+    if (pastSnap.empty) {
+      throw new HttpsError("failed-precondition", "No occurrence of this booking has started yet.");
+    }
+    const occurrenceGigId = pastSnap.docs[0].id;
+    const occurrenceStartsAt = pastSnap.docs[0].data().startsAt as number;
+
+    // Whole-run only: every future filled occurrence STILL OWNED BY THIS
+    // BOOKING gets reopened below, and the series' own linkage clears IFF
+    // it still names this booking — the no-show ends this run for this
+    // booking exactly the way cancelBooking does (plan amendment closing a
+    // gap where the run's remaining dates were otherwise left "filled"
+    // against a booking that had already flipped to cancelled_by_musician).
+    // Read here (transaction read phase); applied in the write phase below
+    // via reopenSeriesOccurrences.
     let futureOccurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+    let seriesActiveBookingId: string | null = null;
     if (freshBooking.seriesId) {
-      // Most recent occurrence of the run whose start has already passed —
-      // served by the existing (seriesId,startsAt) composite index (a
-      // descending scan of an ascending composite index needs no separate
-      // index entry).
-      const pastSnap = await tx.get(
-        db.collection("gigs")
-          .where("seriesId", "==", freshBooking.seriesId)
-          .where("startsAt", "<=", now)
-          .orderBy("startsAt", "desc")
-          .limit(1));
-      if (pastSnap.empty) {
-        throw new HttpsError("failed-precondition", "No occurrence of this run has started yet.");
-      }
-      occurrenceGigId = pastSnap.docs[0].id;
-      occurrenceStartsAt = pastSnap.docs[0].data().startsAt as number;
-      futureOccurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, now);
-    } else {
-      const gigSnap = await tx.get(db.doc(`gigs/${freshBooking.gigId}`));
-      const gig = gigSnap.data() as GigDoc | undefined;
-      if (!gig) throw new HttpsError("internal", "This booking's gig could not be found.");
-      occurrenceGigId = freshBooking.gigId;
-      occurrenceStartsAt = gig.startsAt;
+      const seriesSnap = await tx.get(db.doc(`gigSeries/${freshBooking.seriesId}`));
+      seriesActiveBookingId = (seriesSnap.data() as GigSeriesDoc | undefined)?.activeBookingId ?? null;
+      futureOccurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, bookingId, now);
     }
 
-    if (occurrenceStartsAt > now) {
-      throw new HttpsError("failed-precondition", "Cannot report a no-show before the gig has started.");
-    }
     const daysSinceStart = (now - occurrenceStartsAt) / (24 * 3_600_000);
     if (daysSinceStart > NO_SHOW_REPORT_WINDOW_DAYS) {
       throw new HttpsError("failed-precondition",
         `No-shows must be reported within ${NO_SHOW_REPORT_WINDOW_DAYS} days of the start.`);
     }
 
-    // Negative — the start has already passed by definition of the checks above.
+    // Negative — the start has already passed (the query above only
+    // returns occurrences with startsAt <= now).
     const hoursBeforeStart = (occurrenceStartsAt - now) / 3_600_000;
 
     // ---- WRITES ----
@@ -529,7 +600,7 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
 
     // Whole-run unwind — see the read-phase comment above.
     if (freshBooking.seriesId) {
-      reopenSeriesOccurrences(tx, db, freshBooking.seriesId, futureOccurrenceDocs, now);
+      reopenSeriesOccurrences(tx, db, freshBooking.seriesId, bookingId, seriesActiveBookingId, futureOccurrenceDocs, now);
     }
 
     return { occurrenceGigId };

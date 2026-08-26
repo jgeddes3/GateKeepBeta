@@ -223,6 +223,25 @@ describe("recomputeReliability / cancelBooking", () => {
     expect(curatorBooking.reliability.noShowCount).toBe(1);
   });
 
+  it("boundary: EXACTLY MUSICIAN_MARK_WINDOW_HOURS before start applies no mark (strict less-than only marks)", async () => {
+    const { musician, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("mb24");
+    // Mirrors the 72h boundary test's rationale above — buffer applied
+    // immediately before the single remaining call (cancelBooking).
+    const BOUNDARY_BUFFER_MS = 60_000;
+    await adb.doc(`gigs/${gigId}`).update({
+      startsAt: Date.now() + MUSICIAN_MARK_WINDOW_HOURS * 3_600_000 + BOUNDARY_BUFFER_MS,
+    });
+
+    await callFn("cancelBooking", { bookingId, reason: "Change of plans." }, musician.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.cancellation?.outcome).toBe("deposit_refunded");
+    expect(after.cancellation?.markApplied).toBe(false);
+
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+    expect(reliability).toBeUndefined();
+  });
+
   it("cancel after the gig has already started: failed-precondition (report instead)", async () => {
     const { curator, bookingId, gigId } = await makeConfirmedBooking("cbpast");
     await setGigStartsAt(gigId, -1); // 1 hour in the past
@@ -358,7 +377,14 @@ describe("cancelOccurrence", () => {
       const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(after.status).toBe("confirmed"); // run survives
       expect(after.occurrenceCancellations).toHaveLength(1);
-      expect(after.occurrenceCancellations?.[0]).toMatchObject({ gigId: gigId1, by: "curator" });
+      // gigId1 starts ~20h out — under CURATOR_FORFEIT_WINDOW_HOURS (72h),
+      // so this per-date outcome forfeits (curator side never marks).
+      expect(after.occurrenceCancellations?.[0]).toMatchObject({
+        gigId: gigId1, by: "curator", outcome: "deposit_forfeited", markApplied: false,
+      });
+      // hoursBeforeStart is positive — this date hasn't happened yet (unlike
+      // reportNoShow's always-negative value for an already-passed start).
+      expect(after.occurrenceCancellations?.[0].hoursBeforeStart).toBeGreaterThan(0);
       // Run-level deposit untouched by a per-occurrence cancellation.
       expect(after.deposit?.forfeitedTo).toBeNull();
 
@@ -396,6 +422,15 @@ describe("cancelOccurrence", () => {
       await callFn("acceptBooking", { bookingId }, curator.user);
 
       await callFn("cancelOccurrence", { bookingId, gigId: gigId1, reason: "Can't make it that night." }, musician.user);
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      // Musician side never forfeits the curator's deposit (refunded always),
+      // but a <24h cancel does apply a mark; hoursBeforeStart stays positive
+      // (this date hasn't happened yet).
+      expect(after.occurrenceCancellations?.[0]).toMatchObject({
+        gigId: gigId1, by: "musician", outcome: "deposit_refunded", markApplied: true,
+      });
+      expect(after.occurrenceCancellations?.[0].hoursBeforeStart).toBeGreaterThan(0);
 
       const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
         .data() as ReliabilityDoc;
@@ -442,12 +477,17 @@ describe("reportNoShow", () => {
       .rejects.toMatchObject({ code: "functions/already-exists" });
   });
 
-  it("more than NO_SHOW_REPORT_WINDOW_DAYS after the start: failed-precondition", async () => {
-    const { curator, bookingId, gigId } = await makeConfirmedBooking("nswin");
+  it("more than NO_SHOW_REPORT_WINDOW_DAYS after the start: failed-precondition, no mark appended", async () => {
+    const { curator, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("nswin");
     await setGigStartsAt(gigId, -(NO_SHOW_REPORT_WINDOW_DAYS + 1) * 24);
 
     await expect(callFn("reportNoShow", { bookingId, reason: "Too late to report." }, curator.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // Rejected before any write — the reliability doc must never have been
+    // touched (no doc created, so no marks either).
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+    expect(reliability).toBeUndefined();
   });
 
   it("a curator from an unrelated profile: permission-denied", async () => {
