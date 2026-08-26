@@ -168,6 +168,82 @@ describe("deleteProfile", () => {
   });
 });
 
+describe("deleteProfile gig/series cascade (S6)", () => {
+  it("removes the curator's gigs (with their private/location subdocs) and series", async () => {
+    const { user } = await signUpTestUser(`s6a-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`s6a_${Date.now()}`), user);
+    await seedCuratorGateContent(adb, profileId);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("s6aadmin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+
+    // Seed a gig (with a private/location subdoc) and a series directly —
+    // this test's subject is the cascade, not gig/series creation mechanics.
+    const gigRef = adb.collection("gigs").doc();
+    await gigRef.set({
+      curatorProfileId: profileId, seriesId: null, detachedFromTemplate: false,
+      title: "X", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 1000, maxCents: 2000, structure: "perHour" },
+      startsAt: Date.now(), durationMinutes: 60,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: { venueName: null, neighborhood: null, city: "Austin", geo: null, addressVisibility: "neighborhood", address: null },
+      status: "draft", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await adb.doc(`gigs/${gigRef.id}/private/location`).set({ address: "123 Main St", geo: { lat: 1, lng: 2 } });
+    const seriesRef = adb.collection("gigSeries").doc();
+    await seriesRef.set({
+      curatorProfileId: profileId,
+      recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+      fillMode: "per_occurrence", template: {},
+      status: "active", materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+
+    // reject-from-approved is required before deleteProfile will accept
+    // this profile (the draft/rejected-only gate) — its cascade closes/pauses
+    // "open"/"active" content, but this gig is "draft" (untouched by it),
+    // proving what removes it here is deleteProfile's OWN cascade.
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "test" }, adminUser.user);
+
+    await callFn("deleteProfile", { profileId }, user);
+
+    expect((await gigRef.get()).exists).toBe(false);
+    expect((await adb.doc(`gigs/${gigRef.id}/private/location`).get()).exists).toBe(false);
+    expect((await seriesRef.get()).exists).toBe(false);
+  });
+
+  it("does not touch another profile's gigs/series — negative control", async () => {
+    const { user } = await signUpTestUser(`s6c-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`s6c_${Date.now()}`), user);
+    const otherGigRef = adb.collection("gigs").doc();
+    await otherGigRef.set({
+      curatorProfileId: "some-other-profile-id", seriesId: null, detachedFromTemplate: false,
+      title: "Survivor", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 1000, maxCents: 2000, structure: "perHour" },
+      startsAt: Date.now(), durationMinutes: 60,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: { venueName: null, neighborhood: null, city: "Austin", geo: null, addressVisibility: "neighborhood", address: null },
+      status: "draft", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await otherGigRef.get()).exists).toBe(true);
+  });
+
+  it("recomputes curatorAccess for former members — a uid with no other approved curator membership loses a (possibly stale) marker", async () => {
+    const { user, uid } = await signUpTestUser(`s6b-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`s6b_${Date.now()}`), user);
+    // Seeded directly — isolates the assertion to deleteProfile's OWN
+    // post-cascade recompute rather than any earlier review.ts touchpoint
+    // (this profile is deleted straight from "draft", which never runs
+    // review.ts's cascade at all).
+    await adb.doc(`curatorAccess/${uid}`).set({});
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await adb.doc(`curatorAccess/${uid}`).get()).exists).toBe(false);
+  });
+});
+
 describe("submitProfileForReview", () => {
   it("moves draft to pending_review; only member admins may submit", async () => {
     const { user } = await signUpTestUser(`m3-${Date.now()}@test.com`);

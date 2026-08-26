@@ -9,6 +9,7 @@ import {
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { writeAudit } from "./review.js";
 import { bucket, logDeleteFailure } from "./storage.js";
+import { syncCuratorAccess } from "./curator.js";
 
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
@@ -24,6 +25,39 @@ export async function requireProfileAdmin(profileId: string, uid: string) {
   const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
   if (!m.exists || m.data()?.role !== "admin") {
     throw new HttpsError("permission-denied", "Only profile admins can do that.");
+  }
+}
+
+// S6 deleteProfile cascade helpers — page in PAGE-sized chunks (not one
+// unbounded .get()) since a prolific curator's gig/series history can be
+// arbitrarily large. Re-querying with the same `.limit(PAGE)` after each
+// page's docs are deleted naturally returns the NEXT page — deleted docs
+// never reappear in the next `.get()` — so no `startAfter` cursor is needed.
+const DELETE_CASCADE_PAGE_SIZE = 200;
+
+async function deleteGigsForProfile(db: FirebaseFirestore.Firestore, profileId: string): Promise<void> {
+  for (;;) {
+    const snap = await db.collection("gigs")
+      .where("curatorProfileId", "==", profileId).limit(DELETE_CASCADE_PAGE_SIZE).get();
+    if (snap.empty) return;
+    // recursiveDelete per gig (not a batched plain delete): each gig doc
+    // also owns a private/location subdoc that only recursiveDelete reaches.
+    for (const gigDoc of snap.docs) {
+      await db.recursiveDelete(gigDoc.ref);
+    }
+    if (snap.docs.length < DELETE_CASCADE_PAGE_SIZE) return;
+  }
+}
+
+async function deleteSeriesForProfile(db: FirebaseFirestore.Firestore, profileId: string): Promise<void> {
+  for (;;) {
+    const snap = await db.collection("gigSeries")
+      .where("curatorProfileId", "==", profileId).limit(DELETE_CASCADE_PAGE_SIZE).get();
+    if (snap.empty) return;
+    const batch = db.batch();
+    for (const doc of snap.docs) batch.delete(doc.ref); // gigSeries has no subcollections — a plain delete suffices
+    await batch.commit();
+    if (snap.docs.length < DELETE_CASCADE_PAGE_SIZE) return;
   }
 }
 
@@ -211,9 +245,66 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   }
   const handle = snap.data()?.handle as string | undefined;
   const name = snap.data()?.name as string | undefined;
+  const isCurator = snap.data()?.type === "curator";
 
   if (handle) await db.doc(`handles/${handle}`).delete();
+
+  // S6: collect member uids BEFORE the profile's own recursiveDelete removes
+  // the members subcollection — syncCuratorAccess (post-delete, below) needs
+  // to run for each of them once this profile's membership docs are truly
+  // gone, so a member whose ONLY approved-curator access came from this
+  // profile correctly loses the marker (a member who belongs to another
+  // approved curator profile keeps it, exactly like removeMember's and
+  // reviewProfile's reject cascade).
+  let memberUids: string[] = [];
+  if (isCurator) {
+    const membersSnap = await db.collection(`profiles/${profileId}/members`).get();
+    memberUids = membersSnap.docs.map((d) => d.id);
+  }
+
+  // S6: cascade-delete this curator's gigs and series before the profile's
+  // own recursiveDelete — deleteProfile only ever runs on a draft/rejected
+  // profile (the gate above), but a profile reaches "rejected" either
+  // straight from draft (never approved, so never any gigs/series — createGig
+  // requires an approved profile) or via reviewProfile's retroactive
+  // reject-from-approved, which CLOSES/PAUSES live gigs/series but does not
+  // delete them — deleting the profile is the deliberate second step for a
+  // full scrub (README's "Content takedown is a two-step" note), and those
+  // closed/paused docs (plus their exact private addresses) must not survive
+  // it. Each gig gets its own recursiveDelete (not a plain doc delete) so its
+  // private/location subdoc is reached too; gigSeries has no subcollections,
+  // so a plain batched delete suffices. Both queries page in PAGE-sized
+  // chunks rather than fetching the whole collection in one unbounded read —
+  // a prolific curator's cancelled/closed/taken_down gig history is
+  // otherwise unbounded (unlike MAX_OPEN_GIGS_PER_PROFILE, which only caps
+  // "open" gigs).
+  if (isCurator) {
+    await deleteGigsForProfile(db, profileId);
+    await deleteSeriesForProfile(db, profileId);
+  }
+
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
+
+  // S6: post-deletion recompute — now that the membership docs are truly
+  // gone, syncCuratorAccess's collectionGroup('members') scan for each
+  // former member no longer finds this profile, so a member whose only
+  // curator access came from here correctly loses the marker. Best-effort
+  // (allSettled), matching reviewProfile's identical reject-cascade
+  // rationale — deleting a profile is a rare, admin/owner-initiated action
+  // (unlike reviewProfile's automatic cascade on every reject), so a failed
+  // recompute here is logged rather than queued to curatorAccessRetries; the
+  // far more common path to a marker needing recompute (reviewProfile's
+  // reject-from-approved) already runs and retries BEFORE deleteProfile can
+  // even be called (this profile must already be "rejected" to pass the
+  // gate above).
+  if (isCurator && memberUids.length > 0) {
+    const results = await Promise.allSettled(memberUids.map((memberUid) => syncCuratorAccess(memberUid)));
+    results.forEach((result, i) => {
+      if (result.status === "rejected") {
+        console.error("curatorAccess recompute failed", { profileId, memberUid: memberUids[i] }, result.reason);
+      }
+    });
+  }
 
   // Storage cascade — best-effort. force: true is required: without it,
   // deleteFiles aborts the ENTIRE prefix sweep on the first per-object
