@@ -246,7 +246,7 @@ export function validateLookingFor(input: LookingFor): Result {
   return { ok: true };
 }
 
-type GigContentInput = Pick<GigDoc, "title" | "description" | "wants" | "durationMinutes" | "provisions">;
+export type GigContentInput = Pick<GigDoc, "title" | "description" | "wants" | "durationMinutes" | "provisions">;
 
 export function validateGigContent(input: GigContentInput): Result {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -304,7 +304,7 @@ export function validateBudget(input: GigBudget): Result {
   return { ok: true };
 }
 
-type GigRecurrence = GigSeriesDoc["recurrence"];
+export type GigRecurrence = GigSeriesDoc["recurrence"];
 
 export function validateRecurrence(input: GigRecurrence, now: number): Result {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {

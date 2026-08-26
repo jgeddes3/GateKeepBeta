@@ -22,6 +22,7 @@ export interface ProfileDoc {
   createdAt: number;
   updatedAt: number;
   portfolio?: PortfolioData; // musicians only; seeded empty by createProfileDraft
+  curator?: CuratorDetails;  // curators only; seeded by createProfileDraft
 }
 
 export interface MemberDoc {

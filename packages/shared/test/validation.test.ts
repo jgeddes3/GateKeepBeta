@@ -9,7 +9,7 @@ import {
   MAX_OPEN_GIGS_PER_PROFILE, MAX_ACTIVE_SERIES_PER_PROFILE, MAX_PENDING_CURATOR_PROFILES,
   RESUBMIT_COOLDOWN_MS, SERIES_MATERIALIZE_WEEKS,
 } from "../src/index";
-import type { ProfileDraftInput, LookingFor, GigWants } from "../src/index";
+import type { ProfileDraftInput, LookingFor, GigWants, ProfileDoc, CuratorDetails } from "../src/index";
 
 describe("validateHandle", () => {
   it("accepts lowercase letters, digits, underscores, 3-30 chars", () => {
@@ -467,6 +467,24 @@ describe("validateRecurrence", () => {
     expect(validateRecurrence({ ...ok, minute: [] as never }, now).ok).toBe(false);
     expect(validateRecurrence({ ...ok, cadence: 1 as never }, now).ok).toBe(false);
     expect(validateRecurrence({ ...ok, endDate: "tomorrow" as never }, now).ok).toBe(false);
+  });
+});
+
+describe("ProfileDoc.curator", () => {
+  it("accepts a curator profile with CuratorDetails seeded (compile-time + runtime shape check)", () => {
+    const curator: CuratorDetails = {
+      about: "A neighborhood listening room.",
+      lookingFor: { genres: [GENRES[0]], actSizes: [ACT_SIZES[0]], notes: null },
+      amenities: { capacity: 80, hasPA: true, hasBackline: false, indoorOutdoor: "indoor", notes: null },
+      advertisingInterest: true,
+      location: { address: "123 Main St", city: "Portland", neighborhood: "Alberta", geo: null },
+      photoPaths: [],
+    };
+    const profile: ProfileDoc = {
+      type: "curator", subtype: "venue", name: "The Alberta Room", handle: "the_alberta_room",
+      status: "draft", rejectionReason: null, createdAt: 0, updatedAt: 0, curator,
+    };
+    expect(profile.curator?.about).toBe("A neighborhood listening room.");
   });
 });
 
