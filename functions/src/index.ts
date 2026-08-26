@@ -15,4 +15,4 @@ export { createSeries, updateSeries, pauseSeries, endSeries } from "./gigSeries.
 export { dailySweep } from "./scheduled.js";
 export { searchUsersByName, backfillDisplayNameLower, flagAccount } from "./adminTools.js";
 export { backfillBookingVisibility } from "./bookingVisibility.js";
-export { applyToGig, offerGig, counterBooking, declineBooking, withdrawBooking } from "./bookings.js";
+export { applyToGig, offerGig, counterBooking, declineBooking, withdrawBooking, acceptBooking } from "./bookings.js";

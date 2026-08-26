@@ -27,6 +27,11 @@
     ] },
   { "collectionGroup": "gigs", "queryScope": "COLLECTION",
     "fields": [
+      { "fieldPath": "seriesId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "startsAt", "order": "ASCENDING" }
     ] },

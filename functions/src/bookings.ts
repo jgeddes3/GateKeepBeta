@@ -1,9 +1,11 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  validateOfferInput, isValidDocId,
+  validateOfferInput, isValidDocId, computeExpectedTotalCents, computeDepositCents,
   MAX_BOOKING_THREAD_ENTRIES, MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE,
+  DEPOSIT_PERCENT, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
   type BookingRequestDoc, type OfferEntry, type BookingSide, type GigDoc, type GigSeriesDoc,
+  type AcceptedTerms, type BookingDeposit,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember,
@@ -396,6 +398,213 @@ export const withdrawBooking = onCall<{ bookingId: string }>({ region: "us-centr
     kind: "booking",
     title: "Booking request withdrawn",
     body: `${actingName} withdrew their booking request${gigTitle ? ` for "${gigTitle}"` : ""}.`,
+  });
+
+  return { ok: true };
+});
+
+// Generic message for every reason a gig/run can be unavailable at accept
+// time (gig closed underneath the negotiation, or — whole-run — the series
+// paused/ended mid-thread). Deliberately identical across both branches: the
+// caller reached this callable as a legitimate member of the booking, so
+// there's no enumeration concern in being specific, but the two cases are
+// operationally the same thing from the accepting side's point of view
+// ("what you were about to confirm isn't there anymore").
+const GIG_UNAVAILABLE_MESSAGE = "This gig is no longer available.";
+
+async function supersedeSiblingBooking(
+  db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot, now: number,
+): Promise<void> {
+  // Fan-out is best-effort and MUST be failure-isolated: one poisoned
+  // sibling (a missing gig doc, a transient write failure) must never abort
+  // the rest of the fan-out — the already-committed accept transaction is
+  // not undone by a notification/supersede failure here. Task 8's sweep
+  // expiry step is the backstop for anything a failed iteration misses.
+  try {
+    const rival = doc.data() as BookingRequestDoc;
+    // Re-check status: `doc` came from a plain (non-transactional) query
+    // snapshot taken just before this loop, and two of this callable's own
+    // sibling queries (per-occurrence gigId + seriesId) can both return the
+    // same booking — the caller dedupes via a `seen` id set, but a stale
+    // status here is still a defensive belt-and-suspenders check.
+    if (rival.status !== "open") return;
+    await doc.ref.update({ status: "superseded", resolvedAt: now, updatedAt: now });
+
+    const rivalGigSnap = await db.doc(`gigs/${rival.gigId}`).get();
+    const rivalGigTitle = (rivalGigSnap.data() as GigDoc | undefined)?.title;
+    await notifyProfileMembers(rival.musicianProfileId, {
+      kind: "booking",
+      title: "Booking request no longer available",
+      body: `Another act was booked for${rivalGigTitle ? ` "${rivalGigTitle}"` : " this gig"}.`,
+    });
+  } catch (e) {
+    console.error(`acceptBooking: failed to supersede/notify sibling booking ${doc.id}`, e);
+  }
+}
+
+export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central1" }, async (req) => {
+  const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
+  const { bookingId } = req.data ?? ({} as { bookingId: string });
+  if (!isValidDocId(bookingId)) throw new HttpsError("invalid-argument", "A booking id is required.");
+
+  const db = getFirestore();
+  const bookingRef = db.doc(`bookings/${bookingId}`);
+  const bookingSnap = await bookingRef.get();
+  if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+  const booking = bookingSnap.data() as BookingRequestDoc;
+
+  // Membership resolved once, outside the transaction — see requireBookingSide.
+  const callerSide = await requireBookingSide(booking, uid);
+
+  const now = Date.now();
+  // Everything that decides whether the fill can happen — the booking's own
+  // turn/status/thread, the gig's live status, and (whole-run) the series'
+  // live status plus EVERY currently-open occurrence of the run — is read
+  // and written inside ONE transaction. Without this, a gig/series status
+  // flip (a takedown, another callable, an admin-SDK race, or two racing
+  // accepts) could slip in between a pre-transaction check and the write
+  // below. Same turn-check idiom as counterBooking/declineBooking/
+  // withdrawBooking (see their comments); this callable just has more state
+  // to re-read before it can safely write.
+  const { filledGigIds } = await db.runTransaction(async (tx) => {
+    // ---- READS (all of them, before any write — Admin SDK transaction rule) ----
+    const freshSnap = await tx.get(bookingRef);
+    if (!freshSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const freshBooking = freshSnap.data() as BookingRequestDoc;
+
+    if (callerSide !== freshBooking.awaitingSide) {
+      throw new HttpsError("failed-precondition", "It isn't your side's turn on this booking.");
+    }
+    if (freshBooking.status !== "open") {
+      throw new HttpsError("failed-precondition", `Cannot accept a booking in status "${freshBooking.status}".`);
+    }
+
+    const gigRef = db.doc(`gigs/${freshBooking.gigId}`);
+    const gigSnap = await tx.get(gigRef);
+    const gig = gigSnap.data() as GigDoc | undefined;
+    // Defensive — mirrors counterBooking's identical rationale: a booking
+    // always names an existing gig at creation time and nothing deletes gigs.
+    if (!gig) throw new HttpsError("internal", "This booking's gig could not be found.");
+    if (gig.status !== "open") throw new HttpsError("failed-precondition", GIG_UNAVAILABLE_MESSAGE);
+
+    // Whole-run: re-read the series (must still be active) and every
+    // currently-open occurrence of the run — bounded (series occurrences
+    // never exceed the SERIES_MATERIALIZE_WEEKS-week materialize window),
+    // so a transactional query here is safe. This query's results include
+    // the initiating gig itself (it's checked open above, and it IS an
+    // occurrence of its own series), so the write loop below is the single
+    // place every occurrence — including the one this booking's thread was
+    // actually about — gets filled; no separate write to `gigRef` is needed
+    // in the whole-run branch.
+    let occurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+    if (freshBooking.seriesId) {
+      const seriesRef = db.doc(`gigSeries/${freshBooking.seriesId}`);
+      const seriesSnap = await tx.get(seriesRef);
+      const series = seriesSnap.data() as GigSeriesDoc | undefined;
+      if (!series || series.status !== "active") {
+        throw new HttpsError("failed-precondition", GIG_UNAVAILABLE_MESSAGE);
+      }
+      const occurrenceSnap = await tx.get(
+        db.collection("gigs").where("seriesId", "==", freshBooking.seriesId).where("status", "==", "open"));
+      occurrenceDocs = occurrenceSnap.docs;
+    }
+
+    // ---- Freeze terms from the LAST thread entry — whatever the two sides
+    // most recently landed on, never the first offer. Whole-run: every
+    // occurrence shares the template duration, so the INITIATING gig's
+    // durationMinutes stands in for all of them here; sub-5 recomputes each
+    // occurrence's own total from `acceptedTerms.amountCents` at settlement
+    // time — this doc's acceptedTerms/deposit represent ONE occurrence. ----
+    const lastEntry = freshBooking.thread[freshBooking.thread.length - 1];
+    const expectedTotalCents = computeExpectedTotalCents(freshBooking.structure, lastEntry.amountCents, {
+      durationMinutes: gig.durationMinutes, songCount: lastEntry.expectedQuantity ?? undefined,
+    });
+    // Tripwire (quality-review mandate): a forgotten/corrupted
+    // durationMinutes or songCount must never silently produce a $0 deposit
+    // obligation — fail loudly instead.
+    if (expectedTotalCents <= 0) {
+      throw new HttpsError("failed-precondition",
+        "This booking's terms compute to a $0 total — check the gig's duration/song count before accepting.");
+    }
+    const acceptedTerms: AcceptedTerms = {
+      amountCents: lastEntry.amountCents, expectedQuantity: lastEntry.expectedQuantity, expectedTotalCents,
+    };
+    const deposit: BookingDeposit = {
+      amountCents: computeDepositCents(expectedTotalCents), status: "unpaid", forfeitedTo: null,
+      policy: {
+        percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS,
+        musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS,
+      },
+    };
+
+    // ---- WRITES ----
+    tx.update(bookingRef, { status: "confirmed", confirmedAt: now, updatedAt: now, acceptedTerms, deposit });
+
+    const filledGigIds: string[] = [];
+    if (freshBooking.seriesId) {
+      for (const doc of occurrenceDocs) {
+        tx.update(doc.ref, {
+          status: "filled", bookingId, bookedMusicianProfileId: freshBooking.musicianProfileId, updatedAt: now,
+        });
+        filledGigIds.push(doc.id);
+      }
+      tx.update(db.doc(`gigSeries/${freshBooking.seriesId}`), {
+        activeBookingId: bookingId, bookedMusicianProfileId: freshBooking.musicianProfileId, updatedAt: now,
+      });
+    } else {
+      tx.update(gigRef, {
+        status: "filled", bookingId, bookedMusicianProfileId: freshBooking.musicianProfileId, updatedAt: now,
+      });
+      filledGigIds.push(freshBooking.gigId);
+    }
+
+    return { filledGigIds };
+  });
+
+  // ---- POST-TRANSACTION FAN-OUT (deliberately outside the txn) ----
+  // Sibling supersede: every other OPEN booking naming any gig this accept
+  // just filled, UNION (whole-run only) every open booking naming the run's
+  // series directly — the latter is a second, overlapping net in case a
+  // rival whole-run applicant's own gigId isn't among `filledGigIds` for
+  // some edge-case reason. `seen` dedupes across both queries (and excludes
+  // the winner itself, whose status is no longer "open" anyway) so a
+  // booking matching both is only processed once. Idempotent +
+  // failure-isolated (see supersedeSiblingBooking) — Task 8's sweep expiry
+  // step is the backstop for anything missed here.
+  const seen = new Set<string>([bookingId]);
+  const siblingQueries = filledGigIds.map((gid) =>
+    db.collection("bookings").where("gigId", "==", gid).where("status", "==", "open"));
+  if (booking.seriesId) {
+    siblingQueries.push(
+      db.collection("bookings").where("seriesId", "==", booking.seriesId).where("status", "==", "open"));
+  }
+  for (const q of siblingQueries) {
+    const snap = await q.get();
+    for (const doc of snap.docs) {
+      if (seen.has(doc.id)) continue;
+      seen.add(doc.id);
+      await supersedeSiblingBooking(db, doc, now);
+    }
+  }
+
+  // Winners — both sides. booking.gigId/musicianProfileId/curatorProfileId
+  // are immutable (see requireBookingSide), so the outer, pre-transaction
+  // `booking` is safe to use here, matching decline/withdrawBooking's own
+  // post-transaction notification convention.
+  const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
+  const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
+  const musicianName = await profileName(db, booking.musicianProfileId);
+  const curatorName = await profileName(db, booking.curatorProfileId);
+  await notifyProfileMembers(booking.curatorProfileId, {
+    kind: "booking",
+    title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
+    body: `${musicianName} is booked and confirmed.`,
+  });
+  await notifyProfileMembers(booking.musicianProfileId, {
+    kind: "booking",
+    title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
+    body: `You're booked and confirmed with ${curatorName}.`,
   });
 
   return { ok: true };

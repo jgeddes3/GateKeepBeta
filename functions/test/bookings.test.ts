@@ -4,13 +4,23 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
   MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_BOOKING_THREAD_ENTRIES,
+  DEPOSIT_PERCENT, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
   type ProfileDraftInput, type BookingRequestDoc, type OfferEntry,
 } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
-vi.setConfig({ testTimeout: 15_000 });
+// 20s (not the file-wide-standard 15s), matching bookingVisibility.test.ts's
+// own precedent for this suite's other unusually chain-heavy booking file:
+// several tests here run 3-5 chained callables (createProfileDraft x2,
+// submitProfileForReview x2, reviewProfile x2, createGig, publishGig,
+// applyToGig, counterBooking, acceptBooking...) before ever reaching an
+// assertion. Task 5's acceptBooking pushed the "applyToGig happy path" test
+// (already ~14s of the prior 15s budget in isolation) over the edge under
+// full-suite load — one more deployed function measurably adds dispatch
+// overhead across all ~300+ other tests' calls too, not just this file's own.
+vi.setConfig({ testTimeout: 20_000 });
 
 async function makeApprovedCuratorProfile(emailPrefix: string) {
   const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
@@ -465,5 +475,194 @@ describe("withdrawBooking", () => {
 
     await expect(callFn("withdrawBooking", { bookingId }, curator.user)) // curator IS awaiting
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+});
+
+describe("acceptBooking", () => {
+  it("happy path: freezes acceptedTerms from the LAST thread entry (not the first offer), computes deposit with ceil, fills the gig, sets confirmedAt, notifies both winners", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab1c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab1m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
+
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload({ amountCents: 9000 }) }, musician.user);
+    // Curator counters — this becomes the LAST thread entry, and must be
+    // what gets frozen, not the musician's original 9000 offer. Chosen so
+    // BOTH ceils actually round up: 10001c/hr * 1.5hr = 15001.5 ->
+    // expectedTotalCents 15002; 15002 * 35% = 5250.7 -> deposit 5251.
+    await callFn("counterBooking", { bookingId, offer: offerPayload({ amountCents: 10001 }) }, curator.user);
+    // awaitingSide flipped to musician after the counter — musician accepts.
+
+    await callFn("acceptBooking", { bookingId }, musician.user);
+
+    const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(booking.status).toBe("confirmed");
+    expect(typeof booking.confirmedAt).toBe("number");
+    expect(booking.acceptedTerms).toEqual({ amountCents: 10001, expectedQuantity: 1.5, expectedTotalCents: 15002 });
+    expect(booking.deposit).toEqual({
+      amountCents: 5251, status: "unpaid", forfeitedTo: null,
+      policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
+    });
+
+    const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
+    expect(gig?.status).toBe("filled");
+    expect(gig?.bookingId).toBe(bookingId);
+    expect(gig?.bookedMusicianProfileId).toBe(musicianProfileId);
+
+    const curatorNotes = await pollNotifications(curator.uid);
+    expect(curatorNotes.docs.some((d) => d.data().kind === "booking" && /confirmed/i.test(d.data().title))).toBe(true);
+    const musicianNotes = await pollNotifications(musician.uid);
+    expect(musicianNotes.docs.some((d) => d.data().kind === "booking" && /confirmed/i.test(d.data().title))).toBe(true);
+  });
+
+  it("enforces awaitingSide — the non-awaiting side cannot accept (failed-precondition), booking left open", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab2c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab2m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    // awaitingSide is "curator" after the apply — the musician (initiator,
+    // non-awaiting) tries to accept out of turn.
+    await expect(callFn("acceptBooking", { bookingId }, musician.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("open");
+  });
+
+  it("rejects a stranger to both sides with permission-denied", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab3c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab3m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    const { user: stranger } = await signUpTestUser(`ab3s-${Date.now()}@test.com`);
+    await expect(callFn("acceptBooking", { bookingId }, stranger))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("race: gig flipped closed via admin SDK before accept -> failed-precondition, booking left open", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab4c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab4m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+
+    // Simulates a concurrent takedown/closure racing the accept.
+    await adb.doc(`gigs/${gigId}`).update({ status: "closed" });
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("open");
+    expect(after.acceptedTerms).toBeNull();
+    expect(after.deposit).toBeNull();
+  });
+
+  it("supersede: two rival open bookings on the same gig -> loser superseded + notified, winner confirmed", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab5c");
+    const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab5w");
+    const { owner: loser, profileId: loserProfileId } = await makeApprovedMusicianProfile("ab5l");
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+
+    const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
+    const { bookingId: loserBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: loserProfileId, offer: offerPayload() }, loser.user);
+
+    await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
+
+    const winnerAfter = (await adb.doc(`bookings/${winnerBookingId}`).get()).data() as BookingRequestDoc;
+    expect(winnerAfter.status).toBe("confirmed");
+
+    const loserAfter = (await adb.doc(`bookings/${loserBookingId}`).get()).data() as BookingRequestDoc;
+    expect(loserAfter.status).toBe("superseded");
+    expect(loserAfter.resolvedAt).not.toBeNull();
+
+    const loserNotes = await pollNotifications(loser.uid);
+    expect(loserNotes.docs.some((d) => d.data().kind === "booking" && /no longer available/i.test(d.data().title))).toBe(true);
+  });
+
+  it("whole-run: fills every currently-open occurrence, stamps the series, supersedes a rival booking on a DIFFERENT occurrence", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab6c");
+    const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab6w");
+    const { owner: rival, profileId: rivalProfileId } = await makeApprovedMusicianProfile("ab6r");
+
+    const series = await seedSeries(curatorProfileId, "whole_run");
+    const gigId1 = await createOpenGig(curatorProfileId, curator.user);
+    const gigId2 = await createOpenGig(curatorProfileId, curator.user);
+    const gigId3 = await createOpenGig(curatorProfileId, curator.user);
+    await Promise.all([gigId1, gigId2, gigId3].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+
+    const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId: gigId1, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
+    const { bookingId: rivalBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId: gigId2, musicianProfileId: rivalProfileId, offer: offerPayload() }, rival.user);
+    expect((await adb.doc(`bookings/${winnerBookingId}`).get()).data()?.seriesId).toBe(series.id);
+
+    await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
+
+    for (const gigId of [gigId1, gigId2, gigId3]) {
+      const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
+      expect(gig?.status).toBe("filled");
+      expect(gig?.bookingId).toBe(winnerBookingId);
+      expect(gig?.bookedMusicianProfileId).toBe(winnerProfileId);
+    }
+
+    const seriesAfter = (await adb.doc(`gigSeries/${series.id}`).get()).data();
+    expect(seriesAfter?.activeBookingId).toBe(winnerBookingId);
+    expect(seriesAfter?.bookedMusicianProfileId).toBe(winnerProfileId);
+
+    const rivalAfter = (await adb.doc(`bookings/${rivalBookingId}`).get()).data() as BookingRequestDoc;
+    expect(rivalAfter.status).toBe("superseded");
+
+    // Cleanup — never leave an "active" gigSeries fixture behind (the shared
+    // emulator's scheduled.test.ts sweep scans every active series).
+    await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+  });
+
+  it("whole-run: fails with failed-precondition when the series is paused mid-thread, booking left open", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab7c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab7m");
+
+    const series = await seedSeries(curatorProfileId, "whole_run");
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    await adb.doc(`gigs/${gigId}`).update({ seriesId: series.id });
+
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.seriesId).toBe(series.id);
+
+    // Series paused mid-thread — after the booking was created (and so
+    // targets the whole run), before the accept.
+    await adb.doc(`gigSeries/${series.id}`).update({ status: "paused" });
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("open");
+    // Already non-active ("paused") — the shared sweep only scans
+    // status:"active" series, so no further cleanup is needed.
+  });
+
+  it("tripwire: rejects a zero expectedTotalCents (a durationMinutes:0 perHour gig) with failed-precondition, never a silent $0 deposit", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab8c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab8m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
+    // A forgotten/corrupted duration, seeded directly (bypasses updateGig's
+    // own validation, which would otherwise reject durationMinutes:0).
+    await adb.doc(`gigs/${gigId}`).update({ durationMinutes: 0 });
+
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("open");
+    expect(after.deposit).toBeNull();
   });
 });
