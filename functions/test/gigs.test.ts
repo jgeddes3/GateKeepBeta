@@ -163,6 +163,15 @@ describe("publishGig", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
+  it("rejects publishing once the profile has been rejected/unpublished, even for a still-member owner", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("pg5", "venue");
+    const gigId = await createDraftGig(profileId, owner.user);
+    const admin = await makeAdminUser("pg5a");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Policy violation." }, admin.user);
+    await expect(callFn("publishGig", { gigId }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
   it("enforces MAX_OPEN_GIGS_PER_PROFILE with resource-exhausted", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("pg4", "venue");
     const seedLocation = {
@@ -279,6 +288,17 @@ describe("updateGig", () => {
     await expect(callFn("updateGig", {
       gigId, ...gigContent({ budget: { minCents: 5, maxCents: 1, structure: "perHour" } }),
     }, owner.user)).rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+
+  it("rejects editing a still-open gig once the profile has been rejected/unpublished", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ug9", "venue");
+    const gigId = await createDraftGig(profileId, owner.user);
+    await callFn("publishGig", { gigId }, owner.user); // now "open" — world-readable
+    const admin = await makeAdminUser("ug9a");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Policy violation." }, admin.user);
+    await expect(callFn("updateGig", { gigId, ...gigContent({ title: "Should not land" }) }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.title).not.toBe("Should not land");
   });
 });
 

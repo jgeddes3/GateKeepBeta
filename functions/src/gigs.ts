@@ -161,6 +161,12 @@ export const publishGig = onCall<{ gigId: string }>({ region: "us-central1" }, a
   if (!gigSnap.exists) throw new HttpsError("not-found", "Gig not found.");
   const gig = gigSnap.data() as GigDoc;
   await requireProfileMember(gig.curatorProfileId, uid);
+  // A profile can be rejected/unpublished after a gig was created against it
+  // (Task 6 lands the cascade that closes/pauses live gigs+series on that
+  // event, but until it runs — or for a gig created before it existed — a
+  // member of a no-longer-approved profile must not be able to publish new
+  // content into the world-readable "open" surface).
+  await requireApprovedCuratorProfile(gig.curatorProfileId);
   if (gig.status !== "draft") {
     throw new HttpsError("failed-precondition", `Cannot publish a gig in status "${gig.status}".`);
   }
@@ -193,6 +199,11 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1" }, async
   const gig = gigSnap.data() as GigDoc;
 
   await requireProfileMember(gig.curatorProfileId, uid);
+  // Same rationale as publishGig: a member of a since-rejected/unpublished
+  // profile must not keep editing a (possibly still world-readable "open")
+  // gig's content. cancelGig deliberately keeps membership-only — cancelling
+  // only narrows exposure, it never adds any.
+  await requireApprovedCuratorProfile(gig.curatorProfileId);
   if (gig.status === "cancelled" || gig.status === "taken_down") {
     throw new HttpsError("failed-precondition", `Cannot edit a gig in status "${gig.status}".`);
   }
