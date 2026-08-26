@@ -205,10 +205,22 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
 
     // Reject's decision is final the instant the transaction above commits —
     // unlike approve (which can still be rolled back below if the copy
-    // fails), nothing downstream undoes "rejected". Write the audit right
-    // here, not gated on the storage outcome. Guarded on
-    // prior.status !== "rejected" so an idempotent reject-from-rejected
-    // retry doesn't produce a duplicate audit row for the same decision.
+    // fails), nothing downstream undoes "rejected". Write the audit AND
+    // notify the musician right here, unconditionally-once at claim time —
+    // not gated on the storage outcome below. This used to live at the very
+    // end, alongside approve's notification, but the storage-cleanup step
+    // below can throw HttpsError("unavailable", ...) when the public delete
+    // fails for a non-404 reason (see that throw's comment) — that aborts
+    // the call before ever reaching a post-storage notification block, so a
+    // takedown whose first storage attempt failed would silently never
+    // notify the musician, even on a successful retry (the retry's `prior`
+    // is already "rejected" by then, which is exactly the idempotency guard
+    // below and correctly suppresses a second notification). Firing both
+    // here instead — before any storage work — means the musician always
+    // hears about a reject exactly once, regardless of how storage cleanup
+    // goes. Both are guarded on prior.status !== "rejected" so an idempotent
+    // reject-from-rejected retry doesn't produce a duplicate audit row or
+    // tell the musician twice.
     if (decision === "rejected" && prior.status !== "rejected") {
       await writeAudit({
         actorUid,
@@ -218,6 +230,15 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         // "pending_review") is worth more to an auditor than the reason alone.
         detail: `[was ${prior.status}] ${reason!.trim()}`,
         targetId: `${profileId}/${trackId}`,
+      });
+      const rejectTitle = prior.title ?? "Your track";
+      const wasApproved = prior.status === "approved";
+      await notifyProfileMembers(profileId, {
+        kind: "track_review",
+        title: wasApproved ? `"${rejectTitle}" was removed from your portfolio` : `"${rejectTitle}" needs attention`,
+        body: wasApproved
+          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
+          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
       });
     }
 
@@ -297,12 +318,18 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         await publicFile.delete()
           .catch(logDeleteFailure("reviewTrack", "superseded public (post-review race)", publicTrackPath(profileId, trackId)));
       }
-      return { ok: true }; // no audit/notify — the other admin's decision stands
+      // Only approve's audit/notify are skipped here — the other admin's
+      // decision stands. Reject's already fired unconditionally above,
+      // before this re-read, so there's nothing to skip for it.
+      return { ok: true };
     }
 
-    // Reject's audit already ran (right after the transaction, above) —
-    // approve's is gated here because approve can still be superseded by a
-    // concurrent reject between the copy finishing and this re-read.
+    // Reject's audit + notification already ran (right after the
+    // transaction, above, unconditionally-once at claim time — see the
+    // comment there for why). Approve's are gated here instead because
+    // approve — unlike reject — can still be superseded by a concurrent
+    // reject between the copy finishing and this re-read; the `stillOurs`
+    // check above already returned early without audit/notify if so.
     if (decision === "approved") {
       await writeAudit({
         actorUid,
@@ -310,24 +337,10 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         detail: prior.title ?? "",
         targetId: `${profileId}/${trackId}`,
       });
-    }
-    // Suppresses the notification on an idempotent retry (prior.status
-    // already equals decision — e.g. reject-from-rejected): the member was
-    // already told once. For approve this condition is always true anyway
-    // (prior.status is always "pending_review" there, never "approved").
-    if (prior.status !== decision) {
-      const title = prior.title ?? "Your track";
-      const wasApproved = prior.status === "approved";
       await notifyProfileMembers(profileId, {
         kind: "track_review",
-        title: decision === "approved"
-          ? `"${title}" is live!`
-          : wasApproved ? `"${title}" was removed from your portfolio` : `"${title}" needs attention`,
-        body: decision === "approved"
-          ? "Your track passed review and now plays on your public portfolio."
-          : wasApproved
-            ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
-            : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+        title: `"${prior.title ?? "Your track"}" is live!`,
+        body: "Your track passed review and now plays on your public portfolio.",
       });
     }
     return { ok: true };

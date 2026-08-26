@@ -2512,8 +2512,8 @@ describe("reviewTrack", () => {
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
-  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state", async () => {
-    const { profileId, trackId } = await makePendingTrack("rv4");
+  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state, musician notified", async () => {
+    const { uid, profileId, trackId } = await makePendingTrack("rv4");
     const { user: adminUser, uid: adminUid } = await makeAdminUser("rv4a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const [pubBefore] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
@@ -2529,6 +2529,18 @@ describe("reviewTrack", () => {
     expect(audit.size).toBe(1);
     expect(audit.docs[0].data().actorUid).toBe(adminUid);
     expect(audit.docs[0].data().detail).toMatch(/^\[was approved\]/);
+    // Pins that a takedown's notification fires at claim time (right after
+    // the transaction, alongside the audit) rather than after storage
+    // cleanup — see reviewTrack's comment on that ordering: it exists so a
+    // storage-cleanup failure (HttpsError "unavailable") can't swallow the
+    // notification the way it could when notification lived at the very
+    // end. Reproducing that exact storage failure isn't practical against
+    // the real Storage emulator (the Admin SDK bypasses storage.rules, and
+    // there's no supported way to force a non-404 delete error), so this
+    // instead confirms the notification exists for the ordinary success
+    // path at the new call site.
+    const notifs = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifs.docs.some((d) => /removed from your portfolio/.test(d.data().title as string))).toBe(true);
   });
   it("approve fails cleanly when the review clip is already gone: failed-precondition, doc rolled back to pending_review", async () => {
     const { profileId, trackId } = await makePendingTrack("rv5");
@@ -2710,10 +2722,22 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
 
     // Reject's decision is final the instant the transaction above commits —
     // unlike approve (which can still be rolled back below if the copy
-    // fails), nothing downstream undoes "rejected". Write the audit right
-    // here, not gated on the storage outcome. Guarded on
-    // prior.status !== "rejected" so an idempotent reject-from-rejected
-    // retry doesn't produce a duplicate audit row for the same decision.
+    // fails), nothing downstream undoes "rejected". Write the audit AND
+    // notify the musician right here, unconditionally-once at claim time —
+    // not gated on the storage outcome below. This used to live at the very
+    // end, alongside approve's notification, but the storage-cleanup step
+    // below can throw HttpsError("unavailable", ...) when the public delete
+    // fails for a non-404 reason (see that throw's comment) — that aborts
+    // the call before ever reaching a post-storage notification block, so a
+    // takedown whose first storage attempt failed would silently never
+    // notify the musician, even on a successful retry (the retry's `prior`
+    // is already "rejected" by then, which is exactly the idempotency guard
+    // below and correctly suppresses a second notification). Firing both
+    // here instead — before any storage work — means the musician always
+    // hears about a reject exactly once, regardless of how storage cleanup
+    // goes. Both are guarded on prior.status !== "rejected" so an idempotent
+    // reject-from-rejected retry doesn't produce a duplicate audit row or
+    // tell the musician twice.
     if (decision === "rejected" && prior.status !== "rejected") {
       await writeAudit({
         actorUid,
@@ -2723,6 +2747,15 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         // "pending_review") is worth more to an auditor than the reason alone.
         detail: `[was ${prior.status}] ${reason!.trim()}`,
         targetId: `${profileId}/${trackId}`,
+      });
+      const rejectTitle = prior.title ?? "Your track";
+      const wasApproved = prior.status === "approved";
+      await notifyProfileMembers(profileId, {
+        kind: "track_review",
+        title: wasApproved ? `"${rejectTitle}" was removed from your portfolio` : `"${rejectTitle}" needs attention`,
+        body: wasApproved
+          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
+          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
       });
     }
 
@@ -2802,12 +2835,18 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         await publicFile.delete()
           .catch(logDeleteFailure("reviewTrack", "superseded public (post-review race)", publicTrackPath(profileId, trackId)));
       }
-      return { ok: true }; // no audit/notify — the other admin's decision stands
+      // Only approve's audit/notify are skipped here — the other admin's
+      // decision stands. Reject's already fired unconditionally above,
+      // before this re-read, so there's nothing to skip for it.
+      return { ok: true };
     }
 
-    // Reject's audit already ran (right after the transaction, above) —
-    // approve's is gated here because approve can still be superseded by a
-    // concurrent reject between the copy finishing and this re-read.
+    // Reject's audit + notification already ran (right after the
+    // transaction, above, unconditionally-once at claim time — see the
+    // comment there for why). Approve's are gated here instead because
+    // approve — unlike reject — can still be superseded by a concurrent
+    // reject between the copy finishing and this re-read; the `stillOurs`
+    // check above already returned early without audit/notify if so.
     if (decision === "approved") {
       await writeAudit({
         actorUid,
@@ -2815,24 +2854,10 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         detail: prior.title ?? "",
         targetId: `${profileId}/${trackId}`,
       });
-    }
-    // Suppresses the notification on an idempotent retry (prior.status
-    // already equals decision — e.g. reject-from-rejected): the member was
-    // already told once. For approve this condition is always true anyway
-    // (prior.status is always "pending_review" there, never "approved").
-    if (prior.status !== decision) {
-      const title = prior.title ?? "Your track";
-      const wasApproved = prior.status === "approved";
       await notifyProfileMembers(profileId, {
         kind: "track_review",
-        title: decision === "approved"
-          ? `"${title}" is live!`
-          : wasApproved ? `"${title}" was removed from your portfolio` : `"${title}" needs attention`,
-        body: decision === "approved"
-          ? "Your track passed review and now plays on your public portfolio."
-          : wasApproved
-            ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
-            : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+        title: `"${prior.title ?? "Your track"}" is live!`,
+        body: "Your track passed review and now plays on your public portfolio.",
       });
     }
     return { ok: true };
@@ -2950,6 +2975,47 @@ route through `logDeleteFailure`); and `rv7`'s test was strengthened to seed
 a stray object at the public path before the retry and assert it gets
 cleaned up (proving the retry re-attempts storage work) while also asserting
 no duplicate audit row or notification is produced.
+
+#### Quality-review hardening (pass 3 — folded into the Step 3/Step 1 code above)
+
+A review pass during Task 12 (the admin Takedowns panel that actually
+exercises the retroactive-takedown path end-to-end) found a notification
+could be lost across a takedown retry — closed in the same commit as Task
+12's web fixes (`fix(web,functions): admin queue race guards, clip-error
+states, takedown notification integrity`):
+
+D. **A takedown whose first storage attempt failed never notified the
+   musician, even after a successful retry.** Reject's notification lived at
+   the very end of the function, alongside approve's, gated on
+   `prior.status !== decision`. But the storage-cleanup step can throw
+   `HttpsError("unavailable", ...)` when the public object's delete fails for
+   a non-404 reason (pass 2's fix C.2) — that throw aborts the call before
+   ever reaching the end-of-function notification block. On retry, the
+   transaction's `prior.status` is now `"rejected"` (the first attempt's
+   claim already committed it), so the retry's own idempotency guard
+   (`prior.status !== decision` — now `false`) suppresses the notification a
+   *second* time, except there was never a first time: the musician is never
+   told at all. Fixed by moving reject's notification to fire alongside its
+   audit, immediately after the transaction commits and before any storage
+   work — the same `prior.status !== "rejected"` guard that already gated
+   the audit now gates the notification too, so it's unconditional-once at
+   claim time and can't be lost to a downstream storage failure. Approve's
+   notification stays where it was (gated on the post-storage `stillOurs`
+   guard), since approve — unlike reject — really can still be undone after
+   the claim commits.
+
+   Reproducing the exact `unavailable` storage failure in a test wasn't
+   practical: the whole `functions/test` suite drives real callables against
+   the Functions/Firestore/Storage emulators over HTTP (no in-process
+   mocking of `bucket()`), and the Admin SDK bypasses `storage.rules`
+   entirely, so there's no supported way to force a non-404 delete error
+   from a test. `rv4`'s test (the retroactive-takedown case) was instead
+   strengthened to assert a notification exists after an ordinary successful
+   takedown, pinning that the new call site still fires correctly; the
+   reordering itself is provably safe by inspection (reject's decision is
+   already final the instant its transaction commits, per the standing
+   comment on that transaction — nothing downstream can un-reject it, so
+   nothing downstream should gate telling the musician about it either).
 
 ---
 
@@ -4639,6 +4705,12 @@ git commit -m "feat(web): portfolio editor, musician wizard, dashboard wiring"
 
 ### Task 12: Web — admin Tracks review queue
 
+> **Post-review revision:** this section documents the FINAL shipped code
+> after a quality-review pass hardened the first cut (see "Quality-review
+> hardening" below the original steps). The steps below are kept in their
+> original order but their code blocks now show the final, byte-exact
+> implementation — not the version that first went green.
+
 **Files:**
 - Modify: `apps/web/app/admin/page.tsx`
 
@@ -4647,20 +4719,41 @@ git commit -m "feat(web): portfolio editor, musician wizard, dashboard wiring"
 Add to `apps/web/app/admin/page.tsx` (following the existing `Queue` component's patterns exactly — per-row busy state, checklist banner):
 
 ```tsx
+import { useEffect, useState, useRef } from "react";
+import {
+  collection, collectionGroup, query, where, onSnapshot, orderBy, limit, getDoc, getDocs, doc,
+  type DocumentReference,
+} from "firebase/firestore";
 import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import type { TrackDoc } from "@gatekeep/shared";
 
-type TrackRow = TrackDoc & { id: string; profileId: string; profileName: string };
+type TrackRow = Row<TrackDoc> & { profileId: string; profileName: string };
 
+// Owns the Approve/Reject actions for exactly one pending track — same
+// per-row-busy-state rationale as QueueRow above. Also resolves and plays the
+// review clip inline (spec §6: admin listens before approving), via
+// getDownloadURL on the track's review/... storagePath — admins can read any
+// review clip under storage.rules. url is three-state: null while resolving
+// (loading placeholder), "error" if getDownloadURL rejects (e.g. the object
+// is missing — surfaced as an explicit dead-end rather than an infinite
+// "clip loading…", since nothing will ever move it out of that state), or
+// the resolved string. storagePath is typed nullable on TrackDoc (other
+// statuses can have no file yet); the transcode trigger only ever writes
+// status:"pending_review" and storagePath together in the same update, so in
+// practice every row here has one, but the effect still guards against a
+// falsy path rather than assuming that invariant.
 function TrackQueueRow({ t }: { t: TrackRow }) {
   const [busy, setBusy] = useState(false);
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null | "error">(null);
   useEffect(() => {
     if (!t.storagePath) return;
     let cancelled = false;
     void getDownloadURL(storageRef(getFirebase().storage, t.storagePath))
       .then((u) => { if (!cancelled) setUrl(u); })
-      .catch(() => { if (!cancelled) setUrl(null); });
+      .catch((e) => {
+        console.error("TrackQueueRow: getDownloadURL failed", t.storagePath, e);
+        if (!cancelled) setUrl("error");
+      });
     return () => { cancelled = true; };
   }, [t.storagePath]);
   const review = async (decision: "approved" | "rejected") => {
@@ -4673,44 +4766,96 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
         { profileId: t.profileId, trackId: t.id, decision, reason });
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Could not submit the review — try again.");
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
       <strong>{t.title}</strong> — {t.profileName} · {t.durationSec ?? "?"}s
-      {url ? <audio controls src={url} style={{ display: "block", margin: "8px 0" }} />
-           : <p style={{ color: "#888" }}>clip loading…</p>}
+      {t.storagePath == null
+        ? <p style={{ color: "#888" }}>No clip on file.</p>
+        : url === "error"
+          ? <p style={{ color: "#b00020" }}>Clip unavailable — reject and ask the musician to re-upload.</p>
+          : url
+            ? <audio controls preload="none" src={url} style={{ display: "block", margin: "8px 0" }} />
+            : <p style={{ color: "#888" }}>clip loading…</p>}
       <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
       <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
     </div>
   );
 }
 
+// Pending-track review queue (spec §6). collectionGroup('tracks') mirrors
+// Queue's flat collection query above, but tracks live under
+// profiles/{profileId}/tracks — collectionGroup + the admin CG-read rule and
+// fieldOverride index (already in place) is what makes a single
+// cross-profile "everything pending" listener possible. Bounded with
+// limit(100), same reasoning as AuditLog's limit(50): an admin listener
+// should never fan out unboundedly. This intentionally doesn't order by
+// createdAt (i.e. isn't FIFO-oldest-first) — collectionGroup + an equality
+// filter + orderBy on a different field needs its own composite index,
+// which doesn't exist yet; deferred until the queue realistically nears
+// this cap and ordering starts to matter.
+//
+// Each snapshot also resolves the parent profile doc for its name
+// (deleted-profile-safe, same "(deleted)" fallback the mobile/web
+// dashboards use elsewhere) — batched via Promise.all over the *unique*
+// profile ids in this snapshot (several pending tracks routinely share a
+// profile), not one sequential getDoc per track. Two race guards on top of
+// that N+1 resolution, since it's async work hanging off a listener that
+// can fire again before it finishes: `cancelled` (composed into the
+// cleanup, same convention as UserProfiles below) for unmount, and a
+// monotonic `seq` token so a slower, older snapshot's resolution can never
+// finish after and repaint over a newer one's already-committed state.
 function TracksQueue() {
   const [pending, setPending] = useState<TrackRow[]>([]);
   useEffect(() => {
     const { db } = getFirebase();
-    return onSnapshot(
-      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review")),
+    let cancelled = false;
+    let seq = 0;
+    const unsubscribe = onSnapshot(
+      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review"), limit(100)),
       async (s) => {
+        const mySeq = ++seq;
+        const profileRefs = new Map<string, DocumentReference>();
+        for (const d of s.docs) {
+          const profileRef = d.ref.parent.parent;
+          if (!profileRef) continue;
+          profileRefs.set(profileRef.id, profileRef);
+        }
+        const nameEntries = await Promise.all(
+          Array.from(profileRefs.values()).map(async (profileRef) => {
+            const p = await getDoc(profileRef);
+            return [profileRef.id, p.exists() ? (p.data() as ProfileDoc).name : "(deleted)"] as const;
+          }),
+        );
+        if (cancelled || mySeq !== seq) return;
+        const names = new Map(nameEntries);
         const rows: TrackRow[] = [];
         for (const d of s.docs) {
-          const profileRef = d.ref.parent.parent!;
-          const p = await getDoc(profileRef);
-          rows.push({ id: d.id, profileId: profileRef.id,
-            profileName: p.exists() ? (p.data() as ProfileDoc).name : "(deleted)",
-            ...(d.data() as TrackDoc) });
+          const profileRef = d.ref.parent.parent;
+          if (!profileRef) continue;
+          rows.push({
+            id: d.id,
+            profileId: profileRef.id,
+            profileName: names.get(profileRef.id) ?? "(deleted)",
+            ...(d.data() as TrackDoc),
+          });
         }
         setPending(rows);
-      });
+      },
+    );
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
   return (
     <section>
       <h2>Track review queue ({pending.length})</h2>
+      {/* Screening guidance per spec §6: admins hear exactly what the public would. */}
       <p style={{ background: "#fff8e1", border: "1px solid #f0d878", padding: "8px 12px", borderRadius: 4 }}>
         You are hearing exactly what the public would hear. Screening call: does this
-        sound like the artist's own performance (not AI-generated / not someone
-        else's recording)? When unsure, reject with a note asking for context.
+        sound like the artist&apos;s own performance (not AI-generated / not someone
+        else&apos;s recording)? When unsure, reject with a note asking for context.
       </p>
       {pending.map((t) => <TrackQueueRow key={`${t.profileId}-${t.id}`} t={t} />)}
       {pending.length === 0 && <p>Nothing waiting.</p>}
@@ -4719,59 +4864,129 @@ function TracksQueue() {
 }
 ```
 
-- [ ] **Step 1b: Add a `TakedownsPanel` section (sketch — refine when this task is actually implemented)**
+- [ ] **Step 1b: Add a `TakedownsPanel` section**
 
 `reviewTrack` (Task 8) accepts `decision: "rejected"` on an already-`approved`
 track as a retroactive takedown (spec §6: "admins can retroactively
 unpublish"), but as of Task 8 that path is backend-only — nothing in the
 admin UI can reach it, since `TracksQueue` above only ever lists
-`pending_review` tracks. Below the pending queue, add a small handle-lookup
+`pending_review` tracks. Below the pending queue, a small handle-lookup
 panel: type a profile's `@handle`, see its currently-`approved` tracks, and
 remove one with a reason (same `reviewTrack` call, `decision: "rejected"`).
-Concise sketch — not production code, full implementation is this task's job:
+Same `handles/{handle} -> profileId` indirection the public `/u/[handle]`
+route uses, and handles are stored lowercase there too.
 
 ```tsx
 function TakedownsPanel() {
   const [handle, setHandle] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
-  const [tracks, setTracks] = useState<(TrackDoc & { id: string })[]>([]);
+  const [tracks, setTracks] = useState<Row<TrackDoc>[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Track ids whose most recent removal attempt committed the reject
+  // server-side but then hit reviewTrack's "unavailable" (public clip
+  // couldn't be deleted) — see the remove() catch below for why these stay
+  // in `tracks` and get a visible marker instead of disappearing.
+  const [incompleteIds, setIncompleteIds] = useState<Set<string>>(new Set());
+  // Guards lookup() the same way TracksQueue's `seq` guards its snapshot
+  // handler: the Enter-key handler and the Look-up button both call
+  // lookup(), and disabling on lookupBusy narrows but doesn't fully close
+  // the window for a second call to start before React commits the first's
+  // setLookupBusy(true) (both can read the same stale closure mid-event). A
+  // ref (not state — needs to be readable synchronously the instant a
+  // response resolves) means a slower, superseded lookup's response can
+  // never overwrite a newer one's already-displayed results.
+  const lookupSeq = useRef(0);
 
   const lookup = async () => {
-    const { db } = getFirebase();
-    const h = await getDoc(doc(db, `handles/${handle.trim().toLowerCase()}`));
-    if (!h.exists()) { window.alert("No profile with that handle."); return; }
-    const pid = (h.data() as { profileId: string }).profileId;
-    setProfileId(pid);
-    const snap = await getDocs(query(
-      collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved")));
-    setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+    const h = handle.trim().toLowerCase();
+    if (!h) return;
+    const mySeq = ++lookupSeq.current;
+    setLookupBusy(true);
+    // Clear any previous handle's results up front, so a failed lookup (or a
+    // slow one) never leaves a stale profile's tracks on screen under a new
+    // handle in the input.
+    setProfileId(null);
+    setTracks([]);
+    setIncompleteIds(new Set());
+    try {
+      const { db } = getFirebase();
+      const handleDoc = await getDoc(doc(db, "handles", h));
+      if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
+      if (!handleDoc.exists()) { window.alert("No profile with that handle."); return; }
+      const pid = (handleDoc.data() as { profileId: string }).profileId;
+      const snap = await getDocs(query(
+        collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order")));
+      if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
+      setProfileId(pid);
+      setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+    } catch (e) {
+      if (mySeq === lookupSeq.current) {
+        window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
+      }
+    } finally {
+      if (mySeq === lookupSeq.current) setLookupBusy(false);
+    }
   };
 
   const remove = async (trackId: string) => {
     if (!profileId) return;
-    const reason = window.prompt("Takedown reason (shown to the musician):");
+    const reason = window.prompt(
+      "Takedown reason (shown to the musician) — this removes the track from their live profile immediately:",
+    ) ?? "";
     if (!reason) return;
     setBusyId(trackId);
     try {
       await httpsCallable(getFirebase().functions, "reviewTrack")(
         { profileId, trackId, decision: "rejected", reason });
       setTracks((ts) => ts.filter((t) => t.id !== trackId));
+      setIncompleteIds((ids) => { const next = new Set(ids); next.delete(trackId); return next; });
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
-    } finally { setBusyId(null); }
+      const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
+      if (code === "functions/unavailable") {
+        // reviewTrack already committed "rejected" before throwing this —
+        // the decision is final at the transaction, storage cleanup runs
+        // after (see that function's comments) — so the public object may
+        // still be reachable even though the doc says rejected. Don't
+        // filter the row out: a fresh lookup queries status=="approved",
+        // which this doc no longer matches, so re-looking-up would just
+        // silently drop the row and hide an incomplete takedown. Mark it
+        // instead, so the admin sees it needs a retry rather than assuming
+        // it's still an ordinary live track.
+        setIncompleteIds((ids) => new Set(ids).add(trackId));
+      } else {
+        window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
+      }
+    } finally {
+      setBusyId(null);
+    }
   };
 
   return (
     <section>
       <h2>Takedowns</h2>
       <p>Retroactively remove a live track from an approved profile (spec §6).</p>
-      <input value={handle} onChange={(e) => setHandle(e.target.value)} placeholder="@handle" />
-      <button onClick={lookup}>Look up</button>
+      <input
+        placeholder="@handle"
+        value={handle}
+        onChange={(e) => setHandle(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !lookupBusy) void lookup(); }}
+      />{" "}
+      <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
       {tracks.map((t) => (
-        <div key={t.id} style={{ marginTop: 4 }}>
-          {t.title}{" "}
-          <button disabled={busyId === t.id} onClick={() => remove(t.id)}>Remove…</button>
+        <div key={t.id} style={{ border: "1px solid #ddd", padding: 12, marginTop: 8 }}>
+          <strong>{t.title}</strong> · {t.durationSec ?? "?"}s
+          {incompleteIds.has(t.id) && (
+            <p style={{ color: "#b00020", margin: "4px 0" }}>
+              Removal incomplete — retry. (The track is already off review, but the public
+              clip may still be reachable.)
+            </p>
+          )}
+          <div>
+            <button disabled={busyId === t.id} onClick={() => remove(t.id)}>
+              {busyId === t.id ? "Removing…" : incompleteIds.has(t.id) ? "Retry removal…" : "Remove…"}
+            </button>
+          </div>
         </div>
       ))}
       {profileId && tracks.length === 0 && <p>No approved tracks.</p>}
@@ -4784,7 +4999,7 @@ Render it in `AdminPage` between `<Queue />` and `<UserLookup />`, after `Tracks
 
 - [ ] **Step 2: Verify**
 
-Run: `pnpm --filter @gatekeep/web typecheck && pnpm --filter @gatekeep/web lint`
+Run: `pnpm --filter @gatekeep/web exec next typegen && pnpm --filter @gatekeep/web typecheck && pnpm --filter @gatekeep/web lint && pnpm --filter @gatekeep/web build`
 Manual: with a pending track from the Task 11 loop, admin hears the clip inline, approve flips it Live on the public page; reject shows the reason in the musician's TrackManager.
 
 - [ ] **Step 3: Commit**
@@ -4793,6 +5008,60 @@ Manual: with a pending track from the Task 11 loop, admin hears the clip inline,
 git add apps/web/app/admin/page.tsx
 git commit -m "feat(web): admin track review queue with inline playback"
 ```
+
+#### Quality-review hardening (folded into the Step 1/Step 1b code above)
+
+A review pass on the first cut found five gaps, closed in a single follow-up
+commit (`fix(web,functions): admin queue race guards, clip-error states,
+takedown notification integrity`) — the code blocks above already reflect the
+fix, not the original:
+
+1. **TracksQueue's snapshot handler had no unmount/staleness guards and did a
+   sequential N+1 profile lookup.** The original `onSnapshot` callback awaited
+   one `getDoc` per track in a `for` loop with no `cancelled` flag and no
+   protection against out-of-order completion — a slower, older snapshot's
+   resolution could finish after a newer one and repaint stale state over it,
+   and an unmounted component's listener could still call `setPending`. Fixed
+   by adding the same `cancelled` convention `UserProfiles` already uses
+   (composed into the `onSnapshot` cleanup alongside `unsubscribe`), a
+   monotonic `seq` token so only the latest snapshot's resolution can commit,
+   and replacing the sequential per-track lookups with `Promise.all` over the
+   *unique* profile ids in the snapshot (a `Map` cache keyed by profileId).
+   Also replaced the non-null-asserted `d.ref.parent.parent!` with the same
+   defensive `if (!profileRef) continue` `UserProfiles` uses.
+2. **TrackQueueRow's clip URL had no error state.** `getDownloadURL` failures
+   collapsed `url` back to `null`, which the row rendered as a permanent
+   "clip loading…" with no way out. Fixed by making `url` three-state
+   (`string | null | "error"`), logging the failure via `console.error`, and
+   rendering a distinct "Clip unavailable — reject and ask the musician to
+   re-upload." message on error.
+3. **TakedownsPanel's Enter-key handler ignored the busy lock, and `lookup()`
+   had no protection against out-of-order responses.** Fixed by gating the
+   Enter handler on `!lookupBusy` and adding a `useRef`-backed `lookupSeq`
+   token (same rationale as TracksQueue's `seq`) so a slower, superseded
+   lookup's response can never overwrite a newer one's already-displayed
+   results. Also: a removal that hits reviewTrack's `unavailable` throw (the
+   decision is already committed "rejected" server-side; only the public
+   object's delete failed) used to leave the row looking like an ordinary
+   still-live approved track. Fixed by tracking those track ids in an
+   `incompleteIds` set, keeping the row in `tracks` instead of hiding it
+   (hiding it via a fresh lookup would just silently drop it — the doc no
+   longer matches `status=="approved"`), and marking it "Removal incomplete —
+   retry."
+4. **The CG pending-track query was unbounded.** Fixed with `limit(100)`,
+   matching `AuditLog`'s `limit(50)` — with a comment noting FIFO
+   (oldest-pending-first) ordering would need its own composite index on the
+   `tracks` collectionGroup, deliberately deferred.
+5. **Cross-cutting: `functions/src/tracks.ts`'s `reviewTrack` could lose a
+   takedown notification across a retry.** See Task 8's "Quality-review
+   hardening (pass 3)" for the fix — reject's notification moved to fire
+   alongside its audit, at claim time, instead of at the end of the function
+   where a storage-cleanup failure could abort the call before ever reaching
+   it.
+
+Also `preload="none"` on the review-clip `<audio>` element — an admin
+scrolling the queue shouldn't eagerly fetch every clip's audio before
+choosing to play one.
 
 ---
 

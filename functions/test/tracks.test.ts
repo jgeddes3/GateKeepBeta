@@ -255,8 +255,8 @@ describe("reviewTrack", () => {
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
-  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state", async () => {
-    const { profileId, trackId } = await makePendingTrack("rv4");
+  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state, musician notified", async () => {
+    const { uid, profileId, trackId } = await makePendingTrack("rv4");
     const { user: adminUser, uid: adminUid } = await makeAdminUser("rv4a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const [pubBefore] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
@@ -272,6 +272,18 @@ describe("reviewTrack", () => {
     expect(audit.size).toBe(1);
     expect(audit.docs[0].data().actorUid).toBe(adminUid);
     expect(audit.docs[0].data().detail).toMatch(/^\[was approved\]/);
+    // Pins that a takedown's notification fires at claim time (right after
+    // the transaction, alongside the audit) rather than after storage
+    // cleanup — see reviewTrack's comment on that ordering: it exists so a
+    // storage-cleanup failure (HttpsError "unavailable") can't swallow the
+    // notification the way it could when notification lived at the very
+    // end. Reproducing that exact storage failure isn't practical against
+    // the real Storage emulator (the Admin SDK bypasses storage.rules, and
+    // there's no supported way to force a non-404 delete error), so this
+    // instead confirms the notification exists for the ordinary success
+    // path at the new call site.
+    const notifs = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifs.docs.some((d) => /removed from your portfolio/.test(d.data().title as string))).toBe(true);
   });
   it("approve fails cleanly when the review clip is already gone: failed-precondition, doc rolled back to pending_review", async () => {
     const { profileId, trackId } = await makePendingTrack("rv5");

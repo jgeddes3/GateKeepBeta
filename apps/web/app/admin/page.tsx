@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   collection, collectionGroup, query, where, onSnapshot, orderBy, limit, getDoc, getDocs, doc,
+  type DocumentReference,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getDownloadURL, ref as storageRef } from "firebase/storage";
@@ -73,21 +74,27 @@ type TrackRow = Row<TrackDoc> & { profileId: string; profileName: string };
 // per-row-busy-state rationale as QueueRow above. Also resolves and plays the
 // review clip inline (spec §6: admin listens before approving), via
 // getDownloadURL on the track's review/... storagePath — admins can read any
-// review clip under storage.rules. url stays null (and the row shows a
-// loading placeholder) until that resolves or fails. storagePath is typed
-// nullable on TrackDoc (other statuses can have no file yet); the transcode
-// trigger only ever writes status:"pending_review" and storagePath together
-// in the same update, so in practice every row here has one, but the effect
-// still guards against a falsy path rather than assuming that invariant.
+// review clip under storage.rules. url is three-state: null while resolving
+// (loading placeholder), "error" if getDownloadURL rejects (e.g. the object
+// is missing — surfaced as an explicit dead-end rather than an infinite
+// "clip loading…", since nothing will ever move it out of that state), or
+// the resolved string. storagePath is typed nullable on TrackDoc (other
+// statuses can have no file yet); the transcode trigger only ever writes
+// status:"pending_review" and storagePath together in the same update, so in
+// practice every row here has one, but the effect still guards against a
+// falsy path rather than assuming that invariant.
 function TrackQueueRow({ t }: { t: TrackRow }) {
   const [busy, setBusy] = useState(false);
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null | "error">(null);
   useEffect(() => {
     if (!t.storagePath) return;
     let cancelled = false;
     void getDownloadURL(storageRef(getFirebase().storage, t.storagePath))
       .then((u) => { if (!cancelled) setUrl(u); })
-      .catch(() => { if (!cancelled) setUrl(null); });
+      .catch((e) => {
+        console.error("TrackQueueRow: getDownloadURL failed", t.storagePath, e);
+        if (!cancelled) setUrl("error");
+      });
     return () => { cancelled = true; };
   }, [t.storagePath]);
   const review = async (decision: "approved" | "rejected") => {
@@ -109,9 +116,11 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
       <strong>{t.title}</strong> — {t.profileName} · {t.durationSec ?? "?"}s
       {t.storagePath == null
         ? <p style={{ color: "#888" }}>No clip on file.</p>
-        : url
-          ? <audio controls src={url} style={{ display: "block", margin: "8px 0" }} />
-          : <p style={{ color: "#888" }}>clip loading…</p>}
+        : url === "error"
+          ? <p style={{ color: "#b00020" }}>Clip unavailable — reject and ask the musician to re-upload.</p>
+          : url
+            ? <audio controls preload="none" src={url} style={{ display: "block", margin: "8px 0" }} />
+            : <p style={{ color: "#888" }}>clip loading…</p>}
       <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
       <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
     </div>
@@ -122,30 +131,63 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
 // Queue's flat collection query above, but tracks live under
 // profiles/{profileId}/tracks — collectionGroup + the admin CG-read rule and
 // fieldOverride index (already in place) is what makes a single
-// cross-profile "everything pending" listener possible. Each snapshot also
-// resolves the parent profile doc for its name (deleted-profile-safe, same
-// "(deleted)" fallback the mobile/web dashboards use elsewhere).
+// cross-profile "everything pending" listener possible. Bounded with
+// limit(100), same reasoning as AuditLog's limit(50): an admin listener
+// should never fan out unboundedly. This intentionally doesn't order by
+// createdAt (i.e. isn't FIFO-oldest-first) — collectionGroup + an equality
+// filter + orderBy on a different field needs its own composite index,
+// which doesn't exist yet; deferred until the queue realistically nears
+// this cap and ordering starts to matter.
+//
+// Each snapshot also resolves the parent profile doc for its name
+// (deleted-profile-safe, same "(deleted)" fallback the mobile/web
+// dashboards use elsewhere) — batched via Promise.all over the *unique*
+// profile ids in this snapshot (several pending tracks routinely share a
+// profile), not one sequential getDoc per track. Two race guards on top of
+// that N+1 resolution, since it's async work hanging off a listener that
+// can fire again before it finishes: `cancelled` (composed into the
+// cleanup, same convention as UserProfiles below) for unmount, and a
+// monotonic `seq` token so a slower, older snapshot's resolution can never
+// finish after and repaint over a newer one's already-committed state.
 function TracksQueue() {
   const [pending, setPending] = useState<TrackRow[]>([]);
   useEffect(() => {
     const { db } = getFirebase();
-    return onSnapshot(
-      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review")),
+    let cancelled = false;
+    let seq = 0;
+    const unsubscribe = onSnapshot(
+      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review"), limit(100)),
       async (s) => {
+        const mySeq = ++seq;
+        const profileRefs = new Map<string, DocumentReference>();
+        for (const d of s.docs) {
+          const profileRef = d.ref.parent.parent;
+          if (!profileRef) continue;
+          profileRefs.set(profileRef.id, profileRef);
+        }
+        const nameEntries = await Promise.all(
+          Array.from(profileRefs.values()).map(async (profileRef) => {
+            const p = await getDoc(profileRef);
+            return [profileRef.id, p.exists() ? (p.data() as ProfileDoc).name : "(deleted)"] as const;
+          }),
+        );
+        if (cancelled || mySeq !== seq) return;
+        const names = new Map(nameEntries);
         const rows: TrackRow[] = [];
         for (const d of s.docs) {
-          const profileRef = d.ref.parent.parent!;
-          const p = await getDoc(profileRef);
+          const profileRef = d.ref.parent.parent;
+          if (!profileRef) continue;
           rows.push({
             id: d.id,
             profileId: profileRef.id,
-            profileName: p.exists() ? (p.data() as ProfileDoc).name : "(deleted)",
+            profileName: names.get(profileRef.id) ?? "(deleted)",
             ...(d.data() as TrackDoc),
           });
         }
         setPending(rows);
       },
     );
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
   return (
     <section>
@@ -175,29 +217,49 @@ function TakedownsPanel() {
   const [profileId, setProfileId] = useState<string | null>(null);
   const [tracks, setTracks] = useState<Row<TrackDoc>[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Track ids whose most recent removal attempt committed the reject
+  // server-side but then hit reviewTrack's "unavailable" (public clip
+  // couldn't be deleted) — see the remove() catch below for why these stay
+  // in `tracks` and get a visible marker instead of disappearing.
+  const [incompleteIds, setIncompleteIds] = useState<Set<string>>(new Set());
+  // Guards lookup() the same way TracksQueue's `seq` guards its snapshot
+  // handler: the Enter-key handler and the Look-up button both call
+  // lookup(), and disabling on lookupBusy narrows but doesn't fully close
+  // the window for a second call to start before React commits the first's
+  // setLookupBusy(true) (both can read the same stale closure mid-event). A
+  // ref (not state — needs to be readable synchronously the instant a
+  // response resolves) means a slower, superseded lookup's response can
+  // never overwrite a newer one's already-displayed results.
+  const lookupSeq = useRef(0);
 
   const lookup = async () => {
     const h = handle.trim().toLowerCase();
     if (!h) return;
+    const mySeq = ++lookupSeq.current;
     setLookupBusy(true);
     // Clear any previous handle's results up front, so a failed lookup (or a
     // slow one) never leaves a stale profile's tracks on screen under a new
     // handle in the input.
     setProfileId(null);
     setTracks([]);
+    setIncompleteIds(new Set());
     try {
       const { db } = getFirebase();
       const handleDoc = await getDoc(doc(db, "handles", h));
+      if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
       if (!handleDoc.exists()) { window.alert("No profile with that handle."); return; }
       const pid = (handleDoc.data() as { profileId: string }).profileId;
       const snap = await getDocs(query(
         collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order")));
+      if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
       setProfileId(pid);
       setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
+      if (mySeq === lookupSeq.current) {
+        window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
+      }
     } finally {
-      setLookupBusy(false);
+      if (mySeq === lookupSeq.current) setLookupBusy(false);
     }
   };
 
@@ -212,8 +274,23 @@ function TakedownsPanel() {
       await httpsCallable(getFirebase().functions, "reviewTrack")(
         { profileId, trackId, decision: "rejected", reason });
       setTracks((ts) => ts.filter((t) => t.id !== trackId));
+      setIncompleteIds((ids) => { const next = new Set(ids); next.delete(trackId); return next; });
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
+      const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
+      if (code === "functions/unavailable") {
+        // reviewTrack already committed "rejected" before throwing this —
+        // the decision is final at the transaction, storage cleanup runs
+        // after (see that function's comments) — so the public object may
+        // still be reachable even though the doc says rejected. Don't
+        // filter the row out: a fresh lookup queries status=="approved",
+        // which this doc no longer matches, so re-looking-up would just
+        // silently drop the row and hide an incomplete takedown. Mark it
+        // instead, so the admin sees it needs a retry rather than assuming
+        // it's still an ordinary live track.
+        setIncompleteIds((ids) => new Set(ids).add(trackId));
+      } else {
+        window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
+      }
     } finally {
       setBusyId(null);
     }
@@ -227,15 +304,21 @@ function TakedownsPanel() {
         placeholder="@handle"
         value={handle}
         onChange={(e) => setHandle(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") void lookup(); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && !lookupBusy) void lookup(); }}
       />{" "}
       <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
       {tracks.map((t) => (
         <div key={t.id} style={{ border: "1px solid #ddd", padding: 12, marginTop: 8 }}>
           <strong>{t.title}</strong> · {t.durationSec ?? "?"}s
+          {incompleteIds.has(t.id) && (
+            <p style={{ color: "#b00020", margin: "4px 0" }}>
+              Removal incomplete — retry. (The track is already off review, but the public
+              clip may still be reachable.)
+            </p>
+          )}
           <div>
             <button disabled={busyId === t.id} onClick={() => remove(t.id)}>
-              {busyId === t.id ? "Removing…" : "Remove…"}
+              {busyId === t.id ? "Removing…" : incompleteIds.has(t.id) ? "Retry removal…" : "Remove…"}
             </button>
           </div>
         </div>
