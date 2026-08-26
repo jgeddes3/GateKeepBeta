@@ -172,6 +172,15 @@ describe("publishGig", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
+  it("P1: rejects publishing a gig whose date has already passed", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("pg6", "venue");
+    const { gigId } = await callFn<Record<string, unknown>, { gigId: string }>(
+      "createGig", { profileId, ...gigContent({ startsAt: Date.now() - 3600_000 }) }, owner.user);
+    await expect(callFn("publishGig", { gigId }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("draft"); // unchanged
+  });
+
   it("enforces MAX_OPEN_GIGS_PER_PROFILE with resource-exhausted", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("pg4", "venue");
     const seedLocation = {
@@ -299,6 +308,29 @@ describe("updateGig", () => {
     await expect(callFn("updateGig", { gigId, ...gigContent({ title: "Should not land" }) }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
     expect((await adb.doc(`gigs/${gigId}`).get()).data()?.title).not.toBe("Should not land");
+  });
+
+  it("S2: re-submitting the SAME address does not consume the caller's daily geocode budget again", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ug10", "planner");
+    const address = `1 Repeat St, Reno-${Date.now()}, NV`;
+    const gigId = await createDraftGig(profileId, owner.user, { location: { address } });
+    const afterCreate = (await adb.doc(`geocodeBudgets/${owner.uid}`).get()).data();
+    expect(afterCreate?.count).toBe(1); // createGig always geocodes (no prior private location)
+
+    await callFn("updateGig", { gigId, ...gigContent(), location: { address } }, owner.user);
+    const afterUpdate = (await adb.doc(`geocodeBudgets/${owner.uid}`).get()).data();
+    expect(afterUpdate?.count).toBe(1); // unchanged — the re-submitted address was skipped
+  });
+});
+
+describe("createGig geocoder throttle (S2)", () => {
+  it("rejects with resource-exhausted once the caller's daily geocode budget is already at the ceiling", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("cg9", "planner");
+    const dateKey = new Date().toISOString().slice(0, 10);
+    await adb.doc(`geocodeBudgets/${owner.uid}`).set({ date: dateKey, count: 50 });
+    await expect(callFn("createGig",
+      { profileId, ...gigContent({ location: { address: `999 Over Budget Rd, Marfa-${Date.now()}, TX` } }) }, owner.user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
   });
 });
 

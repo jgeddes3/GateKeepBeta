@@ -292,6 +292,17 @@ describe("updateSeries", () => {
     await expect(callFn("updateSeries", { seriesId: "does-not-exist", ...seriesContent() }, owner.user))
       .rejects.toMatchObject({ code: "functions/not-found" });
   });
+
+  it("P3: rejects editing a series once the profile has been rejected/unpublished, even for a still-member owner", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("us10", "venue");
+    const seriesId = await createSeries(profileId, owner.user);
+    const admin = await makeAdminUser("us10a");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Policy violation." }, admin.user);
+    await expect(callFn("updateSeries", { seriesId, ...seriesContent({ title: "Should not land" }) }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
+    expect(series?.template.title).not.toBe("Should not land");
+  });
 });
 
 describe("pauseSeries", () => {

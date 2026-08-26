@@ -5,6 +5,20 @@
  * schema change.
  */
 
+import { getFirestore } from "firebase-admin/firestore";
+import { HttpsError } from "firebase-functions/v2/https";
+import { defineSecret } from "firebase-functions/params";
+
+// P5: GEOCODER_API_KEY as a Secret Manager-backed param — the modern (v2)
+// replacement for reading a bare, unmanaged process.env value in
+// production. Declaring it here (not inline in getGeocoder()) lets every
+// onCall handler that can reach geocode() import the SAME SecretParam and
+// list it in its own `secrets: [geocoderApiKey]` option, which is what
+// actually makes Cloud Functions fetch the secret from Secret Manager and
+// inject it as an env var at invocation time — a defineSecret() that no
+// handler ever declares in `secrets` never gets populated in production.
+export const geocoderApiKey = defineSecret("GEOCODER_API_KEY");
+
 export interface GeocodeResult {
   lat: number;
   lng: number;
@@ -154,13 +168,54 @@ export function parseGoogleResponse(json: unknown): GeocodeResult | null {
  */
 export function getGeocoder(): Geocoder {
   if (process.env.GEOCODER_PROVIDER === "google") {
-    const apiKey = process.env.GEOCODER_API_KEY;
+    // P5: geocoderApiKey.value() reads the Secret Manager-backed value that
+    // Cloud Functions injects as an env var in production once a handler
+    // declares `secrets: [geocoderApiKey]` (see curator.ts/gigs.ts/
+    // gigSeries.ts's onCall options). The Functions emulator does not
+    // provision Secret Manager secrets by default, so .value() legitimately
+    // resolves to "" there — the `|| process.env.GEOCODER_API_KEY` fallback
+    // keeps GEOCODER_PROVIDER=google testable locally against a real key
+    // (set via a functions/.env file or the shell) without requiring a
+    // `.secret.local` file or a deploy. Both reads ultimately look at the
+    // same underlying env var name, so this is deliberately redundant, not
+    // two different sources of truth — see README's geocoder setup section.
+    const apiKey = geocoderApiKey.value() || process.env.GEOCODER_API_KEY;
     if (!apiKey) {
       throw new Error("GEOCODER_PROVIDER=google requires GEOCODER_API_KEY");
     }
     return new GoogleGeocoder(apiKey);
   }
   return new StubGeocoder();
+}
+
+// ---------- S2: per-uid daily geocode budget ----------
+
+const GEOCODE_DAILY_BUDGET = 50;
+
+// Per-uid ceiling on actual geocode() calls (S2) — reachable from every
+// address-resolving onCall (updateCuratorProfile, createGig/updateGig,
+// createSeries/updateSeries), so a runaway or abusive client hammering any
+// of them with distinct addresses could otherwise burn through the
+// production geocoding provider's quota/cost on one uid's behalf. Keyed by
+// UTC calendar date (not a rolling 24h window): geocodeBudgets/{uid} simply
+// gets overwritten with a fresh {date, count: 1} the moment today's date key
+// no longer matches what's stored, so the counter resets cleanly at day
+// boundaries with no separate cleanup job. Transactional (not a bare
+// read-then-write) so two concurrent geocode-triggering calls from the same
+// uid can't both read count=49 and both squeak under the ceiling.
+export async function consumeGeocodeBudget(uid: string): Promise<void> {
+  const db = getFirestore();
+  const dateKey = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
+  const ref = db.doc(`geocodeBudgets/${uid}`);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.data();
+    const count = data?.date === dateKey ? ((data.count as number | undefined) ?? 0) : 0;
+    if (count >= GEOCODE_DAILY_BUDGET) {
+      throw new HttpsError("resource-exhausted", "Too many location updates today.");
+    }
+    tx.set(ref, { date: dateKey, count: count + 1 });
+  });
 }
 
 /**

@@ -165,6 +165,44 @@ describe("updateCuratorProfile", () => {
   });
 });
 
+describe("updateCuratorProfile geocoder throttle (S2)", () => {
+  it("does not consume the daily geocode budget when the location input is unchanged from the last-geocoded value", async () => {
+    const { user, uid } = await signUpTestUser(`s2a-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user, "planner");
+    const location = { address: null, city: `Austin-${Date.now()}` };
+    // First call: no stored geocodedFrom yet — always geocodes, consuming
+    // the budget once.
+    await callFn("updateCuratorProfile", { profileId, location }, user);
+    const afterFirst = (await adb.doc(`geocodeBudgets/${uid}`).get()).data();
+    expect(afterFirst?.count).toBe(1);
+    // Second call with the EXACT same location input — the query string
+    // matches curator.location.geocodedFrom, so this must skip the geocoder
+    // (and the budget charge) entirely.
+    await callFn("updateCuratorProfile", { profileId, location }, user);
+    const afterSecond = (await adb.doc(`geocodeBudgets/${uid}`).get()).data();
+    expect(afterSecond?.count).toBe(1); // unchanged — the second call was skipped
+  });
+
+  it("a changed location input DOES consume the budget again", async () => {
+    const { user, uid } = await signUpTestUser(`s2b-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user, "planner");
+    await callFn("updateCuratorProfile", { profileId, location: { address: null, city: `First-${Date.now()}` } }, user);
+    await callFn("updateCuratorProfile", { profileId, location: { address: null, city: `Second-${Date.now()}` } }, user);
+    const budget = (await adb.doc(`geocodeBudgets/${uid}`).get()).data();
+    expect(budget?.count).toBe(2);
+  });
+
+  it("rejects with resource-exhausted once the caller's daily geocode budget is already at the ceiling", async () => {
+    const { user, uid } = await signUpTestUser(`s2c-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user, "planner");
+    const dateKey = new Date().toISOString().slice(0, 10);
+    await adb.doc(`geocodeBudgets/${uid}`).set({ date: dateKey, count: 50 });
+    await expect(callFn("updateCuratorProfile",
+      { profileId, location: { address: null, city: `Over-${Date.now()}` } }, user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+  });
+});
+
 describe("removeCuratorPhoto", () => {
   it("member removes a photo: array entry and storage object both go; non-member is rejected", async () => {
     const { user } = await signUpTestUser(`rp1-${Date.now()}@test.com`);

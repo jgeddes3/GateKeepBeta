@@ -13,7 +13,7 @@ import {
 import {
   resolveGigLocation, validateLocationInput, GEOCODE_FAILURE_MESSAGE, type GigLocationInput,
 } from "./gigs.js";
-import { getGeocoder, coarsen } from "./geocode.js";
+import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -69,7 +69,7 @@ function buildRecurrence(input: GigRecurrence): GigSeriesDoc["recurrence"] {
   };
 }
 
-export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1" }, async (req) => {
+export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
@@ -101,7 +101,7 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1" },
   // Same resolution createGig runs — the template stores the resolved
   // public/private split so Task 7's materializer never has to re-geocode.
   const { location, privateLocation } = await resolveGigLocation(
-    isVenue, profile.name as string, curatorLocation, input.location);
+    uid, isVenue, profile.name as string, curatorLocation, input.location);
 
   const seriesRef = db.collection("gigSeries").doc();
   const series: GigSeriesDoc = {
@@ -118,7 +118,8 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1" },
   return { seriesId: seriesRef.id };
 });
 
-export const updateSeries = onCall<UpdateSeriesInput>({ region: "us-central1" }, async (req) => {
+export const updateSeries = onCall<UpdateSeriesInput>(
+  { region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
@@ -133,6 +134,11 @@ export const updateSeries = onCall<UpdateSeriesInput>({ region: "us-central1" },
   if (!seriesSnap.exists) throw new HttpsError("not-found", "Series not found.");
   const series = seriesSnap.data() as GigSeriesDoc;
   await requireProfileMember(series.curatorProfileId, uid);
+  // P3: matches createSeries/publishGig/updateGig's approval gate — without
+  // it, a member of a since-rejected/unpublished curator profile could keep
+  // editing (and, via the propagation sweep below, keep rewriting) a
+  // possibly still world-readable series' future occurrences.
+  await requireApprovedCuratorProfile(series.curatorProfileId);
   if (series.status === "ended") {
     throw new HttpsError("failed-precondition", "Cannot edit an ended series.");
   }
@@ -154,19 +160,42 @@ export const updateSeries = onCall<UpdateSeriesInput>({ region: "us-central1" },
     const newVisibility = input.location.addressVisibility ?? location.addressVisibility;
 
     if (overrideAddress.length > 0) {
-      const result = await getGeocoder().geocode(overrideAddress);
-      if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
-      const publicGeo = newVisibility === "public" ? { lat: result.lat, lng: result.lng } : coarsen(result);
-      location = {
-        venueName: isVenue ? (profile.name as string) : null, neighborhood: result.neighborhood, city: result.city,
-        geo: publicGeo, addressVisibility: newVisibility,
-        address: newVisibility === "public" ? overrideAddress : null,
-      };
-      privateLocation = { address: overrideAddress, geo: { lat: result.lat, lng: result.lng } };
+      if (privateLocation.geocodedFrom === overrideAddress) {
+        // S2: unchanged address input — reuse the already-resolved geocode
+        // rather than re-querying (and re-charging the daily budget for)
+        // the exact same address a member just re-submitted.
+        if (!privateLocation.geo) {
+          throw new HttpsError("internal", "This series' stored location is missing coordinates.");
+        }
+        const { lat, lng } = privateLocation.geo;
+        const publicGeo = newVisibility === "public" ? { lat, lng }
+          : coarsen({ lat, lng, neighborhood: location.neighborhood, city: location.city });
+        location = {
+          venueName: isVenue ? (profile.name as string) : null, neighborhood: location.neighborhood, city: location.city,
+          geo: publicGeo, addressVisibility: newVisibility,
+          address: newVisibility === "public" ? overrideAddress : null,
+        };
+        privateLocation = { address: overrideAddress, geo: { lat, lng }, geocodedFrom: overrideAddress };
+      } else {
+        await consumeGeocodeBudget(uid);
+        const result = await getGeocoder().geocode(overrideAddress);
+        if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
+        const publicGeo = newVisibility === "public" ? { lat: result.lat, lng: result.lng } : coarsen(result);
+        location = {
+          venueName: isVenue ? (profile.name as string) : null, neighborhood: result.neighborhood, city: result.city,
+          geo: publicGeo, addressVisibility: newVisibility,
+          address: newVisibility === "public" ? overrideAddress : null,
+        };
+        privateLocation = { address: overrideAddress, geo: { lat: result.lat, lng: result.lng }, geocodedFrom: overrideAddress };
+      }
     } else {
       // Visibility-only change (or a no-op location object) — reuse the
       // already-exact private geo/address rather than re-geocoding.
-      const lat = privateLocation.geo!.lat; const lng = privateLocation.geo!.lng;
+      // P7: explicit guard instead of a `.geo!` non-null assertion.
+      if (!privateLocation.geo) {
+        throw new HttpsError("internal", "This series' stored location is missing coordinates.");
+      }
+      const lat = privateLocation.geo.lat; const lng = privateLocation.geo.lng;
       const publicGeo = newVisibility === "public"
         ? { lat, lng }
         : coarsen({ lat, lng, neighborhood: location.neighborhood, city: location.city });

@@ -6,7 +6,7 @@ import {
   type CuratorDetails, type LookingFor, type CuratorSubtype,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireCuratorProfile } from "./guards.js";
-import { getGeocoder } from "./geocode.js";
+import { getGeocoder, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
 import { bucket, logDeleteFailure } from "./storage.js";
 
 type Amenities = CuratorDetails["amenities"];
@@ -84,7 +84,8 @@ function validateCuratorUpdate(input: CuratorProfileUpdateInput): Result {
   return { ok: true };
 }
 
-export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>({ region: "us-central1" }, async (req) => {
+export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>(
+  { region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
@@ -110,15 +111,27 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>({ region: 
       throw new HttpsError("invalid-argument", "Only venues can set a street address.");
     }
     const query = isVenue && hasAddress ? trimmedAddress : city.trim();
-    const result = await getGeocoder().geocode(query);
-    if (!result) {
-      throw new HttpsError("invalid-argument", "Could not locate that — check spelling and try again.");
+    const currentLocation = snap.data()?.curator?.location as CuratorDetails["location"] | undefined;
+    if (currentLocation?.geocodedFrom === query) {
+      // S2: unchanged input — the caller re-submitted the exact same
+      // address/city that already produced the stored geo. Reuse it as-is
+      // rather than paying for a geocode call (and its daily budget charge)
+      // that would just re-derive the same result — a curator re-saving
+      // other fields (about/amenities/etc.) alongside an untouched location
+      // must not cost a geocode every time.
+      locationUpdate = currentLocation;
+    } else {
+      await consumeGeocodeBudget(uid);
+      const result = await getGeocoder().geocode(query);
+      if (!result) {
+        throw new HttpsError("invalid-argument", "Could not locate that — check spelling and try again.");
+      }
+      locationUpdate = isVenue && hasAddress
+        ? { address: trimmedAddress, city: result.city, neighborhood: result.neighborhood,
+            geo: { lat: result.lat, lng: result.lng }, geocodedFrom: query }
+        : { address: null, city: result.city, neighborhood: null,
+            geo: { lat: result.lat, lng: result.lng }, geocodedFrom: query };
     }
-    locationUpdate = isVenue && hasAddress
-      ? { address: trimmedAddress, city: result.city, neighborhood: result.neighborhood,
-          geo: { lat: result.lat, lng: result.lng } }
-      : { address: null, city: result.city, neighborhood: null,
-          geo: { lat: result.lat, lng: result.lng } };
   }
 
   // Dotted-string-keys form (mirrors updatePortfolio): merges into the

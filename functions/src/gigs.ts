@@ -11,7 +11,7 @@ import {
 } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { getGeocoder, coarsen } from "./geocode.js";
+import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -82,6 +82,7 @@ function validateGigInput(input: CreateGigInput | UpdateGigInput): Result {
 // supports a "visibility-only, reuse the already-exact private address"
 // branch that doesn't fit this always-(re)geocode shape.
 export async function resolveGigLocation(
+  uid: string,
   isVenue: boolean,
   venueName: string,
   curatorLocation: CuratorDetails["location"] | undefined,
@@ -105,6 +106,11 @@ export async function resolveGigLocation(
   const defaultVisibility: AddressVisibility = isVenue ? "public" : "neighborhood";
   const visibility = locationInput?.addressVisibility ?? defaultVisibility;
 
+  // S2: this path always creates a brand-new gig/series doc (no prior
+  // private location to compare against), so it always consumes the daily
+  // geocode budget — the "skip when unchanged" optimization only applies to
+  // updateGig/updateSeries's re-submission case below.
+  await consumeGeocodeBudget(uid);
   const result = await getGeocoder().geocode(resolvedAddress);
   if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
 
@@ -115,12 +121,12 @@ export async function resolveGigLocation(
     address: visibility === "public" ? resolvedAddress : null,
   };
   const privateLocation: GigPrivateLocation = {
-    address: resolvedAddress, geo: { lat: result.lat, lng: result.lng },
+    address: resolvedAddress, geo: { lat: result.lat, lng: result.lng }, geocodedFrom: resolvedAddress,
   };
   return { location, privateLocation };
 }
 
-export const createGig = onCall<CreateGigInput>({ region: "us-central1" }, async (req) => {
+export const createGig = onCall<CreateGigInput>({ region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
@@ -139,7 +145,7 @@ export const createGig = onCall<CreateGigInput>({ region: "us-central1" }, async
   const curatorLocation = profile.curator?.location as CuratorDetails["location"] | undefined;
 
   const { location, privateLocation } = await resolveGigLocation(
-    isVenue, profile.name as string, curatorLocation, input.location);
+    uid, isVenue, profile.name as string, curatorLocation, input.location);
 
   const now = Date.now();
   const db = getFirestore();
@@ -187,6 +193,14 @@ export const publishGig = onCall<{ gigId: string }>({ region: "us-central1" }, a
   if (gig.status !== "draft") {
     throw new HttpsError("failed-precondition", `Cannot publish a gig in status "${gig.status}".`);
   }
+  // P1: a draft can sit unpublished indefinitely (e.g. drafted, then
+  // abandoned) — without this check, publishing it after its startsAt has
+  // already elapsed would put a bookable-looking "open" gig for a date that
+  // already passed onto the world-readable surface, where it would then sit
+  // until the NEXT day's sweep finally closes it (up to a 24h window).
+  if (gig.startsAt < Date.now()) {
+    throw new HttpsError("failed-precondition", "This gig's date has already passed.");
+  }
 
   const openCount = await db.collection("gigs")
     .where("curatorProfileId", "==", gig.curatorProfileId)
@@ -201,7 +215,7 @@ export const publishGig = onCall<{ gigId: string }>({ region: "us-central1" }, a
   return { ok: true };
 });
 
-export const updateGig = onCall<UpdateGigInput>({ region: "us-central1" }, async (req) => {
+export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
@@ -233,21 +247,41 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1" }, async
     const overrideAddress = typeof input.location.address === "string" ? input.location.address.trim() : "";
     const newVisibility = input.location.addressVisibility ?? gig.location.addressVisibility;
     let resolvedAddress: string; let lat: number; let lng: number;
-    let neighborhood: string | null; let city: string;
+    let neighborhood: string | null; let city: string; let geocodedFrom: string;
 
     if (overrideAddress.length > 0) {
-      // Address change — re-geocode.
-      const result = await getGeocoder().geocode(overrideAddress);
-      if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
-      resolvedAddress = overrideAddress; lat = result.lat; lng = result.lng;
-      neighborhood = result.neighborhood; city = result.city;
+      const currentPrivate = (await privateRef.get()).data() as GigPrivateLocation | undefined;
+      if (currentPrivate?.geocodedFrom === overrideAddress) {
+        // S2: unchanged address input — reuse the already-resolved geocode
+        // rather than re-querying (and re-charging the daily budget for)
+        // the exact same address a member just re-submitted.
+        if (!currentPrivate.geo) {
+          throw new HttpsError("internal", "This gig's stored location is missing coordinates.");
+        }
+        resolvedAddress = overrideAddress; lat = currentPrivate.geo.lat; lng = currentPrivate.geo.lng;
+        neighborhood = gig.location.neighborhood; city = gig.location.city; geocodedFrom = overrideAddress;
+      } else {
+        // Address change — re-geocode.
+        await consumeGeocodeBudget(uid);
+        const result = await getGeocoder().geocode(overrideAddress);
+        if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
+        resolvedAddress = overrideAddress; lat = result.lat; lng = result.lng;
+        neighborhood = result.neighborhood; city = result.city; geocodedFrom = overrideAddress;
+      }
     } else {
       // Visibility-only change (or a no-op location object) — reuse the
       // already-exact private geo/address rather than re-geocoding.
       const currentPrivate = (await privateRef.get()).data() as GigPrivateLocation;
+      // P7: explicit guard instead of a `.geo!` non-null assertion — a
+      // corrupted/partially-written private/location subdoc must surface a
+      // clear internal error here, not an uncaught TypeError on `.lat`.
+      if (!currentPrivate.geo) {
+        throw new HttpsError("internal", "This gig's stored location is missing coordinates.");
+      }
       resolvedAddress = currentPrivate.address;
-      lat = currentPrivate.geo!.lat; lng = currentPrivate.geo!.lng;
+      lat = currentPrivate.geo.lat; lng = currentPrivate.geo.lng;
       neighborhood = gig.location.neighborhood; city = gig.location.city;
+      geocodedFrom = currentPrivate.geocodedFrom ?? currentPrivate.address;
     }
 
     const publicGeo = newVisibility === "public" ? { lat, lng } : coarsen({ lat, lng, neighborhood, city });
@@ -256,7 +290,7 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1" }, async
       geo: publicGeo, addressVisibility: newVisibility,
       address: newVisibility === "public" ? resolvedAddress : null,
     };
-    privateLocation = { address: resolvedAddress, geo: { lat, lng } };
+    privateLocation = { address: resolvedAddress, geo: { lat, lng }, geocodedFrom };
   }
 
   const updates: Partial<GigDoc> = {
@@ -336,6 +370,14 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
   if (scope === "series") {
     const seriesRef = db.doc(`gigSeries/${gig.seriesId}`);
     batch.update(seriesRef, { status: "paused", updatedAt: now });
+    // P11: sweeps status=="open" siblings only, by design — as of this
+    // wave the materializer (scheduled.ts) only ever creates occurrences
+    // directly into "open", so every currently-live occurrence of a series
+    // is reachable this way. This narrows automatically if a future gig
+    // status is introduced (e.g. sub-4's "filled"/booked state) that is
+    // ALSO publicly/live-reachable without being "open" — revisit this
+    // filter then, or a series takedown will silently leave such
+    // occurrences up.
     const siblingsSnap = await db.collection("gigs")
       .where("seriesId", "==", gig.seriesId)
       .where("status", "==", "open")
