@@ -18,7 +18,7 @@ function Gate() {
     const inAuthGroup = segments[0] === "(auth)";
     if (!user && !inAuthGroup) router.replace("/(auth)/sign-in");
     if (user && inAuthGroup) router.replace("/");
-  }, [user, loading, segments]);
+  }, [user, loading, segments, router]);
   return <Stack screenOptions={{ headerShown: false }} />;
 }
 

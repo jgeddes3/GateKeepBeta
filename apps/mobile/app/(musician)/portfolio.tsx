@@ -108,6 +108,17 @@ export default function Portfolio() {
   const [lastProfileId, setLastProfileId] = useState(profileId);
   if (profileId !== lastProfileId) {
     setLastProfileId(profileId);
+    // react-hooks/refs flags any ref write during render on principle (a
+    // discarded/re-run render could in general mutate a ref more than
+    // once), but this particular write is idempotent — it always sets
+    // activeIdRef.current to the profileId this render is FOR, so a
+    // StrictMode double-render or a thrown-away render pass writes the
+    // same value redundantly rather than a wrong one. It has to happen
+    // HERE (synchronously, in the same render-time reset as the setState
+    // calls below) rather than in an effect: see the block comment above
+    // this ref's declaration for the exact race (effect cleanup runs
+    // after commit+paint) this closes.
+    // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
     setProfile(null);
     setBooking("loading");
@@ -115,7 +126,10 @@ export default function Portfolio() {
   }
 
   useEffect(() => {
-    if (!profileId) { setProfile(null); return; }
+    // profile is already null here: the render-time reset above just ran
+    // (or this mounted with profileId already null, matching useState's
+    // own default) — no need to set it again.
+    if (!profileId) return;
     // Captured once per effect instance (one per profileId, since this
     // effect is keyed on it) — the identity check below compares against
     // whichever profileId is CURRENTLY active, not this closure's own,
@@ -157,7 +171,9 @@ export default function Portfolio() {
   // TrackManager's own list UI — catching a track's status leaving
   // "processing" without polling.
   useEffect(() => {
-    if (!profileId) { setTracks([]); return; }
+    // Same reasoning as the profile effect above: tracks is already []
+    // (render-time reset, or useState's own default) by the time this runs.
+    if (!profileId) return;
     const forId = profileId;
     const { db } = getFirebase();
     return onSnapshot(

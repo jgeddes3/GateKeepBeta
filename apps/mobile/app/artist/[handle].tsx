@@ -38,6 +38,22 @@ export default function Artist() {
   const player = useAudioPlayer(null);
   const status = useAudioPlayerStatus(player);
 
+  // Render-time reset, mirroring (musician)/portfolio.tsx's `lastProfileId`
+  // pattern: if this screen instance is ever reused across a handle change
+  // (e.g. a replace-style navigation from one artist page straight to
+  // another instead of a fresh push/mount) the fetch effect below — keyed
+  // on `handle` — wouldn't reset `state` to "loading" until it runs, which
+  // is after commit+paint. Without this, that gap paints the PREVIOUS
+  // artist's already-loaded content under the new handle for a frame.
+  // Adjusted synchronously during render (React's documented "adjust state
+  // while rendering" pattern) so React re-renders with "loading" before
+  // committing.
+  const [lastHandle, setLastHandle] = useState(handle);
+  if (handle !== lastHandle) {
+    setLastHandle(handle);
+    setState("loading");
+  }
+
   // Clears the "now playing" row highlight when a clip ends on its own.
   // play()'s manual toggle-off branch below already clears playingId itself
   // synchronously, so this only needs to cover the case that branch
@@ -51,12 +67,18 @@ export default function Artist() {
   // didJustFinish is the native "actually reached the end" signal and isn't
   // subject to that reload blip.
   useEffect(() => {
+    // Reacting to an edge (native player status transitioning to
+    // didJustFinish=true) is exactly the "subscribe to an external
+    // system, setState in response" case react-hooks/set-state-in-effect's
+    // own docs carve out — there's no prop/state this is purely derived
+    // from that render-time logic could substitute for, and the comment
+    // above explains exactly why the dependency is `didJustFinish` alone.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (status.didJustFinish) setPlayingId(null);
   }, [status.didJustFinish]);
 
   useEffect(() => {
     let cancelled = false;
-    setState("loading");
     (async () => {
       try {
         const { db, storage } = getFirebase();

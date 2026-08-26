@@ -86,6 +86,14 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
 
   useEffect(() => {
     if (!picked || invalid) return;
+    // flagInvalid synchronously sets state, but this is a genuine "sync
+    // with an external system" effect (expo-audio's player status), not
+    // derivable during render: `status` only updates via expo-audio's own
+    // internal subscription, and the whole point (see the comment below)
+    // is telling "still loading" apart from "permanently unreadable"
+    // across successive status ticks — something render-time logic alone
+    // can't do without duplicating this same effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (status.error) { flagInvalid(UNREADABLE_MSG); return; }
     // expo-audio's AudioStatus.duration is 0 "until determined" — that can
     // still be true even after isLoaded flips (per expo-audio's docs), so a

@@ -17,6 +17,17 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   const [activeContext, setActiveContext] = useState<ActiveContext>("fan");
 
   useEffect(() => {
+    // Sync with Firebase Auth (an external system) signing the user out:
+    // this only fires on the logout transition, not on mount (myProfiles/
+    // activeContext already default to [] / "fan"), so it's not a
+    // derived-from-render value a render-time reset could replace without
+    // adding new, unproven "was there a user before" bookkeeping state
+    // that isn't otherwise needed. The effect's uid-swap path (a member
+    // switching accounts without logging out) is deliberately NOT covered
+    // by this branch — see the onSnapshot below, which itself resolves the
+    // new uid's profiles once it arrives, matching web's equivalent
+    // behavior of not clearing stale data mid-swap.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!user) { setMyProfiles([]); setActiveContext("fan"); return; }
     let cancelled = false;
     const { db } = getFirebase();

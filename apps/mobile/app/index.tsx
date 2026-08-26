@@ -1,2 +1,4 @@
 import { Redirect } from "expo-router";
-export default () => <Redirect href="/(fan)" />;
+export default function Index() {
+  return <Redirect href="/(fan)" />;
+}
