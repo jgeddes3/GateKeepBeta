@@ -5129,9 +5129,29 @@ Run in `apps/mobile/`:
 ```bash
 npx expo install expo-audio expo-document-picker @react-native-community/slider
 ```
-(`expo-av` is deprecated in this SDK — `expo-audio` is the playback API. No app.json plugin changes needed for playback-only use.)
+(`expo-av` is deprecated in this SDK — `expo-audio` is the playback API. As
+shipped, `expo install` auto-registered an `"expo-audio"` entry in
+`app.json`'s `plugins` array — despite this note's original expectation of
+no plugin changes for playback-only use, that's what `expo install` did on
+SDK 57, so it was kept.)
 
 - [ ] **Step 2: Create `apps/mobile/src/portfolio/TrimUploader.tsx`**
+
+Final code — ported from the review-hardened web components; see the
+DO-NOT-COPY checklist above. Decode errors and non-finite/sub-1s durations
+are detected via expo-audio's `status.error`/`status.isLoaded` (folded
+into a derived `duration`, so a bad file renders as "still loading,"
+never as usable); there is no separate local duration state to go stale
+on a re-pick, since a new `picked.uri` always spins up a fresh native
+`AudioPlayer` (unlike web's single `<audio>` element, whose `duration`
+state had to be manually reset); the trim window is clamped to
+`duration - MAX_CLIP_SECONDS` with a whole-file branch (covers the
+duration-just-over-30s degenerate case too); and `upload()`'s `try`
+closes immediately after the storage upload resolves, with every
+success-path side effect — including `onDone()` — outside it, so the
+`catch` only runs `deleteTrack` cleanup when `created` is set (the
+upload itself didn't finish), never for a downstream throw after a
+completed upload:
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -5142,18 +5162,61 @@ import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
-import { validateTrackCreate, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput } from "@gatekeep/shared";
+import {
+  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput,
+} from "@gatekeep/shared";
+
+const UNREADABLE_MSG = "Couldn't read that audio file — try mp3, wav, m4a, aac, flac, or ogg.";
+const UNSUPPORTED_MSG = "Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.";
 
 type Picked = { uri: string; name: string; size: number; mimeType: string };
 
+// Pick a local audio file, preview it, drag the 30s window, upload the original.
+// The server pipeline trims/transcodes; we never keep the full track.
 export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?: () => void }) {
   const [picked, setPicked] = useState<Picked | null>(null);
   const [title, setTitle] = useState("");
   const [startSec, setStartSec] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
+  // True once the CURRENT `picked` file is known to be unreadable/too-short —
+  // set by the status effect below and cleared whenever a new file is picked.
+  // Distinguishes "still loading metadata" (duration 0, not yet invalid) from
+  // "loaded, but permanently unusable" so the effect fires its alert exactly
+  // once per bad pick instead of on every subsequent status tick.
+  const [invalid, setInvalid] = useState(false);
+
   const player = useAudioPlayer(picked ? { uri: picked.uri } : null);
   const status = useAudioPlayerStatus(player);
-  const duration = status.duration ?? 0;
+
+  // A NEW `picked.uri` always produces a brand-new native AudioPlayer instance
+  // (expo-audio keys the underlying player on JSON.stringify(source)), so
+  // `status` here starts from THAT player's own fresh status — duration
+  // resets to 0 on its own whenever the file changes. Unlike web's
+  // TrimUploader (one <audio> element whose `duration` state had to be
+  // manually reset in pick() to avoid leaking the PREVIOUS file's length),
+  // there's no separate local duration state that can go stale here.
+  const rawDuration = status.duration;
+  // Mirrors web's onloadedmetadata guard: a file can pass the content-type
+  // check yet still be corrupt/unplayable, or report a non-finite/near-0
+  // duration. Fold that into `duration` itself (not just into `invalid`) so
+  // every consumer below — the render gate, the slider math — automatically
+  // treats a bad file the same as "still loading" instead of rendering trim
+  // controls against a nonsensical length. `< 1`, not `<= 0`: a sub-1-second
+  // "clip" isn't practically previewable or trimmable either.
+  const duration = !invalid && Number.isFinite(rawDuration) && rawDuration >= 1 ? rawDuration : 0;
+
+  useEffect(() => {
+    if (!picked || invalid) return;
+    if (status.error) {
+      setInvalid(true);
+      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
+      return;
+    }
+    if (status.isLoaded && (!Number.isFinite(status.duration) || status.duration < 1)) {
+      setInvalid(true);
+      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
+    }
+  }, [picked, invalid, status.error, status.isLoaded, status.duration]);
 
   // Stop preview at the end of the 30s window.
   useEffect(() => {
@@ -5166,61 +5229,127 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
     const res = await DocumentPicker.getDocumentAsync({ type: "audio/*", copyToCacheDirectory: true });
     if (res.canceled || !res.assets[0]) return;
     const a = res.assets[0];
-    if ((a.size ?? 0) > MAX_AUDIO_UPLOAD_BYTES) { Alert.alert("Too big", "Audio files must be under 50 MB."); return; }
-    setPicked({ uri: a.uri, name: a.name, size: a.size ?? 0, mimeType: a.mimeType ?? "audio/mpeg" });
+    // Reject only a KNOWN-bad type — an empty/undefined mimeType is let
+    // through on purpose: some OSes report nothing for legitimate but less
+    // common containers (m4a, flac) instead of a proper audio/* MIME type,
+    // and the server doesn't trust this field either way — ffmpeg sniffs the
+    // actual container/codec from the bytes. This is only a cheap
+    // client-side triage.
+    if (a.mimeType && !(AUDIO_CONTENT_TYPES as readonly string[]).includes(a.mimeType)) {
+      Alert.alert("Unsupported format", UNSUPPORTED_MSG);
+      return;
+    }
+    if ((a.size ?? 0) > MAX_AUDIO_UPLOAD_BYTES) {
+      Alert.alert("Too big", "Audio files must be under 50 MB.");
+      return;
+    }
+    setInvalid(false);
+    setPicked({ uri: a.uri, name: a.name, size: a.size ?? 0, mimeType: a.mimeType ?? "" });
     setStartSec(0);
     if (!title) setTitle(a.name.replace(/\.[^.]+$/, ""));
   };
 
-  const preview = () => { player.seekTo(startSec); player.play(); };
+  const preview = () => {
+    void player.seekTo(startSec).then(() => player.play()).catch(() => {});
+  };
 
   const upload = async () => {
     if (!picked) return;
-    const input: CreateTrackInput = { profileId, title: title.trim(), startSec: Math.floor(startSec),
-      sizeBytes: picked.size, contentType: picked.mimeType };
+    const input: CreateTrackInput = {
+      profileId, title: title.trim(), startSec: Math.floor(startSec),
+      // picked.mimeType can legitimately be "" (see pick()'s comment above) —
+      // fall back to a generic-but-sniffable contentType rather than sending
+      // an empty string the server would reject outright.
+      sizeBytes: picked.size, contentType: picked.mimeType || "audio/mpeg",
+    };
     const v = validateTrackCreate(input);
     if (!v.ok) { Alert.alert("Check your track", v.reason); return; }
-    setBusy("Starting…");
+    setBusy("Requesting upload…");
+    // Tracked outside the try so the catch below can tell "createTrack itself
+    // failed" (created stays null — nothing to clean up) apart from "the
+    // track doc exists but the storage upload after it failed" (created is
+    // set — the doc must be cleaned up, or it lingers as a dead
+    // "Processing…" row with nothing behind it).
+    let created: { trackId: string; uploadPath: string } | null = null;
     try {
       const { functions, storage } = getFirebase();
       const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
         functions, "createTrack")(input);
+      created = data;
       const blob = await (await fetch(picked.uri)).blob();
       const task = uploadBytesResumable(storageRef(storage, data.uploadPath), blob,
         { contentType: input.contentType });
       task.on("state_changed",
-        (s) => setBusy(`Uploading ${Math.round((s.bytesTransferred / s.totalBytes) * 100)}%`));
+        (s) => setBusy(`Uploading… ${Math.round((s.bytesTransferred / s.totalBytes) * 100)}%`));
       await task;
-      setBusy(null); setPicked(null); setTitle("");
-      onDone?.();
-    } catch (e: unknown) {
+      // The try closes HERE, right after the upload itself resolves — every
+      // success-path side effect below runs OUTSIDE the try/catch on
+      // purpose. onDone() is a callback supplied by the parent; if it (or
+      // anything else down here) were to throw while still inside the try,
+      // the catch below would see `created` set and delete the track this
+      // upload just successfully finished, mistaking a downstream error for
+      // an upload failure.
+    } catch (e) {
       setBusy(null);
-      Alert.alert("Upload failed", e instanceof Error ? e.message : "Try again.");
+      console.error(e); // the alerts below are deliberately generic — keep the real error in the console
+      if (created) {
+        try {
+          await httpsCallable(getFirebase().functions, "deleteTrack")({ profileId, trackId: created.trackId });
+          Alert.alert("Upload failed", "Try again.");
+        } catch {
+          // Best-effort cleanup itself failed — tell the musician exactly
+          // what's left behind instead of a generic message that leaves a
+          // dead "Processing…" row unexplained.
+          Alert.alert("Upload failed", "Delete the stuck \"Processing…\" entry below and try again.");
+        }
+      } else {
+        Alert.alert("Upload failed", e instanceof Error ? e.message : "Try again.");
+      }
+      return;
     }
+    setBusy(null); setPicked(null); setTitle(""); setInvalid(false);
+    onDone?.();
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const windowEnd = Math.min(startSec + MAX_CLIP_SECONDS, duration);
+  const sliderMax = Math.max(0, Math.floor(duration - MAX_CLIP_SECONDS));
+  // Also covers duration JUST over 30s (e.g. 30.4s): sliderMax would compute
+  // to 0 — a degenerate range with nowhere to drag — so treat that the same
+  // as "whole file" instead of rendering a slider that can't move.
+  const wholeFileUsed = duration > 0 && (duration <= MAX_CLIP_SECONDS || sliderMax === 0);
+
   return (
     <View style={{ borderWidth: 1, borderStyle: "dashed", borderColor: "#bbb", borderRadius: 8, padding: 12, gap: 8 }}>
       <Text style={{ fontWeight: "700" }}>Add a track (30-second snippet)</Text>
-      <Pressable onPress={pick} style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
+      <Pressable onPress={() => void pick()} accessibilityRole="button" accessibilityLabel="Choose an audio file"
+        style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
         <Text>{picked ? picked.name : "Choose audio file…"}</Text>
       </Pressable>
       {picked && duration > 0 && (
         <>
           <TextInput placeholder="Track title" value={title} onChangeText={setTitle} maxLength={80}
             style={{ borderWidth: 1, padding: 10, borderRadius: 8 }} />
-          <Text>Window: {fmt(startSec)} – {fmt(Math.min(startSec + MAX_CLIP_SECONDS, duration))} of {fmt(duration)}</Text>
-          <Slider minimumValue={0} maximumValue={Math.max(0, Math.floor(duration - 1))} step={1}
-            value={startSec} onValueChange={setStartSec} />
+          {wholeFileUsed ? (
+            <Text>Whole file will be used (30 seconds or less)</Text>
+          ) : (
+            <>
+              <Text>Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})</Text>
+              <Slider minimumValue={0} maximumValue={sliderMax} step={1}
+                value={startSec} onValueChange={setStartSec} />
+            </>
+          )}
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Pressable onPress={preview} style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
-              <Text>▶ Preview</Text></Pressable>
+              <Text>▶ Preview</Text>
+            </Pressable>
             <Pressable onPress={() => player.pause()} style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
-              <Text>Stop</Text></Pressable>
-            <Pressable onPress={upload} disabled={busy !== null}
+              <Text>Stop</Text>
+            </Pressable>
+            <Pressable onPress={() => void upload()} disabled={busy !== null}
               style={{ backgroundColor: "#111", padding: 10, borderRadius: 8 }}>
-              <Text style={{ color: "#fff" }}>{busy ?? "Upload snippet"}</Text></Pressable>
+              <Text style={{ color: "#fff" }}>{busy ?? "Upload snippet"}</Text>
+            </Pressable>
           </View>
         </>
       )}
@@ -5231,53 +5360,133 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
 
 - [ ] **Step 3: Create `apps/mobile/src/portfolio/TrackManager.tsx`**
 
+Final code — ported from the review-hardened web components; see the
+DO-NOT-COPY checklist above. `MAX_TRACKS` comes from `@gatekeep/shared`
+instead of a hardcoded `10`. A single `busy` flag locks every row action
+(reorder/rename/delete) while any call is in flight, for the same reason
+web's `TrackManager` does: `reorderTracks` swaps two rows at once, so a
+per-row lock wouldn't stop a second tap from racing the first move's
+still-in-flight call against a still-stale `tracks` array. Rename is an
+inline `TextInput` edit, not a ported `window.prompt` — RN's
+`Alert.prompt` is iOS-only and silently no-ops on Android:
+
 ```tsx
 import { useEffect, useState } from "react";
-import { View, Text, Pressable, Alert } from "react-native";
+import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import type { TrackDoc } from "@gatekeep/shared";
+import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
 
 type Row = TrackDoc & { id: string };
+
 const STATUS_LABEL: Record<TrackDoc["status"], string> = {
   processing: "Processing…", pending_review: "In review", approved: "Live",
   rejected: "Rejected", failed: "Failed",
 };
+const STATUS_BG: Record<TrackDoc["status"], string> = {
+  approved: "#dcfce7", rejected: "#fee2e2", failed: "#fee2e2",
+  processing: "#fef9c3", pending_review: "#fef9c3",
+};
 
 export function TrackManager({ profileId }: { profileId: string }) {
   const [tracks, setTracks] = useState<Row[]>([]);
+  // Single flag, not per-row: reorderTracks affects TWO rows at once (the
+  // swapped pair), so a per-row lock wouldn't stop a second tap from racing
+  // the first move's still-in-flight call against a still-stale `tracks`
+  // array. Locking every action across every row while ANY call is in
+  // flight is simpler and fully covers that.
+  const [busy, setBusy] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+
   useEffect(() => {
     const { db } = getFirebase();
-    return onSnapshot(query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
+    return onSnapshot(
+      query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
       (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
   }, [profileId]);
+
   const call = async (name: string, data: object) => {
+    setBusy(true);
     try { await httpsCallable(getFirebase().functions, name)(data); }
-    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "Try again."); }
+    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); }
+    finally { setBusy(false); }
   };
+
+  const move = (i: number, dir: -1 | 1) => {
+    if (busy || !tracks[i] || !tracks[i + dir]) return;
+    // A single reorderTracks call with the whole reordered id list, not two
+    // sequential updateTrack calls — reorderTracks owns ordering atomically;
+    // two separate calls would be non-atomic (a reload between them leaves
+    // two tracks sharing an order) and a no-op on ties.
+    const ids = tracks.map((t) => t.id);
+    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+    void call("reorderTracks", { profileId, trackIds: ids });
+  };
+
+  const startRename = (t: Row) => { setRenamingId(t.id); setRenameText(t.title); };
+  // Exits rename mode immediately (mirroring a native prompt dismissing
+  // itself synchronously) rather than waiting on the async call — if it
+  // fails, the Alert inside call() explains why and the musician can tap
+  // Rename again.
+  const saveRename = (trackId: string) => {
+    const title = renameText.trim();
+    setRenamingId(null);
+    if (title) void call("updateTrack", { profileId, trackId, title });
+  };
+
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>
-        Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/10)
+        Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
       </Text>
-      {tracks.map((t) => (
-        <View key={t.id} style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10, gap: 4 }}>
-          <Text style={{ fontWeight: "600" }}>{t.title} · {STATUS_LABEL[t.status]}</Text>
+      {tracks.map((t, i) => (
+        <View key={t.id} style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10, gap: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text style={{ fontWeight: "600", flex: 1 }}>{t.title}</Text>
+            <View style={{ paddingVertical: 2, paddingHorizontal: 8, borderRadius: 10, backgroundColor: STATUS_BG[t.status] }}>
+              <Text style={{ fontSize: 12 }}>{STATUS_LABEL[t.status]}</Text>
+            </View>
+          </View>
           {(t.rejectionReason || t.failureReason) && (
             <Text style={{ color: "#991b1b" }}>{t.rejectionReason ?? t.failureReason}</Text>
           )}
-          <Pressable onPress={() => Alert.alert("Delete track?", t.title, [
-              { text: "Cancel" },
-              { text: "Delete", style: "destructive",
-                onPress: () => void call("deleteTrack", { profileId, trackId: t.id }) },
-            ])}>
-            <Text style={{ color: "#dc2626" }}>Delete</Text>
-          </Pressable>
+          {renamingId === t.id ? (
+            <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+              <TextInput value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
+                style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
+              <Pressable disabled={busy} onPress={() => saveRename(t.id)}>
+                <Text style={{ fontWeight: "600" }}>Save</Text>
+              </Pressable>
+              <Pressable onPress={() => setRenamingId(null)}>
+                <Text style={{ color: "#666" }}>Cancel</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+              <Pressable disabled={busy || i === 0} onPress={() => move(i, -1)} accessibilityRole="button" accessibilityLabel="Move up">
+                <Text style={{ opacity: busy || i === 0 ? 0.4 : 1 }}>↑</Text>
+              </Pressable>
+              <Pressable disabled={busy || i === tracks.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down">
+                <Text style={{ opacity: busy || i === tracks.length - 1 ? 0.4 : 1 }}>↓</Text>
+              </Pressable>
+              <Pressable disabled={busy} onPress={() => startRename(t)}>
+                <Text style={{ opacity: busy ? 0.4 : 1 }}>Rename</Text>
+              </Pressable>
+              <Pressable disabled={busy} onPress={() => Alert.alert("Delete track?", t.title, [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Delete", style: "destructive",
+                    onPress: () => void call("deleteTrack", { profileId, trackId: t.id }) },
+                ])}>
+                <Text style={{ color: "#dc2626", opacity: busy ? 0.4 : 1 }}>Delete</Text>
+              </Pressable>
+            </View>
+          )}
         </View>
       ))}
-      <TrimUploader profileId={profileId} />
+      <TrimUploader profileId={profileId} onDone={() => { /* onSnapshot refreshes */ }} />
     </View>
   );
 }
@@ -5285,20 +5494,52 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
 - [ ] **Step 4: Create `apps/mobile/src/portfolio/PortfolioForms.tsx`**
 
-RN ports of the web forms — same callables, same validation, same field set:
+Final code — ported from the review-hardened web components; see the
+DO-NOT-COPY checklist above. `BioGenresForm` tracks a `savedGenres`
+state (what the server currently holds, not just the mount-time value)
+so an all-genres-deselected save is blocked with an explicit alert
+instead of silently no-op'ing, while a bio-only save still omits
+`genres` entirely so it keeps working before any genre has ever been
+picked. `LinksForm` clears its url input only once `save()` actually
+succeeds. `PhotoUploader` takes a `currentPath: string | null` prop —
+the pipeline rewrites the profile doc's avatar/coverPhotoPath a few
+seconds after the storage upload lands, so this component watches that
+PROP (via a render-time "adjust state while rendering" check, not a
+`useEffect`) to know when to drop its own "Processing…" state, bounded
+by a 60s `useEffect` timeout so an upload that never writes back doesn't
+leave the button disabled forever; it also enforces
+`MAX_PHOTO_UPLOAD_BYTES`, which the pre-hardening sketch omitted.
+`BookingForm` keeps rate inputs as raw strings (`RateInput`), converting
+dollars to cents exactly once, in `save()` — not on every keystroke,
+which would fight the user mid-entry (typing "1.50" round-tripping
+through cents and re-rendering as "1.5"). Whoever wires these into a
+screen (Task 14) MUST mount `BioGenresForm`/`LinksForm`/`BookingForm`
+with `key={profileId}` — they seed local state from `initial` only once,
+on mount, and Expo Router's stack navigator reuses screen instances
+across a profile-context switch instead of remounting:
 
 ```tsx
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
-  GENRES, GIG_TYPES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind,
+  GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
+  type PortfolioData, type BookingDoc, type BookingPreferences, type BookingRates,
+  type ExternalLink, type ExternalLinkKind, type RateAmount,
 } from "@gatekeep/shared";
 
+// RN ports of the web portfolio forms — same callables, same validation,
+// same field set. Expo Router's stack navigator reuses screen instances
+// across param changes exactly like Next's App Router does: each of these
+// components seeds its local state from `initial` ONLY ONCE, on mount
+// (`useState(initial?.x ?? default)`). Whoever wires these into a screen
+// (the wizard/dashboard tab) MUST re-key each instance by `profileId`
+// (`key={profileId}`) when switching the active profile context, or a
+// remount won't happen and the PREVIOUS profile's bio/links/rates will leak
+// into the new one.
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
   catch (e) { Alert.alert("Save failed", e instanceof Error ? e.message : "Try again."); return false; }
@@ -5306,25 +5547,54 @@ const callOrAlert = async (name: string, data: object): Promise<boolean> => {
 
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
+    <Pressable onPress={onPress} accessibilityRole="button" style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
       borderWidth: 1, borderColor: "#bbb", backgroundColor: active ? "#111" : "#fff" }}>
       <Text style={{ color: active ? "#fff" : "#111" }}>{label}</Text>
     </Pressable>
   );
 }
 
-export function BioGenresForm({ profileId, initial }:
-  { profileId: string; initial: PortfolioData | undefined }) {
+export function BioGenresForm({ profileId, initial, onSaved }:
+  { profileId: string; initial: PortfolioData | undefined; onSaved?: () => void }) {
   const [bio, setBio] = useState(initial?.bio ?? "");
   const [genres, setGenres] = useState<string[]>(initial?.genres ?? []);
+  // Tracks what the SERVER currently holds, not just the mount-time value —
+  // select 2 -> save -> deselect all -> save must hit the guard below even
+  // though `initial` still says zero.
+  const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
   const [busy, setBusy] = useState(false);
   const toggle = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
+
   const save = async () => {
-    const v = validatePortfolioUpdate({ profileId, bio, genres });
+    if (genres.length === 0 && savedGenres.length > 0) {
+      // Genres were saved before and the musician has now deselected all of
+      // them. The omit-when-empty branch below exists for the never-set-yet
+      // case (a bio-only save while onboarding); reusing it here would
+      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side —
+      // which looks to the musician like their change was saved (the chips
+      // show empty) when it wasn't. Block it with an explicit message
+      // instead.
+      Alert.alert("Keep at least one genre", "It's required for review.");
+      return;
+    }
+    // Omit genres entirely (rather than sending []) when none are picked
+    // yet — a bio-only save has to work while a musician is still filling
+    // in the rest of the form; validatePortfolioUpdate (and the server)
+    // both treat an omitted field as "leave it alone", but an explicit []
+    // fails the 1-3-genres check.
+    const payload = genres.length > 0 ? { profileId, bio, genres } : { profileId, bio };
+    const v = validatePortfolioUpdate(payload);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
-    setBusy(true); await callOrAlert("updatePortfolio", { profileId, bio, genres }); setBusy(false);
+    setBusy(true);
+    if (await callOrAlert("updatePortfolio", payload)) {
+      if (genres.length > 0) setSavedGenres(genres);
+      onSaved?.();
+    }
+    setBusy(false);
   };
+
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Bio & genres</Text>
@@ -5334,7 +5604,7 @@ export function BioGenresForm({ profileId, initial }:
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GENRES.map((g) => <Chip key={g} label={g} active={genres.includes(g)} onPress={() => toggle(g)} />)}
       </View>
-      <Pressable onPress={save} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
+      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
         <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save bio & genres"}</Text>
       </Pressable>
     </View>
@@ -5346,19 +5616,27 @@ export function LinksForm({ profileId, initial }:
   const [links, setLinks] = useState<ExternalLink[]>(initial?.externalLinks ?? []);
   const [kind, setKind] = useState<ExternalLinkKind>("spotify");
   const [url, setUrl] = useState("");
-  const save = async (next: ExternalLink[]) => {
+  const [busy, setBusy] = useState(false);
+
+  const save = async (next: ExternalLink[]): Promise<boolean> => {
     const v = validatePortfolioUpdate({ profileId, externalLinks: next });
-    if (!v.ok) { Alert.alert("Check the link", v.reason); return; }
-    if (await callOrAlert("updatePortfolio", { profileId, externalLinks: next })) setLinks(next);
+    if (!v.ok) { Alert.alert("Check the link", v.reason); return false; }
+    setBusy(true);
+    const ok = await callOrAlert("updatePortfolio", { profileId, externalLinks: next });
+    if (ok) setLinks(next);
+    setBusy(false);
+    return ok;
   };
+
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Links</Text>
       {links.map((l, i) => (
-        <View key={`${l.url}-${i}`} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+        <View key={`${l.kind}-${l.url}-${i}`} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
           <Text style={{ flex: 1 }} numberOfLines={1}>{l.kind}: {l.url}</Text>
-          <Pressable onPress={() => void save(links.filter((_, j) => j !== i))}>
-            <Text style={{ color: "#dc2626" }}>Remove</Text></Pressable>
+          <Pressable disabled={busy} onPress={() => void save(links.filter((_, j) => j !== i))}>
+            <Text style={{ color: "#dc2626" }}>Remove</Text>
+          </Pressable>
         </View>
       ))}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
@@ -5366,24 +5644,66 @@ export function LinksForm({ profileId, initial }:
           <Chip key={k} label={k} active={kind === k} onPress={() => setKind(k)} />)}
       </View>
       <View style={{ flexDirection: "row", gap: 6 }}>
-        <TextInput placeholder="https://…" autoCapitalize="none" value={url} onChangeText={setUrl}
+        <TextInput placeholder="https://…" autoCapitalize="none" editable={!busy} value={url} onChangeText={setUrl}
           style={{ borderWidth: 1, borderRadius: 8, padding: 10, flex: 1 }} />
-        <Pressable onPress={() => { if (url) { void save([...links, { kind, url }]); setUrl(""); } }}
-          style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}><Text>Add</Text></Pressable>
+        <Pressable disabled={busy} style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}
+          onPress={async () => {
+            if (!url) return;
+            // Clear the input only once the save actually succeeds —
+            // clearing unconditionally would silently throw away what the
+            // musician typed on a validation failure or a network error.
+            if (await save([...links, { kind, url }])) setUrl("");
+          }}>
+          <Text>Add</Text>
+        </Pressable>
       </View>
     </View>
   );
 }
 
-export function PhotoUploader({ profileId, uid, kind }:
-  { profileId: string; uid: string; kind: "avatar" | "cover" }) {
+export function PhotoUploader({ profileId, uid, kind, currentPath }:
+  { profileId: string; uid: string; kind: "avatar" | "cover"; currentPath: string | null }) {
   const [busy, setBusy] = useState(false);
+  // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
+  // seconds after the storage upload lands — we don't know its eventual
+  // value client-side, so instead we keep showing "Processing…" until the
+  // `currentPath` PROP itself moves. `baseline` tracks the last path we've
+  // actually seen; when it disagrees with the incoming prop we're mid-render
+  // with fresh data, so we adjust state right here (not in a useEffect —
+  // this is React's documented "adjust state while rendering" escape hatch
+  // for resetting state when a prop changes: since it runs synchronously
+  // before commit, React just re-renders once more with the corrected
+  // state instead of committing a stale frame first). This also closes the
+  // double-upload race: while awaiting, the button is disabled instead of
+  // sitting idle and inviting a second upload before the first has landed.
+  const [awaiting, setAwaiting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [baseline, setBaseline] = useState(currentPath);
+  if (currentPath !== baseline) {
+    setBaseline(currentPath);
+    if (awaiting) setAwaiting(false);
+    if (timedOut) setTimedOut(false);
+  }
+  // Bounds the wait: some failures never write ANYTHING back to the profile
+  // doc (an oversized/corrupt image the resize step rejects outright before
+  // ever reaching a write, for instance), so `currentPath` would never move
+  // and `awaiting` — and the disabled button — would otherwise deadlock
+  // permanently. This is a legitimate useEffect (subscribing to an external
+  // timer and calling setState from ITS callback, not synchronously in the
+  // effect body), unlike the render-time adjustment above.
+  useEffect(() => {
+    if (!awaiting) return;
+    const t = setTimeout(() => { setAwaiting(false); setTimedOut(true); }, 60_000);
+    return () => clearTimeout(t);
+  }, [awaiting]);
+
   const upload = async () => {
-    // expo-image-picker is not installed; DocumentPicker covers image files fine.
     const res = await DocumentPicker.getDocumentAsync({ type: "image/*", copyToCacheDirectory: true });
     if (res.canceled || !res.assets[0]) return;
     const a = res.assets[0];
+    if ((a.size ?? 0) > MAX_PHOTO_UPLOAD_BYTES) { Alert.alert("Too big", "Photos must be under 10 MB."); return; }
     setBusy(true);
+    setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
       // RN has no crypto.randomUUID — timestamp+random nonce is fine (uniqueness, not secrecy of THIS value).
@@ -5391,60 +5711,107 @@ export function PhotoUploader({ profileId, uid, kind }:
       const blob = await (await fetch(a.uri)).blob();
       await uploadBytes(storageRef(storage, stagingPhotoPath(uid, profileId, kind, nonce)), blob,
         { contentType: a.mimeType ?? "image/jpeg" });
+      setAwaiting(true);
+      // The photo pipeline resizes/strips and updates the profile doc; the
+      // parent screen's snapshot listener feeds the new path back in as
+      // `currentPath`, which the render-time check above picks up and
+      // flips `awaiting` back to false.
     } catch (e) {
       Alert.alert("Upload failed", e instanceof Error ? e.message : "Try again.");
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
+  const processing = awaiting;
+  const label = busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`;
   return (
-    <Pressable onPress={upload} disabled={busy} style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}>
-      <Text>{busy ? "Uploading…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}</Text>
-    </Pressable>
+    <View style={{ gap: 4 }}>
+      <Pressable onPress={() => void upload()} disabled={busy || processing}
+        accessibilityRole="button" accessibilityLabel={`Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
+        style={{ borderWidth: 1, borderRadius: 8, padding: 10, alignSelf: "flex-start" }}>
+        <Text>{label}{currentPath && !processing ? " ✓" : ""}</Text>
+      </Pressable>
+      {timedOut && (
+        <Text style={{ color: "#92400e", fontSize: 12 }}>
+          Still processing — if your photo doesn&#39;t appear, try a smaller one.
+        </Text>
+      )}
+    </View>
   );
 }
 
+type RateKey = "perHour" | "perSong" | "perSet";
+type RateInput = { amount: string; note: string | null };
+const rateInputFrom = (r: RateAmount | null | undefined): RateInput =>
+  r ? { amount: (r.amountCents / 100).toString(), note: r.note ?? null } : { amount: "", note: null };
+
+const DEFAULT_PREFS: BookingPreferences = {
+  gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null,
+  bringsOwnPA: null, availabilityPattern: null,
+};
+
 export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
-  const [rates, setRates] = useState(initial?.rates ?? { perHour: null, perSong: null, perSet: null });
-  const [prefs, setPrefs] = useState(initial?.preferences ?? { gigTypes: [] as string[],
-    travelRadiusKm: null, actSize: null, typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null });
+  // Raw strings, not derived cents: converting dollars -> cents -> back to a
+  // display string on every keystroke (the naive approach) fights the user
+  // mid-entry — e.g. typing "1.50" round-trips through 150 cents and
+  // re-renders as "1.5", dropping the trailing zero and disrupting the
+  // cursor. Conversion now happens exactly once, in save().
+  const [rateInputs, setRateInputs] = useState<Record<RateKey, RateInput>>({
+    perHour: rateInputFrom(initial?.rates.perHour),
+    perSong: rateInputFrom(initial?.rates.perSong),
+    perSet: rateInputFrom(initial?.rates.perSet),
+  });
+  const [prefs, setPrefs] = useState<BookingPreferences>(initial?.preferences ?? DEFAULT_PREFS);
   const [busy, setBusy] = useState(false);
 
   const numField = (value: number | null, set: (n: number | null) => void, placeholder: string) => (
     <TextInput keyboardType="number-pad" placeholder={placeholder}
       value={value === null ? "" : String(value)}
-      onChangeText={(t) => set(t === "" ? null : Number(t))}
+      onChangeText={(t) => set(t === "" ? null : Math.round(Number(t)))}
       style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 100 }} />
   );
-  const rateRow = (key: "perHour" | "perSong" | "perSet", label: string) => (
-    <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+  const rateRow = (key: RateKey, label: string) => (
+    <View key={key} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
       <Text style={{ width: 100 }}>{label}</Text>
       <Text>$</Text>
       <TextInput keyboardType="decimal-pad" placeholder="—"
-        value={rates[key] ? String(rates[key]!.amountCents / 100) : ""}
-        onChangeText={(t) => setRates((r) => ({ ...r, [key]: t === "" ? null
-          : { amountCents: Math.round(Number(t) * 100), note: r[key]?.note ?? null } }))}
+        value={rateInputs[key].amount}
+        onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: t } }))}
         style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 90 }} />
-      <TextInput placeholder="note" maxLength={200} editable={rates[key] !== null}
-        value={rates[key]?.note ?? ""}
-        onChangeText={(t) => setRates((r) => ({ ...r,
-          [key]: r[key] ? { ...r[key]!, note: t || null } : null }))}
+      <TextInput placeholder="note (optional)" maxLength={200} editable={rateInputs[key].amount.trim() !== ""}
+        value={rateInputs[key].note ?? ""}
+        onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: t || null } }))}
         style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
     </View>
   );
   const save = async () => {
+    const rates: BookingRates = { perHour: null, perSong: null, perSet: null };
+    for (const key of ["perHour", "perSong", "perSet"] as const) {
+      const raw = rateInputs[key].amount.trim();
+      if (raw === "") continue; // stays null — field left blank on purpose
+      const dollars = Number(raw);
+      if (!Number.isFinite(dollars) || dollars <= 0) {
+        Alert.alert("Check your rates", "Rates must be more than $0, or leave the field blank.");
+        return;
+      }
+      rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
+    }
     const input = { profileId, rates, preferences: prefs };
-    const v = validateBookingUpdate(input as never);
+    const v = validateBookingUpdate(input);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
-    setBusy(true); await callOrAlert("updateBookingInfo", input); setBusy(false);
+    setBusy(true);
+    await callOrAlert("updateBookingInfo", input);
+    setBusy(false);
   };
 
   return (
     <View style={{ gap: 10 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Rates & preferences</Text>
-      <Text style={{ color: "#666" }}>Visible to curators only — never on your public page.</Text>
+      <Text style={{ color: "#666" }}>Visible to curators only — never on your public page. Offer any mix of the three.</Text>
       {rateRow("perHour", "Per hour")}
       {rateRow("perSong", "Per song")}
-      {rateRow("perSet", "Per set")}
+      {rateRow("perSet", "Per set (flat)")}
       <Text style={{ fontWeight: "700" }}>Gig types</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GIG_TYPES.map((g) => <Chip key={g} label={g.replace("_", " ")} active={prefs.gigTypes.includes(g)}
@@ -5475,10 +5842,9 @@ export function BookingForm({ profileId, initial }:
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {(["weekends", "weeknights", "anytime", "limited"] as const).map((a) =>
           <Chip key={a} label={a} active={prefs.availabilityPattern === a}
-            onPress={() => setPrefs((p) => ({ ...p,
-              availabilityPattern: p.availabilityPattern === a ? null : a }))} />)}
+            onPress={() => setPrefs((p) => ({ ...p, availabilityPattern: p.availabilityPattern === a ? null : a }))} />)}
       </View>
-      <Pressable onPress={save} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
+      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
         <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save rates & preferences"}</Text>
       </Pressable>
     </View>
@@ -5637,13 +6003,23 @@ export default function Portfolio() {
       )}
       <View style={{ gap: 8 }}>
         <Text style={{ fontSize: 18, fontWeight: "700" }}>Photos</Text>
-        <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar" />
-        <PhotoUploader profileId={profileId} uid={user.uid} kind="cover" />
+        {/* currentPath is required, not optional: Task 13's PhotoUploader */}
+        {/* watches it (against its own `baseline`) to know when the photo */}
+        {/* pipeline has finished and drop its "Processing…" state. */}
+        <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar"
+          currentPath={profile.portfolio?.avatarPhotoPath ?? null} />
+        <PhotoUploader profileId={profileId} uid={user.uid} kind="cover"
+          currentPath={profile.portfolio?.coverPhotoPath ?? null} />
       </View>
-      <BioGenresForm profileId={profileId} initial={profile.portfolio} />
-      <LinksForm profileId={profileId} initial={profile.portfolio} />
+      {/* key={profileId} on all three initial-seeded forms: Expo Router reuses */}
+      {/* this screen instance across a profile-context switch, and each form */}
+      {/* only seeds its local state from `initial` once, on mount — without */}
+      {/* the key forcing a remount, the PREVIOUS profile's bio/links/rates */}
+      {/* leak onto the newly-selected profile. See the DO-NOT-COPY note above. */}
+      <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
+      <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
-      <BookingForm profileId={profileId} initial={booking} />
+      <BookingForm key={profileId} profileId={profileId} initial={booking} />
       {profile.status === "draft" && (
         <Pressable onPress={resubmit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
           <Text style={{ color: "#fff", textAlign: "center" }}>Submit for review</Text></Pressable>
