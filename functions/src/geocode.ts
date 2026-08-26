@@ -165,11 +165,15 @@ export function getGeocoder(): Geocoder {
 
 /**
  * Coarsen a geocode result to 2 decimal places (~1.1 km cell).
- * Returns an object with rounded lat/lng for use as a neighborhood-level pin.
+ * Uses symmetric round-half-away-from-zero to ensure hemisphere-independent
+ * neighborhood-cell bucketing: both +73.985 and -73.985 round to ±73.99.
+ * Floating-point precision (e.g., Math.abs(-73.985)*100 ≈ 7398.4999...) is
+ * handled with a small epsilon nudge.
  */
 export function coarsen(result: GeocodeResult): { lat: number; lng: number } {
+  const roundSymmetric = (v: number): number => Math.sign(v) * Math.round(Math.abs(v) * 100 + 1e-9) / 100;
   return {
-    lat: Math.round(result.lat * 100) / 100,
-    lng: Math.round(result.lng * 100) / 100,
+    lat: roundSymmetric(result.lat),
+    lng: roundSymmetric(result.lng),
   };
 }

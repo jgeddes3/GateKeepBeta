@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   StubGeocoder,
   GoogleGeocoder,
@@ -77,33 +77,72 @@ describe("coarsen", () => {
     expect(result.lat).toBe(-33.87);
     expect(result.lng).toBe(151.21);
   });
+
+  it("uses symmetric rounding for positive boundary case (73.985)", () => {
+    const input: GeocodeResult = {
+      lat: 73.985,
+      lng: 0,
+      neighborhood: null,
+      city: "Test",
+    };
+    const result = coarsen(input);
+    expect(result.lat).toBe(73.99);
+  });
+
+  it("uses symmetric rounding for negative boundary case (-73.985)", () => {
+    const input: GeocodeResult = {
+      lat: -73.985,
+      lng: 0,
+      neighborhood: null,
+      city: "Test",
+    };
+    const result = coarsen(input);
+    expect(result.lat).toBe(-73.99);
+  });
+
+  it("rounds non-boundary negative coordinates symmetrically", () => {
+    const input: GeocodeResult = {
+      lat: -40.71382,
+      lng: -74.00713,
+      neighborhood: "Test",
+      city: "Test",
+    };
+    const result = coarsen(input);
+    expect(result.lat).toBe(-40.71);
+    expect(result.lng).toBe(-74.01);
+  });
 });
 
 describe("getGeocoder", () => {
-  let originalProvider: string | undefined;
-  let originalApiKey: string | undefined;
-
-  beforeEach(() => {
-    originalProvider = process.env.GEOCODER_PROVIDER;
-    originalApiKey = process.env.GEOCODER_API_KEY;
-  });
-
-  afterEach(() => {
-    process.env.GEOCODER_PROVIDER = originalProvider;
-    process.env.GEOCODER_API_KEY = originalApiKey;
-  });
-
   it("returns StubGeocoder when GEOCODER_PROVIDER is unset", () => {
-    delete process.env.GEOCODER_PROVIDER;
-    const geocoder = getGeocoder();
-    expect(geocoder).toBeInstanceOf(StubGeocoder);
+    vi.stubEnv("GEOCODER_PROVIDER", undefined);
+    try {
+      const geocoder = getGeocoder();
+      expect(geocoder).toBeInstanceOf(StubGeocoder);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("returns GoogleGeocoder when GEOCODER_PROVIDER=google", () => {
-    process.env.GEOCODER_PROVIDER = "google";
-    process.env.GEOCODER_API_KEY = "test-key";
-    const geocoder = getGeocoder();
-    expect(geocoder).toBeInstanceOf(GoogleGeocoder);
+    vi.stubEnv("GEOCODER_PROVIDER", "google");
+    vi.stubEnv("GEOCODER_API_KEY", "test-key");
+    try {
+      const geocoder = getGeocoder();
+      expect(geocoder).toBeInstanceOf(GoogleGeocoder);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("throws when GEOCODER_PROVIDER=google without GEOCODER_API_KEY", () => {
+    vi.stubEnv("GEOCODER_PROVIDER", "google");
+    vi.stubEnv("GEOCODER_API_KEY", undefined);
+    try {
+      expect(() => getGeocoder()).toThrow("GEOCODER_PROVIDER=google requires GEOCODER_API_KEY");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
