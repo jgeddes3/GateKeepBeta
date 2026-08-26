@@ -106,6 +106,35 @@ describe("reviewProfile", () => {
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+  it("P2: rejects an invalid decision value with invalid-argument", async () => {
+    const { profileId } = await pendingProfile("v7");
+    const adminUser = await makeAdminUser("admin");
+    await expect(callFn("reviewProfile", { profileId, decision: "maybe" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+  it("P2: rejects a malformed profileId with invalid-argument", async () => {
+    const adminUser = await makeAdminUser("admin");
+    await expect(callFn("reviewProfile", { profileId: "../etc", decision: "approved" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("reviewProfile", { profileId: "", decision: "approved" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+  it("P2: approving a profile DELETES lastRejectedAt and resubmitCount (world-readable moderation-history leak)", async () => {
+    const { owner, profileId } = await pendingProfile("v8");
+    const adminUser = await makeAdminUser("admin");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Round 1" }, adminUser.user);
+    await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await callFn("submitProfileForReview", { profileId }, owner.user);
+    const beforeApprove = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(typeof beforeApprove?.lastRejectedAt).toBe("number");
+    expect(beforeApprove?.resubmitCount).toBe(1);
+
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    const approved = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(approved?.status).toBe("approved");
+    expect(approved).not.toHaveProperty("lastRejectedAt");
+    expect(approved).not.toHaveProperty("resubmitCount");
+  });
 });
 
 const SEED_LOCATION = {

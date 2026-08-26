@@ -148,7 +148,14 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
     // proceed, violating the never-zero-admins invariant.
     await db.runTransaction(async (tx) => {
       const target = await tx.get(memberRef);
-      if (!target.exists) throw new HttpsError("not-found", "Not a member.");
+      // S4: a missing member doc is treated as success, not not-found — a
+      // retried/duplicate removeMember call (the client's own retry, or two
+      // admins clicking "remove" on the same member near-simultaneously)
+      // must be idempotent. The recompute below still runs unconditionally
+      // in that case: it's the caller's only remaining chance to clear a
+      // stale curatorAccess marker for this uid if an EARLIER removal's own
+      // recompute failed transiently.
+      if (!target.exists) return;
       if (target.data()?.role === "admin") {
         const admins = await tx.get(adminsQuery);
         if (admins.size <= 1) {
@@ -158,13 +165,17 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
       }
       tx.delete(memberRef);
     });
-    // curatorAccess/{uid} maintenance (Task 6): removing a member from an
-    // approved curator profile may have been their only path to curator
-    // access — recompute (not a blind delete), since they might belong to
-    // another approved curator profile too.
+    // curatorAccess/{uid} maintenance (Task 6, repaired S4): recompute
+    // unconditionally for any curator-profile removal, regardless of
+    // whether THIS profile is currently approved. syncCuratorAccess is a
+    // full, idempotent recompute across every profile the uid belongs to —
+    // gating it on this profile's own approval status was never actually
+    // necessary, and meant a member removed from an already-rejected/
+    // unpublished curator profile (whose own reviewProfile-time recompute
+    // may have failed and been queued to curatorAccessRetries) never got a
+    // fresh recompute attempt here either.
     const profileSnap = await db.doc(`profiles/${profileId}`).get();
-    const profileData = profileSnap.data();
-    if (profileData?.type === "curator" && profileData?.status === "approved") {
+    if (profileSnap.data()?.type === "curator") {
       await syncCuratorAccess(uid);
     }
     return { ok: true };

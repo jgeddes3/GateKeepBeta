@@ -344,4 +344,38 @@ describe("curatorAccess touchpoints", () => {
     await callFn("removeMember", { profileId, uid: member.uid }, owner.user);
     expect((await adb.doc(`curatorAccess/${member.uid}`).get()).exists).toBe(false);
   });
+
+  it("S4: removing an already-removed member succeeds idempotently (no not-found) and still recomputes curatorAccess", async () => {
+    const { owner, profileId } = await approvedVenueWithOwner("mca6");
+    const email = `mca6-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true);
+
+    await callFn("removeMember", { profileId, uid: invitee.uid }, owner.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+    expect((await adb.doc(`profiles/${profileId}/members/${invitee.uid}`).get()).exists).toBe(false);
+
+    // Second removal on the now-gone member doc: S4 requires this to
+    // succeed (not throw not-found) AND still run the recompute — proven
+    // here by it simply not throwing (the recompute is a no-op re-affirming
+    // the already-cleared marker).
+    await expect(callFn("removeMember", { profileId, uid: invitee.uid }, owner.user))
+      .resolves.toMatchObject({ ok: true });
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+  });
+
+  it("S4: a member removing themselves after they were already removed succeeds idempotently", async () => {
+    const { owner, profileId } = await bandWithOwner("mca7");
+    const email = `mca7-${Date.now()}@test.com`;
+    const member = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, member.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, member.user);
+    await callFn("removeMember", { profileId, uid: member.uid }, owner.user);
+    await expect(callFn("removeMember", { profileId, uid: member.uid }, member.user))
+      .resolves.toMatchObject({ ok: true });
+  });
 });

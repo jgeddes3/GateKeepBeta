@@ -1,7 +1,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
-import type { AuditLogDoc } from "@gatekeep/shared";
+import { isValidDocId, type AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
 import { syncCuratorAccess } from "./curator.js";
 
@@ -22,6 +22,16 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
   { region: "us-central1" }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, decision, reason } = req.data;
+    // P2: enum-guard `decision` and shape-guard `profileId` — untrusted
+    // onCall payload, same defensive-runtime rationale used throughout this
+    // codebase (an admin caller's client bug, not necessarily malice, could
+    // otherwise send an arbitrary string through to the status field below).
+    if (decision !== "approved" && decision !== "rejected") {
+      throw new HttpsError("invalid-argument", 'Decision must be "approved" or "rejected".');
+    }
+    if (!isValidDocId(profileId)) {
+      throw new HttpsError("invalid-argument", "A profile id is required.");
+    }
     if (decision === "rejected" && !reason?.trim()) {
       throw new HttpsError("invalid-argument", "A rejection reason is required.");
     }
@@ -66,10 +76,19 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       rejectionReason: decision === "rejected" ? reason!.trim() : null,
       updatedAt: now,
       // Anti-spam (Task 4): submitProfileForReview reads this to enforce a
-      // 24h resubmit cooldown after a rejection. Only stamped on reject —
-      // omitted (not cleared) on approve, so an earlier reject's timestamp
-      // stays put through a later approve.
-      ...(decision === "rejected" ? { lastRejectedAt: now } : {}),
+      // 24h resubmit cooldown after a rejection. Only stamped on reject.
+      // P2: on approve, DELETE both fields rather than leaving them in
+      // place — profiles/{id} becomes world-readable once approved
+      // (firestore.rules), so a lingering lastRejectedAt/resubmitCount from
+      // an earlier reject cycle was a moderation-history leak (anyone could
+      // see how many times, and how recently, this profile got rejected
+      // before finally clearing review). No schema churn: both fields are
+      // already optional on ProfileDoc, and submitProfileForReview treats
+      // `lastRejectedAt === undefined` as "never rejected" / omits
+      // resubmitCount on a genuine first submission either way.
+      ...(decision === "rejected"
+        ? { lastRejectedAt: now }
+        : { lastRejectedAt: FieldValue.delete(), resubmitCount: FieldValue.delete() }),
     });
 
     // curatorAccess/{uid} + takedown cascade (Task 6) — curator profiles
@@ -118,18 +137,27 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     // Best-effort per member (allSettled, not all) — matches deleteProfile's
     // cascade-cleanup style: one member's recompute failing (e.g. a
     // transient Firestore error) must not fail the whole review decision,
-    // which has already committed. A re-trigger mechanism for a failed
-    // recompute is deliberately out of scope here — the next membership or
-    // approval-status event that touches that uid (another reviewProfile
-    // call, respondToInvite, removeMember) re-syncs it via its own
-    // touchpoint, so a stale marker is self-healing, not permanent.
+    // which has already committed. S4 CORRECTION: this used to claim a
+    // failed recompute "self-heals" via the next membership/approval-status
+    // touchpoint for that uid — false whenever this rejected profile was
+    // that uid's ONLY curator membership, since no such touchpoint will
+    // ever fire again for them (no more invites/removals/reviews touch a
+    // uid with zero remaining curator profiles). A failed recompute is
+    // instead recorded to curatorAccessRetries/{uid} below, which the daily
+    // sweep's retry step (functions/src/scheduled.ts) retries until it
+    // succeeds, deleting the retry doc on success.
     if (isCurator && decision === "rejected" && wasApproved) {
       const results = await Promise.allSettled(memberUids.map((memberUid) => syncCuratorAccess(memberUid)));
-      results.forEach((result, i) => {
-        if (result.status === "rejected") {
-          console.error("curatorAccess recompute failed", { profileId, memberUid: memberUids[i] }, result.reason);
+      await Promise.allSettled(results.map(async (result, i) => {
+        if (result.status !== "rejected") return;
+        const memberUid = memberUids[i];
+        console.error("curatorAccess recompute failed", { profileId, memberUid }, result.reason);
+        try {
+          await getFirestore().doc(`curatorAccessRetries/${memberUid}`).set({ createdAt: Date.now() });
+        } catch (e) {
+          console.error("curatorAccessRetries write failed", { memberUid }, e);
         }
-      });
+      }));
     }
 
     await writeAudit({
