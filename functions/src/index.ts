@@ -12,3 +12,4 @@ export { createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack } fro
 export { processUpload } from "./media.js";
 export { createGig, publishGig, updateGig, cancelGig, takedownGig } from "./gigs.js";
 export { createSeries, updateSeries, pauseSeries, endSeries } from "./gigSeries.js";
+export { dailySweep } from "./scheduled.js";

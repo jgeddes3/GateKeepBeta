@@ -60,7 +60,10 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     return { ok: true as const };
   });
 
-const INVITE_MAX_AGE_MS = 14 * 86_400_000; // 14 days
+// Exported for reuse by Task 7's invite sweep (scheduled.ts) — the daily job
+// revokes stale pending invites past the same expiry respondToInvite already
+// enforces at accept-time. Single source of truth, not redefined there.
+export const INVITE_MAX_AGE_MS = 14 * 86_400_000; // 14 days
 
 export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
   { region: "us-central1" }, async (req) => {
