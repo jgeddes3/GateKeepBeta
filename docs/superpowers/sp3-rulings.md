@@ -319,3 +319,26 @@ Same base environment as sub-project 2 (see `sp2-rulings.md`), plus:
   45/45 — 43 baseline + 2 new tests + storage 14/14, unchanged), both lints (0 errors, pre-existing
   warnings only), web build, mobile `npx expo export --platform ios`. Full evidence in Task 14's
   report (`.superpowers/sdd/2026-08-26-curator-gigs/task-14-report.md`).
+
+## Post-gate follow-ups (from the fix-wave re-review — file with sub-4)
+
+- Sweep step 5 (curatorAccess retries): add a per-doc try/catch inside the drain loop — a
+  deterministically-failing uid at a fixed queue position would otherwise starve every uid after it
+  indefinitely (the step-level catch only bounds it per-run today).
+- `gigs.ts` updateGig neighborhood→public branch: `.data() as GigPrivateLocation` lacks
+  `| undefined` — a fully missing private/location subdoc would raw-TypeError instead of the
+  intended internal HttpsError (unreachable today; every writer creates the subdoc).
+- `removeMember`: add `isValidDocId` guards on profileId/uid (P2's hardening pattern) and
+  `requireVerifiedEmail` (only sibling mutator without it).
+- S4 test gap: add a case removing a member from an already-REJECTED curator profile holding a
+  stale marker — current tests would not fail if the old status=="approved" recompute gate were
+  restored.
+- `deleteProfile`: move the handles/{handle} delete AFTER the (now potentially long) gig/series
+  cascade — a mid-cascade failure currently frees the handle while the profile doc still carries
+  it (idempotent retry recovers; low impact, draft/rejected only).
+- Invite-accept fast path (`members.ts`): decides the curatorAccess set from a profile snapshot
+  read before the membership transaction — a ~100ms race with reject-from-approved can set a
+  stale-TRUE marker (self-healing via S4's unconditional recompute on later removal; harden by
+  re-reading status post-transaction or calling syncCuratorAccess instead).
+- `syncCuratorAccess`: unbounded sequential N+1 over a uid's memberships — cap/paginate if
+  membership counts grow.
