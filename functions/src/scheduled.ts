@@ -1,10 +1,11 @@
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldPath } from "firebase-admin/firestore";
 import {
-  SERIES_MATERIALIZE_WEEKS,
+  SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE,
   type GigSeriesDoc, type GigDoc, type SeriesCadence,
 } from "@gatekeep/shared";
 import { INVITE_MAX_AGE_MS } from "./members.js";
+import { syncCuratorAccess } from "./curator.js";
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -123,6 +124,11 @@ function computeOccurrences(series: GigSeriesDoc, now: number): MaterializePlan 
 // every profile — cheap defensive chunking against Firestore's 500-op
 // per-batch limit, even though any single series' per-run occurrence count
 // is small (capped by SERIES_MATERIALIZE_WEEKS).
+//
+// S3: EACH of the five steps below constructs its OWN writer and commits it
+// at the end of that step's own try/catch, rather than one writer shared
+// across the whole sweep — so a step that throws only ever loses ITS OWN
+// not-yet-rotated-out batch, never a healthy step's already-queued writes.
 function createChunkedWriter(db: FirebaseFirestore.Firestore) {
   const LIMIT = 400;
   let batch = db.batch();
@@ -148,11 +154,41 @@ function createChunkedWriter(db: FirebaseFirestore.Firestore) {
       batch.update(ref, data);
       ops++;
     },
+    async delete(ref: FirebaseFirestore.DocumentReference): Promise<void> {
+      await rotateIfFull();
+      batch.delete(ref);
+      ops++;
+    },
     async commit(): Promise<void> {
       if (ops > 0) await batch.commit();
     },
   };
 }
+
+// S3: pages a query PAGE_SIZE docs at a time instead of one unbounded
+// `.get()` — the gigSeries/gigs/tracks/invites collections all grow
+// unboundedly over the app's lifetime, and an unbounded scan risks memory
+// pressure and a single giant, slow read on every sweep run regardless of
+// how much of that data the sweep actually needs to touch that day. The
+// caller's query MUST already carry an explicit `.orderBy(...)` (matching
+// its own filters) so `.startAfter(cursor)` cursors correctly between pages.
+async function* paginate(
+  baseQuery: FirebaseFirestore.Query, pageSize: number,
+): AsyncGenerator<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+  for (;;) {
+    let q = baseQuery.limit(pageSize);
+    if (cursor) q = q.startAfter(cursor);
+    const snap = await q.get();
+    if (snap.empty) return;
+    yield snap.docs;
+    if (snap.docs.length < pageSize) return;
+    cursor = snap.docs[snap.docs.length - 1];
+  }
+}
+
+const SERIES_PAGE_SIZE = 100;
+const SWEEP_PAGE_SIZE = 500;
 
 export interface SweepReport {
   occurrencesCreated: number;
@@ -160,16 +196,37 @@ export interface SweepReport {
   pastGigsClosed: number;
   tracksFailed: number;
   invitesRevoked: number;
+  // P4: series skipped by the materializer cap guard (profile already at/
+  // over MAX_OPEN_GIGS_PER_PROFILE open gigs) or the TOCTOU re-read (series
+  // was paused/ended between the initial scan and this series' write).
+  seriesSkippedCapped: number;
+  seriesSkippedRace: number;
+  // S4: curatorAccessRetries entries successfully retried (and cleared) this run.
+  curatorAccessRetried: number;
+  // S3: per-step failure counts — a step that throws is caught, logged, and
+  // counted here rather than aborting the remaining steps.
+  errors: {
+    series: number; pastGigs: number; tracks: number; invites: number; curatorAccessRetries: number;
+  };
 }
 
 // The daily sweep's entire behavior lives in this plain, exported function so
 // tests can invoke it directly with an injected clock (`now`) against
 // emulator-seeded data — no scheduler emulator config, no wall-clock races.
+//
+// S3: each of the five steps below is independently wrapped in its own
+// try/catch — a poisoned doc (e.g. a malformed series) that makes ONE step
+// throw is logged and counted in `report.errors`, but never prevents the
+// REMAINING steps from running. Each step also owns its own chunked writer,
+// committed at the end of that step's try block, so one step's failure can
+// only ever lose that step's own not-yet-durable writes, never another
+// step's.
 export async function runDailySweep(now: number): Promise<SweepReport> {
   const db = getFirestore();
-  const writer = createChunkedWriter(db);
   const report: SweepReport = {
     occurrencesCreated: 0, seriesAdvanced: 0, pastGigsClosed: 0, tracksFailed: 0, invitesRevoked: 0,
+    seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
+    errors: { series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0 },
   };
 
   // 1) Materialize active series.
@@ -178,45 +235,96 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // occurrences — paused/ended series must never be materialized. This is
   // enforced by the QUERY FILTER below, not a post-filter: a paused/ended
   // series is never even fetched, so there is no code path downstream that
-  // could accidentally materialize one.
-  const activeSeriesSnap = await db.collection("gigSeries").where("status", "==", "active").get();
-  for (const seriesDoc of activeSeriesSnap.docs) {
-    const series = seriesDoc.data() as GigSeriesDoc;
-    const { startsAtList, newMaterializedThrough } = computeOccurrences(series, now);
-    if (newMaterializedThrough <= series.materializedThrough) continue; // nothing new for this series
+  // could accidentally materialize one. (P4/M-10 adds a SECOND, per-series
+  // re-check right before writing — see below — for the narrower race where
+  // a series is paused/ended AFTER this initial scan but before its write.)
+  try {
+    const writer = createChunkedWriter(db);
+    const seriesQuery = db.collection("gigSeries").where("status", "==", "active").orderBy(FieldPath.documentId());
+    for await (const page of paginate(seriesQuery, SERIES_PAGE_SIZE)) {
+      for (const seriesDoc of page) {
+        const series = seriesDoc.data() as GigSeriesDoc;
+        const { startsAtList, newMaterializedThrough } = computeOccurrences(series, now);
+        if (newMaterializedThrough <= series.materializedThrough) continue; // nothing new for this series
 
-    for (const startsAt of startsAtList) {
-      const gigRef = db.collection("gigs").doc();
-      // status:"open" — the profile was approved at series creation, and the
-      // cascade that unpublishes a rejected profile's content also pauses
-      // its series (Task 6), so an occurrence of an active series is
-      // legitimately publishable straight away, unlike createGig's "draft"
-      // default for a member-authored one-off.
-      const gig: GigDoc = {
-        curatorProfileId: series.curatorProfileId, seriesId: seriesDoc.id, detachedFromTemplate: false,
-        title: series.template.title, description: series.template.description, wants: series.template.wants,
-        budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
-        provisions: series.template.provisions, location: series.template.location,
-        status: "open", createdAt: now, updatedAt: now,
-      };
-      await writer.set(gigRef, gig);
-      // Mirrors createGig's own write and updateSeries' propagation sweep —
-      // both halves of the template (public content + the exact private
-      // address/geo) land on every occurrence.
-      await writer.set(db.doc(`gigs/${gigRef.id}/private/location`), series.templatePrivateLocation);
+        // P4: materializer cap guard — MAX_OPEN_GIGS_PER_PROFILE bounds a
+        // profile's total open gigs; createGig/publishGig enforce it at
+        // request time, but the daily materializer is the OTHER writer of
+        // "open" gigs and, unguarded, could blow well past it in one run
+        // (worst case: MAX_OPEN_GIGS_PER_PROFILE manually-published gigs +
+        // MAX_ACTIVE_SERIES_PER_PROFILE series each materializing a full
+        // SERIES_MATERIALIZE_WEEKS-wide weekly window on their first run —
+        // roughly 50 + 10*8 = 130 open gigs for one profile). Skip (log +
+        // count) rather than partially materializing; matches this
+        // codebase's established non-transactional-cap-read tier (see
+        // createGig/createSeries) rather than a hard global enforcement.
+        const openCount = await db.collection("gigs")
+          .where("curatorProfileId", "==", series.curatorProfileId).where("status", "==", "open").count().get();
+        if (openCount.data().count >= MAX_OPEN_GIGS_PER_PROFILE) {
+          report.seriesSkippedCapped++;
+          continue;
+        }
+
+        // P4/M-10 (TOCTOU): re-read the series' status immediately before
+        // writing its occurrences. The scan above filtered status=='active'
+        // at the START of this run, but a curator (pauseSeries/endSeries) or
+        // an admin takedown (takedownGig scope:"series") can flip that
+        // status in the window between that scan and this write — cheap
+        // with per-step writers (one extra get per series that's actually
+        // about to be written, not per occurrence).
+        const freshSnap = await seriesDoc.ref.get();
+        if (freshSnap.data()?.status !== "active") {
+          report.seriesSkippedRace++;
+          continue;
+        }
+
+        for (const startsAt of startsAtList) {
+          const gigRef = db.collection("gigs").doc();
+          // status:"open" — the profile was approved at series creation, and
+          // the cascade that unpublishes a rejected profile's content also
+          // pauses its series (Task 6), so an occurrence of an active
+          // series is legitimately publishable straight away, unlike
+          // createGig's "draft" default for a member-authored one-off.
+          const gig: GigDoc = {
+            curatorProfileId: series.curatorProfileId, seriesId: seriesDoc.id, detachedFromTemplate: false,
+            title: series.template.title, description: series.template.description, wants: series.template.wants,
+            budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
+            provisions: series.template.provisions, location: series.template.location,
+            status: "open", createdAt: now, updatedAt: now,
+          };
+          await writer.set(gigRef, gig);
+          // Mirrors createGig's own write and updateSeries' propagation sweep —
+          // both halves of the template (public content + the exact private
+          // address/geo) land on every occurrence.
+          await writer.set(db.doc(`gigs/${gigRef.id}/private/location`), series.templatePrivateLocation);
+        }
+        await writer.update(seriesDoc.ref, { materializedThrough: newMaterializedThrough, updatedAt: now });
+        report.occurrencesCreated += startsAtList.length;
+        report.seriesAdvanced += 1;
+      }
     }
-    await writer.update(seriesDoc.ref, { materializedThrough: newMaterializedThrough, updatedAt: now });
-    report.occurrencesCreated += startsAtList.length;
-    report.seriesAdvanced += 1;
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: series materialization step failed", e);
+    report.errors.series++;
   }
 
   // 2) Past sweep: an "open" gig whose start time has elapsed closes
   // automatically. Reuses the existing (status,startsAt) composite index.
-  const pastSnap = await db.collection("gigs")
-    .where("status", "==", "open").where("startsAt", "<", now).get();
-  for (const doc of pastSnap.docs) {
-    await writer.update(doc.ref, { status: "closed", updatedAt: now });
-    report.pastGigsClosed++;
+  try {
+    const writer = createChunkedWriter(db);
+    const pastQuery = db.collection("gigs")
+      .where("status", "==", "open").where("startsAt", "<", now).orderBy("startsAt");
+    for await (const page of paginate(pastQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        await writer.update(doc.ref, { status: "closed", updatedAt: now });
+        report.pastGigsClosed++;
+      }
+    }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: past-gig sweep step failed", e);
+    report.errors.pastGigs++;
   }
 
   // 3) Track reaper (SP2 debt): a track stuck in "processing" for more than
@@ -227,14 +335,23 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // "tracks"/"status" via firestore.indexes.json's fieldOverride); the 24h
   // age check runs in application code rather than adding a new composite
   // collection-group index for what's normally a tiny, transient result set.
-  const processingCutoff = now - PROCESSING_STALE_MS;
-  const processingSnap = await db.collectionGroup("tracks").where("status", "==", "processing").get();
-  for (const doc of processingSnap.docs) {
-    const createdAt = doc.data().createdAt as number;
-    if (createdAt < processingCutoff) {
-      await writer.update(doc.ref, { status: "failed", failureReason: "Upload abandoned", updatedAt: now });
-      report.tracksFailed++;
+  try {
+    const writer = createChunkedWriter(db);
+    const processingCutoff = now - PROCESSING_STALE_MS;
+    const trackQuery = db.collectionGroup("tracks").where("status", "==", "processing").orderBy(FieldPath.documentId());
+    for await (const page of paginate(trackQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        const createdAt = doc.data().createdAt as number;
+        if (createdAt < processingCutoff) {
+          await writer.update(doc.ref, { status: "failed", failureReason: "Upload abandoned", updatedAt: now });
+          report.tracksFailed++;
+        }
+      }
     }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: track reaper step failed", e);
+    report.errors.tracks++;
   }
 
   // 4) Invite sweep (SP2 debt): a pending invite past its expiry is revoked
@@ -243,17 +360,48 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // respondToInvite already enforces at accept-time) rather than redefined
   // here. Same app-code-filters-the-age pattern as the track reaper, over
   // the existing "status" equality (part of the (profileId,status) index).
-  const inviteCutoff = now - INVITE_MAX_AGE_MS;
-  const pendingInvitesSnap = await db.collection("invites").where("status", "==", "pending").get();
-  for (const doc of pendingInvitesSnap.docs) {
-    const createdAt = doc.data().createdAt as number;
-    if (createdAt < inviteCutoff) {
-      await writer.update(doc.ref, { status: "revoked" });
-      report.invitesRevoked++;
+  try {
+    const writer = createChunkedWriter(db);
+    const inviteCutoff = now - INVITE_MAX_AGE_MS;
+    const inviteQuery = db.collection("invites").where("status", "==", "pending").orderBy(FieldPath.documentId());
+    for await (const page of paginate(inviteQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        const createdAt = doc.data().createdAt as number;
+        if (createdAt < inviteCutoff) {
+          await writer.update(doc.ref, { status: "revoked" });
+          report.invitesRevoked++;
+        }
+      }
     }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: invite sweep step failed", e);
+    report.errors.invites++;
   }
 
-  await writer.commit();
+  // 5) curatorAccess retry sweep (S4): retries syncCuratorAccess for any uid
+  // whose recompute failed at its original touchpoint (reviewProfile's
+  // reject-from-approved cascade — see review.ts's curatorAccessRetries
+  // write) and was recorded to curatorAccessRetries/{uid}. Deletes the
+  // retry doc on success; a renewed failure here leaves it in place (and
+  // aborts the rest of THIS step, per the same step-level try/catch as
+  // steps 1-4) to retry again on the next day's run.
+  try {
+    const writer = createChunkedWriter(db);
+    const retryQuery = db.collection("curatorAccessRetries").orderBy(FieldPath.documentId());
+    for await (const page of paginate(retryQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        await syncCuratorAccess(doc.id);
+        await writer.delete(doc.ref);
+        report.curatorAccessRetried++;
+      }
+    }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: curatorAccess retry step failed", e);
+    report.errors.curatorAccessRetries++;
+  }
+
   return report;
 }
 
@@ -263,7 +411,13 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
 // timeZone option) is an arbitrary daily slot; picking the launch metro's
 // actual low-traffic window is a launch-checklist refinement alongside the
 // anchor-timezone note above.
+//
+// S3: timeoutSeconds: 540 (9 minutes — the v2 scheduler max is 540s for a
+// non-Cloud-Run-based function) and memory: "512MiB" give the sweep real
+// headroom now that its five steps page through potentially large
+// collections; the default 60s/256MiB was sized for the original four-step,
+// unbounded-`.get()` implementation and was already a latent risk at scale.
 export const dailySweep = onSchedule(
-  { schedule: "every day 09:00", region: "us-central1" },
+  { schedule: "every day 09:00", region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
   async () => { await runDailySweep(Date.now()); },
 );

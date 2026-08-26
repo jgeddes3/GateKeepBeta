@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import type { GigSeriesDoc, GigDoc, InviteDoc, TrackDoc, SeriesCadence } from "@gatekeep/shared";
+import { MAX_OPEN_GIGS_PER_PROFILE, type GigSeriesDoc, type GigDoc, type InviteDoc, type TrackDoc, type SeriesCadence } from "@gatekeep/shared";
 import { runDailySweep } from "../src/scheduled.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -325,6 +325,114 @@ describe("runDailySweep — invite sweep", () => {
     expect((await adb.doc(`invites/${staleId}`).get()).data()?.status).toBe("revoked");
     expect((await adb.doc(`invites/${freshId}`).get()).data()?.status).toBe("pending");
     expect((await adb.doc(`invites/${oldAcceptedId}`).get()).data()?.status).toBe("accepted");
+  });
+});
+
+describe("runDailySweep — S3 sweep resilience", () => {
+  it("a poisoned series (malformed recurrence, forced via admin SDK) does not prevent steps 2-4 — their effects still land", async () => {
+    const now = Date.now();
+    // Force a genuinely-throwing series doc: destructuring `null` inside
+    // anchorFor's `const { weekday, hour, minute } = series.recurrence;`
+    // throws a TypeError. This bypasses createSeries/validateRecurrence
+    // entirely (an admin-SDK-only shape — the real callables can never
+    // produce it), simulating the kind of malformed data step 1's
+    // try/catch must survive without blocking the rest of the sweep.
+    const { seriesId: poisonedId } = await seedSeries({
+      createdAt: now, updatedAt: now, recurrence: null as unknown as GigSeriesDoc["recurrence"],
+    });
+
+    // Independent fixtures for steps 2-4, unrelated to the poisoned series —
+    // if the step-level try/catch (not a per-doc catch) is working, step 1's
+    // exception must not stop steps 2/3/4 from running at all.
+    const profileId = fakeProfileId();
+    const pastId = await seedOccurrence("not-a-real-series", profileId, { status: "open", startsAt: now - 3600_000 });
+    const staleTrackId = await seedTrack(profileId, { status: "processing", createdAt: now - 25 * 3600_000 });
+    const staleInviteId = await seedInvite({ status: "pending", createdAt: now - 15 * DAY_MS });
+
+    const report = await runDailySweep(now);
+
+    expect(report.errors.series).toBeGreaterThanOrEqual(1);
+    expect((await adb.doc(`gigs/${pastId}`).get()).data()?.status).toBe("closed");
+    expect((await adb.doc(`profiles/${profileId}/tracks/${staleTrackId}`).get()).data()?.status).toBe("failed");
+    expect((await adb.doc(`invites/${staleInviteId}`).get()).data()?.status).toBe("revoked");
+    // The poisoned series itself never advanced (its own step aborted).
+    const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
+    expect(poisoned.materializedThrough).toBe(0);
+
+    // Cleanup: this file runs every test against ONE persistent, never-reset
+    // Firestore emulator instance, and step 1's query is unscoped
+    // (`where("status","==","active")` over the WHOLE collection) — leaving
+    // this doc "active" forever would poison every LATER test in this file
+    // that also calls runDailySweep (a single throw anywhere in step 1's
+    // loop aborts that whole step for THAT run, not just this doc). Flip it
+    // out of the query's match set once this test is done with it.
+    await adb.doc(`gigSeries/${poisonedId}`).update({ status: "ended" });
+  });
+});
+
+describe("runDailySweep — S4 curatorAccess retry sweep", () => {
+  it("retries a seeded curatorAccessRetries doc via syncCuratorAccess and deletes it on success", async () => {
+    const uid = `retry-uid-${Date.now()}`;
+    await adb.doc(`curatorAccessRetries/${uid}`).set({ createdAt: Date.now() });
+    const report = await runDailySweep(Date.now());
+    expect(report.curatorAccessRetried).toBeGreaterThanOrEqual(1);
+    expect((await adb.doc(`curatorAccessRetries/${uid}`).get()).exists).toBe(false);
+  });
+});
+
+describe("runDailySweep — P4 materializer cap guard + TOCTOU re-read", () => {
+  it("a profile already at MAX_OPEN_GIGS_PER_PROFILE open gigs materializes nothing for its series", async () => {
+    const createdAt = Date.now();
+    const { seriesId, profileId } = await seedSeries({ createdAt, updatedAt: createdAt });
+    const batch = adb.batch();
+    for (let i = 0; i < MAX_OPEN_GIGS_PER_PROFILE; i++) {
+      const ref = adb.collection("gigs").doc();
+      const doc: GigDoc = {
+        curatorProfileId: profileId, seriesId: null, detachedFromTemplate: false,
+        title: `Cap filler ${i}`, description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+        budget: { minCents: 1000, maxCents: 2000, structure: "perHour" },
+        startsAt: createdAt, durationMinutes: 60,
+        provisions: { hasPA: null, hasBackline: null, notes: null },
+        location: SEED_LOCATION, status: "open", createdAt, updatedAt: createdAt,
+      };
+      batch.set(ref, doc);
+    }
+    await batch.commit();
+    const anchor = expectedAnchor(createdAt, 5, 20, 0);
+
+    const report = await runDailySweep(anchor);
+
+    expect(report.seriesSkippedCapped).toBeGreaterThanOrEqual(1);
+    const occs = await occurrencesFor(seriesId);
+    expect(occs.length).toBe(0);
+    const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+    expect(series.materializedThrough).toBe(0); // untouched — capped before advancing the watermark
+  });
+
+  it("M-10 TOCTOU: a series paused between the scan and its write materializes nothing", async () => {
+    const createdAt = Date.now();
+    const { seriesId } = await seedSeries({ createdAt, updatedAt: createdAt });
+    const anchor = expectedAnchor(createdAt, 5, 20, 0);
+
+    // Races a concurrent pause against the sweep's own per-series re-read:
+    // the initial scan (status=='active') already matches this series by
+    // the time both promises start, but the write path performs its OWN
+    // fresh `seriesDoc.ref.get()` immediately before writing (P4/M-10 fix)
+    // — that fresh read must see "paused" and skip, even though the
+    // ORIGINAL scan saw "active". Started via Promise.all (not a fixed
+    // delay/sleep) so the pause genuinely races the sweep's own real
+    // Firestore round-trips (the scan query, then the per-series cap-check
+    // .count().get()) rather than an arbitrary timer.
+    await Promise.all([
+      runDailySweep(anchor),
+      adb.doc(`gigSeries/${seriesId}`).update({ status: "paused" }),
+    ]);
+
+    const occs = await occurrencesFor(seriesId);
+    expect(occs.length).toBe(0);
+    const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+    expect(series.status).toBe("paused");
+    expect(series.materializedThrough).toBe(0); // untouched — skipped before advancing the watermark
   });
 });
 
