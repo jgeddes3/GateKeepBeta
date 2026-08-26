@@ -82,6 +82,16 @@ describe("users", () => {
     await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "x".repeat(81) }));
     await assertSucceeds(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" }));
   });
+  // Task 8: displayNameLower (searchUsersByName's index field) is maintained
+  // server-side only (onUserCreated + the onUserDocWritten trigger) — it
+  // must stay outside the update rule's hasOnly set so a client can never
+  // poison it to hide from or spoof admin name search.
+  it("owner cannot set displayNameLower directly — server-maintained only", async () => {
+    await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayNameLower: "hacked" }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "Alice L", displayNameLower: "alice l" }));
+  });
 });
 
 describe("pushTokens", () => {

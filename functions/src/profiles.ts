@@ -1,5 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   validateProfileDraft, isValidDocId, validateLookingFor,
   MAX_PENDING_CURATOR_PROFILES, RESUBMIT_COOLDOWN_MS,
@@ -170,7 +170,14 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
     }
   }
 
-  await ref.update({ status: "pending_review", rejectionReason: null, updatedAt: Date.now() });
+  // Task 8: resubmitCount lets the admin queue render "resubmitted Nth
+  // time" — only stamped when this submission is a genuine resubmit (status
+  // was "rejected"), never on the first-ever draft -> pending_review
+  // submission, which isn't a resubmit of anything.
+  await ref.update({
+    status: "pending_review", rejectionReason: null, updatedAt: Date.now(),
+    ...(status === "rejected" ? { resubmitCount: FieldValue.increment(1) } : {}),
+  });
   return { ok: true };
 });
 

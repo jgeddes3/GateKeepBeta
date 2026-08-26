@@ -2,33 +2,154 @@
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 
 import { describe, it, expect } from "vitest";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
 import { signUpTestUser, db, wait } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { computeDisplayNameLowerFix } from "../src/authTriggers.js";
 
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
+
+// Shared by every test below: poll users/{uid} until it exists (onUserCreated
+// is async, and a cold-started Functions emulator can take several seconds
+// for its first invocation).
+async function waitForUserDoc(uid: string, deadline = Date.now() + 10_000) {
+  let snap = await adminFirestore(admin).doc(`users/${uid}`).get();
+  while (!snap.exists && Date.now() < deadline) {
+    await wait(250);
+    snap = await adminFirestore(admin).doc(`users/${uid}`).get();
+  }
+  return snap;
+}
 
 describe("onUserCreated", () => {
   it(
     "creates users/{uid} with email and defaults",
     async () => {
       const { uid } = await signUpTestUser(`alice-${Date.now()}@test.com`);
-
-      // Trigger execution is async, and a cold-started Functions emulator can
-      // take several seconds for its first invocation. Poll instead of a
-      // single fixed sleep.
-      const deadline = Date.now() + 10_000;
-      let snap = await adminFirestore(admin).doc(`users/${uid}`).get();
-      while (!snap.exists && Date.now() < deadline) {
-        await wait(250);
-        snap = await adminFirestore(admin).doc(`users/${uid}`).get();
-      }
+      const snap = await waitForUserDoc(uid);
 
       expect(snap.exists).toBe(true);
       expect(snap.data()?.email).toContain("@test.com");
       expect(snap.data()?.photoUrl).toBeNull();
       expect(typeof snap.data()?.createdAt).toBe("number");
+    },
+    15_000,
+  );
+
+  it(
+    "also stamps displayNameLower as the lowercased displayName",
+    async () => {
+      const { uid } = await signUpTestUser(`bob-${Date.now()}@test.com`);
+      const snap = await waitForUserDoc(uid);
+
+      expect(snap.exists).toBe(true);
+      const data = snap.data();
+      expect(data?.displayNameLower).toBe((data?.displayName as string).toLowerCase());
+    },
+    15_000,
+  );
+});
+
+// Task 8: computeDisplayNameLowerFix is the pure consistency rule behind
+// both onUserDocWritten (below) and backfillDisplayNameLower
+// (adminTools.ts). Unit-tested directly (no emulator round trip) because
+// onUserDocWritten reacts to EVERY write to users/{uid} within single-digit
+// milliseconds — a live-emulator integration test that seeds an
+// "inconsistent" doc almost always finds it already corrected by the time
+// it can look again, especially against backfillDisplayNameLower's own
+// collection-wide scan, which takes far longer than the trigger's reaction.
+// This is the reliable seam for exercising the actual decision logic.
+describe("computeDisplayNameLowerFix", () => {
+  it("returns the lowercased value when displayNameLower is missing", () => {
+    expect(computeDisplayNameLowerFix({ displayName: "Legacy Missing Lower" }))
+      .toBe("legacy missing lower");
+  });
+  it("returns the corrected lowercased value when displayNameLower is stale", () => {
+    expect(computeDisplayNameLowerFix({ displayName: "Legacy Stale Lower", displayNameLower: "an old stale value" }))
+      .toBe("legacy stale lower");
+  });
+  it("returns null when already consistent — the no-op / no-self-retrigger case", () => {
+    expect(computeDisplayNameLowerFix({ displayName: "Already Consistent", displayNameLower: "already consistent" }))
+      .toBeNull();
+  });
+  it("treats a missing/non-string displayName as empty string, not a crash", () => {
+    expect(computeDisplayNameLowerFix({})).toBe("");
+    expect(computeDisplayNameLowerFix({ displayName: 42 })).toBe("");
+    expect(computeDisplayNameLowerFix({ displayName: "", displayNameLower: "" })).toBeNull();
+  });
+});
+
+// Task 8: onUserDocWritten (v2 onDocumentWritten("users/{uid}")) keeps
+// displayNameLower in sync with displayName after creation — e.g. a client
+// update via the users update rule (owner may write displayName directly).
+describe("onUserDocWritten", () => {
+  it(
+    "syncs displayNameLower when displayName changes",
+    async () => {
+      const { uid } = await signUpTestUser(`carol-${Date.now()}@test.com`);
+      await waitForUserDoc(uid);
+
+      await updateDoc(doc(db, "users", uid), { displayName: "CaRoL Mixed CASE" });
+
+      const deadline = Date.now() + 10_000;
+      let adata = (await adminFirestore(admin).doc(`users/${uid}`).get()).data();
+      while (adata?.displayNameLower !== "carol mixed case" && Date.now() < deadline) {
+        await wait(250);
+        adata = (await adminFirestore(admin).doc(`users/${uid}`).get()).data();
+      }
+
+      expect(adata?.displayName).toBe("CaRoL Mixed CASE");
+      expect(adata?.displayNameLower).toBe("carol mixed case");
+    },
+    15_000,
+  );
+
+  it(
+    "is a no-op once displayNameLower is already consistent — no self-retrigger churn",
+    async () => {
+      const { uid } = await signUpTestUser(`dave-${Date.now()}@test.com`);
+      await waitForUserDoc(uid);
+
+      await updateDoc(doc(db, "users", uid), { displayName: "Dave Settled" });
+
+      const deadline = Date.now() + 10_000;
+      let snap = await adminFirestore(admin).doc(`users/${uid}`).get();
+      while (snap.data()?.displayNameLower !== "dave settled" && Date.now() < deadline) {
+        await wait(250);
+        snap = await adminFirestore(admin).doc(`users/${uid}`).get();
+      }
+      expect(snap.data()?.displayNameLower).toBe("dave settled");
+      const updateTimeAfterSync = snap.updateTime;
+
+      // If the trigger's own sync write re-triggered itself (a missing or
+      // broken consistency guard), the document's updateTime would keep
+      // advancing indefinitely. Wait past one more plausible trigger round
+      // trip and confirm Firestore's own updateTime — not an app-level
+      // field — genuinely stopped changing.
+      await wait(3_000);
+      const settledSnap = await adminFirestore(admin).doc(`users/${uid}`).get();
+      expect(settledSnap.updateTime?.isEqual(updateTimeAfterSync!)).toBe(true);
+    },
+    20_000,
+  );
+
+  it(
+    "handles a deleted user doc gracefully (no error, nothing recreated)",
+    async () => {
+      const adb = adminFirestore(admin);
+      const uid = `ghost-${Date.now()}`;
+      await adb.doc(`users/${uid}`).set({
+        displayName: "Ghost", displayNameLower: "ghost", email: "g@test.com",
+        photoUrl: null, homeCity: null, createdAt: Date.now(),
+      });
+      await adb.doc(`users/${uid}`).delete();
+
+      // Give the trigger a moment to run against the delete event; the
+      // assertion is purely that nothing resurrects the doc or throws.
+      await wait(3_000);
+      const snap = await adb.doc(`users/${uid}`).get();
+      expect(snap.exists).toBe(false);
     },
     15_000,
   );

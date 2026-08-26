@@ -10,6 +10,12 @@ export interface UserDoc {
   photoUrl: string | null;
   homeCity: string | null;
   createdAt: number; // epoch ms
+  // Task 8: lowercased displayName for prefix search (searchUsersByName).
+  // Written by onUserCreated and kept in sync by the onUserDocWritten
+  // trigger — NEVER client-writable (outside firestore.rules' users update
+  // hasOnly set). Optional because pre-Task-8 seed data / in-flight docs may
+  // not have it yet until the trigger or backfillDisplayNameLower catches up.
+  displayNameLower?: string;
 }
 
 export interface ProfileDoc {
@@ -27,6 +33,13 @@ export interface ProfileDoc {
   // profile type; submitProfileForReview reads it to enforce a
   // RESUBMIT_COOLDOWN_MS resubmit cooldown. Absent until the first reject.
   lastRejectedAt?: number;
+  // Task 8: how many times this profile has been resubmitted after a
+  // rejection (i.e. submitProfileForReview called while status was
+  // "rejected") — lets the admin queue render "resubmitted Nth time".
+  // Absent for a profile that has never been rejected+resubmitted; the
+  // FIRST ever submission (draft -> pending_review) deliberately does not
+  // count as a resubmit.
+  resubmitCount?: number;
 }
 
 export interface MemberDoc {

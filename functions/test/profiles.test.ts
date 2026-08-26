@@ -371,6 +371,31 @@ describe("submitProfileForReview anti-spam", () => {
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
   });
 
+  // Task 8: resubmitCount lets the admin queue render "resubmitted Nth
+  // time". Extends the cooldown fixture above — every resubmit still has to
+  // clear the 24h cooldown, so lastRejectedAt is stamped back via the admin
+  // SDK the same way that test does.
+  it("resubmitCount increments across reject-then-resubmit cycles, and stays unset after the first-ever submission", async () => {
+    const { user } = await signUpTestUser(`crsc-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Resubmit Room", handle: `crsc_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, profileId);
+    await callFn("submitProfileForReview", { profileId }, user);
+    // First-ever submission (draft -> pending_review) is not a "resubmit".
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.resubmitCount).toBeUndefined();
+
+    const adminUser = await makeAdminUser("crscadmin");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Round 1" }, adminUser.user);
+    await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.resubmitCount).toBe(1);
+
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Round 2" }, adminUser.user);
+    await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.resubmitCount).toBe(2);
+  });
+
   it("reviewProfile stamps lastRejectedAt on reject, live (not just via admin-SDK seeding above)", async () => {
     const { user } = await signUpTestUser(`cstamp-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
