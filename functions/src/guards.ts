@@ -51,3 +51,15 @@ export async function requireApprovedCuratorProfile(profileId: string): Promise<
   }
   return p;
 }
+
+// Sub-project 4: booking actions (applyToGig and offerGig's target side)
+// require not just a musician profile but one that has cleared review — an
+// unapproved (draft/pending/rejected) musician has no public act to book
+// yet. Mirrors requireApprovedCuratorProfile above.
+export async function requireApprovedMusicianProfile(profileId: string): Promise<DocumentSnapshot> {
+  const p = await requireMusicianProfile(profileId);
+  if (p.data()?.status !== "approved") {
+    throw new HttpsError("failed-precondition", "This musician profile is not approved yet.");
+  }
+  return p;
+}
