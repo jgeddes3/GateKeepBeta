@@ -91,12 +91,35 @@ async function pollNotifications(uid: string) {
   return notes;
 }
 
+// NOTE: the suite runs every test file against ONE persistent Firestore
+// emulator instance with no reset between files (see scheduled.test.ts's own
+// comment on this) — a "status: active" gigSeries doc left behind here is
+// visible to scheduled.test.ts's runDailySweep, which scans every active
+// series. An earlier version of this fixture used `template: {}`, which
+// crashed that scan (`series.template.title` undefined) and silently
+// swallowed OTHER series' legitimately-materialized occurrences for that
+// run (scheduled.ts's per-step try/catch aborts the whole step, including
+// already-planned-but-not-yet-committed writes, on the first throw). Give it
+// a real, materializer-safe template so a stray cross-file sweep is a no-op
+// rather than a crash; the "sets seriesId..." test also flips both series to
+// "ended" once it's done with them, minimizing how long they're live.
 function seedSeries(curatorProfileId: string, fillMode: "whole_run" | "per_occurrence") {
   const ref = adb.collection("gigSeries").doc();
   return ref.set({
     curatorProfileId, fillMode, status: "active",
     recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
-    template: {}, templatePrivateLocation: {},
+    template: {
+      title: "Friday Night Jazz", description: "A cozy weekly set.",
+      wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 10_000, maxCents: 20_000, structure: "perHour" },
+      durationMinutes: 90,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: {
+        venueName: "The Green Room", neighborhood: "Downtown", city: "Austin",
+        geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: "123 Main St, Austin, TX",
+      },
+    },
+    templatePrivateLocation: { address: "123 Main St, Austin, TX", geo: { lat: 30.27, lng: -97.74 } },
     materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
     activeBookingId: null, bookedMusicianProfileId: null,
   }).then(() => ref);
@@ -156,6 +179,14 @@ describe("applyToGig", () => {
 
     expect((await adb.doc(`bookings/${wholeRunBookingId}`).get()).data()?.seriesId).toBe(wholeRunSeries.id);
     expect((await adb.doc(`bookings/${perOccurrenceBookingId}`).get()).data()?.seriesId).toBeNull();
+
+    // Cleanup: flip both out of "active" now that this test is done with
+    // them — minimizes the window where a cross-file dailySweep run (see
+    // seedSeries's comment) could scan and materialize against them.
+    await Promise.all([
+      adb.doc(`gigSeries/${wholeRunSeries.id}`).update({ status: "ended" }),
+      adb.doc(`gigSeries/${perOccurrenceSeries.id}`).update({ status: "ended" }),
+    ]);
   });
 
   it("rejects an unapproved (pending) musician profile with failed-precondition", async () => {
@@ -198,6 +229,12 @@ describe("applyToGig", () => {
     await callFn("applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
     await expect(callFn("applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user))
       .rejects.toMatchObject({ code: "functions/already-exists" });
+
+    // State-unchanged: exactly the first booking exists, no second landed.
+    const pairSnap = await adb.collection("bookings")
+      .where("gigId", "==", gigId).where("musicianProfileId", "==", musicianProfileId)
+      .where("status", "==", "open").get();
+    expect(pairSnap.size).toBe(1);
   });
 
   it("enforces MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE with resource-exhausted", async () => {
@@ -221,6 +258,14 @@ describe("applyToGig", () => {
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     await expect(callFn("applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user))
       .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+
+    // State-unchanged: the rejected 26th attempt must not have landed.
+    const finalCount = await adb.collection("bookings")
+      .where("musicianProfileId", "==", musicianProfileId)
+      .where("initiatedBy", "==", "musician")
+      .where("status", "==", "open")
+      .count().get();
+    expect(finalCount.data().count).toBe(MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE);
   });
 
   describe("bad offer input", () => {
@@ -294,6 +339,22 @@ describe("counterBooking", () => {
     // non-awaiting) tries to counter out of turn.
     await expect(callFn("counterBooking", { bookingId, offer: offerPayload({ amountCents: 20000 }) }, musician.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // State-unchanged: the rejected counter must not have appended anything.
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.thread).toHaveLength(1);
+    expect(after.awaitingSide).toBe("curator");
+  });
+
+  it("rejects a stranger to both sides with permission-denied", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cb4c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cb4m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    const { user: stranger } = await signUpTestUser(`cb4s-${Date.now()}@test.com`);
+    await expect(callFn("counterBooking", { bookingId, offer: offerPayload() }, stranger))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
 
   it("flips awaitingSide, appends the correct 'by', bumps updatedAt, notifies the other side", async () => {
@@ -302,7 +363,11 @@ describe("counterBooking", () => {
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
-    const before = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    // Force an old updatedAt directly (rather than trusting clock resolution
+    // between two calls a few ms apart) so the strict toBeGreaterThan
+    // assertion below can never flake on a same-millisecond fast local run.
+    const staleUpdatedAt = Date.now() - 60_000;
+    await adb.doc(`bookings/${bookingId}`).update({ updatedAt: staleUpdatedAt });
 
     await callFn("counterBooking", { bookingId, offer: offerPayload({ amountCents: 22000 }) }, curator.user);
 
@@ -312,7 +377,7 @@ describe("counterBooking", () => {
     expect(after.thread[1].by).toBe("curator");
     expect(after.thread[1].amountCents).toBe(22000);
     expect(after.thread[1].expectedQuantity).toBe(1.5); // re-derived perHour from the current gig
-    expect(after.updatedAt).toBeGreaterThanOrEqual(before.updatedAt);
+    expect(after.updatedAt).toBeGreaterThan(staleUpdatedAt);
 
     const notes = await pollNotifications(musician.uid);
     expect(notes.docs.some((d) => d.data().kind === "booking" && /Countered offer/.test(d.data().title))).toBe(true);

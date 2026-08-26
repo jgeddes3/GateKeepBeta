@@ -20,29 +20,26 @@ export interface CounterBookingInput { bookingId: string; offer: OfferInput; }
 
 async function profileName(db: FirebaseFirestore.Firestore, profileId: string): Promise<string> {
   const snap = await db.doc(`profiles/${profileId}`).get();
-  return (snap.data()?.name as string | undefined) ?? "";
+  return (snap.data()?.name as string | undefined) ?? "A profile";
 }
 
-// Turn-gated actions (counterBooking/declineBooking/withdrawBooking) share
-// this distinction: a member of the booking's OTHER side is a legitimate
-// participant (they can read this booking; they just can't act on it right
-// now) — that's a state violation (failed-precondition, "not your turn"),
-// distinct from a total stranger to both sides of the booking, which is a
-// genuine authorization failure (permission-denied).
-async function requireBookingTurnSide(
-  booking: BookingRequestDoc, uid: string, allowedSide: BookingSide,
-): Promise<void> {
-  const allowedProfileId = allowedSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
-  const otherProfileId = allowedSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
+// Resolves which side (if any) `uid` belongs to on this booking.
+// musicianProfileId/curatorProfileId are immutable once a booking is
+// created, so this is safe to resolve from a non-transactional read even
+// though the turn-based checks in counterBooking/declineBooking/
+// withdrawBooking (which depend on the MUTABLE awaitingSide/status/thread)
+// are not — those re-check against a transactional re-read instead (see
+// each callable below). A stranger to both sides throws permission-denied
+// immediately; this function only tells you WHICH side you're on, never
+// whether it's currently that side's turn.
+async function requireBookingSide(booking: BookingRequestDoc, uid: string): Promise<BookingSide> {
   const db = getFirestore();
-  const [allowedMember, otherMember] = await Promise.all([
-    db.doc(`profiles/${allowedProfileId}/members/${uid}`).get(),
-    db.doc(`profiles/${otherProfileId}/members/${uid}`).get(),
+  const [musicianMember, curatorMember] = await Promise.all([
+    db.doc(`profiles/${booking.musicianProfileId}/members/${uid}`).get(),
+    db.doc(`profiles/${booking.curatorProfileId}/members/${uid}`).get(),
   ]);
-  if (allowedMember.exists) return;
-  if (otherMember.exists) {
-    throw new HttpsError("failed-precondition", "It isn't your side's turn on this booking.");
-  }
+  if (musicianMember.exists) return "musician";
+  if (curatorMember.exists) return "curator";
   throw new HttpsError("permission-denied", "Only a member of this booking's profiles can do that.");
 }
 
@@ -54,6 +51,13 @@ async function requireBookingTurnSide(
 // profile the cap counts against, who's now awaitingSide, who gets
 // notified) — see gigs.ts's resolveGigLocation for the identical
 // shared-tail-of-two-callables pattern.
+//
+// Precondition: callers MUST have already verified `gig.status === "open"`
+// before calling this — it does not re-check gig status itself (a gig
+// doesn't change concurrently with a fresh booking's creation the way an
+// existing booking's awaitingSide/status does, so no transaction is needed
+// here; applyToGig/offerGig's own status check just before the call is the
+// single source of truth).
 async function finalizeBookingRequest(params: {
   db: FirebaseFirestore.Firestore;
   gig: GigDoc; gigId: string;
@@ -164,7 +168,11 @@ export const applyToGig = onCall<ApplyToGigInput>({ region: "us-central1" }, asy
   if (!gigSnap.exists) throw new HttpsError("not-found", "Gig not found.");
   const gig = gigSnap.data() as GigDoc;
   if (gig.status !== "open") {
-    throw new HttpsError("failed-precondition", `Cannot apply to a gig in status "${gig.status}".`);
+    // Generic message (not the actual status) — unlike offerGig/updateGig's
+    // equivalent checks, the caller here need not be any kind of member of
+    // the gig's curator profile, so echoing the real status back would be an
+    // enumeration oracle for a non-member probing gig ids.
+    throw new HttpsError("failed-precondition", "This gig is not open for applications.");
   }
   // Re-read: the curator profile may have been unpublished/rejected after
   // posting this gig — mirrors publishGig/updateGig's identical staleness
@@ -172,7 +180,7 @@ export const applyToGig = onCall<ApplyToGigInput>({ region: "us-central1" }, asy
   // "open" until the review-reject cascade or a later sweep catches it).
   await requireApprovedCuratorProfile(gig.curatorProfileId);
 
-  const musicianName = (musicianSnap.data()?.name as string | undefined) ?? "";
+  const musicianName = (musicianSnap.data()?.name as string | undefined) ?? "A profile";
   return finalizeBookingRequest({
     db, gig, gigId: input.gigId,
     curatorProfileId: gig.curatorProfileId, musicianProfileId: input.musicianProfileId,
@@ -199,11 +207,14 @@ export const offerGig = onCall<OfferGigInput>({ region: "us-central1" }, async (
   const curatorSnap = await requireApprovedCuratorProfile(gig.curatorProfileId);
 
   if (gig.status !== "open") {
+    // Unlike applyToGig's variant, echoing the real status here is fine —
+    // the caller must already be a member of the gig's own curator profile
+    // to reach this line, so there's nothing to enumerate.
     throw new HttpsError("failed-precondition", `Cannot offer on a gig in status "${gig.status}".`);
   }
   await requireApprovedMusicianProfile(input.musicianProfileId);
 
-  const curatorName = (curatorSnap.data()?.name as string | undefined) ?? "";
+  const curatorName = (curatorSnap.data()?.name as string | undefined) ?? "A profile";
   return finalizeBookingRequest({
     db, gig, gigId: input.gigId,
     curatorProfileId: gig.curatorProfileId, musicianProfileId: input.musicianProfileId,
@@ -223,17 +234,14 @@ export const counterBooking = onCall<CounterBookingInput>({ region: "us-central1
   if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
   const booking = bookingSnap.data() as BookingRequestDoc;
 
-  // Turn enforcement — only the side currently awaiting a response may
-  // counter it.
-  await requireBookingTurnSide(booking, uid, booking.awaitingSide);
-  if (booking.status !== "open") {
-    throw new HttpsError("failed-precondition", `Cannot counter a booking in status "${booking.status}".`);
-  }
-  if (booking.thread.length >= MAX_BOOKING_THREAD_ENTRIES) {
-    throw new HttpsError("resource-exhausted",
-      `A booking's negotiation thread may have at most ${MAX_BOOKING_THREAD_ENTRIES} entries.`);
-  }
+  // Membership (which side, if any, `uid` is on) doesn't depend on mutable
+  // booking state — safe to resolve once, outside the transaction below.
+  const callerSide = await requireBookingSide(booking, uid);
 
+  // Re-derived from the CURRENT gig, not copied from an earlier thread entry
+  // or trusted from the caller — the task explicitly allows this read
+  // before/outside the transaction (only the thread append itself needs the
+  // transactional booking read).
   const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
   const gig = gigSnap.data() as GigDoc | undefined;
   // Defensive: a booking always names an existing gig at creation time and
@@ -242,30 +250,53 @@ export const counterBooking = onCall<CounterBookingInput>({ region: "us-central1
   // below if that invariant is ever violated.
   if (!gig) throw new HttpsError("internal", "This booking's gig could not be found.");
 
+  // booking.structure is immutable once set — safe to validate against the
+  // outer (non-transactional) read.
   const err = validateOfferInput(booking.structure, {
     amountCents: input.offer?.amountCents, expectedQuantity: input.offer?.expectedQuantity, note: input.offer?.note,
   });
   if (err) throw new HttpsError("invalid-argument", err);
 
-  // perHour quantity is re-derived from the CURRENT gig, not copied from an
-  // earlier thread entry or trusted from the caller — mirrors
-  // finalizeBookingRequest's identical derivation, re-run here in case the
-  // gig's duration changed since the booking opened.
-  const expectedQuantity = booking.structure === "perHour" ? gig.durationMinutes / 60
-    : booking.structure === "perSong" ? (input.offer.expectedQuantity as number)
-    : null;
-
   const now = Date.now();
-  const entry: OfferEntry = {
-    by: booking.awaitingSide, amountCents: input.offer.amountCents, expectedQuantity,
-    note: input.offer.note ?? null, at: now,
-  };
-  const newAwaitingSide: BookingSide = booking.awaitingSide === "musician" ? "curator" : "musician";
-  await bookingRef.update({ thread: [...booking.thread, entry], awaitingSide: newAwaitingSide, updatedAt: now });
+  // Turn/status/thread-cap checks AND the thread append all run against a
+  // single transactional read-then-write: without this, two same-side
+  // concurrent counters each read a stale thread and the second `update`
+  // would silently clobber the first's entry (last-write-wins on the full
+  // array replace) — a dropped negotiation entry with no self-heal.
+  // Firestore retries this function on write contention, so the second
+  // caller's retry sees the first counter's fresh thread/awaitingSide.
+  const { notifyProfileId } = await db.runTransaction(async (tx) => {
+    const freshSnap = await tx.get(bookingRef);
+    if (!freshSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const freshBooking = freshSnap.data() as BookingRequestDoc;
 
-  const actingProfileId = booking.awaitingSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
+    if (callerSide !== freshBooking.awaitingSide) {
+      throw new HttpsError("failed-precondition", "It isn't your side's turn on this booking.");
+    }
+    if (freshBooking.status !== "open") {
+      throw new HttpsError("failed-precondition", `Cannot counter a booking in status "${freshBooking.status}".`);
+    }
+    if (freshBooking.thread.length >= MAX_BOOKING_THREAD_ENTRIES) {
+      throw new HttpsError("resource-exhausted",
+        `A booking's negotiation thread may have at most ${MAX_BOOKING_THREAD_ENTRIES} entries.`);
+    }
+
+    const expectedQuantity = freshBooking.structure === "perHour" ? gig.durationMinutes / 60
+      : freshBooking.structure === "perSong" ? (input.offer.expectedQuantity as number)
+      : null;
+    const entry: OfferEntry = {
+      by: freshBooking.awaitingSide, amountCents: input.offer.amountCents, expectedQuantity,
+      note: input.offer.note ?? null, at: now,
+    };
+    const newAwaitingSide: BookingSide = freshBooking.awaitingSide === "musician" ? "curator" : "musician";
+    tx.update(bookingRef, { thread: [...freshBooking.thread, entry], awaitingSide: newAwaitingSide, updatedAt: now });
+
+    const notifyProfileId = newAwaitingSide === "musician" ? freshBooking.musicianProfileId : freshBooking.curatorProfileId;
+    return { newAwaitingSide, notifyProfileId };
+  });
+
+  const actingProfileId = callerSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
   const actingName = await profileName(db, actingProfileId);
-  const notifyProfileId = newAwaitingSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
   await notifyProfileMembers(notifyProfileId, {
     kind: "booking",
     title: `Countered offer for "${gig.title}"`,
@@ -287,21 +318,32 @@ export const declineBooking = onCall<{ bookingId: string }>({ region: "us-centra
   if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
   const booking = bookingSnap.data() as BookingRequestDoc;
 
-  // Only the side currently awaiting a response may decline THIS offer —
-  // same turn-enforcement rationale as counterBooking.
-  await requireBookingTurnSide(booking, uid, booking.awaitingSide);
-  if (booking.status !== "open") {
-    throw new HttpsError("failed-precondition", `Cannot decline a booking in status "${booking.status}".`);
-  }
+  // Membership resolved once, outside the transaction — see requireBookingSide.
+  const callerSide = await requireBookingSide(booking, uid);
 
   const now = Date.now();
-  await bookingRef.update({ status: "declined", resolvedAt: now, updatedAt: now });
+  // Turn/status check + write share a transactional read so a decline can't
+  // race a concurrent counter/withdraw against a stale status/awaitingSide
+  // (same rationale as counterBooking above).
+  await db.runTransaction(async (tx) => {
+    const freshSnap = await tx.get(bookingRef);
+    if (!freshSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const freshBooking = freshSnap.data() as BookingRequestDoc;
+
+    if (callerSide !== freshBooking.awaitingSide) {
+      throw new HttpsError("failed-precondition", "It isn't your side's turn on this booking.");
+    }
+    if (freshBooking.status !== "open") {
+      throw new HttpsError("failed-precondition", `Cannot decline a booking in status "${freshBooking.status}".`);
+    }
+    tx.update(bookingRef, { status: "declined", resolvedAt: now, updatedAt: now });
+  });
 
   const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
   const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
-  const actingProfileId = booking.awaitingSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
+  const actingProfileId = callerSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
   const actingName = await profileName(db, actingProfileId);
-  const otherProfileId = booking.awaitingSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
+  const otherProfileId = callerSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
   await notifyProfileMembers(otherProfileId, {
     kind: "booking",
     title: "Booking request declined",
@@ -323,24 +365,33 @@ export const withdrawBooking = onCall<{ bookingId: string }>({ region: "us-centr
   if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
   const booking = bookingSnap.data() as BookingRequestDoc;
 
-  // You can withdraw only while the OTHER side is deciding (i.e. you are
-  // NOT the current awaitingSide) — same turn-enforcement rationale as
-  // counterBooking/declineBooking, inverted: once it's your own turn, the
-  // right action is to counter or decline, not withdraw.
-  const nonAwaitingSide: BookingSide = booking.awaitingSide === "musician" ? "curator" : "musician";
-  await requireBookingTurnSide(booking, uid, nonAwaitingSide);
-  if (booking.status !== "open") {
-    throw new HttpsError("failed-precondition", `Cannot withdraw a booking in status "${booking.status}".`);
-  }
+  // Membership resolved once, outside the transaction — see requireBookingSide.
+  const callerSide = await requireBookingSide(booking, uid);
 
   const now = Date.now();
-  await bookingRef.update({ status: "withdrawn", resolvedAt: now, updatedAt: now });
+  // You can withdraw only while the OTHER side is deciding (i.e. you are NOT
+  // the current awaitingSide) — determined against the transaction's fresh
+  // read, same rationale as counterBooking/declineBooking above.
+  await db.runTransaction(async (tx) => {
+    const freshSnap = await tx.get(bookingRef);
+    if (!freshSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const freshBooking = freshSnap.data() as BookingRequestDoc;
+    const nonAwaitingSide: BookingSide = freshBooking.awaitingSide === "musician" ? "curator" : "musician";
+
+    if (callerSide !== nonAwaitingSide) {
+      throw new HttpsError("failed-precondition", "It isn't your side's turn on this booking.");
+    }
+    if (freshBooking.status !== "open") {
+      throw new HttpsError("failed-precondition", `Cannot withdraw a booking in status "${freshBooking.status}".`);
+    }
+    tx.update(bookingRef, { status: "withdrawn", resolvedAt: now, updatedAt: now });
+  });
 
   const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
   const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
-  const actingProfileId = nonAwaitingSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
+  const actingProfileId = callerSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
   const actingName = await profileName(db, actingProfileId);
-  const otherProfileId = nonAwaitingSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
+  const otherProfileId = callerSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
   await notifyProfileMembers(otherProfileId, {
     kind: "booking",
     title: "Booking request withdrawn",

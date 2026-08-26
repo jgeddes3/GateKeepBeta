@@ -311,7 +311,14 @@ export type BookingSide = "musician" | "curator";
 
 export interface OfferEntry {
   by: BookingSide; amountCents: number;
-  expectedQuantity: number | null;  // perSong: song count (required int >=1); perHour: hours derived from gig duration (server-set); perSet: null
+  // perSong: song count (required int >=1); perHour: hours derived from the
+  // gig's durationMinutes at write time (server-set); perSet: null. DISPLAY
+  // DATA ONLY for perHour — a listed thread entry's quantity can go stale if
+  // the gig's duration is edited later. Never multiply amountCents by this
+  // field to compute money owed; always go through
+  // computeExpectedTotalCents(structure, amountCents, { durationMinutes }),
+  // which re-derives the hours from the gig itself at the moment of use.
+  expectedQuantity: number | null;
   note: string | null; at: number;
 }
 export interface AcceptedTerms { amountCents: number; expectedQuantity: number | null; expectedTotalCents: number; }
