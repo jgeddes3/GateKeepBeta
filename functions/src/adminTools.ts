@@ -113,6 +113,14 @@ export const flagAccount = onCall<{ uid: string; text: string }>({ region: "us-c
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const existing = (snap.data()?.notes as AdminNoteDoc["notes"] | undefined) ?? [];
+    // P6: an unbounded notes array is both a moderation-UX problem (an
+    // ever-growing, never-archived history) and a doc-size risk (a
+    // Firestore doc caps at 1 MiB) — 200 is a generous ceiling for how many
+    // flags one account should accumulate before someone actually archives
+    // the history, not a number expected to be hit in routine moderation.
+    if (existing.length >= 200) {
+      throw new HttpsError("resource-exhausted", "note limit reached — archive this account's notes");
+    }
     const notes: AdminNoteDoc["notes"] = [...existing, entry];
     tx.set(ref, { notes });
   });

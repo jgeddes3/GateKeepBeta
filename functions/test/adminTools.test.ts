@@ -125,6 +125,17 @@ describe("flagAccount", () => {
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
 
+  it("P6: rejects flagging once a user's notes reach 200 entries (resource-exhausted)", async () => {
+    const target = await signUpTestUser(`flagtarget6-${Date.now()}@test.com`);
+    const adminUser = await makeAdminUser("flag5");
+    const notes = Array.from({ length: 200 }, (_, i) => ({ byUid: adminUser.uid, at: i, text: `note ${i}` }));
+    await adb.doc(`adminNotes/${target.uid}`).set({ notes });
+    await expect(callFn("flagAccount", { uid: target.uid, text: "one too many" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+    const after = (await adb.doc(`adminNotes/${target.uid}`).get()).data()?.notes as unknown[];
+    expect(after.length).toBe(200); // unchanged — the 201st entry was rejected
+  });
+
   it("non-admin callers are denied", async () => {
     const target = await signUpTestUser(`flagtarget5-${Date.now()}@test.com`);
     const stranger = await signUpTestUser(`flagstranger-${Date.now()}@test.com`);
