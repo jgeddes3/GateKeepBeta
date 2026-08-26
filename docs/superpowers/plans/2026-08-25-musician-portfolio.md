@@ -6130,25 +6130,74 @@ fixes; the Task 11 snippets above reflect the corrected code:
 
 - [ ] **Step 1: Rewrite `apps/mobile/app/(musician)/portfolio.tsx`**
 
+Final code, post quality-review fix pass. Sanctioned deviations from the
+sketch this section originally showed: a single canonical submit/resubmit
+button below the tracks section (gated identically, on the same
+`missingForSubmit()` result, for both `draft` and `rejected`) replaces the
+sketch's second "Resubmit for review" button embedded inside the rejected
+banner — one submit call site instead of two that could drift out of sync
+with each other; the missing-items hint (plain `.join(", ")`, per the
+DO-NOT-COPY note above) and the delete-draft affordance from the handoff
+notes above are filled in (the sketch omitted both); and the public-page
+link's host is a named `PUBLIC_PROFILE_HOST` constant at the top of the
+file — still a placeholder until a deployed web domain exists, swap that
+one constant when it does:
+
 ```tsx
 import { useEffect, useState } from "react";
 import { ScrollView, View, Text, Pressable, Alert, Linking } from "react-native";
-import { doc, onSnapshot, getDoc } from "firebase/firestore";
+import { useRouter } from "expo-router";
+import { doc, onSnapshot, getDoc, collection, query, orderBy } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../src/portfolio/PortfolioForms";
 import { TrackManager } from "../../src/portfolio/TrackManager";
-import type { ProfileDoc, BookingDoc } from "@gatekeep/shared";
+import type { ProfileDoc, BookingDoc, TrackDoc } from "@gatekeep/shared";
+
+type TrackRow = TrackDoc & { id: string };
+
+// Placeholder host until a deployed web domain exists — swap this one
+// constant when it does; every public-page link on this screen reads it.
+const PUBLIC_PROFILE_HOST = "https://gatekeep.example";
+
+// Mirrors functions/src/profiles.ts's submitProfileForReview gate EXACTLY:
+// bio, >=1 genre, an avatar photo, AND >=1 track that's actually listenable
+// (status pending_review or approved) — see the server's
+// LISTENABLE_TRACK_STATUSES, which excludes "processing" because createTrack
+// writes the doc BEFORE the client finishes uploading bytes, so "processing"
+// can be an abandoned upload with nothing behind it. Keep this in sync with
+// web's Task 11 copy (apps/web/app/dashboard/portfolio/[profileId]/page.tsx)
+// — a lock that's looser on one platform than the other means musicians get
+// a different (and confusing) submit experience depending which app they
+// used.
+function missingForSubmit(profile: ProfileDoc, tracks: TrackRow[]): string[] {
+  const missing: string[] = [];
+  const pf = profile.portfolio;
+  if (!pf?.bio?.trim()) missing.push("a bio");
+  if (!pf?.genres?.length) missing.push("at least one genre");
+  if (!pf?.avatarPhotoPath) missing.push("a profile photo");
+  const hasListenableTrack = tracks.some((t) => t.status === "pending_review" || t.status === "approved");
+  if (!hasListenableTrack) {
+    missing.push(tracks.some((t) => t.status === "processing")
+      ? "a track that's finished processing (still transcoding — this can take a minute)"
+      : "at least one track");
+  }
+  return missing;
+}
 
 export default function Portfolio() {
   const { user } = useAuth();
-  const { activeContext } = useProfileContext();
+  const router = useRouter();
+  const { activeContext, switchTo } = useProfileContext();
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
   const [booking, setBooking] = useState<BookingDoc | null>(null);
+  const [tracks, setTracks] = useState<TrackRow[]>([]);
+  const [submitBusy, setSubmitBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   useEffect(() => {
     if (!profileId) { setProfile(null); return; }
@@ -6160,28 +6209,84 @@ export default function Portfolio() {
     return unsub;
   }, [profileId]);
 
+  // Own subscription, separate from TrackManager's below: the submit-lock
+  // gate needs live track statuses at THIS level (to enable/disable the
+  // submit button and render the missing-items hint) independent of
+  // TrackManager's own list UI — catching a track's status leaving
+  // "processing" without polling.
+  useEffect(() => {
+    if (!profileId) { setTracks([]); return; }
+    const { db } = getFirebase();
+    return onSnapshot(
+      query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+  }, [profileId]);
+
   if (!user || !profileId || !profile) {
     return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
       <Text>Switch to a musician profile to edit its portfolio.</Text></View>;
   }
-  const resubmit = async () => {
-    try { await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId }); }
-    catch (e) { Alert.alert("Not yet", e instanceof Error ? e.message : "Could not submit."); }
+
+  const missing = missingForSubmit(profile, tracks);
+  const canSubmit = missing.length === 0;
+  const showSubmit = profile.status === "draft" || profile.status === "rejected";
+
+  const submit = async () => {
+    setSubmitBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+    } catch (e) {
+      // The server's failed-precondition message is user-ready — surface it
+      // verbatim. This is the backstop for a race the client gate's snapshot
+      // hasn't caught up to yet (e.g. a track flips out of pending_review
+      // between renders), not the primary UX (the button is disabled while
+      // `missing` is non-empty).
+      Alert.alert("Not yet", e instanceof Error ? e.message : "Could not submit.");
+    } finally {
+      setSubmitBusy(false);
+    }
   };
+
+  const doDelete = async () => {
+    setDeleteBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      // Nothing here nulls activeContext itself — fall back to "fan" (the
+      // same switch ContextSwitcher's own "Me (fan)" row performs) so this
+      // screen doesn't keep pointing at a profile that no longer exists.
+      switchTo("fan");
+      router.replace("/(fan)");
+    } catch (e) {
+      Alert.alert("Could not delete", e instanceof Error ? e.message : "Try again.");
+      setDeleteBusy(false);
+    }
+  };
+  const deleteDraft = () => {
+    Alert.alert(
+      `Delete "${profile.name}"?`,
+      `This permanently deletes the profile, its tracks, and its photos, and releases the handle @${profile.handle}. This can't be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void doDelete() },
+      ],
+    );
+  };
+
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }}>
+    <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }} keyboardShouldPersistTaps="handled">
       <Text style={{ fontSize: 22, fontWeight: "700" }}>{profile.name}</Text>
       <Text>Status: {profile.status.replace("_", " ")}</Text>
       {profile.status === "approved" && (
-        <Pressable onPress={() => Linking.openURL(`https://gatekeep.example/@${profile.handle}`)}>
+        <Pressable onPress={() => void Linking.openURL(`${PUBLIC_PROFILE_HOST}/@${profile.handle}`)}>
           <Text style={{ textDecorationLine: "underline" }}>View public page</Text>
         </Pressable>
       )}
       {profile.status === "rejected" && (
         <View style={{ backgroundColor: "#fee2e2", borderRadius: 8, padding: 12, gap: 8 }}>
-          <Text><Text style={{ fontWeight: "700" }}>Changes requested: </Text>{profile.rejectionReason}</Text>
-          <Pressable onPress={resubmit} style={{ backgroundColor: "#111", padding: 10, borderRadius: 8 }}>
-            <Text style={{ color: "#fff", textAlign: "center" }}>Resubmit for review</Text></Pressable>
+          <Text>
+            <Text style={{ fontWeight: "700" }}>Changes requested: </Text>
+            {profile.rejectionReason ?? "(no reason provided)"}
+          </Text>
         </View>
       )}
       <View style={{ gap: 8 }}>
@@ -6198,27 +6303,151 @@ export default function Portfolio() {
       {/* this screen instance across a profile-context switch, and each form */}
       {/* only seeds its local state from `initial` once, on mount — without */}
       {/* the key forcing a remount, the PREVIOUS profile's bio/links/rates */}
-      {/* leak onto the newly-selected profile. See the DO-NOT-COPY note above. */}
+      {/* would leak onto the newly-selected profile. */}
       <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
       <BookingForm key={profileId} profileId={profileId} initial={booking} />
-      {profile.status === "draft" && (
-        <Pressable onPress={resubmit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
-          <Text style={{ color: "#fff", textAlign: "center" }}>Submit for review</Text></Pressable>
+      {showSubmit && (
+        <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
+          <Pressable onPress={() => void submit()} disabled={!canSubmit || submitBusy}
+            style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: !canSubmit || submitBusy ? 0.5 : 1 }}>
+            <Text style={{ color: "#fff", textAlign: "center" }}>
+              {submitBusy ? "Submitting…" : profile.status === "rejected" ? "Resubmit for review" : "Submit for review"}
+            </Text>
+          </Pressable>
+          {!canSubmit && (
+            // Plain join, not Intl.ListFormat: unverified under Hermes's ICU
+            // data build — see Task 14's DO-NOT-COPY note (web's page uses
+            // Intl.ListFormat; this is the deliberately simpler mobile copy).
+            <Text style={{ color: "#92400e" }}>Add {missing.join(", ")} before submitting.</Text>
+          )}
+          <Pressable onPress={deleteDraft} disabled={deleteBusy}
+            style={{ borderWidth: 1, borderColor: "#fca5a5", borderRadius: 6, padding: 10, alignSelf: "flex-start" }}>
+            <Text style={{ color: "#dc2626" }}>{deleteBusy ? "Deleting…" : "Delete this profile"}</Text>
+          </Pressable>
+        </View>
       )}
     </ScrollView>
   );
 }
 ```
 
-(The public-page link's host is a placeholder until a web domain exists — point it at the deployed web app when that lands; keep the `gatekeep.example` constant in one place at the top of the file with a comment.)
-
 - [ ] **Step 2: Update `apps/mobile/app/join.tsx`**
 
-Musician joins stop auto-submitting. Replace the `submit` handler body: after `createProfileDraft`, for `type === "musician"` do **not** call `submitProfileForReview`; instead alert "Draft created — build your portfolio next" and `router.replace("/(musician)/portfolio")` (the ProfileContext picks up the new membership; instruct the user to switch context if needed). Curator joins keep the old create-then-submit behavior unchanged.
+Musician joins stop auto-submitting; curator joins keep the old
+create-then-submit behavior unchanged.
+
+Final code, post quality-review fix pass. One sanctioned deviation from the
+plan text this section originally gave: after `createProfileDraft`, the
+musician branch calls `switchTo` (from `useProfileContext`) with the newly
+created profile summary directly, rather than only alerting and leaving the
+`ProfileContext` membership listener to pick the new profile up passively —
+so the portfolio tab has an active profile and renders its edit forms on
+the very next screen, instead of showing its own "switch to a musician
+profile" placeholder until the musician manually switches context by hand.
+The submit button's label is also now conditional (`"Create my profile"`
+for musician vs. `"Submit for review"` for curator), since "Submit for
+review" stopped being true for the musician path the moment it stopped
+calling `submitProfileForReview`:
+
+```tsx
+import { useState } from "react";
+import { View, Text, TextInput, Pressable, Alert, ScrollView } from "react-native";
+import { httpsCallable } from "firebase/functions";
+import { useRouter } from "expo-router";
+import { getFirebase } from "../src/lib/firebase";
+import { useProfileContext } from "../src/shell/ProfileContext";
+import { validateProfileDraft, type ProfileType } from "@gatekeep/shared";
+
+const SUBTYPES: Record<ProfileType, { value: string; label: string }[]> = {
+  musician: [{ value: "solo", label: "Solo act" }, { value: "band", label: "Band" }],
+  curator: [{ value: "venue", label: "Venue" }, { value: "planner", label: "Event planner" },
+            { value: "individual_host", label: "Individual host" }],
+};
+
+export default function Join() {
+  const [type, setType] = useState<ProfileType>("musician");
+  const [subtype, setSubtype] = useState("solo");
+  const [name, setName] = useState("");
+  const [handle, setHandle] = useState("");
+  const router = useRouter();
+  const { switchTo } = useProfileContext();
+
+  const submit = async () => {
+    const input = { type, subtype, name, handle: handle.toLowerCase() };
+    const v = validateProfileDraft(input);
+    if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
+    try {
+      const { functions } = getFirebase();
+      const { data } = await httpsCallable<typeof input, { profileId: string }>(
+        functions, "createProfileDraft")(input);
+      if (type === "musician") {
+        // MUST FIX (Task 14): do NOT auto-submit a musician draft. Task 9's
+        // minimum-content gate (bio, >=1 genre, avatar, >=1 listenable
+        // track) means a brand-new draft can NEVER pass
+        // submitProfileForReview — every auto-submit here would always fail
+        // with failed-precondition. Route into the portfolio tab to collect
+        // that content instead, mirroring web's join/page.tsx createDraft ->
+        // router.push handoff. Curator joins (below) are unaffected — there's
+        // no gate for them — and keep the old create-then-submit behavior.
+        switchTo({ profileId: data.profileId, type: "musician", name: name.trim(), status: "draft" });
+        Alert.alert("Draft created", "Add a bio, photo, and a track next, then submit for review.");
+        router.replace("/(musician)/portfolio");
+        return;
+      }
+      await httpsCallable(functions, "submitProfileForReview")({ profileId: data.profileId });
+      Alert.alert("Submitted!", "Our team will review your profile. We'll notify you.");
+      router.back();
+    } catch (e: any) {
+      Alert.alert("Couldn't submit", e?.message ?? "Try again.");
+    }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 12 }} keyboardShouldPersistTaps="handled">
+      <Text style={{ fontSize: 24, fontWeight: "700" }}>Join GateKeep</Text>
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        {(["musician", "curator"] as const).map((t) => (
+          <Pressable key={t} onPress={() => { setType(t); setSubtype(SUBTYPES[t][0].value); }}
+            style={{ borderWidth: 1, padding: 10, borderRadius: 8, backgroundColor: type === t ? "#111" : "#fff" }}>
+            <Text style={{ color: type === t ? "#fff" : "#111" }}>{t}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+        {SUBTYPES[type].map((s) => (
+          <Pressable key={s.value} onPress={() => setSubtype(s.value)}
+            style={{ borderWidth: 1, padding: 10, borderRadius: 8, backgroundColor: subtype === s.value ? "#111" : "#fff" }}>
+            <Text style={{ color: subtype === s.value ? "#fff" : "#111" }}>{s.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <TextInput placeholder="Name (band, venue, or your stage name)" value={name} onChangeText={setName}
+        style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
+      <TextInput placeholder="Handle (yourname — lowercase, no spaces)" autoCapitalize="none"
+        value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
+      <Pressable onPress={submit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
+        {/* Musician: create-only now (see the MUST FIX comment above) —
+            "Submit for review" would be a lie until the portfolio tab's own
+            gated button actually does that. Curator: unchanged, still
+            submits immediately. */}
+        <Text style={{ color: "#fff", textAlign: "center" }}>{type === "musician" ? "Create my profile" : "Submit for review"}</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+```
 
 - [ ] **Step 3: Create `apps/mobile/app/artist/[handle].tsx` (hero-first native public view)**
+
+Final code. One sanctioned deviation from the sketch this section originally
+showed: track duration renders through a small shared `fmtDuration` helper
+(general `mm:ss`, matching `TrimUploader`'s own `fmt`) instead of the
+sketch's hardcoded `` `0:${...}` `` prefix — the sketch's version only ever
+read correctly because clips are capped at `MAX_CLIP_SECONDS` (30s), so it
+happened to never need a minutes digit; the helper is equivalent today but
+doesn't silently break if that cap ever changes:
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -6232,21 +6461,28 @@ import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
 
 type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 
+const fmtDuration = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
 function TrackRow({ t, playingId, onPlay }:
   { t: LoadedTrack; playingId: string | null; onPlay: (t: LoadedTrack) => void }) {
   return (
-    <Pressable onPress={() => onPlay(t)}
+    <Pressable onPress={() => onPlay(t)} accessibilityRole="button" accessibilityLabel={`Play ${t.title}`}
       style={{ flexDirection: "row", gap: 10, alignItems: "center", borderWidth: 1,
         borderColor: "#ddd", borderRadius: 8, padding: 12 }}>
       <Text>{playingId === t.id ? "❚❚" : "▶"}</Text>
       <Text style={{ flex: 1 }}>{t.title}</Text>
-      <Text style={{ color: "#888" }}>{t.durationSec ? `0:${String(Math.round(t.durationSec)).padStart(2, "0")}` : ""}</Text>
+      <Text style={{ color: "#888" }}>{t.durationSec ? fmtDuration(t.durationSec) : ""}</Text>
     </Pressable>
   );
 }
 
 export default function Artist() {
-  const { handle } = useLocalSearchParams<{ handle: string }>();
+  const { handle: rawHandle } = useLocalSearchParams<{ handle: string }>();
+  // Handles are stored lowercase (functions/src/profiles.ts); the route
+  // param can arrive in any case a user typed or shared a link with —
+  // normalize before every lookup, mirroring web's app/u/[handle]/page.tsx
+  // fix (a mismatched-case lookup there used to silently 404).
+  const handle = (rawHandle ?? "").toLowerCase();
   const [state, setState] = useState<"loading" | "notfound" | {
     profile: ProfileDoc; tracks: LoadedTrack[]; avatarUrl: string | null; coverUrl: string | null;
   }>("loading");
@@ -6255,13 +6491,14 @@ export default function Artist() {
 
   useEffect(() => {
     let cancelled = false;
+    setState("loading");
     (async () => {
       try {
         const { db, storage } = getFirebase();
         const h = await getDoc(doc(db, "handles", handle));
         if (!h.exists()) { if (!cancelled) setState("notfound"); return; }
         const profileId = h.data().profileId as string;
-        const p = await getDoc(doc(db, "profiles", profileId));
+        const p = await getDoc(doc(db, "profiles", profileId)); // rules deny unless approved/member/admin
         if (!p.exists() || (p.data() as ProfileDoc).type !== "musician") {
           if (!cancelled) setState("notfound"); return;
         }
@@ -6272,30 +6509,50 @@ export default function Artist() {
         };
         const trackSnap = await getDocs(query(collection(db, `profiles/${profileId}/tracks`),
           where("status", "==", "approved"), orderBy("order")));
-        const tracks = (await Promise.all(trackSnap.docs.map(async (t) => {
-          const d = t.data() as TrackDoc;
-          const u = await url(d.storagePath);
-          return u ? { id: t.id, title: d.title, durationSec: d.durationSec, url: u } : null;
-        }))).filter((x): x is LoadedTrack => x !== null);
-        if (!cancelled) setState({ profile, tracks,
-          avatarUrl: await url(profile.portfolio?.avatarPhotoPath),
-          coverUrl: await url(profile.portfolio?.coverPhotoPath) });
-      } catch { if (!cancelled) setState("notfound"); } // permission-denied = not approved
+        const [tracks, avatarUrl, coverUrl] = await Promise.all([
+          Promise.all(trackSnap.docs.map(async (t) => {
+            const d = t.data() as TrackDoc;
+            const u = await url(d.storagePath);
+            return u ? { id: t.id, title: d.title, durationSec: d.durationSec, url: u } : null;
+          })).then((rows) => rows.filter((x): x is LoadedTrack => x !== null)),
+          url(profile.portfolio?.avatarPhotoPath),
+          url(profile.portfolio?.coverPhotoPath),
+        ]);
+        if (!cancelled) setState({ profile, tracks, avatarUrl, coverUrl });
+      } catch (e) {
+        // permission-denied (a draft/pending/rejected profile's Firestore
+        // rules deny the read) means "not approved" — from the public's
+        // point of view that's a legitimate not-found, not a leak of
+        // whether a handle exists behind the scenes. Anything else (offline,
+        // a missing index, a real backend outage) still lands on the same
+        // "not found" screen here — mobile has no separate error route to
+        // send it to — but gets logged so a real outage doesn't vanish
+        // silently the way web's loadProfile explicitly distinguishes.
+        console.error("artist page load failed", handle, e);
+        if (!cancelled) setState("notfound");
+      }
     })();
     return () => { cancelled = true; };
   }, [handle]);
 
-  if (state === "loading") return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>Loading…</Text></View>;
-  if (state === "notfound") return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>No profile at @{handle}.</Text></View>;
+  if (state === "loading") {
+    return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>Loading…</Text></View>;
+  }
+  if (state === "notfound") {
+    return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>No profile at @{handle}.</Text></View>;
+  }
 
   const { profile, tracks, avatarUrl, coverUrl } = state;
   const pf = profile.portfolio;
   const play = (t: LoadedTrack) => {
     if (playingId === t.id) { player.pause(); setPlayingId(null); return; }
+    // Single active player: replace() swaps whatever was loaded (including a
+    // still-playing previous track) with the new source before playing it.
     player.replace({ uri: t.url });
     player.play();
     setPlayingId(t.id);
   };
+
   return (
     <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
       {coverUrl && <Image source={{ uri: coverUrl }} style={{ width: "100%", height: 180 }} />}
@@ -6315,15 +6572,23 @@ export default function Artist() {
             {tracks.map((t) => <TrackRow key={t.id} t={t} playingId={playingId} onPlay={play} />)}
           </View>
         )}
-        {pf?.bio ? (<><Text style={{ fontSize: 18, fontWeight: "700" }}>About</Text>
-          <Text style={{ lineHeight: 21 }}>{pf.bio}</Text></>) : null}
+        {pf?.bio ? (
+          <>
+            <Text style={{ fontSize: 18, fontWeight: "700" }}>About</Text>
+            <Text style={{ lineHeight: 21 }}>{pf.bio}</Text>
+          </>
+        ) : null}
         {pf?.externalLinks && pf.externalLinks.length > 0 && (
           <View style={{ flexDirection: "row", gap: 14, flexWrap: "wrap" }}>
             {pf.externalLinks.map((l) => (
-              <Pressable key={l.url} onPress={() => void Linking.openURL(l.url)}>
+              <Pressable key={`${l.kind}:${l.url}`} onPress={() => void Linking.openURL(l.url)}>
                 <Text style={{ textDecorationLine: "underline" }}>{l.kind}</Text>
-              </Pressable>))}
+              </Pressable>
+            ))}
           </View>
+        )}
+        {tracks.length === 0 && !pf?.bio && (
+          <Text style={{ color: "#888" }}>This artist hasn&#39;t added content yet.</Text>
         )}
         {/* Shows: platform events only — section appears when sub-4/6 data exists. */}
       </View>
