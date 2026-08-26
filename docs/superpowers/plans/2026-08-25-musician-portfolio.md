@@ -3330,9 +3330,7 @@ descendant (this page's sticky `.identity` sidebar included), and `html`'s copy 
 import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import {
-  doc, getDoc, getDocs, collection, query, where, orderBy, FirestoreError,
-} from "firebase/firestore";
+import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
 import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
@@ -3341,10 +3339,22 @@ import styles from "./portfolio.module.css";
 
 // Takedowns/approvals need to propagate within about a minute, and this page
 // can't be gated behind App Check (it's plain SSR, no client attestation) —
-// so bound the Firestore/Storage reads to once per handle per revalidate
-// window instead of `force-dynamic`'s unbounded per-request reads, which was
-// an unauthenticated crawl-storm DoS surface.
+// so ISR bounds repeat Firestore/Storage reads to once per handle per
+// revalidate window instead of `force-dynamic`'s unbounded per-request reads.
+// (A flood of distinct/random handles still costs one cold render each —
+// this caps *repeat* hits on the same handle, not a broad crawl.)
 export const revalidate = 60;
+// Required for `revalidate` to take effect on a dynamic-params route: without
+// this, Next treats the route as fully dynamic (no caching, revalidate is a
+// no-op) per generate-static-params.md ("you must return an empty array ...
+// in order to revalidate (ISR) paths at runtime"). An empty array means no
+// paths are prerendered at build time; each handle is rendered (and cached)
+// on its first request instead. Verified: without this, `next build` marks
+// the route `ƒ` (fully dynamic); with it, `●` (SSG, ISR-eligible), and a
+// second request to the same handle comes back `x-nextjs-cache: HIT`.
+export function generateStaticParams() {
+  return [];
+}
 
 type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 type Loaded = {
@@ -3355,7 +3365,13 @@ type Loaded = {
 async function storageUrl(path: string | null | undefined): Promise<string | null> {
   if (!path) return null;
   try { return await getDownloadURL(ref(getServerFirebase().storage, path)); }
-  catch { return null; }
+  catch (e) {
+    // Swallowed to null on purpose (a missing/racing object shouldn't 500 the
+    // whole page), but a Storage-wide outage would otherwise silently empty
+    // every avatar/cover/track URL with no signal anywhere — log it.
+    console.warn("storageUrl failed", path, e);
+    return null;
+  }
 }
 
 // cache() dedupes this per-request across generateMetadata and the page body —
@@ -3386,12 +3402,22 @@ const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
     ]);
     return { profile, tracks, avatarUrl, coverUrl };
   } catch (e) {
+    // Duck-typed, not `e instanceof FirestoreError`: FirebaseError's own
+    // constructor runs `Object.setPrototypeOf(this, FirebaseError.prototype)`
+    // (an ES5-target workaround in @firebase/util, still present in the
+    // built SDK) which clobbers the prototype chain of every subclass
+    // instance — so a real FirestoreError never passes `instanceof
+    // FirestoreError`, only `instanceof FirebaseError`. Trusting that check
+    // would send every FirestoreError down the "rethrow as 500" path below,
+    // including permission-denied ones — turning "not approved" into a
+    // 404-vs-500 enumeration oracle for handle existence.
+    //
     // permission-denied = the profile/track isn't approved (rules deny the
     // read) — that's a legitimate "not found" from the public's point of
     // view. not-found only fires if a doc vanishes between reads. Anything
     // else (offline, a missing index, a backend outage) is a real failure —
     // surface it as a truthful 500, not a silent "Not found" 200.
-    const code = e instanceof FirestoreError ? e.code : undefined;
+    const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
     if (code === "permission-denied" || code === "not-found") return null;
     console.error("portfolio load failed", handle, e);
     throw e;
@@ -3401,7 +3427,12 @@ const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
 export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise<Metadata> {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
-  if (!data) return { title: "Not found · GateKeep", robots: { index: false } };
+  // The page component calls notFound() for the same null case, which
+  // renders not-found.tsx's own `metadata` (its title) instead of whatever
+  // this function returns — so only robots survives here in practice; keep
+  // it anyway as a fallback for any caller that resolves metadata without
+  // rendering the page (e.g. a metadata-only route consumer).
+  if (!data) return { robots: { index: false } };
   const { profile } = data;
   const pf = profile.portfolio;
   const description = pf?.bio?.slice(0, 160)
@@ -3479,11 +3510,17 @@ export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
 
 Rendered when `loadProfile()` returns `null` and the page calls `notFound()` — handle doesn't
 exist, the profile isn't approved, or it's not a musician profile. Deliberately generic: never
-confirms or denies that a draft exists at this handle. `notFound()` also injects
-`<meta name="robots" content="noindex">` automatically.
+confirms or denies that a draft exists at this handle. `notFound()` injects
+`<meta name="robots" content="noindex">` automatically, but NOT a title — this segment's own
+`metadata` export is what actually renders once `notFound()` throws (page.tsx's
+`generateMetadata` return value never reaches the response for that request), so the title has
+to live here.
 
 ```tsx
+import type { Metadata } from "next";
 import styles from "./portfolio.module.css";
+
+export const metadata: Metadata = { title: "Not found · GateKeep" };
 
 export default function NotFound() {
   return (
@@ -3495,15 +3532,31 @@ export default function NotFound() {
 }
 ```
 
-- [ ] **Step 4c: Add `metadataBase` to the root layout**
+- [ ] **Step 4c: Add a safe `metadataBase` fallback to the root layout**
 
-`alternates.canonical` and `openGraph.url` above are relative paths (`/@handle`) — Next.js
-requires `metadataBase` set somewhere in the tree to resolve those to absolute URLs (a build
-error otherwise). Add to `apps/web/app/layout.tsx`'s `metadata` export:
+`alternates.canonical` and `openGraph.url` above are relative paths (`/@handle`) — resolving
+those to absolute URLs needs `metadataBase` set somewhere in the tree. Do NOT hardcode a
+`http://localhost:3000` fallback: that would ship a canonical/og:url pointing at localhost in
+production if `NEXT_PUBLIC_SITE_URL` is ever left unset. Instead fall back to Vercel's own
+auto-populated `VERCEL_PROJECT_PRODUCTION_URL` env var, and omit `metadataBase` entirely (not a
+guessed URL) if neither is set — verified empirically: `generateMetadata`'s relative
+`alternates.canonical`/`openGraph.url` degrade gracefully to relative `<link>`/`<meta>` values
+when `metadataBase` is absent (browsers/crawlers resolve those against the current origin; no
+build error was observed for this ISR/runtime-rendered route). Add to `apps/web/app/layout.tsx`:
 
 ```ts
+// NEXT_PUBLIC_SITE_URL is the explicit override (set it once a production
+// domain exists); VERCEL_PROJECT_PRODUCTION_URL is Vercel's own env var,
+// available automatically on Vercel deployments without any config. If
+// neither is set, metadataBase is omitted entirely rather than falling back
+// to a localhost URL — a missing canonical/og:url is invisible, but a
+// canonical link pointing at http://localhost:3000 would ship broken SEO/
+// share metadata into production.
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
+  ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : undefined);
+
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+  ...(siteUrl ? { metadataBase: new URL(siteUrl) } : {}),
   title: "GateKeep",
   description: "Find the music. Book the night.",
 };
@@ -3513,7 +3566,9 @@ export const metadata: Metadata = {
 
 The existing `html, body { max-width: 100vw; overflow-x: hidden; }` rule breaks
 `position: sticky` on any descendant once both elements carry `overflow-x: hidden` (`html`'s
-copy already propagates). Split it so only `html` keeps `overflow-x: hidden`:
+copy already propagates). Split it so only `html` keeps `overflow-x: hidden`, and fold
+`max-width: 100vw` into the existing `body { ... }` rule below rather than adding a second
+`body` block:
 
 ```css
 html {
@@ -3522,7 +3577,16 @@ html {
 }
 
 body {
+  /* max-width: 100vw folded in here — no overflow-x: hidden (inherited from html). */
   max-width: 100vw;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 ```
 
@@ -3554,6 +3618,19 @@ Expected: green (0 errors — the two `@next/next/no-img-element` warnings on th
 without a configured remote pattern).
 
 Manual (needs `pnpm emu` + seeded approved profile with an approved track): `pnpm --filter @gatekeep/web dev`, open `http://localhost:3000/@<handle>` — page renders server-side (view-source shows content), track plays, `/u/<handle>` redirects to `/@<handle>`. Also check: `/@<MixedCaseHandle>` resolves the same profile (handles are lowercased before the Firestore lookup), and a nonexistent handle (`/@doesnotexist`) returns a true HTTP 404 (`curl -s -o /dev/null -w "%{http_code}"`), not a 200 with "not found" text in the body.
+
+Also seed a **`pending_review`** (not `approved`) profile and request its handle — firestore.rules
+denies the public read (`permission-denied`), which must still resolve to a real HTTP 404, not a
+500. This is the case the duck-typed error narrowing in `loadProfile`'s catch exists for; a 500
+here instead of a 404 is a live enumeration oracle (free handle = 404, taken-but-unapproved
+handle = 500) and was caught exactly this way in review.
+
+To verify the ISR/cache-HIT behavior specifically, use a production build rather than `next dev`
+(dev always renders fresh): `pnpm --filter @gatekeep/web build`, confirm the route table shows
+`● /u/[handle]` ("SSG ... uses generateStaticParams") rather than `ƒ`, then
+`FIREBASE_EMULATORS=1 pnpm --filter @gatekeep/web start` and `curl -sD - http://localhost:3000/@<handle>`
+twice — first response `x-nextjs-cache: MISS` with `Cache-Control: s-maxage=60, ...`, second
+response `x-nextjs-cache: HIT`.
 
 - [ ] **Step 7: Commit**
 
@@ -4974,6 +5051,11 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
 - Monorepo map: add `storage.rules`, `functions/src/{portfolio,tracks,media,storage}.ts`, `apps/web/app/join/`, `apps/web/app/dashboard/portfolio/`, `apps/mobile/src/portfolio/`, `apps/mobile/app/artist/`.
 - Key commands: note the storage emulator (port 9199) now starts with `pnpm emu`, and `emu:test`/`emu:rules` include it.
 - Environment: note `next typegen` for fresh clones (typecheck fails without it) and the corepack/pnpm Windows PATH workaround.
+- Environment variables table: add a row for `NEXT_PUBLIC_SITE_URL` (app: web; purpose: absolute
+  base URL for the public portfolio page's canonical link + OpenGraph `og:url`/images — see
+  `apps/web/app/layout.tsx`'s `metadataBase`; default when unset: falls back to Vercel's
+  `VERCEL_PROJECT_PRODUCTION_URL` if present, else `metadataBase` is omitted and those URLs
+  render relative instead of absolute — never a hardcoded localhost fallback).
 - Manual follow-ups: **replace** the "native App Check lands in sub-project 2" sentence — EAS production build + native App Check moved to a dedicated launch-prep track (per SP2 spec §1), same must-review list as the admin/internal deferred items. Add: create the production Storage bucket lifecycle rule (24h TTL on `staging/`) in the Firebase console/deploy config before launch — the emulator does not enforce lifecycle rules.
 - Manual follow-ups: the App Check enforcement checklist must cover Cloud Storage, not just Firestore + Functions — and Storage must NOT be flipped to enforce until native mobile App Check ships (mobile currently has no App Check attestation; enforcing early would lock the app out of its own uploads).
 - Manual follow-ups: abandoned `processing` tracks (created via `createTrack` but never uploaded, or stuck if the transcode trigger never fires) hold one of the 10 cap slots indefinitely until a member manually deletes them; consider a scheduled cleanup sweep (e.g. delete `processing` tracks older than 24h) in a later sub-project.

@@ -1,9 +1,7 @@
 import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import {
-  doc, getDoc, getDocs, collection, query, where, orderBy, FirestoreError,
-} from "firebase/firestore";
+import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
 import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
@@ -12,10 +10,20 @@ import styles from "./portfolio.module.css";
 
 // Takedowns/approvals need to propagate within about a minute, and this page
 // can't be gated behind App Check (it's plain SSR, no client attestation) —
-// so bound the Firestore/Storage reads to once per handle per revalidate
-// window instead of `force-dynamic`'s unbounded per-request reads, which was
-// an unauthenticated crawl-storm DoS surface.
+// so ISR bounds repeat Firestore/Storage reads to once per handle per
+// revalidate window instead of `force-dynamic`'s unbounded per-request reads.
+// (A flood of distinct/random handles still costs one cold render each —
+// this caps *repeat* hits on the same handle, not a broad crawl.)
 export const revalidate = 60;
+// Required for `revalidate` to take effect on a dynamic-params route: without
+// this, Next treats the route as fully dynamic (no caching, revalidate is a
+// no-op) per generate-static-params.md ("you must return an empty array ...
+// in order to revalidate (ISR) paths at runtime"). An empty array means no
+// paths are prerendered at build time; each handle is rendered (and cached)
+// on its first request instead.
+export function generateStaticParams() {
+  return [];
+}
 
 type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 type Loaded = {
@@ -26,7 +34,13 @@ type Loaded = {
 async function storageUrl(path: string | null | undefined): Promise<string | null> {
   if (!path) return null;
   try { return await getDownloadURL(ref(getServerFirebase().storage, path)); }
-  catch { return null; }
+  catch (e) {
+    // Swallowed to null on purpose (a missing/racing object shouldn't 500 the
+    // whole page), but a Storage-wide outage would otherwise silently empty
+    // every avatar/cover/track URL with no signal anywhere — log it.
+    console.warn("storageUrl failed", path, e);
+    return null;
+  }
 }
 
 // cache() dedupes this per-request across generateMetadata and the page body —
@@ -57,12 +71,22 @@ const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
     ]);
     return { profile, tracks, avatarUrl, coverUrl };
   } catch (e) {
+    // Duck-typed, not `e instanceof FirestoreError`: FirebaseError's own
+    // constructor runs `Object.setPrototypeOf(this, FirebaseError.prototype)`
+    // (an ES5-target workaround in @firebase/util, still present in the
+    // built SDK) which clobbers the prototype chain of every subclass
+    // instance — so a real FirestoreError never passes `instanceof
+    // FirestoreError`, only `instanceof FirebaseError`. Trusting that check
+    // would send every FirestoreError down the "rethrow as 500" path below,
+    // including permission-denied ones — turning "not approved" into a
+    // 404-vs-500 enumeration oracle for handle existence.
+    //
     // permission-denied = the profile/track isn't approved (rules deny the
     // read) — that's a legitimate "not found" from the public's point of
     // view. not-found only fires if a doc vanishes between reads. Anything
     // else (offline, a missing index, a backend outage) is a real failure —
     // surface it as a truthful 500, not a silent "Not found" 200.
-    const code = e instanceof FirestoreError ? e.code : undefined;
+    const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
     if (code === "permission-denied" || code === "not-found") return null;
     console.error("portfolio load failed", handle, e);
     throw e;
@@ -72,7 +96,12 @@ const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
 export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise<Metadata> {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
-  if (!data) return { title: "Not found · GateKeep", robots: { index: false } };
+  // The page component calls notFound() for the same null case, which
+  // renders not-found.tsx's own `metadata` (its title) instead of whatever
+  // this function returns — so only robots survives here in practice; keep
+  // it anyway as a fallback for any caller that resolves metadata without
+  // rendering the page (e.g. a metadata-only route consumer).
+  if (!data) return { robots: { index: false } };
   const { profile } = data;
   const pf = profile.portfolio;
   const description = pf?.bio?.slice(0, 160)
