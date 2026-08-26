@@ -32,22 +32,30 @@ export default function Join() {
       const { data } = await httpsCallable<typeof input, { profileId: string }>(
         functions, "createProfileDraft")(input);
       if (type === "musician") {
-        // MUST FIX (Task 14): do NOT auto-submit a musician draft. Task 9's
-        // minimum-content gate (bio, >=1 genre, avatar, >=1 listenable
+        // MUST FIX (SP2 Task 14): do NOT auto-submit a musician draft. Task
+        // 9's minimum-content gate (bio, >=1 genre, avatar, >=1 listenable
         // track) means a brand-new draft can NEVER pass
         // submitProfileForReview — every auto-submit here would always fail
         // with failed-precondition. Route into the portfolio tab to collect
         // that content instead, mirroring web's join/page.tsx createDraft ->
-        // router.push handoff. Curator joins (below) are unaffected — there's
-        // no gate for them — and keep the old create-then-submit behavior.
+        // router.push handoff.
         switchTo({ profileId: data.profileId, type: "musician", name: name.trim(), status: "draft" });
         Alert.alert("Draft created", "Add a bio, photo, and a track next, then submit for review.");
         router.replace("/(musician)/portfolio");
         return;
       }
-      await httpsCallable(functions, "submitProfileForReview")({ profileId: data.profileId });
-      Alert.alert("Submitted!", "Our team will review your profile. We'll notify you.");
-      router.back();
+      // MUST FIX (this task, mirrors the identical musician bug above):
+      // sub-project 3 added functions/src/profiles.ts's curator minimum-
+      // content gate (about, >=1 photo, a location, a valid lookingFor) —
+      // this auto-submit-on-create call would now ALWAYS fail with
+      // failed-precondition for a brand-new curator draft too, since none of
+      // that content exists yet at creation time. Route into the curator
+      // dashboard tab to collect it instead, exactly mirroring the musician
+      // branch above and web's join/page.tsx (which never auto-submits for
+      // either profile type).
+      switchTo({ profileId: data.profileId, type: "curator", name: name.trim(), status: "draft" });
+      Alert.alert("Draft created", "Add an about section, photos, a location, and what you're looking for next, then submit for review.");
+      router.replace("/(curator)/dashboard");
     } catch (e) {
       Alert.alert("Couldn't submit", e instanceof Error ? e.message : "Try again.");
     } finally {
@@ -80,13 +88,10 @@ export default function Join() {
         value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
       <Pressable onPress={() => void submit()} disabled={busy}
         style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
-        {/* Musician: create-only now (see the MUST FIX comment above) —
-            "Submit for review" would be a lie until the portfolio tab's own
-            gated button actually does that. Curator: unchanged, still
-            submits immediately. */}
-        <Text style={{ color: "#fff", textAlign: "center" }}>
-          {busy ? "Creating…" : type === "musician" ? "Create my profile" : "Submit for review"}
-        </Text>
+        {/* Both types are create-only now (see the two MUST FIX comments
+            above) — "Submit for review" would be a lie for either until the
+            destination tab's own gated submit button actually does that. */}
+        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Creating…" : "Create my profile"}</Text>
       </Pressable>
     </ScrollView>
   );

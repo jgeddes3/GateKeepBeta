@@ -7,7 +7,7 @@ import { getFirebase } from "../lib/firebase";
 import {
   GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
   type PortfolioData, type BookingDoc, type BookingPreferences, type BookingRates,
-  type ExternalLink, type ExternalLinkKind, type RateAmount,
+  type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
 } from "@gatekeep/shared";
 
 // RN ports of the web portfolio forms — same callables, same validation,
@@ -140,8 +140,16 @@ export function LinksForm({ profileId, initial }:
   );
 }
 
-export function PhotoUploader({ profileId, uid, kind, currentPath }:
-  { profileId: string; uid: string; kind: "avatar" | "cover"; currentPath: string | null }) {
+// Sub-project 3 widened `kind` to accept "gallery" (curator profiles) — the
+// upload/staging/awaiting-pipeline mechanics below are unchanged and work
+// identically for it: a caller managing a LIST rather than a single slot
+// (curator's photoPaths array) passes a `currentPath` that's really a
+// fingerprint of the list (e.g. its length) instead of one path, so the same
+// "baseline moved -> awaiting cleared" logic still detects completion — see
+// src/curator/CuratorForms.tsx's GalleryPhotosSection. Mirrors web's Task 9
+// widening of ../../web/src/portfolio/PortfolioForms.tsx's PhotoUploader.
+export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
+  { profileId: string; uid: string; kind: PhotoKind; currentPath: string | null; disabled?: boolean }) {
   const [busy, setBusy] = useState(false);
   // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
   // seconds after the storage upload lands — we don't know its eventual
@@ -202,13 +210,18 @@ export function PhotoUploader({ profileId, uid, kind, currentPath }:
     }
   };
   const processing = awaiting;
-  const label = busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`;
+  const photoLabel = kind === "avatar" ? "profile photo" : kind === "cover" ? "cover photo" : "photo";
+  const label = busy ? "Uploading…" : processing ? "Processing…" : `Upload ${photoLabel}`;
   return (
     <View style={{ gap: 4 }}>
-      <Pressable onPress={() => void upload()} disabled={busy || processing}
-        accessibilityRole="button" accessibilityLabel={`Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10, alignSelf: "flex-start" }}>
-        <Text>{label}{currentPath && !processing ? " ✓" : ""}</Text>
+      <Pressable onPress={() => void upload()} disabled={busy || processing || disabled}
+        accessibilityRole="button" accessibilityLabel={`Upload ${photoLabel}`}
+        style={{ borderWidth: 1, borderRadius: 8, padding: 10, alignSelf: "flex-start", opacity: disabled ? 0.5 : 1 }}>
+        {/* The checkmark reads as "this slot is filled" — meaningful for
+            avatar/cover's single-slot model, misleading for gallery (where
+            currentPath is a length fingerprint, not a real path, and the
+            gallery grid already renders its own thumbnails). */}
+        <Text>{label}{currentPath && !processing && kind !== "gallery" ? " ✓" : ""}</Text>
       </Pressable>
       {timedOut && (
         <Text style={{ color: "#92400e", fontSize: 12 }}>
