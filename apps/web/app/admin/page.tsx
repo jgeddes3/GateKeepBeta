@@ -8,7 +8,12 @@ import { httpsCallable } from "firebase/functions";
 import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import { getFirebase } from "../../src/lib/firebase";
 import { AdminGate } from "./AdminGate";
-import type { ProfileDoc, AuditLogDoc, UserDoc, TrackDoc } from "@gatekeep/shared";
+import { GIG_STATUS_LABEL, formatGigDateTime, badge } from "../../src/gigs/GigForms";
+import {
+  GIG_STATUSES,
+  type ProfileDoc, type AuditLogDoc, type UserDoc, type TrackDoc, type GigDoc, type GigStatus,
+  type CuratorSubtype, type AdminNoteDoc,
+} from "@gatekeep/shared";
 
 type Row<T> = T & { id: string };
 
@@ -37,6 +42,31 @@ function PhotoThumb({ path, alt }: { path: string | null | undefined; alt: strin
   return <img src={url} alt={alt} style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 4, border: "1px solid #ccc" }} />;
 }
 
+// Resolves the uid of the profile's owner — the member whose role is
+// "admin" who joined earliest (createProfileDraft always writes exactly one
+// such member, {uid, role:"admin", label:"owner"}, at creation time;
+// inviteMember can add further admin-role members later, so "earliest
+// joinedAt" rather than "the only admin" picks the original creator when
+// more than one exists). Used by QueueRow's reject-with-flag below to know
+// WHO flagAccount's uid should target, since ProfileDoc itself carries no
+// owner-uid field. Fetches the whole (small, single-digit) members
+// subcollection rather than an equality+orderBy query, deliberately: that
+// combination needs its own composite index, which doesn't exist (and this
+// task is web-only — no backend/index changes), so sorting client-side over
+// an unfiltered read is the return-nothing-new-to-deploy option. Returns
+// null if the profile somehow has no admin-role member (shouldn't happen in
+// practice, but the caller surfaces that as a "couldn't flag" error rather
+// than assuming).
+async function resolveProfileOwnerUid(profileId: string): Promise<string | null> {
+  const { db } = getFirebase();
+  const snap = await getDocs(collection(db, `profiles/${profileId}/members`));
+  const admins = snap.docs
+    .map((d) => ({ uid: d.id, ...(d.data() as { role: string; joinedAt: number }) }))
+    .filter((m) => m.role === "admin")
+    .sort((a, b) => a.joinedAt - b.joinedAt);
+  return admins[0]?.uid ?? null;
+}
+
 // Owns the Approve/Reject actions (and their in-flight/error state) for
 // exactly one queue row. A per-row component — rather than a shared
 // in-flight-ids array on Queue — keeps the busy flag local state instead of
@@ -46,18 +76,48 @@ function PhotoThumb({ path, alt }: { path: string | null | undefined; alt: strin
 //
 // Finding 2: reviewers were approving bio/photos/genres/links sight-unseen —
 // the checklist below said "check submitted details for impersonation" but
-// nothing on this row showed those details. Musician portfolios only;
-// curator profiles have no `portfolio` field to show.
+// nothing on this row showed those details. Musician portfolios show their
+// portfolio block; curator profiles (Task 12) show the curator gate-fields
+// block below instead — each type only has one of the two.
+//
+// Task 12 also adds an optional "also flag this account" checkbox+note next
+// to Reject: when checked, flagAccount is called AFTER reviewProfile's
+// reject commits (never before — a flag on an account whose reject then
+// fails would leave a flag with nothing to explain it). Both calls share
+// this row's one `busy` lock, so nothing else on the row can fire mid
+// two-step sequence.
 function QueueRow({ p }: { p: Row<ProfileDoc> }) {
   const [busy, setBusy] = useState(false);
+  const [flagChecked, setFlagChecked] = useState(false);
+  const [flagNote, setFlagNote] = useState("");
   const review = async (decision: "approved" | "rejected") => {
     const reason = decision === "rejected"
       ? window.prompt("Rejection reason (shown to the applicant):") ?? "" : undefined;
     if (decision === "rejected" && !reason) return;
+    const trimmedFlagNote = flagNote.trim();
+    if (decision === "rejected" && flagChecked && (trimmedFlagNote.length < 1 || trimmedFlagNote.length > 500)) {
+      window.alert('Enter a note (1-500 characters) for "also flag this account", or uncheck it.');
+      return;
+    }
     setBusy(true);
     try {
       const { functions } = getFirebase();
       await httpsCallable(functions, "reviewProfile")({ profileId: p.id, decision, reason });
+      if (decision === "rejected" && flagChecked) {
+        try {
+          const ownerUid = await resolveProfileOwnerUid(p.id);
+          if (!ownerUid) throw new Error("Could not find an account on this profile to flag.");
+          await httpsCallable(functions, "flagAccount")({ uid: ownerUid, text: trimmedFlagNote });
+          setFlagChecked(false);
+          setFlagNote("");
+        } catch (flagError) {
+          window.alert(
+            `The review was submitted, but the account flag failed: ${
+              flagError instanceof Error ? flagError.message : "try flagging from User lookup instead."
+            }`,
+          );
+        }
+      }
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Could not submit the review — try again.");
     } finally {
@@ -65,6 +125,7 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
     }
   };
   const pf = p.type === "musician" ? p.portfolio : undefined;
+  const curator = p.type === "curator" ? p.curator : undefined;
   // Same https-only display filter as the public /u/[handle] page and the
   // mobile artist screen — belt-and-suspenders even though
   // validatePortfolioUpdate already enforces this at write time.
@@ -72,6 +133,32 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
   return (
     <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
       <strong>{p.name}</strong> @{p.handle} — {p.type} ({p.subtype})
+      {typeof p.resubmitCount === "number" && p.resubmitCount > 0 && (
+        <>{" "}<span style={badge("#fde68a")}>resubmitted ×{p.resubmitCount}</span></>
+      )}
+      {curator && (
+        <div style={{ marginTop: 8, fontSize: 14 }}>
+          <p style={{ margin: "0 0 4px" }}>
+            {curator.photoPaths.length} photo{curator.photoPaths.length === 1 ? "" : "s"}
+            {" · "}{curator.location.address ?? curator.location.city}
+          </p>
+          {curator.lookingFor.genres.length > 0 && (
+            <p style={{ margin: "0 0 4px" }}>Genres: {curator.lookingFor.genres.join(", ")}</p>
+          )}
+          {curator.lookingFor.actSizes.length > 0 && (
+            <p style={{ margin: "0 0 4px" }}>Act sizes: {curator.lookingFor.actSizes.join(", ")}</p>
+          )}
+          {curator.about && (
+            <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+              {curator.about.length > 240 ? `${curator.about.slice(0, 240)}…` : curator.about}
+            </p>
+          )}
+          {!curator.about && curator.lookingFor.genres.length === 0 && curator.lookingFor.actSizes.length === 0
+            && curator.photoPaths.length === 0 && (
+            <p style={{ margin: 0, color: "#888" }}>No curator details submitted.</p>
+          )}
+        </div>
+      )}
       {pf && (
         <div style={{ marginTop: 8, display: "flex", gap: 12 }}>
           <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
@@ -97,9 +184,27 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
           </div>
         </div>
       )}
-      <div style={{ marginTop: 8 }}>
+      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
         <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
+        <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
+          <input
+            type="checkbox"
+            disabled={busy}
+            checked={flagChecked}
+            onChange={(e) => setFlagChecked(e.target.checked)}
+          />
+          also flag this account
+        </label>
+        {flagChecked && (
+          <input
+            placeholder="flag note (shown only to admins)"
+            value={flagNote}
+            disabled={busy}
+            onChange={(e) => setFlagNote(e.target.value)}
+            style={{ fontSize: 13, flex: "1 1 220px", minWidth: 160 }}
+          />
+        )}
       </div>
     </div>
   );
@@ -260,6 +365,151 @@ function TracksQueue() {
       </p>
       {pending.map((t) => <TrackQueueRow key={`${t.profileId}-${t.id}`} t={t} />)}
       {pending.length === 0 && <p>Nothing waiting.</p>}
+    </section>
+  );
+}
+
+const NON_VENUE_SUBTYPES = new Set<CuratorSubtype>(["planner", "individual_host"]);
+
+// Task 12's admin gig-moderation section. Mirrors GigsList's own STATUS_BG/
+// STATUS_FG palette (apps/web/app/dashboard/curator/[profileId]/gigs/
+// page.tsx) rather than importing it — that file only exports the map
+// implicitly via a module-private const, not through GigForms.tsx's shared
+// exports, so duplicating a 5-entry Record here is simpler than widening
+// that page's own export surface for one reuse.
+const GIG_STATUS_BG: Record<GigDoc["status"], string> = {
+  draft: "#fef9c3", open: "#dcfce7", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
+};
+const GIG_STATUS_FG: Partial<Record<GigDoc["status"], string>> = { taken_down: "#9a3412" };
+
+type GigModRow = Row<GigDoc> & {
+  curatorName: string; curatorHandle: string | null; curatorSubtype: CuratorSubtype | null;
+};
+
+// Owns the takedown action (and its busy/error state) for exactly one gig
+// row — same per-row-component rationale as QueueRow/TrackQueueRow above.
+// Series occurrences get a choice of scope (backend's takedownGig requires
+// scope:"series" to actually own a seriesId, so the series button is simply
+// absent otherwise rather than being shown-then-rejected); a standalone gig
+// only ever gets the one "this date" button.
+function GigModerationRow({ g }: { g: GigModRow }) {
+  const [busy, setBusy] = useState(false);
+  const takedown = async (scope: "occurrence" | "series") => {
+    const reason = window.prompt(
+      scope === "series"
+        ? "Takedown reason (shown to the curator) — this removes this date AND every other open date in the series, and pauses the series:"
+        : "Takedown reason (shown to the curator) — this removes this date immediately:",
+    ) ?? "";
+    if (!reason.trim()) return;
+    if (reason.trim().length > 500) { window.alert("Reason must be 500 characters or fewer."); return; }
+    setBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "takedownGig")({ gigId: g.id, scope, reason: reason.trim() });
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not take down the gig — try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
+      <strong>{g.title || "Untitled gig"}</strong>{" "}
+      <span style={badge(GIG_STATUS_BG[g.status], GIG_STATUS_FG[g.status])}>{GIG_STATUS_LABEL[g.status]}</span>
+      <p style={{ margin: "4px 0 0", fontSize: 14, color: "#666" }}>
+        {g.curatorHandle
+          ? <a href={`/u/${g.curatorHandle}`} target="_blank" rel="noopener noreferrer">{g.curatorName}</a>
+          : g.curatorName}
+        {" · "}{formatGigDateTime(g.startsAt)}
+      </p>
+      {g.status !== "taken_down" && (
+        <div style={{ marginTop: 8 }}>
+          <button disabled={busy} onClick={() => takedown("occurrence")}>
+            {busy ? "Taking down…" : "Take down this date…"}
+          </button>{" "}
+          {g.seriesId && (
+            <button disabled={busy} onClick={() => takedown("series")}>
+              {busy ? "Taking down…" : "Take down entire series…"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Status filter (default "open" — the actionable moderation queue; other
+// statuses are there for the "did I already handle this" / "what happened
+// to it" lookback) + subtype toggle (default non-venue — spec's trust
+// split: individually-run planner/host gigs get eyes-on moderation, venue
+// gigs default OFF the list since venues clear an address-verification bar
+// venues-only at approval time (see profiles.ts's hasLocation check) that
+// planners/hosts don't).
+//
+// GigDoc carries no subtype of its own (only curatorProfileId) — the
+// admin-readable gigs query is by status alone, and curator subtype comes
+// from a second, batched read: same N+1-avoidance shape as TracksQueue's
+// profile-name resolution above (Promise.all over the *unique*
+// curatorProfileIds in the current snapshot), just carrying subtype+handle
+// alongside name instead of name alone. Same two race guards too
+// (`cancelled` for unmount, monotonic `seq` so a slower/older snapshot's
+// resolution can't finish after and repaint over a newer one).
+function GigsAdmin() {
+  const [status, setStatus] = useState<GigStatus>("open");
+  const [showVenue, setShowVenue] = useState(false);
+  const [rows, setRows] = useState<GigModRow[]>([]);
+  useEffect(() => {
+    const { db } = getFirebase();
+    let cancelled = false;
+    let seq = 0;
+    const unsubscribe = onSnapshot(
+      query(collection(db, "gigs"), where("status", "==", status)),
+      async (s) => {
+        const mySeq = ++seq;
+        const docs = s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
+        const curatorIds = Array.from(new Set(docs.map((g) => g.curatorProfileId)));
+        const entries = await Promise.all(
+          curatorIds.map(async (id) => {
+            const p = await getDoc(doc(db, "profiles", id));
+            return [id, p.exists() ? (p.data() as ProfileDoc) : null] as const;
+          }),
+        );
+        if (cancelled || mySeq !== seq) return;
+        const curators = new Map(entries);
+        setRows(docs.map((g) => {
+          const p = curators.get(g.curatorProfileId);
+          return {
+            ...g,
+            curatorName: p?.name ?? "(deleted)",
+            curatorHandle: p?.handle ?? null,
+            curatorSubtype: p ? (p.subtype as CuratorSubtype) : null,
+          };
+        }));
+      },
+    );
+    return () => { cancelled = true; unsubscribe(); };
+  }, [status]);
+
+  const filtered = rows.filter((g) => (
+    showVenue ? g.curatorSubtype === "venue" : g.curatorSubtype === null || NON_VENUE_SUBTYPES.has(g.curatorSubtype)
+  ));
+
+  return (
+    <section>
+      <h2>Gigs ({filtered.length})</h2>
+      <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: 8 }}>
+        <label style={{ fontSize: 14 }}>
+          Status:{" "}
+          <select value={status} onChange={(e) => setStatus(e.target.value as GigStatus)}>
+            {GIG_STATUSES.map((s) => <option key={s} value={s}>{GIG_STATUS_LABEL[s]}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 14 }}>
+          <input type="checkbox" checked={showVenue} onChange={(e) => setShowVenue(e.target.checked)} />
+          {" "}Show venue gigs (default: planners &amp; individual hosts only)
+        </label>
+      </div>
+      {filtered.map((g) => <GigModerationRow key={g.id} g={g} />)}
+      {filtered.length === 0 && <p>Nothing here.</p>}
     </section>
   );
 }
@@ -467,29 +717,128 @@ function UserProfiles({ uid }: { uid: string }) {
   );
 }
 
+// Renders adminNotes/{uid} (Task 12) inline on a user-lookup result —
+// admin-read-only per firestore.rules (`match /adminNotes/{uid} { allow
+// read: if isAdmin(); allow write: if false; }`), written only by
+// flagAccount's Admin SDK transaction. `cancelled` guards unmount the same
+// way UserProfiles above does; no unmount-race window here to compound
+// (a single getDoc, not an N+1 loop), but the guard costs nothing and keeps
+// this file's async-effect shape consistent.
+function AdminNotes({ uid }: { uid: string }) {
+  const [notes, setNotes] = useState<AdminNoteDoc["notes"] | "loading">("loading");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { db } = getFirebase();
+      const snap = await getDoc(doc(db, "adminNotes", uid));
+      if (cancelled) return;
+      setNotes(snap.exists() ? (snap.data() as AdminNoteDoc).notes : []);
+    })();
+    return () => { cancelled = true; };
+  }, [uid]);
+  if (notes === "loading") return <p style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#888" }}>Loading notes…</p>;
+  if (notes.length === 0) return null;
+  return (
+    <ul style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#b00020" }}>
+      {notes.map((n) => (
+        <li key={`${n.byUid}-${n.at}`}>{new Date(n.at).toLocaleString()} — {n.text}</li>
+      ))}
+    </ul>
+  );
+}
+
+type LookupMode = "email" | "name";
+type UserResult = { id: string; displayName: string; email: string };
+
+// Task 12: adds a name-prefix mode (searchUsersByName, admin-only callable
+// over the displayNameLower index) alongside the original exact-email path,
+// via a mode toggle rather than two always-visible inputs — mirrors the
+// existing single-input/single-button lookup shape instead of doubling the
+// UI surface. Both paths funnel into the same UserResult shape so the
+// results list below (profiles + adminNotes) is written once.
+//
+// `searchSeq` guards search() the same way TakedownsPanel's lookupSeq guards
+// its lookup() above: a ref (not state) so a slower, superseded search's
+// response can never overwrite a newer one's already-displayed results —
+// relevant here specifically because switching mode mid-request or
+// double-clicking Search both fire overlapping async calls.
 function UserLookup() {
+  const [mode, setMode] = useState<LookupMode>("email");
   const [term, setTerm] = useState("");
-  const [results, setResults] = useState<Row<UserDoc>[]>([]);
-  const search = async () => {
-    const { db } = getFirebase();
-    const s = await getDocs(query(collection(db, "users"), where("email", "==", term.trim())));
-    setResults(s.docs.map((d) => ({ id: d.id, ...(d.data() as UserDoc) })));
+  const [results, setResults] = useState<UserResult[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const searchSeq = useRef(0);
+
+  const switchMode = (m: LookupMode) => {
+    if (m === mode) return;
+    setMode(m);
+    setResults([]);
+    setSearched(false);
   };
+
+  const search = async () => {
+    const q = term.trim();
+    if (!q) return;
+    const mySeq = ++searchSeq.current;
+    setBusy(true);
+    setSearched(true);
+    try {
+      const { db, functions } = getFirebase();
+      let mapped: UserResult[];
+      if (mode === "email") {
+        const s = await getDocs(query(collection(db, "users"), where("email", "==", q)));
+        mapped = s.docs.map((d) => {
+          const data = d.data() as UserDoc;
+          return { id: d.id, displayName: data.displayName, email: data.email };
+        });
+      } else {
+        const res = await httpsCallable<{ q: string }, { results: { uid: string; displayName: string; email: string }[] }>(
+          functions, "searchUsersByName",
+        )({ q });
+        mapped = res.data.results.map((r) => ({ id: r.uid, displayName: r.displayName, email: r.email }));
+      }
+      if (mySeq !== searchSeq.current) return; // superseded by a newer search
+      setResults(mapped);
+    } catch (e) {
+      if (mySeq === searchSeq.current) {
+        window.alert(e instanceof Error ? e.message : "Search failed — try again.");
+        setResults([]);
+      }
+    } finally {
+      if (mySeq === searchSeq.current) setBusy(false);
+    }
+  };
+
   return (
     <section>
       <h2>User lookup</h2>
-      {/* v1: exact-email lookup only. Name search is deferred — no name index/normalization
-          exists yet, and this dashboard's other surfaces (queue, audit log) cover the
-          near-term admin workflows without it. */}
-      <input placeholder="exact email" value={term} onChange={(e) => setTerm(e.target.value)} />
-      <button onClick={search}>Search</button>
+      <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+        <label style={{ fontSize: 14 }}>
+          <input type="radio" name="lookup-mode" disabled={busy} checked={mode === "email"}
+            onChange={() => switchMode("email")} /> Email (exact)
+        </label>
+        <label style={{ fontSize: 14 }}>
+          <input type="radio" name="lookup-mode" disabled={busy} checked={mode === "name"}
+            onChange={() => switchMode("name")} /> Name (prefix)
+        </label>
+      </div>
+      <input
+        placeholder={mode === "email" ? "exact email" : "name prefix"}
+        value={term}
+        disabled={busy}
+        onChange={(e) => setTerm(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !busy) void search(); }}
+      />{" "}
+      <button disabled={busy} onClick={search}>{busy ? "Searching…" : "Search"}</button>
       {results.map((u) => (
-        <div key={u.id} style={{ marginBottom: 8 }}>
+        <div key={u.id} style={{ marginTop: 8 }}>
           <p style={{ margin: 0 }}>{u.displayName} · {u.email} · uid {u.id}</p>
+          <AdminNotes uid={u.id} />
           <UserProfiles key={u.id} uid={u.id} />
         </div>
       ))}
-      {results.length === 0 && term && <p>No match.</p>}
+      {searched && !busy && results.length === 0 && <p>No match.</p>}
     </section>
   );
 }
@@ -519,7 +868,7 @@ export default function AdminPage() {
     <AdminGate>
       <main style={{ maxWidth: 860, margin: "40px auto", display: "grid", gap: 32 }}>
         <h1>GateKeep Admin</h1>
-        <Queue /><TracksQueue /><TakedownsPanel /><UserLookup /><AuditLog />
+        <Queue /><TracksQueue /><GigsAdmin /><TakedownsPanel /><UserLookup /><AuditLog />
       </main>
     </AdminGate>
   );
