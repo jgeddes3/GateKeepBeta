@@ -331,6 +331,15 @@ export interface BookingCancellation {
   by: BookingSide; reason: string; at: number; hoursBeforeStart: number;
   outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
 }
+// Task 6: one entry per cancelOccurrence call against a whole-run booking —
+// unlike BookingCancellation (the run-level outcome, which also moves
+// deposit.forfeitedTo), a per-occurrence outcome is recorded ONLY here;
+// deposit.forfeitedTo is deliberately left untouched by cancelOccurrence
+// (sub-5 reads these entries directly for occurrence-level settlement).
+export interface OccurrenceCancellation {
+  gigId: string; by: BookingSide; at: number; hoursBeforeStart: number;
+  outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
+}
 // Named BookingRequestDoc (not BookingDoc) because SP2's BookingDoc (the
 // rates+prefs subdoc at profiles/{id}/private/booking, above) already owns
 // the obvious name — use BookingRequestDoc everywhere for this top-level doc.
@@ -343,6 +352,14 @@ export interface BookingRequestDoc {
   acceptedTerms: AcceptedTerms | null; deposit: BookingDeposit | null;
   cancellation: BookingCancellation | null;
   createdAt: number; updatedAt: number; confirmedAt: number | null; resolvedAt: number | null;
+  // Task 6: whole-run per-date cancellations (cancelOccurrence). Optional
+  // (not `occurrenceCancellations:`) so every pre-Task-6 booking literal —
+  // bookings.ts's own finalizeBookingRequest write, and every existing
+  // fixture in bookings.test.ts — stays valid without modification; absent
+  // is treated identically to an empty array by readers. Capped at
+  // MAX_OCCURRENCE_CANCELLATIONS, drop-oldest, once cancelOccurrence starts
+  // writing it.
+  occurrenceCancellations?: OccurrenceCancellation[];
 }
 
 // visibility + projections + reliability
@@ -373,3 +390,4 @@ export const CURATOR_FORFEIT_WINDOW_HOURS = 72;
 export const MUSICIAN_MARK_WINDOW_HOURS = 24;
 export const MAX_RELIABILITY_MARKS = 200;
 export const NO_SHOW_REPORT_WINDOW_DAYS = 14;
+export const MAX_OCCURRENCE_CANCELLATIONS = 100;
