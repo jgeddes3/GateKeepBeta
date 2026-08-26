@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
@@ -16,6 +16,12 @@ import { validateProfileDraft, type ProfileDraftInput } from "@gatekeep/shared";
 export default function Join() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  // Mirrors the editor page's auth guard exactly: the redirect is a side
+  // effect, not something to trigger during render (calling router.replace
+  // directly in the render body — as this page used to do — updates router
+  // state while a different component is rendering, which React Strict Mode
+  // and React 19 both flag).
+  useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   const [subtype, setSubtype] = useState<"solo" | "band">("solo");
   const [name, setName] = useState("");
   const [handle, setHandle] = useState("");
@@ -23,7 +29,7 @@ export default function Join() {
   const [error, setError] = useState<string | null>(null);
 
   if (loading) return <main><p>Loading…</p></main>;
-  if (!user) { router.replace("/sign-in"); return null; }
+  if (!user) return null; // redirecting via the effect above
 
   const createDraft = async () => {
     const input: ProfileDraftInput = { type: "musician", subtype, name, handle: handle.toLowerCase() };

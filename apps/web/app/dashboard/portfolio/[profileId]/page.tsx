@@ -47,6 +47,21 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
+  // Resets `booking` back to "loading" the instant profileId changes — an
+  // in-app navigation from profile A's editor to profile B's (same
+  // route/component, different params) does NOT remount this page, so
+  // without this, B's first render(s) would show A's still-cached booking
+  // data. Adjusted during render (React's documented pattern for resetting
+  // state when a prop/param changes — https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes),
+  // not in a useEffect: this runs synchronously before commit, so React
+  // re-renders once more with the reset state instead of painting a stale
+  // frame first.
+  const [bookingProfileId, setBookingProfileId] = useState(profileId);
+  if (profileId !== bookingProfileId) {
+    setBookingProfileId(profileId);
+    setBooking("loading");
+  }
+
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   useEffect(() => {
     if (!user) return;
@@ -54,10 +69,16 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     const unsub = onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
       () => setProfile(null));
+    // `cancelled` guards against a stale WRITE (as opposed to the stale
+    // READ the render-time reset above handles): without it, navigating
+    // from profile A's editor to profile B's can let A's getDoc resolve
+    // AFTER B's effect has already started, overwriting B's freshly-reset
+    // booking state with A's data.
+    let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
-      .then((s) => setBooking(s.exists() ? (s.data() as BookingDoc) : null))
-      .catch(() => setBooking(null));
-    return unsub;
+      .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
+      .catch(() => { if (!cancelled) setBooking(null); });
+    return () => { cancelled = true; unsub(); };
   }, [user, profileId]);
   // Own subscription, separate from TrackManager's below: the submit-lock
   // gate below needs live track statuses at THIS level (to enable/disable
@@ -121,29 +142,42 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       </p>
       {profile.status === "rejected" && (
         <div style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, padding: 12 }}>
-          <strong>Changes requested:</strong> {profile.rejectionReason}
+          <strong>Changes requested:</strong> {profile.rejectionReason ?? "(no reason provided)"}
         </div>
       )}
       <section>
         <h2>Photos</h2>
         <p>
-          <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar" hasPhoto={!!profile.portfolio?.avatarPhotoPath} />
+          <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar" currentPath={profile.portfolio?.avatarPhotoPath ?? null} />
           {" · "}
-          <PhotoUploader profileId={profileId} uid={user.uid} kind="cover" hasPhoto={!!profile.portfolio?.coverPhotoPath} />
+          <PhotoUploader profileId={profileId} uid={user.uid} kind="cover" currentPath={profile.portfolio?.coverPhotoPath ?? null} />
         </p>
         <p style={{ color: "#666" }}>Photos appear on your page a few seconds after upload.</p>
       </section>
-      <BioGenresForm profileId={profileId} initial={profile.portfolio} />
-      <LinksForm profileId={profileId} initial={profile.portfolio} />
+      {/* Keyed by profileId: these forms seed their local state from `initial`
+          only once, on mount (see PortfolioForms.tsx). Without the key, an
+          in-app navigation from one profile's editor to another's (same
+          route/component, different params) would reuse these instances and
+          leave the FIRST profile's bio/links/rates showing — and editable —
+          on top of the second profile's data until a full reload. */}
+      <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
+      <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
-      <BookingForm profileId={profileId} initial={booking} />
+      <BookingForm key={profileId} profileId={profileId} initial={booking} />
       {showSubmit && (
         <section style={{ display: "grid", gap: 8, borderTop: "1px solid #eee", paddingTop: 24 }}>
           <button onClick={submit} disabled={!canSubmit || submitBusy} style={{ padding: 12, fontSize: 16 }}>
             {submitBusy ? "Submitting…" : profile.status === "rejected" ? "Resubmit for review" : "Submit for review"}
           </button>
           {!canSubmit && (
-            <p style={{ color: "#92400e", margin: 0 }}>Before you submit, add: {missing.join(", ")}.</p>
+            <p style={{ color: "#92400e", margin: 0 }}>
+              {/* Same construction as the server's failed-precondition message
+                  (functions/src/profiles.ts) — "a bio, at least one genre, and
+                  a profile photo" instead of a raw comma join, so the client
+                  hint reads identically to what the server would say if this
+                  lock were somehow bypassed. */}
+              Add {new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(missing)} before submitting.
+            </p>
           )}
           <button onClick={deleteDraft} disabled={deleteBusy}
             style={{ color: "#dc2626", justifySelf: "start", background: "none", border: "1px solid #fca5a5", borderRadius: 6, padding: "6px 12px" }}>
