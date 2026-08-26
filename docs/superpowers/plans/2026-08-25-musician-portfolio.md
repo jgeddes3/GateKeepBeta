@@ -5833,6 +5833,13 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
   - Wire server-side Sentry (`instrumentation.ts`) once DSNs exist — mirrors the existing
     client-side `instrumentation-client.ts` no-op-until-configured pattern.
 - Manual follow-ups (web polish, from Task 11's quality review):
+  - Admin `TracksQueue` snapshot callback: a rejecting `Promise.all` (one failed profile
+    `getDoc`) silently drops the whole snapshot update — switch to `Promise.allSettled` with a
+    per-profile "(unknown)" fallback + `console.error` (from Task 12's re-review).
+  - `functions/test/tracks.test.ts` rv4: assert exactly ONE takedown notification exists
+    (`filter(...).length === 1`, not `.some()`) to pin first-reject single-notify against
+    regressions (from Task 12's re-review). Also: consider reordering reject's storage cleanup
+    before the notification await for faster time-to-public-removal on takedowns.
   - Replace `window.alert`/`confirm`/`prompt` throughout the portfolio editor/wizard with a
     shared feedback primitive (toast/modal component) — the native browser dialogs work but
     block the main thread, can't be styled, and don't match the rest of the app's UI.
