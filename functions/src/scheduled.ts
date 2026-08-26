@@ -53,6 +53,15 @@ function anchorFor(series: GigSeriesDoc): number {
 
 interface MaterializePlan { startsAtList: number[]; newMaterializedThrough: number; }
 
+// Smallest `base + k*step` (k >= 0, so always grid-aligned to `base`) that is
+// >= `threshold`. A no-op (returns `base` unchanged) when `base` already
+// clears the threshold.
+function skipAheadTo(base: number, threshold: number, step: number): number {
+  if (base >= threshold) return base;
+  const stepsToSkip = Math.ceil((threshold - base) / step);
+  return base + stepsToSkip * step;
+}
+
 // Pure planning function (no I/O) — computes which occurrence startsAt
 // values fall newly inside the [materializedThrough, windowEnd) slice, plus
 // the watermark to advance to. Window end is exclusive: an occurrence
@@ -74,22 +83,32 @@ function computeOccurrences(series: GigSeriesDoc, now: number): MaterializePlan 
   }
 
   const anchor = anchorFor(series);
-  let candidate = anchor;
   // Half-open interval convention: a run covers [materializedThrough,
   // windowEnd) — candidates strictly less than windowEnd are materialized,
   // and the watermark then advances to windowEnd itself (the exclusive
-  // upper edge already scanned, not a candidate that was skipped). The skip-
-  // ahead below must match with `<`/ceil, not `<=`/floor+1: a candidate
-  // exactly EQUAL to materializedThrough is the first NOT-yet-covered
-  // instant (materializedThrough is where the previous run's `< windowEnd`
-  // cut off, so that exact value was never itself materialized) and must
-  // remain eligible here. Using `<=`/floor+1 here would treat that instant
-  // as already covered and permanently skip it — losing an occurrence
-  // whenever the window boundary lands exactly on a grid point.
-  if (candidate < series.materializedThrough) {
-    const stepsToSkip = Math.ceil((series.materializedThrough - candidate) / step);
-    candidate += stepsToSkip * step;
-  }
+  // upper edge already scanned, not a candidate that was skipped). Skipping
+  // ahead to `series.materializedThrough` (inclusive — via `>=`, not `>`) is
+  // deliberate: materializedThrough is where the PREVIOUS run's `< windowEnd`
+  // cut off, so that exact value was never itself materialized and must
+  // remain eligible here. Using a strict `>` here (or, equivalently, the old
+  // `<=`/floor+1 skip formula) would treat that instant as already covered
+  // and permanently skip it — losing an occurrence whenever the window
+  // boundary lands exactly on a grid point.
+  let candidate = skipAheadTo(anchor, series.materializedThrough, step);
+  // Second, independent clamp: never plan a candidate before `now`. All four
+  // daily-sweep steps share ONE deferred WriteBatch (see createChunkedWriter)
+  // — step 2's past-gig-close QUERY reads Firestore's already-committed
+  // state, so it cannot see this step's not-yet-committed creates within the
+  // SAME run. Without this clamp, a series whose anchor falls between its
+  // own createdAt and the next scheduled sweep (the common
+  // materializedThrough:0-on-first-run case, not a rare edge case) would
+  // materialize a past-dated "open" occurrence that stays world-readable and
+  // unclosed until the FOLLOWING day's run finally sees and closes it — up
+  // to 24h of a bookable-looking gig for a date that already passed.
+  // Grid-aligned via the same skipAheadTo helper (not "clamp to exactly
+  // now"), so the sequence stays on-pattern: the next candidate is the next
+  // valid cadence slot at/after `now`, not an off-grid timestamp.
+  candidate = skipAheadTo(candidate, now, step);
   const startsAtList: number[] = [];
   while (candidate < windowEnd) {
     startsAtList.push(candidate);

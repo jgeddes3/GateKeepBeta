@@ -245,6 +245,30 @@ describe("runDailySweep — series materialization", () => {
     expect(occs.length).toBe(9);
     expect(occs[8].data().startsAt).toBe(anchor + 56 * DAY_MS);
   });
+
+  it("clamps to `now`: a series whose anchor already elapsed before this run never materializes a past-dated occurrence", async () => {
+    // The four sweep steps share one deferred WriteBatch, so the past-gig
+    // sweep's read query can never see this run's own not-yet-committed
+    // creates — a past-dated occurrence created here would stay "open" and
+    // world-readable until the NEXT day's run finally closes it. Simulates
+    // the ordinary "materializedThrough: 0 on first run" case where the
+    // sweep happens to run a few days after the series' own anchor slot
+    // already elapsed (createdAt long before the first 09:00 sweep).
+    const createdAt = Date.now();
+    const { seriesId } = await seedSeries({ createdAt, updatedAt: createdAt });
+    const anchor = expectedAnchor(createdAt, 5, 20, 0);
+    const now = anchor + 3 * DAY_MS; // this run happens after the anchor's own slot already elapsed
+
+    await runDailySweep(now);
+
+    const occs = await occurrencesFor(seriesId);
+    expect(occs.length).toBe(8);
+    for (const d of occs) expect(d.data().startsAt as number).toBeGreaterThanOrEqual(now);
+    expect(occs.some((d) => d.data().startsAt === anchor)).toBe(false); // the elapsed anchor itself is never created
+    expect(occs[0].data().startsAt).toBe(anchor + 7 * DAY_MS); // first FUTURE grid slot, not the elapsed one
+    const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+    expect(series.materializedThrough).toBe(now + 56 * DAY_MS);
+  });
 });
 
 describe("runDailySweep — past-gig sweep", () => {
