@@ -93,6 +93,16 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
   }, [user, profileId]);
 
+  // `booking === "loading"` is load-bearing here, not just a nicety: the
+  // render-time reset above sets `booking` back to "loading" the instant
+  // profileId changes, but React commits that state change to the DOM on
+  // the SAME render pass unless something short-circuits it. This early
+  // return is what actually keeps that reset from being purely cosmetic —
+  // without it, profile A's already-loaded `profile`/`tracks` state (and
+  // the forms below) would render through the gap between the reset and B's
+  // getDoc resolving, showing A's rates/preferences under profile B's
+  // name/status for a beat. Do not drop this condition as "redundant" with
+  // the render-time reset alone.
   if (loading || !user || profile === "loading" || booking === "loading") return <main><p>Loading…</p></main>;
   if (!profile || profile.type !== "musician") return <main><p>No musician profile here.</p></main>;
 

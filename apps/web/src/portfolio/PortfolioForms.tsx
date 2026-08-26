@@ -1,5 +1,5 @@
 "use client";
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
@@ -21,6 +21,18 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   const toggleGenre = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
   const save = async () => {
+    if (genres.length === 0 && (initial?.genres?.length ?? 0) > 0) {
+      // Genres were saved before and the musician has now deselected all of
+      // them. The omit-when-empty branch below exists for the never-set-yet
+      // case (a bio-only save while onboarding); reusing it here would
+      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side —
+      // which looks to the musician like their change was saved (the chips
+      // show empty) when it wasn't. Block it with an explicit message
+      // instead.
+      window.alert("Keep at least one genre — it's required for review.");
+      return;
+    }
     // Omit genres entirely (rather than sending []) when none are picked
     // yet — a bio-only save has to work while a musician is still filling
     // in the rest of the form; validatePortfolioUpdate (and the server)
@@ -119,15 +131,30 @@ export function PhotoUploader({ profileId, uid, kind, currentPath }:
   // double-upload race: while awaiting, the input is disabled instead of
   // sitting idle and inviting a second upload before the first has landed.
   const [awaiting, setAwaiting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
   const [baseline, setBaseline] = useState(currentPath);
   if (currentPath !== baseline) {
     setBaseline(currentPath);
     if (awaiting) setAwaiting(false);
+    if (timedOut) setTimedOut(false);
   }
+  // Bounds the wait: some failures never write ANYTHING back to the profile
+  // doc (an oversized/corrupt image the resize step rejects outright before
+  // ever reaching a write, for instance), so `currentPath` would never move
+  // and `awaiting` — and the disabled input — would otherwise deadlock
+  // permanently. This is a legitimate useEffect (subscribing to an external
+  // timer and calling setState from ITS callback, not synchronously in the
+  // effect body), unlike the render-time adjustment above.
+  useEffect(() => {
+    if (!awaiting) return;
+    const t = setTimeout(() => { setAwaiting(false); setTimedOut(true); }, 60_000);
+    return () => clearTimeout(t);
+  }, [awaiting]);
 
   const upload = async (f: File) => {
     if (f.size > MAX_PHOTO_UPLOAD_BYTES) { window.alert("Photos must be under 10 MB."); return; }
     setBusy(true);
+    setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
       const path = stagingPhotoPath(uid, profileId, kind, crypto.randomUUID());
@@ -143,12 +170,23 @@ export function PhotoUploader({ profileId, uid, kind, currentPath }:
   };
   const processing = awaiting;
   return (
-    <label style={{ display: "inline-block" }}>
-      {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
-      {currentPath && !processing && <span style={{ color: "#16a34a" }}> ✓</span>}
-      <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing}
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); }} />
-    </label>
+    <>
+      <label style={{ display: "inline-block" }}>
+        {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
+        {currentPath && !processing && <span style={{ color: "#16a34a" }}> ✓</span>}
+        <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = ""; // allows re-picking the same file (e.g. after a failed upload)
+            if (f) void upload(f);
+          }} />
+      </label>
+      {timedOut && (
+        <span style={{ display: "block", color: "#92400e", fontSize: 12 }}>
+          Still processing — if your photo doesn&apos;t appear, try a smaller one.
+        </span>
+      )}
+    </>
   );
 }
 

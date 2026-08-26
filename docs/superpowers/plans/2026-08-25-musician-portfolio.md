@@ -3682,10 +3682,16 @@ draft and no way to release it short of an admin/support action. See Task
 
 - [ ] **Step 1: Create `apps/web/src/portfolio/TrimUploader.tsx`**
 
-Final code, post quality-review fix pass (decode-error handling, format
-allowlist enforced client-side before any heavy work, stale-metadata reset,
-clamped clip window with a "whole file" fallback under 30s, re-pickable file
-input, and mid-upload failure cleanup via `deleteTrack`):
+Final code, post TWO rounds of quality-review fixes: decode-error handling,
+an empty-vs-known-bad content-type distinction (empty is let through — some
+OSes report "" for legit m4a/flac — but a non-empty unrecognized type is
+still rejected), a `duration < 1` reject, stale-metadata reset, a clamped
+clip window with a "whole file" fallback under 30s (also covering a
+computed slider max of exactly 0), a re-pickable file input, mid-upload
+failure cleanup via `deleteTrack`, and — the second round's Important
+finding — the try block now closes immediately after `await task` resolves,
+with the success-path side effects (including the caller-supplied `onDone`)
+running OUTSIDE the try/catch:
 
 ```tsx
 "use client";
@@ -3729,11 +3735,17 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
     // slider against the WRONG file's length until (if ever) this file's
     // onloadedmetadata fires.
     setDuration(0);
-    // Check the format before doing anything else with the file — no point
-    // reading/validating size or spinning up an <audio> element for a file
-    // type the server (validateTrackCreate/AUDIO_CONTENT_TYPES) will refuse
-    // outright.
-    if (!f.type || !(AUDIO_CONTENT_TYPES as readonly string[]).includes(f.type)) {
+    // Reject only a KNOWN-bad type — a non-empty MIME type outside the
+    // allowlist (e.g. "video/mp4", "text/plain"). An EMPTY f.type is let
+    // through on purpose: some OSes/browsers report "" for legitimate but
+    // less common containers (m4a, flac) instead of a proper audio/* MIME
+    // type, and the server doesn't trust this field either way — ffmpeg
+    // sniffs the actual container/codec from the bytes server-side. `pick`
+    // is only a cheap client-side triage; gating on "empty" specifically
+    // would reject real files this allowlist is supposed to accept. (See
+    // upload() below, which falls back to "audio/mpeg" as a generic-but-
+    // sniffable contentType for the empty case.)
+    if (f.type && !(AUDIO_CONTENT_TYPES as readonly string[]).includes(f.type)) {
       setError(UNSUPPORTED_MSG);
       return;
     }
@@ -3745,8 +3757,10 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
       const d = audio.duration;
       // A file can pass the content-type check above yet still be
       // corrupt/unplayable (or report a nonsensical duration) — don't let
-      // that silently produce a 0-length or NaN clip window.
-      if (!Number.isFinite(d) || d <= 0) { setError(UNREADABLE_MSG); return; }
+      // that silently produce a near-0-length or NaN clip window. `< 1`,
+      // not `<= 0`: a sub-1-second "clip" isn't practically previewable or
+      // trimmable either, so it's treated the same as unreadable.
+      if (!Number.isFinite(d) || d < 1) { setError(UNREADABLE_MSG); return; }
       setDuration(d);
     };
     audio.onerror = () => setError(UNREADABLE_MSG);
@@ -3772,6 +3786,10 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
     if (!file) return;
     const input: CreateTrackInput = {
       profileId, title: title.trim(), startSec: Math.floor(startSec),
+      // file.type can legitimately be "" (see pick()'s comment above) — fall
+      // back to a generic-but-sniffable contentType rather than sending an
+      // empty string the server would reject outright; ffmpeg determines
+      // the real container/codec from the bytes regardless of this value.
       sizeBytes: file.size, contentType: file.type || "audio/mpeg",
     };
     const v = validateTrackCreate(input);
@@ -3796,11 +3814,16 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
       task.on("state_changed",
         (s) => setBusy(`Uploading… ${Math.round((s.bytesTransferred / s.totalBytes) * 100)}%`));
       await task;
-      setBusy(null); setFile(null); setTitle("");
-      if (objectUrl.current) { URL.revokeObjectURL(objectUrl.current); objectUrl.current = null; }
-      onDone();
+      // The try closes HERE, right after the upload itself resolves — the
+      // success-path side effects below run OUTSIDE the try/catch on
+      // purpose. onDone() is a callback supplied by the parent; if it (or
+      // anything else down here) were to throw while still inside the try,
+      // the catch below would see `created` set and delete the track this
+      // upload just successfully finished, mistaking a downstream error for
+      // an upload failure.
     } catch (e) {
       setBusy(null);
+      console.error(e); // the alert below is deliberately generic — keep the real error in the console
       if (created) {
         try {
           await httpsCallable(getFirebase().functions, "deleteTrack")({ profileId, trackId: created.trackId });
@@ -3814,12 +3837,21 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
       } else {
         setError(e instanceof Error ? e.message : "Upload failed — try again.");
       }
+      return;
     }
+    setBusy(null); setFile(null); setTitle("");
+    if (objectUrl.current) { URL.revokeObjectURL(objectUrl.current); objectUrl.current = null; }
+    onDone();
   };
 
   const windowEnd = Math.min(startSec + MAX_CLIP_SECONDS, duration);
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-  const wholeFileUsed = duration > 0 && duration <= MAX_CLIP_SECONDS;
+  const sliderMax = Math.max(0, Math.floor(duration - MAX_CLIP_SECONDS));
+  // Also covers the case where duration is JUST over 30s (e.g. 30.4s): the
+  // slider's max would compute to 0 — a degenerate range with nowhere to
+  // drag — so treat that the same as "whole file" instead of rendering a
+  // slider that can't move.
+  const wholeFileUsed = duration > 0 && (duration <= MAX_CLIP_SECONDS || sliderMax === 0);
   return (
     <div style={{ border: "1px dashed #bbb", borderRadius: 8, padding: 16, display: "grid", gap: 8 }}>
       <strong>Add a track (30-second snippet)</strong>
@@ -3834,11 +3866,11 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
           <input placeholder="Track title" value={title} maxLength={80}
             onChange={(e) => setTitle(e.target.value)} />
           {wholeFileUsed ? (
-            <p style={{ margin: 0 }}>Whole file will be used (under 30s)</p>
+            <p style={{ margin: 0 }}>Whole file will be used (30 seconds or less)</p>
           ) : (
             <label>
               Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})
-              <input type="range" min={0} max={Math.max(0, Math.floor(duration - MAX_CLIP_SECONDS))} step={1}
+              <input type="range" min={0} max={sliderMax} step={1}
                 value={startSec} style={{ width: "100%" }}
                 onChange={(e) => setStartSec(Number(e.target.value))} />
             </label>
@@ -3945,20 +3977,27 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
 - [ ] **Step 3: Create `apps/web/src/portfolio/PortfolioForms.tsx`**
 
-Final code, post quality-review fix pass: `BioGenresForm` omits `genres`
-from the payload entirely when none are picked yet (a bio-only save has to
-work); `LinksForm` clears its url input only on success and gets a busy
+Final code, post TWO rounds of quality-review fixes: `BioGenresForm` omits
+`genres` from the payload entirely when none are picked yet (a bio-only
+save has to work), and — second round — blocks the save with an explicit
+message if genres were previously set and the musician deselects all of
+them (silently omitting would leave the OLD value in place while looking
+saved); `LinksForm` clears its url input only on success and gets a busy
 lock; `PhotoUploader` takes the current photo path as a prop (not a
 boolean), enforces the 10MB client-side cap, uses a visually-hidden (not
-`display:none`) file input for keyboard focus, and shows a "Processing…"
-state that persists until the path prop itself changes; `BookingForm` keeps
-rate inputs as raw strings (converting to cents only in `save()`), rejects
-a `$0` rate client-side, and adds `step`+a rounding note to the
-radius/minutes inputs:
+`display:none`) file input for keyboard focus with an `e.target.value = ""`
+reset so the same file can be re-picked after a failure, shows a
+"Processing…" state that persists until the path prop itself changes, and —
+second round's Important finding — bounds that wait to 60s (some pipeline
+failures never write anything back to the doc at all, which would otherwise
+deadlock the control permanently) with a "still processing, try a smaller
+one" fallback hint; `BookingForm` keeps rate inputs as raw strings
+(converting to cents only in `save()`), rejects a `$0` rate client-side, and
+adds `step`+a rounding note to the radius/minutes inputs:
 
 ```tsx
 "use client";
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
@@ -3980,6 +4019,18 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   const toggleGenre = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
   const save = async () => {
+    if (genres.length === 0 && (initial?.genres?.length ?? 0) > 0) {
+      // Genres were saved before and the musician has now deselected all of
+      // them. The omit-when-empty branch below exists for the never-set-yet
+      // case (a bio-only save while onboarding); reusing it here would
+      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side —
+      // which looks to the musician like their change was saved (the chips
+      // show empty) when it wasn't. Block it with an explicit message
+      // instead.
+      window.alert("Keep at least one genre — it's required for review.");
+      return;
+    }
     // Omit genres entirely (rather than sending []) when none are picked
     // yet — a bio-only save has to work while a musician is still filling
     // in the rest of the form; validatePortfolioUpdate (and the server)
@@ -4078,15 +4129,30 @@ export function PhotoUploader({ profileId, uid, kind, currentPath }:
   // double-upload race: while awaiting, the input is disabled instead of
   // sitting idle and inviting a second upload before the first has landed.
   const [awaiting, setAwaiting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
   const [baseline, setBaseline] = useState(currentPath);
   if (currentPath !== baseline) {
     setBaseline(currentPath);
     if (awaiting) setAwaiting(false);
+    if (timedOut) setTimedOut(false);
   }
+  // Bounds the wait: some failures never write ANYTHING back to the profile
+  // doc (an oversized/corrupt image the resize step rejects outright before
+  // ever reaching a write, for instance), so `currentPath` would never move
+  // and `awaiting` — and the disabled input — would otherwise deadlock
+  // permanently. This is a legitimate useEffect (subscribing to an external
+  // timer and calling setState from ITS callback, not synchronously in the
+  // effect body), unlike the render-time adjustment above.
+  useEffect(() => {
+    if (!awaiting) return;
+    const t = setTimeout(() => { setAwaiting(false); setTimedOut(true); }, 60_000);
+    return () => clearTimeout(t);
+  }, [awaiting]);
 
   const upload = async (f: File) => {
     if (f.size > MAX_PHOTO_UPLOAD_BYTES) { window.alert("Photos must be under 10 MB."); return; }
     setBusy(true);
+    setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
       const path = stagingPhotoPath(uid, profileId, kind, crypto.randomUUID());
@@ -4102,12 +4168,23 @@ export function PhotoUploader({ profileId, uid, kind, currentPath }:
   };
   const processing = awaiting;
   return (
-    <label style={{ display: "inline-block" }}>
-      {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
-      {currentPath && !processing && <span style={{ color: "#16a34a" }}> ✓</span>}
-      <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing}
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); }} />
-    </label>
+    <>
+      <label style={{ display: "inline-block" }}>
+        {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
+        {currentPath && !processing && <span style={{ color: "#16a34a" }}> ✓</span>}
+        <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = ""; // allows re-picking the same file (e.g. after a failed upload)
+            if (f) void upload(f);
+          }} />
+      </label>
+      {timedOut && (
+        <span style={{ display: "block", color: "#92400e", fontSize: 12 }}>
+          Still processing — if your photo doesn&apos;t appear, try a smaller one.
+        </span>
+      )}
+    </>
   );
 }
 
@@ -4334,6 +4411,16 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
   }, [user, profileId]);
 
+  // `booking === "loading"` is load-bearing here, not just a nicety: the
+  // render-time reset above sets `booking` back to "loading" the instant
+  // profileId changes, but React commits that state change to the DOM on
+  // the SAME render pass unless something short-circuits it. This early
+  // return is what actually keeps that reset from being purely cosmetic —
+  // without it, profile A's already-loaded `profile`/`tracks` state (and
+  // the forms below) would render through the gap between the reset and B's
+  // getDoc resolving, showing A's rates/preferences under profile B's
+  // name/status for a beat. Do not drop this condition as "redundant" with
+  // the render-time reset alone.
   if (loading || !user || profile === "loading" || booking === "loading") return <main><p>Loading…</p></main>;
   if (!profile || profile.type !== "musician") return <main><p>No musician profile here.</p></main>;
 
@@ -4739,6 +4826,20 @@ logic here, translate the FIX, not the original mistake:
   `${Date.now()}-${Math.floor(Math.random() * 1e9)}` pattern already
   specified in Step 4 below (uniqueness, not secrecy, is all that's
   needed) — do not port web's `crypto.randomUUID()` call as-is.
+- **Try-block boundary around a successful upload.** Web's
+  `TrimUploader.upload()` originally kept the post-upload success side
+  effects (clearing local state, revoking the object URL, and calling the
+  parent-supplied `onDone()` callback) INSIDE the same `try` that awaited
+  the storage upload. That's a trap: if `onDone()` — a callback the PARENT
+  controls, not this component — threw for any reason, the `catch` block
+  would see the "track doc was created" flag set and delete the track that
+  had JUST finished uploading successfully, mistaking a downstream/unrelated
+  error for an upload failure. Fixed by closing the `try` immediately after
+  the upload itself resolves and moving every success-path side effect
+  OUTSIDE the try/catch. Any RN port of `TrimUploader`'s `upload()` (or
+  `PhotoUploader`'s) must keep that same boundary — do not fold the
+  post-upload cleanup back inside the try "for symmetry" with the
+  request/upload calls above it.
 - **`display:none`-equivalent file inputs.** Not applicable to RN's
   `Pressable`-triggered `DocumentPicker` flow the same way (there's no
   native `<input type="file">` to hide), but if any web accessibility
@@ -5193,6 +5294,15 @@ fixes; the Task 11 snippets above reflect the corrected code:
   Step 4 of Task 13 already specifies the correct
   `${Date.now()}-${Math.floor(Math.random() * 1e9)}` nonce pattern for
   `PhotoUploader` — use that, not a ported `crypto.randomUUID()` call.
+- **Try-block boundary around a successful upload.** Same trap as Task 13's
+  note on `TrimUploader.upload()`: the post-upload success side effects
+  (including any parent-supplied "done" callback) must run OUTSIDE the try
+  that awaits the upload, not inside it — otherwise a throw from that
+  callback gets mistaken for an upload failure and deletes the track that
+  just succeeded. `TrimUploader.tsx` itself is created once in Task 13 and
+  reused here by the portfolio tab; if this task touches or duplicates any
+  of that upload-then-callback logic (e.g. wiring its own completion
+  handling around `TrackManager`/`TrimUploader`), keep the same boundary.
 - **`Intl.ListFormat` for the missing-items hint.** If this tab's
   submit-lock (see the handoff note above) renders a missing-items hint
   mirroring web's, verify `Intl.ListFormat` is actually available under
