@@ -170,7 +170,29 @@ export function oneOffDateTimeToMs(v: OneOffDateTimeState): number | null {
   const year = parts[0]; const month = parts[1]; const day = parts[2];
   const hh = Number(v.hour); const mm = Number(v.minute);
   if (!year || !month || !day || !Number.isFinite(hh) || !Number.isFinite(mm)) return null;
-  const ms = new Date(year, month - 1, day, hh, mm, 0, 0).getTime();
+  // Explicit range checks BEFORE constructing — JS's Date constructor
+  // silently ROLLS OVER an out-of-range component into a different,
+  // unintended date/time (day "32" becomes next month's 1st/2nd, hour "25"
+  // becomes 01:00 the next day) rather than throwing, so a typo in this
+  // free-text entry would otherwise create a gig at a date the curator never
+  // actually typed. Mirrors validateRecurrence's bounds for hour (0-23) and
+  // minute (0-59).
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  if (!Number.isInteger(day) || day < 1 || day > 31) return null;
+  if (!Number.isInteger(hh) || hh < 0 || hh > 23) return null;
+  if (!Number.isInteger(mm) || mm < 0 || mm > 59) return null;
+  const d = new Date(year, month - 1, day, hh, mm, 0, 0);
+  // Round-trip check: catches the day-in-month rollovers the range checks
+  // above can't (e.g. Feb 30 -> March 2 — day and month are each
+  // individually in-range, but the constructor didn't land on the actual
+  // month/day requested). LOCAL getters match this constructor's local-time
+  // semantics (see OneOffDateTimeState's comment above — deliberately NOT
+  // UTC, unlike endDateInputToUtcMs below).
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day
+      || d.getHours() !== hh || d.getMinutes() !== mm) {
+    return null;
+  }
+  const ms = d.getTime();
   return Number.isFinite(ms) ? ms : null;
 }
 
@@ -301,7 +323,7 @@ export function OneOffDateTimeFields({ value, onChange }: { value: OneOffDateTim
       <View style={{ gap: 4 }}>
         <Text>Date (YYYY-MM-DD)</Text>
         <TextInput keyboardType="numbers-and-punctuation" placeholder="YYYY-MM-DD" maxLength={10} value={value.date}
-          onChangeText={(t) => onChange({ ...value, date: t })}
+          onChangeText={(t) => onChange({ ...value, date: t.replace(/[^0-9-]/g, "") })}
           style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 140 }} />
       </View>
       <View style={{ gap: 4 }}>
@@ -353,7 +375,7 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
       <View style={{ gap: 4 }}>
         <Text>End date (optional, YYYY-MM-DD)</Text>
         <TextInput keyboardType="numbers-and-punctuation" placeholder="YYYY-MM-DD" maxLength={10} value={value.endDate}
-          onChangeText={(t) => onChange({ ...value, endDate: t })}
+          onChangeText={(t) => onChange({ ...value, endDate: t.replace(/[^0-9-]/g, "") })}
           style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 140 }} />
       </View>
       <Text style={{ color: "#92400e", fontSize: 12 }}>
@@ -380,5 +402,17 @@ export function endDateInputToUtcMs(value: string): number | null {
   const parts = value.split("-").map(Number);
   const year = parts[0]; const month = parts[1]; const day = parts[2];
   if (!year || !month || !day) return null;
-  return Date.UTC(year, month - 1, day);
+  // Same silent-rollover concern as oneOffDateTimeToMs above — Date.UTC
+  // doesn't throw on an out-of-range day/month, it wraps into a different
+  // date. Explicit range checks first, then a round-trip check via the UTC
+  // getters (matching Date.UTC's own semantics) to catch day-in-month
+  // rollovers the range checks alone can't (e.g. Feb 30).
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  if (!Number.isInteger(day) || day < 1 || day > 31) return null;
+  const ms = Date.UTC(year, month - 1, day);
+  const d = new Date(ms);
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+    return null;
+  }
+  return ms;
 }
