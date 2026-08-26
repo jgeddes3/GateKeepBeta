@@ -5,13 +5,18 @@ metro area — team-approved musician/curator profiles, gig booking, and (later)
 on a shared Firebase backend behind default-deny Firestore rules and Cloud Functions-only
 privileged writes.
 
-This repo now spans two sub-projects. **Sub-project 1: Foundation** — accounts, auth, profile
+This repo now spans three sub-projects. **Sub-project 1: Foundation** — accounts, auth, profile
 lifecycle (draft → review → approve), the mobile + web app shells, an admin approval dashboard,
 and notification plumbing. **Sub-project 2: Musician Portfolio** — bio/photos/genres/links,
 10×30s reviewed audio snippets with server-side trim/transcode, curator-gated booking rates &
 preferences, and server-rendered public portfolio pages at `/@handle`, on both mobile and web.
-See `docs/superpowers/specs/` and `docs/superpowers/plans/` for each sub-project's design spec
-and implementation plan (exact filenames under Design docs below).
+**Sub-project 3: Curator Profiles & Gig Postings** — the curator side of the same profile system
+(venues/planners/hosts get the wizard/photos/public-page treatment too), one-off and recurring gig
+postings with budget/location privacy semantics, a shared daily scheduled job that materializes
+recurring series and pays down sub-project 2's cleanup debt, and admin gig moderation + name
+search. See "Gigs & series" below for the concepts, and `docs/superpowers/specs/` /
+`docs/superpowers/plans/` for each sub-project's design spec and implementation plan (exact
+filenames under Design docs below).
 
 ## Monorepo map
 
@@ -30,25 +35,38 @@ GateKeepBeta/
 ├── functions/                    # Cloud Functions (v2 callables + triggers)
 │   ├── src/index.ts              # exports all functions
 │   ├── src/authTriggers.ts       # onUserCreated → users doc
-│   ├── src/guards.ts             # requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile
+│   ├── src/guards.ts             # requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile, requireCuratorProfile
 │   ├── src/profiles.ts           # createProfileDraft, submitProfileForReview, deleteProfile
-│   ├── src/review.ts             # reviewProfile, grantAdmin, audit logging
+│   ├── src/review.ts             # reviewProfile, grantAdmin, audit logging, curator-unpublish takedown cascade
 │   ├── src/members.ts            # inviteMember, respondToInvite, revokeInvite, removeMember, transferAdmin
 │   ├── src/account.ts            # deleteAccount
 │   ├── src/notifications.ts      # push token helpers, notifyUser, approval trigger
 │   ├── src/portfolio.ts          # updatePortfolio, updateBookingInfo
 │   ├── src/tracks.ts             # createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack
-│   ├── src/media.ts              # processUpload trigger: ffmpeg transcode + sharp photo resize
+│   ├── src/media.ts              # processUpload trigger: ffmpeg transcode + sharp photo resize (musician + curator gallery)
+│   ├── src/curator.ts            # updateCuratorProfile, removeCuratorPhoto (sub-project 3)
+│   ├── src/geocode.ts            # geocode(address) adapter interface + Stub/Google providers (sub-project 3)
+│   ├── src/gigs.ts               # createGig, updateGig, publishGig, cancelGig, takedownGig (sub-project 3)
+│   ├── src/gigSeries.ts          # createSeries, updateSeries, pauseSeries, endSeries (sub-project 3)
+│   ├── src/scheduled.ts          # runDailySweep + dailySweep onSchedule wrapper (sub-project 3 — see Gigs & series below)
+│   ├── src/adminTools.ts         # searchUsersByName, backfillDisplayNameLower, flagAccount (sub-project 3)
 │   ├── src/storage.ts            # Storage bucket helper + STORAGE_BUCKET
 │   └── test/*.test.ts            # emulator integration tests
 ├── apps/mobile/                  # Expo (expo-router): app/, src/lib/firebase.ts, src/auth/, src/shell/
 │   ├── eslint.config.js          # flat config (Expo's `eslint-config-expo` default)
+│   ├── src/shell/AccountScreen.tsx # shared account screen; app/(fan|musician|curator)/account.tsx are thin wrappers
 │   ├── src/portfolio/            # RN portfolio editor: forms, TrimUploader, TrackManager
+│   ├── src/curator/              # RN curator wizard/editor forms (sub-project 3)
+│   ├── src/gigs/                 # RN gig composer + series management (sub-project 3)
+│   ├── app/(curator)/            # curator tab group: dashboard, events (gig composer/list/series), account
 │   └── app/artist/[handle].tsx   # native public portfolio view
 ├── apps/web/                     # Next.js (App Router): app/, src/lib/firebase.ts, app/admin/ (claim-gated)
-│   ├── app/join/                 # musician onboarding wizard
+│   ├── app/join/                 # musician + curator onboarding wizard
 │   ├── app/dashboard/portfolio/  # portfolio editor page
-│   └── app/u/[handle]/           # server-rendered (SSR) public portfolio page
+│   ├── app/dashboard/curator/    # curator editor + gig composer/list + series management (sub-project 3)
+│   ├── app/u/[handle]/           # server-rendered (SSR) public portfolio/curator page + open gigs
+│   ├── src/curator/CuratorForms.tsx # curator editor form sections (sub-project 3)
+│   └── src/gigs/GigForms.tsx     # gig composer + series form sections (sub-project 3)
 └── tests-rules/                  # Firestore + Storage security rules emulator tests
 ```
 
@@ -118,6 +136,40 @@ export FUNCTIONS_DISCOVERY_TIMEOUT=60      # bash, seconds; raises the 30s defau
 $env:FUNCTIONS_DISCOVERY_TIMEOUT = "60"    # PowerShell
 ```
 
+## Gigs & series (sub-project 3)
+
+**Concepts.** A `gigs` doc is one dated posting (title, budget, wants, location, one of
+`draft`/`open`/`closed`/`cancelled`/`taken_down`) that only an approved curator profile's members
+can create, always via a callable (`createGig`/`updateGig`/`publishGig`/`cancelGig`) — clients
+never write `gigs` directly. A `gigSeries` doc is a recurring template (weekly/biweekly/monthly)
+that the daily scheduled job (below) materializes into individual `gigs` occurrences up to 8 weeks
+ahead; editing a series' template applies only to future, not-yet-detached occurrences, and any
+occurrence can be edited independently (which detaches it from the template). Location privacy is
+per-gig: non-venue gigs default to `addressVisibility: "neighborhood"` with a coarsened public
+`geo`, while the exact address always lives in the callable/admin-only `gigs/{id}/private/location`
+subdoc; venue-profile gigs default to `"public"` (full address shown). Budgets are stored as
+integer `amountCents` under one of the three `BookingRates` structures (`perHour`/`perSong`/
+`perSet`) — never floating-point dollars.
+
+**Key flows.** Curator onboarding is the same wizard/review pipeline as musicians (draft → submit
+→ admin `reviewProfile` approve/reject), plus curator-specific required content (photos, location,
+looking-for preferences) gating submission. Once approved, the curator dashboard's gig composer
+posts one-off or series gigs; a public curator page at `/@handle` (web) / the native equivalent
+(mobile) renders the curator's approved, `open` gigs at their public precision. Admins get a
+**Gigs** section in `/admin` for moderation (status/subtype filters, takedown with an
+occurrence-vs-series choice), plus name search (`searchUsersByName`) and account flags
+(`flagAccount`) layered onto the existing profile review queue.
+
+**The daily scheduled job** (`functions/src/scheduled.ts`'s `dailySweep`, wrapping the plain
+`runDailySweep(now)` function tests call directly) runs once a day and does four things in one
+pass: (1) materializes new occurrences for every `active` gigSeries up to the 8-week horizon, (2)
+closes `open` gigs whose `startsAt` has passed, (3) fails abandoned `processing` tracks older than
+24h (pays down sub-project 2's reaper debt), and (4) revokes `pending` invites past their 14-day
+expiry. **This only runs in production after `firebase deploy` enables the underlying Cloud
+Scheduler job** — the emulator has no scheduler component, so `runDailySweep` is exercised directly
+by tests locally, never on a timer. See the launch checklist below for the UTC-recurrence and
+timezone caveats that affect exactly when a series' occurrences land.
+
 ## Environment variables
 
 None are required for local development against the emulators — everything below is unset (empty
@@ -129,6 +181,8 @@ string / no-op) by default and only matters for a production deploy.
 | `NEXT_PUBLIC_SENTRY_DSN` | web | Sentry DSN for crash/error reporting | Sentry init skipped (no-op) |
 | `EXPO_PUBLIC_SENTRY_DSN` | mobile | Sentry DSN for crash/error reporting | `Sentry.init` runs with an empty DSN and is a no-op |
 | `NEXT_PUBLIC_SITE_URL` | web | absolute base URL for the public portfolio page's canonical link + OpenGraph `og:url`/images (`apps/web/app/layout.tsx`'s `metadataBase`) | falls back to Vercel's own `VERCEL_PROJECT_PRODUCTION_URL` if present; if neither is set, `metadataBase` is omitted and those URLs render relative instead of absolute (never a hardcoded localhost fallback) |
+| `GEOCODER_PROVIDER` | functions | set to `google` to geocode gig/curator addresses via the real Google Geocoding API (`functions/src/geocode.ts`'s `getGeocoder()`) | unset/any other value → `StubGeocoder`, a deterministic dev/test-only hash-based geocoder with a US-centric bounding box — **launch item**, see checklist below |
+| `GEOCODER_API_KEY` | functions | Google Geocoding API key; required (throws at call time) when `GEOCODER_PROVIDER=google` | n/a while `GEOCODER_PROVIDER` is unset |
 
 Web App Check only initializes when `NODE_ENV === "production"` **and** the site key is set
 (`apps/web/src/lib/firebase.ts`). Mobile Sentry is additionally gated on `!__DEV__`
@@ -204,14 +258,68 @@ before a real launch:
   objects `processUpload` fails to clean up because its trigger never fired at all — see the
   comment above the storage cascade in `functions/src/profiles.ts`'s `deleteProfile`. Ship this
   together with the abandoned-track reaper below; both are "abandoned upload cleanup."
-- **Abandoned `processing`-track reaper**: a track created via `createTrack` but never uploaded
-  (or abandoned mid-upload, before the client-side best-effort cleanup can run) holds one of the
-  10 track cap slots indefinitely until a member manually deletes it. Needs a server-side
-  scheduled sweep (e.g. delete `processing` tracks older than 24h) — not built yet.
+- ~~**Abandoned `processing`-track reaper**~~ — **DONE (sub-project 3):** a track created via
+  `createTrack` but never uploaded (or abandoned mid-upload) used to hold one of the 10 track cap
+  slots indefinitely. `functions/src/scheduled.ts`'s daily sweep now fails `processing` tracks
+  older than 24h automatically; see "Gigs & series" above.
 - **`PUBLIC_PROFILE_HOST`** (`apps/mobile/app/(musician)/portfolio.tsx`): still the
   `https://gatekeep.example` placeholder. The mobile "View public page" link is intentionally
   hidden (`PUBLIC_PROFILE_HOST_READY`) rather than pointing at a dead URL — update the constant to
   the real deployed web domain once one exists, and the link appears on its own.
+
+### Sub-project 3 launch checklist (gigs & series)
+
+- **Geocoder provider**: set `GEOCODER_PROVIDER=google` + `GEOCODER_API_KEY` on the production
+  functions deployment before launch. Without it, every gig/curator address silently geocodes
+  through `StubGeocoder` — a deterministic hash with a US-centric bounding box, fine for dev/test
+  but wrong (and non-US-safe) for real addresses. See the Environment variables table above.
+- **Cloud Scheduler enablement**: `functions/src/scheduled.ts`'s `dailySweep` only starts actually
+  running once `firebase deploy` provisions the underlying Cloud Scheduler job — there is nothing
+  to enable by hand, but the first production deploy should be followed by a Cloud Console check
+  (Cloud Scheduler → confirm the job exists and its next-run time looks right) since a silently
+  failed provision would otherwise go unnoticed until series stop materializing days later.
+- **Verify the 5 sub-project 3 composite indexes on first deploy**: the Firestore emulator does not
+  enforce composite indexes, so `pnpm emu:rules`/`pnpm emu:test` passing locally proves nothing
+  about them. `firestore.indexes.json`'s `gigs`(curatorProfileId,status),
+  `gigs`(curatorProfileId,status,startsAt), `gigs`(seriesId,startsAt), `gigs`(status,startsAt), and
+  `gigSeries`(curatorProfileId,status) composite indexes must actually build successfully on the
+  real project (Firebase console → Firestore → Indexes, or `firebase deploy --only
+  firestore:indexes` then watch for "Enabled") before the gig composer/dashboard/public-page
+  queries that depend on them will work in production.
+- **`LAUNCH_TIMEZONE`** (`@gatekeep/shared`'s `packages/shared/src/types.ts`): currently
+  `"America/New_York"`, a v1 single-metro-launch placeholder that pins every rendered gig time
+  (public curator page + dashboard gigs/series lists, web and mobile) to one IANA zone so a curator
+  and a fan always see the same wall time regardless of their own device's clock. **Must be set to
+  the actual launch metro's IANA zone before launch** — per-venue timezone support is a documented
+  sub-4 obligation (see `docs/superpowers/sp3-rulings.md`), not a v1 feature.
+- **UTC recurrence-time caveat**: a `gigSeries`' `recurrence.weekday`/`hour`/`minute` (and its
+  `endDate`) are interpreted in a FIXED UTC anchor by the daily sweep's materializer
+  (`functions/src/scheduled.ts`), NOT in `LAUNCH_TIMEZONE` or any curator's local time — a curator
+  who picks "Friday 8pm" gets UTC 8pm, which drifts from their actual local 8pm by their UTC offset
+  and across DST. The gig composer's series form (`apps/web/src/gigs/GigForms.tsx` /
+  `apps/mobile/src/gigs/GigForms.tsx`) discloses this in-form ("Times are in UTC for now —
+  local-timezone support is coming"); there is no code fix pending, just this disclosure, until a
+  future sub-project's TZ-aware recurrence work lands.
+- **Name-search backfill (one-shot)**: `searchUsersByName`'s prefix query depends on every
+  `users/{uid}` doc having a `displayNameLower` field. New signups get it automatically
+  (`onUserCreated` + the `onUserDocWritten` sync trigger), but any user created **before**
+  sub-project 3 shipped won't have it yet. Run the admin-gated one-shot callable
+  `backfillDisplayNameLower` once against production after deploy (e.g. from the Firebase console's
+  Functions testing tab, or a short authenticated script) to page through and backfill existing
+  users — until then, name search simply won't find pre-existing accounts (the email-exact lookup
+  path still works for them).
+- **Device pass (mobile, before launch)** — verify on a real dev-build device, not just the
+  simulator/emulator: (1) **Hermes ICU date formatting** — `apps/mobile/src/gigs/GigForms.tsx`'s
+  `formatGigDateTime` wraps its `Intl.DateTimeFormat`/`formatToParts` calls in a try/catch because
+  Hermes's ICU timeZone/formatToParts support isn't independently verified on-device the way a
+  browser's is; confirm it actually renders the formatted date rather than silently falling back to
+  the device's raw local-time string. (2) **Nested "events" Stack headers** — the curator tab's
+  `app/(curator)/events/_layout.tsx` nests an Expo Router `Stack` (list → composer → gig detail →
+  series detail) inside the outer `Tabs` navigator; confirm header/back-button behavior looks right
+  across that nesting on both iOS and Android. (3) **Native provider sign-in** — carried over from
+  sub-projects 1/2 (see Prerequisites/Key commands above): Expo Go cannot perform native
+  Google/Apple sign-in, so this only gets exercised on a real `expo-dev-client` build; confirm both
+  providers still work end-to-end there.
 
 ### Sub-project 2 polish follow-ups (non-blocking)
 
@@ -256,3 +364,8 @@ implementation plan.
 **Sub-project 2: Musician Portfolio** — `docs/superpowers/specs/2026-08-25-musician-portfolio-design.md`
 for the full design spec and `docs/superpowers/plans/2026-08-25-musician-portfolio.md` for the
 task-by-task implementation plan.
+
+**Sub-project 3: Curator Profiles & Gig Postings** — `docs/superpowers/specs/2026-08-26-curator-gigs-design.md`
+for the full design spec and `docs/superpowers/plans/2026-08-26-curator-gigs.md` for the
+task-by-task implementation plan. Durable rulings/handoff record: `docs/superpowers/sp3-rulings.md`
+(mirrors `sp2-rulings.md`'s structure).
