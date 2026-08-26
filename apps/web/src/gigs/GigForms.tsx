@@ -265,9 +265,28 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
 // functions/src/scheduled.ts's anchorFor does with Date.UTC(...), keeps the
 // endDate consistent with the recurrence's weekday/hour/minute (also
 // UTC-interpreted) by construction rather than by that easy-to-miss quirk.
+//
+// P8: range checks + a round-trip check, ported from mobile's
+// endDateInputToUtcMs — mobile needed them first (its free-text YYYY-MM-DD
+// entry has no native picker constraining the value at all), but the same
+// gap exists here too: Date.UTC silently ROLLS OVER an out-of-range
+// day/month into a different date (e.g. Feb 30 -> March 2) rather than
+// throwing, and native <input type="date"> does not, on every browser,
+// reliably prevent a hand-typed or programmatically-set out-of-range value
+// from reaching onChange. The two implementations are byte-identical again.
 export function endDateInputToUtcMs(value: string): number | null {
   if (!value) return null;
   const [year, month, day] = value.split("-").map(Number);
   if (!year || !month || !day) return null;
-  return Date.UTC(year, month - 1, day);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  if (!Number.isInteger(day) || day < 1 || day > 31) return null;
+  const ms = Date.UTC(year, month - 1, day);
+  const d = new Date(ms);
+  // Round-trip check: catches day-in-month rollovers the range checks above
+  // can't (e.g. Feb 30 -> March 2 — day and month are each individually
+  // in-range, but the constructor didn't land on the actual date requested).
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+    return null;
+  }
+  return ms;
 }

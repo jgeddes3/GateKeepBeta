@@ -95,6 +95,14 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
       <RecurrenceFields value={recurrence} onChange={setRecurrence} />
       <ProvisionsFields value={provisions} onChange={setProvisions} />
       <LocationFields isVenue={isVenue} addressRequired={false} currentLabel={currentLabel} value={location} onChange={setLocation} />
+      {/* P10: a visibility change here only reaches future, still-attached
+          occurrences (same propagation rule as every other template field,
+          explained above) — a curator changing this needs to know an
+          individually-edited occurrence's own address visibility won't move
+          with it. */}
+      <p style={{ color: "#666", fontSize: 12, margin: 0 }}>
+        Occurrences you&apos;ve edited individually keep their current address visibility.
+      </p>
       {error && (
         <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
           {error}

@@ -94,6 +94,11 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
       <RecurrenceFields value={recurrence} onChange={setRecurrence} />
       <ProvisionsFields value={provisions} onChange={setProvisions} />
       <LocationFields isVenue={isVenue} addressRequired={false} currentLabel={currentLabel} value={location} onChange={setLocation} />
+      {/* P10: mirrors web's identical copy — a visibility change here only
+          reaches future, still-attached occurrences. */}
+      <Text style={{ color: "#666", fontSize: 12 }}>
+        Occurrences you&#39;ve edited individually keep their current address visibility.
+      </Text>
       {error && (
         <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
           {error}

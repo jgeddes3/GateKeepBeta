@@ -25,9 +25,15 @@ import {
 // doesn't list package.json, and a new native module would need a dev-client
 // rebuild this environment can't perform or verify). Internal state keeps the
 // same string-based shapes as web's RecurrenceState/BudgetState (raw text,
-// converted once at submit) so the UTC endDate math and hour/minute parsing
-// below are byte-identical to the reviewed web version — see the
-// DO-NOT-COPY note on Intl.ListFormat: this file makes no use of it.
+// converted once at submit). P8 CORRECTION: this comment used to claim the
+// UTC endDate math and hour/minute parsing below were already
+// "byte-identical to the reviewed web version" — that was aspirational, not
+// actual: mobile's free-text entry (no native date/time picker to constrain
+// input) needed its own range + round-trip rollover validation FIRST, and
+// web's endDateInputToUtcMs didn't have the matching checks until a later
+// fix ported them back. They are genuinely byte-identical now (see
+// endDateInputToUtcMs below) — see the DO-NOT-COPY note on Intl.ListFormat:
+// this file makes no use of it.
 
 // Mirrors functions/src/gigs.ts's MAX_ADDRESS_LENGTH (module-private, not
 // exported to shared) — a UX-only soft cap; the server remains authoritative.
@@ -396,7 +402,9 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
 // `new Date(value).getTime()` — spells out the UTC math the same way
 // functions/src/scheduled.ts's anchorFor does with Date.UTC(...), keeping
 // endDate consistent with the recurrence's weekday/hour/minute (also
-// UTC-interpreted). Byte-identical logic to web's endDateInputToUtcMs.
+// UTC-interpreted). Byte-identical logic to web's endDateInputToUtcMs (P8:
+// web's version was missing this function's range + round-trip rollover
+// checks and has since been brought in line with this one).
 export function endDateInputToUtcMs(value: string): number | null {
   if (!value) return null;
   const parts = value.split("-").map(Number);

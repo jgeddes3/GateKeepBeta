@@ -464,7 +464,12 @@ function GigsAdmin() {
     let cancelled = false;
     let seq = 0;
     const unsubscribe = onSnapshot(
-      query(collection(db, "gigs"), where("status", "==", status)),
+      // P9: limit(100), same reasoning as TracksQueue's/AuditLog's identical
+      // caps — an admin moderation listener over a status filter that can
+      // legitimately match thousands of docs (e.g. "closed" or "cancelled"
+      // over the platform's whole gig history) must not pull the entire
+      // result set into the browser on every snapshot.
+      query(collection(db, "gigs"), where("status", "==", status), limit(100)),
       async (s) => {
         const mySeq = ++seq;
         const docs = s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
@@ -742,8 +747,13 @@ function AdminNotes({ uid }: { uid: string }) {
   if (notes.length === 0) return null;
   return (
     <ul style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#b00020" }}>
-      {notes.map((n) => (
-        <li key={`${n.byUid}-${n.at}`}>{new Date(n.at).toLocaleString()} — {n.text}</li>
+      {notes.map((n, i) => (
+        // P9: index appended — flagAccount's transaction guarantees two
+        // notes always append (never dedupe), so two flags from the SAME
+        // admin within the same at-millisecond (a real possibility per
+        // adminTools.ts's own comment on why arrayUnion isn't used here)
+        // would otherwise collide on byUid+at alone.
+        <li key={`${n.byUid}-${n.at}-${i}`}>{new Date(n.at).toLocaleString()} — {n.text}</li>
       ))}
     </ul>
   );
