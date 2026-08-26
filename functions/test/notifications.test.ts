@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn, wait } from "./helpers";
+import { signUpTestUser, callFn, wait, seedCuratorGateContent } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
@@ -41,11 +41,12 @@ describe("review notifications", () => {
   it("approving a profile writes an inbox notification for each member", async () => {
     const owner = await signUpTestUser(`n1-${Date.now()}@test.com`);
     // Curator, not musician: this test's subject is notification fan-out on a
-    // review decision, not the Task 9 musician minimum-content gate — a
-    // curator draft submits with no portfolio content required.
+    // review decision, not the minimum-content gate — seed the gate's
+    // requirements directly (Task 4) rather than re-deriving them here.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
       { type: "curator", subtype: "venue", name: "Nova", handle: `nova_${Date.now()}` }, owner.user);
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, owner.user);
     const adminUser = await makeAdminUser();
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
@@ -64,6 +65,7 @@ describe("review notifications", () => {
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
       { type: "curator", subtype: "venue", name: "Comet", handle: `comet_${Date.now()}` }, owner.user);
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, owner.user);
     const adminUser = await makeAdminUser();
     const reason = "Please add at least 3 photos and a bio";
@@ -93,6 +95,7 @@ describe("review notifications", () => {
     const member: MemberDoc = { uid: bandmate.uid, role: "member", label: "drummer", joinedAt: Date.now() };
     await adb.doc(`profiles/${profileId}/members/${bandmate.uid}`).set(member);
 
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, owner.user);
     const adminUser = await makeAdminUser();
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);

@@ -116,6 +116,26 @@ export function makeWav(seconds: number): Uint8Array {
   return new Uint8Array(buf);
 }
 
+// Minimal admin-SDK shortcut for satisfying submitProfileForReview's curator
+// content gate (Task 4) — analogous to the "avatar via admin SDK shortcut"
+// pattern profiles.test.ts already uses for the musician gate (the photo
+// pipeline's own behavior has its own tests). Tests whose subject is
+// something else entirely (delete/submit mechanics, notification fan-out,
+// anti-spam) call this to get a curator profile past the gate without
+// re-deriving valid content inline. Always shaped as a "venue" (non-null
+// address) so it also satisfies the stricter venue location requirement.
+export async function seedCuratorGateContent(adb: Firestore, profileId: string): Promise<void> {
+  await adb.doc(`profiles/${profileId}`).update({
+    "curator.about": "A great room for live music.",
+    "curator.photoPaths": ["public/photos/seed/cover-seed.jpg"],
+    "curator.location": {
+      address: "123 Main St, Austin, TX", city: "Austin", neighborhood: "Downtown",
+      geo: { lat: 30.27, lng: -97.74 },
+    },
+    "curator.lookingFor": { genres: ["rock"], actSizes: ["band"], notes: null },
+  });
+}
+
 // Polls a track doc until its status is one of `statuses` (transcode is async).
 export async function waitForTrackStatus(
   adb: Firestore, docPath: string, statuses: string[], timeoutMs = 45_000,

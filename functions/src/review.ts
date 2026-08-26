@@ -59,6 +59,11 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       status: decision,
       rejectionReason: decision === "rejected" ? reason!.trim() : null,
       updatedAt: Date.now(),
+      // Anti-spam (Task 4): submitProfileForReview reads this to enforce a
+      // 24h resubmit cooldown after a rejection. Only stamped on reject —
+      // omitted (not cleared) on approve, so an earlier reject's timestamp
+      // stays put through a later approve.
+      ...(decision === "rejected" ? { lastRejectedAt: Date.now() } : {}),
     });
     await writeAudit({
       actorUid,

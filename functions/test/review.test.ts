@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn, makeAdminUser } from "./helpers";
+import { signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
@@ -26,6 +26,10 @@ async function pendingProfile(ownerEmailPrefix: string) {
     "createProfileDraft",
     { type: "curator", subtype: "venue", name: "Rooftop 21", handle: `roof_${Date.now()}` },
     owner.user);
+  // Task 4 added a curator minimum-content gate to submitProfileForReview —
+  // this fixture's subject is the review flow, not the gate, so seed the
+  // gate's requirements directly rather than re-deriving them per test.
+  await seedCuratorGateContent(adb, profileId);
   await callFn("submitProfileForReview", { profileId }, owner.user);
   return { owner, profileId };
 }

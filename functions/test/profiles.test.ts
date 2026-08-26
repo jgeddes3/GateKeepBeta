@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   signUpTestUser, signUpUnverifiedTestUser, callFn, wait, uploadTestAudio, makeWav, waitForTrackStatus, makeAdminUser,
+  seedCuratorGateContent,
 } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
@@ -24,9 +25,9 @@ const draft = (handle: string): ProfileDraftInput =>
   ({ type: "musician", subtype: "band", name: "The Midnight Owls", handle });
 
 // For submitProfileForReview tests whose subject is the status transition
-// itself (not the Task 9 musician minimum-content gate) — curators have no
-// portfolio gate, so this fixture keeps those tests focused on submit/resubmit
-// mechanics instead of needing to seed bio/genre/avatar/track content.
+// itself (not the Task 4 curator minimum-content gate, tested separately
+// below) — pair with seedCuratorGateContent before submitting so those tests
+// stay focused on submit/resubmit/delete mechanics.
 const curatorDraft = (handle: string): ProfileDraftInput =>
   ({ type: "curator", subtype: "venue", name: "The Rooftop", handle });
 
@@ -111,6 +112,7 @@ describe("deleteProfile", () => {
     const handle = `del5p_${Date.now()}`;
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(handle), user);
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, user);
     const adminUser = await makeAdminUser("del5admin");
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
@@ -124,6 +126,7 @@ describe("deleteProfile", () => {
     const { user } = await signUpTestUser(`del6-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`del6p_${Date.now()}`), user);
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, user);
     await expect(callFn("deleteProfile", { profileId }, user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -139,6 +142,7 @@ describe("deleteProfile", () => {
 
     const { profileId: rejId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`del7r_${Date.now()}`), user);
+    await seedCuratorGateContent(adb, rejId);
     await callFn("submitProfileForReview", { profileId: rejId }, user);
     const adminUser = await makeAdminUser("del7admin");
     await callFn("reviewProfile", { profileId: rejId, decision: "rejected", reason: "No thanks" }, adminUser.user);
@@ -169,6 +173,7 @@ describe("submitProfileForReview", () => {
     const { user } = await signUpTestUser(`m3-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`sub_${Date.now()}`), user);
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
     const { user: outsider } = await signUpTestUser(`m4-${Date.now()}@test.com`);
@@ -179,6 +184,7 @@ describe("submitProfileForReview", () => {
     const { user } = await signUpTestUser(`m5-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`resub_${Date.now()}`), user);
+    await seedCuratorGateContent(adb, profileId);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -248,13 +254,135 @@ describe("submitProfileForReview minimum content (musicians)", () => {
     await expect(callFn("submitProfileForReview", { profileId }, user))
       .rejects.toThrow(/track/i);
   });
+});
 
-  it("curator drafts submit without portfolio checks (unchanged from foundation)", async () => {
-    const { user } = await signUpTestUser(`gatec-${Date.now()}@test.com`);
+describe("submitProfileForReview minimum content (curators)", () => {
+  it("refuses an empty curator draft, listing what's missing; passes once about+photo+location+lookingFor exist", async () => {
+    const { user } = await signUpTestUser(`cgate-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
-      { type: "curator", subtype: "venue", name: "The Room", handle: `gatec_${Date.now()}` }, user);
+      { type: "curator", subtype: "venue", name: "The Room", handle: `cgate_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/about.*photo.*location.*looking/i);
+
+    await callFn("updateCuratorProfile", { profileId, about: "A great room for live music." }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/photo/i);
+
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": ["public/photos/x/cover-t.jpg"] });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/location/i);
+
+    await callFn("updateCuratorProfile",
+      { profileId, location: { address: "123 Main St, Austin, TX", city: "Austin" } }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/looking/i);
+
+    await callFn("updateCuratorProfile",
+      { profileId, lookingFor: { genres: ["rock"], actSizes: ["band"], notes: null } }, user);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  });
+
+  it("a venue's location requirement is not satisfied by a bare city — a real address is required", async () => {
+    const { user } = await signUpTestUser(`cgatev-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "No Address Venue", handle: `cgatev_${Date.now()}` }, user);
+    await callFn("updateCuratorProfile", { profileId, about: "x" }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": ["public/photos/x/cover-t.jpg"] });
+    await callFn("updateCuratorProfile",
+      { profileId, lookingFor: { genres: ["rock"], actSizes: ["band"], notes: null } }, user);
+    // Deliberately never set location — a venue's curator.location.address stays null.
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/location/i);
+  });
+
+  it("a planner/host's location requirement is satisfied by city alone (no street address ever stored)", async () => {
+    const { user } = await signUpTestUser(`cgatep-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "planner", name: "Party Planner", handle: `cgatep_${Date.now()}` }, user);
+    await callFn("updateCuratorProfile", { profileId, about: "x" }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": ["public/photos/x/cover-t.jpg"] });
+    await callFn("updateCuratorProfile", { profileId, location: { address: null, city: "Austin" } }, user);
+    await callFn("updateCuratorProfile",
+      { profileId, lookingFor: { genres: ["rock"], actSizes: ["band"], notes: null } }, user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(p?.status).toBe("pending_review");
+    expect(p?.curator.location.address).toBeNull();
+  });
+});
+
+describe("submitProfileForReview anti-spam", () => {
+  it("caps pending curator profiles at MAX_PENDING_CURATOR_PROFILES per admin", async () => {
+    const { user } = await signUpTestUser(`ccap-${Date.now()}@test.com`);
+    const { profileId: p1 } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Room A", handle: `ccapa_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, p1);
+    await callFn("submitProfileForReview", { profileId: p1 }, user);
+
+    const { profileId: p2 } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Room B", handle: `ccapb_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, p2);
+    await expect(callFn("submitProfileForReview", { profileId: p2 }, user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+  });
+
+  it("does not cap a musician submission on an unrelated curator's pending count", async () => {
+    // Negative control: the curator pending-cap must only ever count curator
+    // profiles, never gate a musician submission by the same admin.
+    const { user } = await signUpTestUser(`ccapm-${Date.now()}@test.com`);
+    const { profileId: curatorId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Room C", handle: `ccapc_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, curatorId);
+    await callFn("submitProfileForReview", { profileId: curatorId }, user);
+
+    const { profileId: musicianId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Solo Act", handle: `ccapms_${Date.now()}` }, user);
+    await callFn("updatePortfolio", { profileId: musicianId, bio: "x", genres: ["soul"] }, user);
+    await adb.doc(`profiles/${musicianId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    const wav = makeWav(12);
+    const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId: musicianId, title: "Demo", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
+    await uploadTestAudio(uploadPath, wav, "audio/wav", user);
+    await waitForTrackStatus(adb, `profiles/${musicianId}/tracks/${trackId}`, ["pending_review"]);
+    await callFn("submitProfileForReview", { profileId: musicianId }, user);
+    expect((await adb.doc(`profiles/${musicianId}`).get()).data()?.status).toBe("pending_review");
+  }, 60_000);
+
+  it("blocks resubmission within 24h of a rejection, and allows it again after 25h", async () => {
+    const { user } = await signUpTestUser(`ccool-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Cooldown Room", handle: `ccool_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, profileId);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("ccooladmin");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Not yet" }, adminUser.user);
+
+    // +1h since rejection: still inside the 24h cooldown window.
+    await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 60 * 60 * 1000 });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/24 hours/i);
+
+    // +25h since rejection: past the cooldown, resubmission succeeds.
+    await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  });
+
+  it("reviewProfile stamps lastRejectedAt on reject, live (not just via admin-SDK seeding above)", async () => {
+    const { user } = await signUpTestUser(`cstamp-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Stamp Room", handle: `cstamp_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, profileId);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("cstampadmin");
+    const before = Date.now();
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "No thanks" }, adminUser.user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(typeof p?.lastRejectedAt).toBe("number");
+    expect(p?.lastRejectedAt).toBeGreaterThanOrEqual(before);
   });
 });
 

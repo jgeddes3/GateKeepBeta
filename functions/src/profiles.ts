@@ -1,8 +1,12 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  validateProfileDraft, isValidDocId, type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
+  validateProfileDraft, isValidDocId, validateLookingFor,
+  MAX_PENDING_CURATOR_PROFILES, RESUBMIT_COOLDOWN_MS,
+  type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
+  type CuratorDetails, type CuratorSubtype,
 } from "@gatekeep/shared";
+import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { writeAudit } from "./review.js";
 import { bucket, logDeleteFailure } from "./storage.js";
 
@@ -16,17 +20,6 @@ const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"])
 // upload with nothing behind it — that must not satisfy the gate.
 const LISTENABLE_TRACK_STATUSES = ["pending_review", "approved"] as const;
 
-function requireAuth(uid: string | undefined): string {
-  if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
-  return uid;
-}
-
-function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
-  if (req.auth?.token?.email_verified !== true) {
-    throw new HttpsError("failed-precondition", "Please verify your email address first.");
-  }
-}
-
 export async function requireProfileAdmin(profileId: string, uid: string) {
   const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
   if (!m.exists || m.data()?.role !== "admin") {
@@ -35,7 +28,7 @@ export async function requireProfileAdmin(profileId: string, uid: string) {
 }
 
 export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-central1" }, async (req) => {
-  const uid = requireAuth(req.auth?.uid);
+  const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
   const v = validateProfileDraft(input);
@@ -76,6 +69,15 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
       status: "draft", rejectionReason: null, createdAt: now, updatedAt: now,
       ...(input.type === "musician"
         ? { portfolio: { bio: "", genres: [], externalLinks: [], avatarPhotoPath: null, coverPhotoPath: null } }
+        : input.type === "curator"
+        ? { curator: {
+            about: "",
+            lookingFor: { genres: [], actSizes: [], notes: null },
+            amenities: { capacity: null, hasPA: null, hasBackline: null, indoorOutdoor: null, notes: null },
+            advertisingInterest: false,
+            location: { address: null, city: "", neighborhood: null, geo: null },
+            photoPaths: [],
+          } as CuratorDetails }
         : {}),
     };
     const member: MemberDoc = { uid, role: "admin", label: "owner", joinedAt: now };
@@ -87,20 +89,49 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
 });
 
 export const submitProfileForReview = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
-  const uid = requireAuth(req.auth?.uid);
+  const uid = requireAuthUid(req);
   const { profileId } = req.data;
   await requireProfileAdmin(profileId, uid);
   const ref = getFirestore().doc(`profiles/${profileId}`);
   const snap = await ref.get();
-  const status = snap.data()?.status;
+  const data = snap.data();
+  const status = data?.status;
   if (status !== "draft" && status !== "rejected") {
     throw new HttpsError("failed-precondition", `Cannot submit a profile in status "${status}".`);
   }
 
+  // Anti-spam: resubmitting too soon after a rejection is blocked regardless
+  // of profile type — reviewProfile stamps lastRejectedAt on every reject
+  // (routine "revise and resubmit" and retroactive-unpublish alike).
+  const lastRejectedAt = data?.lastRejectedAt as number | undefined;
+  if (lastRejectedAt !== undefined && Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS) {
+    throw new HttpsError("failed-precondition", "You can resubmit 24 hours after a rejection.");
+  }
+
+  // Anti-spam: at most MAX_PENDING_CURATOR_PROFILES curator profiles pending
+  // review per admin at once, to prevent a spam wave of low-effort
+  // venue/planner listings. Same collection-group-scan pattern as
+  // createProfileDraft's unsubmitted-drafts cap above.
+  if (data?.type === "curator") {
+    const myMemberships = await getFirestore().collectionGroup("members").where("uid", "==", uid).get();
+    let pendingCuratorCount = 0;
+    for (const m of myMemberships.docs) {
+      if (m.data().role !== "admin") continue;
+      const profileRef = m.ref.parent.parent;
+      if (!profileRef) continue;
+      const p = await profileRef.get();
+      if (p.data()?.type === "curator" && p.data()?.status === "pending_review") pendingCuratorCount++;
+    }
+    if (pendingCuratorCount >= MAX_PENDING_CURATOR_PROFILES) {
+      throw new HttpsError("resource-exhausted",
+        "You already have a curator profile pending review — wait for that decision first.");
+    }
+  }
+
   // Spec §6 minimum content: reviewers approve a *portfolio* — there must be
-  // something to look at and listen to. Musicians only; curators are sub-3.
-  if (snap.data()?.type === "musician") {
-    const p = snap.data()?.portfolio as PortfolioData | undefined;
+  // something to look at (and, for musicians, listen to).
+  if (data?.type === "musician") {
+    const p = data?.portfolio as PortfolioData | undefined;
     const missing: string[] = [];
     if (!p?.bio?.trim()) missing.push("a bio");
     if (!p?.genres?.length) missing.push("at least one genre");
@@ -120,6 +151,25 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
     }
   }
 
+  if (data?.type === "curator") {
+    const c = data?.curator as CuratorDetails | undefined;
+    const subtype = data?.subtype as CuratorSubtype;
+    const missing: string[] = [];
+    if (!c?.about?.trim()) missing.push("an about description");
+    if (!c?.photoPaths?.length) missing.push("at least one photo");
+    // Venues need a real street address; planners/hosts only ever have a
+    // city-level pin, so a non-empty city satisfies the gate for them.
+    const hasLocation = subtype === "venue" ? !!c?.location?.address : !!c?.location?.city;
+    if (!hasLocation) missing.push("a location");
+    if (!validateLookingFor(c?.lookingFor ?? { genres: [], actSizes: [], notes: null }).ok) {
+      missing.push("what you're looking for");
+    }
+    if (missing.length > 0) {
+      const list = new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(missing);
+      throw new HttpsError("failed-precondition", `Add ${list} before submitting.`);
+    }
+  }
+
   await ref.update({ status: "pending_review", rejectionReason: null, updatedAt: Date.now() });
   return { ok: true };
 });
@@ -130,7 +180,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
 // give up the handle and then delete their account. Also gives admins a way
 // to remediate handle-squatting drafts.
 export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
-  const uid = requireAuth(req.auth?.uid);
+  const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { profileId } = req.data;
   if (!isValidDocId(profileId)) {

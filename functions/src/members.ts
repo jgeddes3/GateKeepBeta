@@ -2,24 +2,14 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { requireProfileAdmin } from "./profiles.js";
+import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import type { InviteDoc, MemberDoc, MemberRole } from "@gatekeep/shared";
-
-function requireAuth(uid: string | undefined): string {
-  if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
-  return uid;
-}
-
-function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
-  if (req.auth?.token?.email_verified !== true) {
-    throw new HttpsError("failed-precondition", "Please verify your email address first.");
-  }
-}
 
 const MAX_PENDING_INVITES_PER_PROFILE = 20;
 
 export const inviteMember = onCall<{ profileId: string; email: string; role: MemberRole; label: string }>(
   { region: "us-central1" }, async (req) => {
-    const uid = requireAuth(req.auth?.uid);
+    const uid = requireAuthUid(req);
     requireVerifiedEmail(req);
     const { profileId, email, role, label } = req.data;
     // Defensive runtime guards: onCall's generic type parameter does not
@@ -73,7 +63,7 @@ const INVITE_MAX_AGE_MS = 14 * 86_400_000; // 14 days
 
 export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
   { region: "us-central1" }, async (req) => {
-    const uid = requireAuth(req.auth?.uid);
+    const uid = requireAuthUid(req);
     // Closes a pre-existing gap: an unverified pre-registered account could
     // otherwise accept an invite and immediately edit content. Foundation
     // already gates createProfileDraft/inviteMember the same way.
@@ -115,7 +105,7 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
 
 export const revokeInvite = onCall<{ inviteId: string }>(
   { region: "us-central1" }, async (req) => {
-    const uid = requireAuth(req.auth?.uid);
+    const uid = requireAuthUid(req);
     const { inviteId } = req.data;
     const db = getFirestore();
     const ref = db.doc(`invites/${inviteId}`);
@@ -130,7 +120,7 @@ export const revokeInvite = onCall<{ inviteId: string }>(
 
 export const removeMember = onCall<{ profileId: string; uid: string }>(
   { region: "us-central1" }, async (req) => {
-    const actor = requireAuth(req.auth?.uid);
+    const actor = requireAuthUid(req);
     const { profileId, uid } = req.data;
     // Members may remove themselves; otherwise admin required. This check can
     // stay outside the transaction — it doesn't participate in the
@@ -161,7 +151,7 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
 
 export const transferAdmin = onCall<{ profileId: string; toUid: string }>(
   { region: "us-central1" }, async (req) => {
-    const actor = requireAuth(req.auth?.uid);
+    const actor = requireAuthUid(req);
     const { profileId, toUid } = req.data;
     await requireProfileAdmin(profileId, actor);
     const db = getFirestore();
