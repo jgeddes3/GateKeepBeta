@@ -1,9 +1,10 @@
 import type { ProfileDraftInput } from "./types.js";
 import {
   GENRES, GIG_TYPES, AUDIO_CONTENT_TYPES, MAX_AUDIO_UPLOAD_BYTES,
-  ACT_SIZES, AVAILABILITY_PATTERNS,
+  ACT_SIZES, AVAILABILITY_PATTERNS, SERIES_CADENCES,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
+  type LookingFor, type GigDoc, type GigBudget, type GigSeriesDoc, type BudgetStructure,
 } from "./types.js";
 
 export const RESERVED_HANDLES = [
@@ -210,6 +211,126 @@ export function validateTrackCreate(input: CreateTrackInput): Result {
   }
   if (!(AUDIO_CONTENT_TYPES as readonly string[]).includes(input.contentType)) {
     return fail("Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.");
+  }
+  return { ok: true };
+}
+
+// ---------- Sub-project 3: curator profiles & gig postings ----------
+
+// Shared element-level rules for a genre/act-size pair, used by both
+// validateLookingFor (curator profile "looking for") and validateGigContent's
+// `wants` field (a gig posting has no `notes`, so it can't just delegate to
+// validateLookingFor wholesale).
+function validateGenresAndActSizes(genres: unknown, actSizes: unknown): Result {
+  if (!Array.isArray(genres) || genres.length < 1) return fail("Pick at least one genre.");
+  for (const g of genres) {
+    if (typeof g !== "string" || !(GENRES as readonly string[]).includes(g)) return fail("Unknown genre.");
+  }
+  if (!Array.isArray(actSizes) || actSizes.length < 1) return fail("Pick at least one act size.");
+  for (const a of actSizes) {
+    if (typeof a !== "string" || !(ACT_SIZES as readonly string[]).includes(a)) return fail("Unknown act size.");
+  }
+  return { ok: true };
+}
+
+export function validateLookingFor(input: LookingFor): Result {
+  // Untrusted onCall payload — same defensive-runtime rationale as validateHandle.
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return fail("Invalid looking-for.");
+  }
+  const v = validateGenresAndActSizes(input.genres, input.actSizes);
+  if (!v.ok) return v;
+  if (input.notes != null && (typeof input.notes !== "string" || input.notes.length > 500)) {
+    return fail("Notes must be at most 500 characters.");
+  }
+  return { ok: true };
+}
+
+type GigContentInput = Pick<GigDoc, "title" | "description" | "wants" | "durationMinutes" | "provisions">;
+
+export function validateGigContent(input: GigContentInput): Result {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return fail("Invalid gig content.");
+  }
+  if (typeof input.title !== "string" || input.title.trim().length < 1 || input.title.trim().length > 80) {
+    return fail("Title must be 1-80 characters.");
+  }
+  if (typeof input.description !== "string" || input.description.length > 2000) {
+    return fail("Description must be at most 2000 characters.");
+  }
+  if (typeof input.wants !== "object" || input.wants === null || Array.isArray(input.wants)) {
+    return fail("Invalid wants.");
+  }
+  const wantsResult = validateGenresAndActSizes(input.wants.genres, input.wants.actSizes);
+  if (!wantsResult.ok) return wantsResult;
+  if (typeof input.durationMinutes !== "number" || !Number.isInteger(input.durationMinutes)
+      || input.durationMinutes < 15 || input.durationMinutes > 720) {
+    return fail("Duration must be 15-720 minutes.");
+  }
+  if (typeof input.provisions !== "object" || input.provisions === null || Array.isArray(input.provisions)) {
+    return fail("Invalid provisions.");
+  }
+  if (input.provisions.hasPA != null && typeof input.provisions.hasPA !== "boolean") {
+    return fail("Invalid PA answer.");
+  }
+  if (input.provisions.hasBackline != null && typeof input.provisions.hasBackline !== "boolean") {
+    return fail("Invalid backline answer.");
+  }
+  if (input.provisions.notes != null
+      && (typeof input.provisions.notes !== "string" || input.provisions.notes.length > 500)) {
+    return fail("Provisions notes must be at most 500 characters.");
+  }
+  return { ok: true };
+}
+
+const BUDGET_STRUCTURES: readonly BudgetStructure[] = ["perHour", "perSong", "perSet"];
+const MAX_BUDGET_CENTS = 5_000_000;
+
+export function validateBudget(input: GigBudget): Result {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return fail("Invalid budget.");
+  }
+  if (typeof input.minCents !== "number" || !Number.isInteger(input.minCents) || input.minCents < 0) {
+    return fail("Minimum budget must be a non-negative whole number of cents.");
+  }
+  if (typeof input.maxCents !== "number" || !Number.isInteger(input.maxCents)
+      || input.maxCents < 0 || input.maxCents > MAX_BUDGET_CENTS) {
+    return fail(`Maximum budget must be a whole number of cents, at most ${MAX_BUDGET_CENTS}.`);
+  }
+  if (input.minCents > input.maxCents) return fail("Minimum budget cannot exceed maximum.");
+  if (typeof input.structure !== "string" || !BUDGET_STRUCTURES.includes(input.structure as BudgetStructure)) {
+    return fail("Invalid budget structure.");
+  }
+  return { ok: true };
+}
+
+type GigRecurrence = GigSeriesDoc["recurrence"];
+
+export function validateRecurrence(input: GigRecurrence, now: number): Result {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return fail("Invalid recurrence.");
+  }
+  if (typeof input.weekday !== "number" || !Number.isInteger(input.weekday)
+      || input.weekday < 0 || input.weekday > 6) {
+    return fail("Weekday must be 0-6.");
+  }
+  if (typeof input.hour !== "number" || !Number.isInteger(input.hour)
+      || input.hour < 0 || input.hour > 23) {
+    return fail("Hour must be 0-23.");
+  }
+  if (typeof input.minute !== "number" || !Number.isInteger(input.minute)
+      || input.minute < 0 || input.minute > 59) {
+    return fail("Minute must be 0-59.");
+  }
+  if (typeof input.cadence !== "string" || !(SERIES_CADENCES as readonly string[]).includes(input.cadence)) {
+    return fail("Invalid cadence.");
+  }
+  if (input.endDate != null) {
+    // Strictly future of the caller-supplied reference time — no Date.now()
+    // in shared code, so callers (functions/src) inject `now` explicitly.
+    if (typeof input.endDate !== "number" || !Number.isFinite(input.endDate) || input.endDate <= now) {
+      return fail("End date must be in the future.");
+    }
   }
   return { ok: true };
 }

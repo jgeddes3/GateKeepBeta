@@ -45,7 +45,7 @@ export interface InviteDoc {
 export interface AuditLogDoc {
   actorUid: string;
   action: "profile_approved" | "profile_rejected" | "admin_granted" | "profile_deleted"
-    | "track_approved" | "track_rejected";
+    | "track_approved" | "track_rejected" | "gig_taken_down" | "account_flagged";
   targetId: string;          // profileId or uid
   detail: string;
   at: number;
@@ -54,7 +54,7 @@ export interface AuditLogDoc {
 export interface NotificationDoc {
   title: string;
   body: string;
-  kind: "profile_review" | "track_review" | "system";
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation";
   read: boolean;
   createdAt: number;
 }
@@ -146,3 +146,62 @@ export const AUDIO_CONTENT_TYPES = [
   "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4",
   "audio/m4a", "audio/x-m4a", "audio/aac", "audio/flac", "audio/ogg",
 ] as const;
+
+// ---------- Sub-project 3: curator profiles & gig postings ----------
+
+export const GIG_STATUSES = ["draft", "open", "closed", "cancelled", "taken_down"] as const;
+export type GigStatus = (typeof GIG_STATUSES)[number];
+export const SERIES_STATUSES = ["active", "paused", "ended"] as const;
+export type SeriesStatus = (typeof SERIES_STATUSES)[number];
+export const SERIES_CADENCES = ["weekly", "biweekly", "monthly"] as const;
+export type SeriesCadence = (typeof SERIES_CADENCES)[number];
+export const FILL_MODES = ["per_occurrence", "whole_run"] as const;
+export type FillMode = (typeof FILL_MODES)[number];
+export type BudgetStructure = "perHour" | "perSong" | "perSet"; // BookingRates keys
+export type AddressVisibility = "public" | "neighborhood";
+
+export interface LookingFor { genres: string[]; actSizes: ActSize[]; notes: string | null; }
+export interface CuratorDetails {
+  about: string;
+  lookingFor: LookingFor;
+  amenities: { capacity: number | null; hasPA: boolean | null; hasBackline: boolean | null;
+               indoorOutdoor: "indoor" | "outdoor" | "both" | null; notes: string | null };
+  advertisingInterest: boolean;
+  // venues: full street address (public). planners/hosts: city only.
+  location: { address: string | null; city: string; neighborhood: string | null;
+              geo: { lat: number; lng: number } | null };
+  photoPaths: string[];          // public/photos/... (SP2 photo pipeline)
+}
+// lives on ProfileDoc as `curator?: CuratorDetails` (curators only; seeded by createProfileDraft)
+
+export interface GigBudget { minCents: number; maxCents: number; structure: BudgetStructure; }
+export interface GigWants { genres: string[]; actSizes: ActSize[]; }
+export interface GigPublicLocation {
+  venueName: string | null; neighborhood: string | null; city: string;
+  geo: { lat: number; lng: number } | null;   // coarsened when visibility=neighborhood
+  addressVisibility: AddressVisibility;
+  address: string | null;                      // present ONLY when visibility=public
+}
+export interface GigDoc {
+  curatorProfileId: string; seriesId: string | null; detachedFromTemplate: boolean;
+  title: string; description: string; wants: GigWants; budget: GigBudget;
+  startsAt: number; durationMinutes: number;
+  provisions: { hasPA: boolean | null; hasBackline: boolean | null; notes: string | null };
+  location: GigPublicLocation;
+  status: GigStatus; createdAt: number; updatedAt: number;
+}
+// gigs/{id}/private/location:
+export interface GigPrivateLocation { address: string; geo: { lat: number; lng: number } | null; }
+export interface GigSeriesDoc {
+  curatorProfileId: string;
+  recurrence: { weekday: number; hour: number; minute: number; cadence: SeriesCadence; endDate: number | null };
+  fillMode: FillMode; template: Omit<GigDoc, "curatorProfileId"|"seriesId"|"detachedFromTemplate"|"status"|"startsAt"|"createdAt"|"updatedAt">;
+  status: SeriesStatus; materializedThrough: number; createdAt: number; updatedAt: number;
+}
+export interface AdminNoteDoc { notes: { byUid: string; at: number; text: string }[]; }
+
+export const MAX_OPEN_GIGS_PER_PROFILE = 50;
+export const MAX_ACTIVE_SERIES_PER_PROFILE = 10;
+export const MAX_PENDING_CURATOR_PROFILES = 1;
+export const RESUBMIT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export const SERIES_MATERIALIZE_WEEKS = 8;

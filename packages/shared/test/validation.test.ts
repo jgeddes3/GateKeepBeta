@@ -1,11 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   validateHandle, validateProfileDraft, RESERVED_HANDLES,
   validatePortfolioUpdate, validateBookingUpdate, validateTrackCreate,
+  validateLookingFor, validateGigContent, validateBudget, validateRecurrence,
   GENRES, GIG_TYPES, MAX_TRACKS, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES,
   ACT_SIZES, AVAILABILITY_PATTERNS, TRACK_STATUSES,
+  GIG_STATUSES, SERIES_STATUSES, SERIES_CADENCES, FILL_MODES,
+  MAX_OPEN_GIGS_PER_PROFILE, MAX_ACTIVE_SERIES_PER_PROFILE, MAX_PENDING_CURATOR_PROFILES,
+  RESUBMIT_COOLDOWN_MS, SERIES_MATERIALIZE_WEEKS,
 } from "../src/index";
-import type { ProfileDraftInput } from "../src/index";
+import type { ProfileDraftInput, LookingFor, GigWants } from "../src/index";
 
 describe("validateHandle", () => {
   it("accepts lowercase letters, digits, underscores, 3-30 chars", () => {
@@ -260,6 +264,249 @@ describe("never throws on hostile payloads (defensive runtime guards)", () => {
     {
       name: "profileId containing a path separator",
       run: () => validatePortfolioUpdate({ profileId: "a/b", bio: "hi" }),
+    },
+  ];
+  for (const { name, run } of hostileCases) {
+    it(`does not throw and reports ok:false — ${name}`, () => {
+      let result: { ok: boolean } | undefined;
+      expect(() => { result = run(); }).not.toThrow();
+      expect(result?.ok).toBe(false);
+    });
+  }
+});
+
+// ---------- Sub-project 3: curator gigs ----------
+
+describe("validateLookingFor", () => {
+  const ok: LookingFor = { genres: [GENRES[0]], actSizes: [ACT_SIZES[0]], notes: null };
+  it("accepts a valid looking-for", () => {
+    expect(validateLookingFor(ok).ok).toBe(true);
+  });
+  it("requires at least one genre", () => {
+    expect(validateLookingFor({ ...ok, genres: [] }).ok).toBe(false);
+  });
+  it("rejects an unknown genre", () => {
+    expect(validateLookingFor({ ...ok, genres: ["polka-metal-fusion-invalid"] }).ok).toBe(false);
+  });
+  it("requires at least one act size", () => {
+    expect(validateLookingFor({ ...ok, actSizes: [] }).ok).toBe(false);
+  });
+  it("rejects an unknown act size", () => {
+    expect(validateLookingFor({ ...ok, actSizes: ["orchestra"] as never }).ok).toBe(false);
+  });
+  it("accepts notes at exactly 500 chars and rejects 501", () => {
+    expect(validateLookingFor({ ...ok, notes: "x".repeat(500) }).ok).toBe(true);
+    expect(validateLookingFor({ ...ok, notes: "x".repeat(501) }).ok).toBe(false);
+  });
+  it("accepts null notes", () => {
+    expect(validateLookingFor({ ...ok, notes: null }).ok).toBe(true);
+  });
+  it("rejects malformed types at runtime (untrusted onCall payload shapes)", () => {
+    expect(validateLookingFor(null as never).ok).toBe(false);
+    expect(validateLookingFor([] as never).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, genres: "rock" as never }).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, genres: 5 as never }).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, genres: [5] as never }).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, actSizes: null as never }).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, actSizes: {} as never }).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, notes: 42 as never }).ok).toBe(false);
+    expect(validateLookingFor({ ...ok, notes: [] as never }).ok).toBe(false);
+  });
+});
+
+describe("validateGigContent", () => {
+  const ok = {
+    title: "Friday Night Sessions",
+    description: "A weekly open mic for local acts.",
+    wants: { genres: [GENRES[0]], actSizes: [ACT_SIZES[0]] } satisfies GigWants,
+    durationMinutes: 60,
+    provisions: { hasPA: true, hasBackline: false, notes: null },
+  };
+  it("accepts valid gig content", () => {
+    expect(validateGigContent(ok).ok).toBe(true);
+  });
+  it("accepts a title at exactly 80 chars and rejects 81", () => {
+    expect(validateGigContent({ ...ok, title: "x".repeat(80) }).ok).toBe(true);
+    expect(validateGigContent({ ...ok, title: "x".repeat(81) }).ok).toBe(false);
+  });
+  it("rejects an empty (or whitespace-only) title", () => {
+    expect(validateGigContent({ ...ok, title: "" }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, title: "   " }).ok).toBe(false);
+  });
+  it("accepts a description at exactly 2000 chars and rejects 2001", () => {
+    expect(validateGigContent({ ...ok, description: "x".repeat(2000) }).ok).toBe(true);
+    expect(validateGigContent({ ...ok, description: "x".repeat(2001) }).ok).toBe(false);
+  });
+  it("delegates wants element validation to the looking-for rules", () => {
+    expect(validateGigContent({ ...ok, wants: { genres: [], actSizes: [ACT_SIZES[0]] } }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, wants: { genres: [GENRES[0]], actSizes: [] } }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, wants: { genres: ["nonsense-genre"], actSizes: [ACT_SIZES[0]] } as never }).ok).toBe(false);
+  });
+  it("accepts duration boundaries 15 and 720, rejects 14 and 721", () => {
+    expect(validateGigContent({ ...ok, durationMinutes: 15 }).ok).toBe(true);
+    expect(validateGigContent({ ...ok, durationMinutes: 14 }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, durationMinutes: 720 }).ok).toBe(true);
+    expect(validateGigContent({ ...ok, durationMinutes: 721 }).ok).toBe(false);
+  });
+  it("rejects a non-integer duration", () => {
+    expect(validateGigContent({ ...ok, durationMinutes: 60.5 }).ok).toBe(false);
+  });
+  it("accepts provisions notes at exactly 500 chars and rejects 501", () => {
+    expect(validateGigContent({ ...ok, provisions: { ...ok.provisions, notes: "x".repeat(500) } }).ok).toBe(true);
+    expect(validateGigContent({ ...ok, provisions: { ...ok.provisions, notes: "x".repeat(501) } }).ok).toBe(false);
+  });
+  it("accepts null hasPA/hasBackline and rejects non-boolean values", () => {
+    expect(validateGigContent({ ...ok, provisions: { ...ok.provisions, hasPA: null, hasBackline: null } }).ok).toBe(true);
+    expect(validateGigContent({ ...ok, provisions: { ...ok.provisions, hasPA: "yes" as never } }).ok).toBe(false);
+  });
+  it("rejects malformed types at runtime (untrusted onCall payload shapes)", () => {
+    expect(validateGigContent(null as never).ok).toBe(false);
+    expect(validateGigContent([] as never).ok).toBe(false);
+    expect(validateGigContent({ ...ok, title: 5 as never }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, description: [] as never }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, wants: null as never }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, durationMinutes: "60" as never }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, provisions: [] as never }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, provisions: null as never }).ok).toBe(false);
+  });
+});
+
+describe("validateBudget", () => {
+  const ok = { minCents: 5000, maxCents: 20000, structure: "perHour" as const };
+  it("accepts a valid budget", () => {
+    expect(validateBudget(ok).ok).toBe(true);
+  });
+  it("accepts minCents at 0 and maxCents at exactly 5,000,000", () => {
+    expect(validateBudget({ ...ok, minCents: 0 }).ok).toBe(true);
+    expect(validateBudget({ ...ok, minCents: 0, maxCents: 5_000_000 }).ok).toBe(true);
+  });
+  it("rejects maxCents over 5,000,000", () => {
+    expect(validateBudget({ ...ok, maxCents: 5_000_001 }).ok).toBe(false);
+  });
+  it("rejects minCents greater than maxCents", () => {
+    expect(validateBudget({ ...ok, minCents: 20001 }).ok).toBe(false);
+  });
+  it("rejects negative cents", () => {
+    expect(validateBudget({ ...ok, minCents: -1 }).ok).toBe(false);
+    expect(validateBudget({ ...ok, maxCents: -1, minCents: -5 }).ok).toBe(false);
+  });
+  it("rejects non-integer cents", () => {
+    expect(validateBudget({ ...ok, minCents: 100.5 }).ok).toBe(false);
+    expect(validateBudget({ ...ok, maxCents: 200.5 }).ok).toBe(false);
+  });
+  it("accepts each budget structure literal", () => {
+    expect(validateBudget({ ...ok, structure: "perHour" }).ok).toBe(true);
+    expect(validateBudget({ ...ok, structure: "perSong" }).ok).toBe(true);
+    expect(validateBudget({ ...ok, structure: "perSet" }).ok).toBe(true);
+  });
+  it("rejects an unknown structure", () => {
+    expect(validateBudget({ ...ok, structure: "perGig" as never }).ok).toBe(false);
+  });
+  it("rejects malformed types at runtime (untrusted onCall payload shapes)", () => {
+    expect(validateBudget(null as never).ok).toBe(false);
+    expect(validateBudget([] as never).ok).toBe(false);
+    expect(validateBudget({ ...ok, minCents: "0" as never }).ok).toBe(false);
+    expect(validateBudget({ ...ok, maxCents: null as never }).ok).toBe(false);
+    expect(validateBudget({ ...ok, structure: 1 as never }).ok).toBe(false);
+    expect(validateBudget({ ...ok, structure: null as never }).ok).toBe(false);
+  });
+});
+
+describe("validateRecurrence", () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const dayMs = 24 * 60 * 60 * 1000;
+  const ok = { weekday: 3, hour: 19, minute: 30, cadence: "weekly" as const, endDate: now + dayMs };
+  it("accepts a valid recurrence", () => {
+    expect(validateRecurrence(ok, now).ok).toBe(true);
+  });
+  it("accepts weekday boundaries 0 and 6, rejects 7 and -1", () => {
+    expect(validateRecurrence({ ...ok, weekday: 0 }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, weekday: 6 }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, weekday: 7 }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, weekday: -1 }, now).ok).toBe(false);
+  });
+  it("accepts hour boundaries 0 and 23, rejects -1 and 24", () => {
+    expect(validateRecurrence({ ...ok, hour: 0 }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, hour: 23 }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, hour: -1 }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, hour: 24 }, now).ok).toBe(false);
+  });
+  it("accepts minute boundaries 0 and 59, rejects -1 and 60", () => {
+    expect(validateRecurrence({ ...ok, minute: 0 }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, minute: 59 }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, minute: -1 }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, minute: 60 }, now).ok).toBe(false);
+  });
+  it("accepts every cadence in the enum and rejects an unknown one", () => {
+    expect(validateRecurrence({ ...ok, cadence: "weekly" }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, cadence: "biweekly" }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, cadence: "monthly" }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, cadence: "daily" as never }, now).ok).toBe(false);
+  });
+  it("accepts a null endDate", () => {
+    expect(validateRecurrence({ ...ok, endDate: null }, now).ok).toBe(true);
+  });
+  it("accepts an endDate in the future and rejects one in the past, relative to the injected now", () => {
+    expect(validateRecurrence({ ...ok, endDate: now + dayMs }, now).ok).toBe(true);
+    expect(validateRecurrence({ ...ok, endDate: now - dayMs }, now).ok).toBe(false);
+  });
+  it("rejects an endDate exactly equal to now (must be strictly future)", () => {
+    expect(validateRecurrence({ ...ok, endDate: now }, now).ok).toBe(false);
+  });
+  it("never calls Date.now() — behavior depends only on the injected now", () => {
+    const spy = vi.spyOn(Date, "now");
+    validateRecurrence(ok, now);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+  it("rejects malformed types at runtime (untrusted onCall payload shapes)", () => {
+    expect(validateRecurrence(null as never, now).ok).toBe(false);
+    expect(validateRecurrence([] as never, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, weekday: "3" as never }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, hour: null as never }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, minute: [] as never }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, cadence: 1 as never }, now).ok).toBe(false);
+    expect(validateRecurrence({ ...ok, endDate: "tomorrow" as never }, now).ok).toBe(false);
+  });
+});
+
+describe("sub-3 gig/curator constants", () => {
+  it("derives the runtime allowlist arrays that back the new status/cadence/fill-mode unions", () => {
+    expect(GIG_STATUSES).toEqual(["draft", "open", "closed", "cancelled", "taken_down"]);
+    expect(SERIES_STATUSES).toEqual(["active", "paused", "ended"]);
+    expect(SERIES_CADENCES).toEqual(["weekly", "biweekly", "monthly"]);
+    expect(FILL_MODES).toEqual(["per_occurrence", "whole_run"]);
+  });
+  it("locks the product caps from the spec", () => {
+    expect(MAX_OPEN_GIGS_PER_PROFILE).toBe(50);
+    expect(MAX_ACTIVE_SERIES_PER_PROFILE).toBe(10);
+    expect(MAX_PENDING_CURATOR_PROFILES).toBe(1);
+    expect(RESUBMIT_COOLDOWN_MS).toBe(24 * 60 * 60 * 1000);
+    expect(SERIES_MATERIALIZE_WEEKS).toBe(8);
+  });
+});
+
+describe("never throws on hostile payloads — sub-3 validators", () => {
+  const hostileCases: Array<{ name: string; run: () => { ok: boolean } }> = [
+    {
+      name: "validateLookingFor genres as a plain object",
+      run: () => validateLookingFor({ genres: {} as never, actSizes: [ACT_SIZES[0]], notes: null }),
+    },
+    {
+      name: "validateGigContent provisions as an array",
+      run: () => validateGigContent({
+        title: "T", description: "D",
+        wants: { genres: [GENRES[0]], actSizes: [ACT_SIZES[0]] },
+        durationMinutes: 30, provisions: [] as never,
+      }),
+    },
+    {
+      name: "validateBudget structure as 'constructor' (prototype-chain lookup bypass)",
+      run: () => validateBudget({ minCents: 0, maxCents: 100, structure: "constructor" as never }),
+    },
+    {
+      name: "validateRecurrence as null",
+      run: () => validateRecurrence(null as never, Date.parse("2026-08-26T00:00:00.000Z")),
     },
   ];
   for (const { name, run } of hostileCases) {
