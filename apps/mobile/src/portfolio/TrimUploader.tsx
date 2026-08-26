@@ -165,7 +165,11 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   };
 
   const upload = async () => {
-    if (!picked) return;
+    if (!picked || busy !== null) return;
+    // Busy from the very first await: the rare size-unknown branch below
+    // fetches the whole file before createTrack runs, and an enabled button
+    // during that window would let a double-tap mint two track docs.
+    setBusy("Checking file…");
     // Neither expo-file-system nor the picker could confirm a byte count at
     // pick time (rare) — resolve it now from the actual fetched bytes and
     // re-check the mobile cap BEFORE ever asking the server to create a
@@ -173,9 +177,18 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
     let sizeBytes = picked.size;
     let prefetchedBlob: Blob | null = null;
     if (sizeBytes === null) {
-      prefetchedBlob = await (await fetch(picked.uri)).blob();
+      try {
+        prefetchedBlob = await (await fetch(picked.uri)).blob();
+      } catch (e) {
+        console.error(e);
+        setBusy(null);
+        setError(UNREADABLE_MSG);
+        Alert.alert("Couldn't read that file", UNREADABLE_MSG);
+        return;
+      }
       sizeBytes = prefetchedBlob.size;
       if (sizeBytes > MOBILE_MAX_AUDIO_BYTES) {
+        setBusy(null);
         setError(MOBILE_SIZE_MSG);
         Alert.alert("Too big", MOBILE_SIZE_MSG);
         return;
@@ -185,6 +198,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
     // it anyway, but catching it here keeps the message specific to what
     // actually went wrong instead of a generic validation failure.
     if (sizeBytes < 1) {
+      setBusy(null);
       setError(UNREADABLE_MSG);
       Alert.alert("Couldn't read that file", UNREADABLE_MSG);
       return;
@@ -197,7 +211,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
       sizeBytes, contentType: picked.mimeType || "audio/mpeg",
     };
     const v = validateTrackCreate(input);
-    if (!v.ok) { Alert.alert("Check your track", v.reason); return; }
+    if (!v.ok) { setBusy(null); Alert.alert("Check your track", v.reason); return; }
     setBusy("Requesting upload…");
     // Tracked outside the try so the catch below can tell "createTrack itself
     // failed" (created stays null — nothing to clean up) apart from "the
