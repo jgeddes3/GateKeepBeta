@@ -161,14 +161,26 @@ occurrence-vs-series choice), plus name search (`searchUsersByName`) and account
 (`flagAccount`) layered onto the existing profile review queue.
 
 **The daily scheduled job** (`functions/src/scheduled.ts`'s `dailySweep`, wrapping the plain
-`runDailySweep(now)` function tests call directly) runs once a day and does four things in one
+`runDailySweep(now)` function tests call directly) runs once a day and does five things in one
 pass: (1) materializes new occurrences for every `active` gigSeries up to the 8-week horizon, (2)
 closes `open` gigs whose `startsAt` has passed, (3) fails abandoned `processing` tracks older than
-24h (pays down sub-project 2's reaper debt), and (4) revokes `pending` invites past their 14-day
-expiry. **This only runs in production after `firebase deploy` enables the underlying Cloud
-Scheduler job** — the emulator has no scheduler component, so `runDailySweep` is exercised directly
-by tests locally, never on a timer. See the launch checklist below for the UTC-recurrence and
-timezone caveats that affect exactly when a series' occurrences land.
+24h (pays down sub-project 2's reaper debt), (4) revokes `pending` invites past their 14-day
+expiry, and (5) retries any `curatorAccessRetries/{uid}` entry left by a `syncCuratorAccess` call
+that failed at its original touchpoint. **This only runs in production after `firebase deploy`
+enables the underlying Cloud Scheduler job** — the emulator has no scheduler component, so
+`runDailySweep` is exercised directly by tests locally, never on a timer. See the launch checklist
+below for the UTC-recurrence and timezone caveats that affect exactly when a series' occurrences
+land.
+
+Each of the five steps runs in its own try/catch with its own chunked batch writer — a poisoned
+doc in one step (a malformed series, say) is logged and counted in `SweepReport.errors`, but never
+prevents the other four steps from running, and each step's own writes are only lost if THAT
+step's own commit never happens (a healthy step's commit is unaffected). Steps 1 and 3-5 also page
+through their collections (100 series/page, 500 docs/page for the rest) rather than issuing one
+unbounded `.get()`, and step 1 additionally skips (and counts) a series whose profile is already
+at the `MAX_OPEN_GIGS_PER_PROFILE` cap, or whose status changed between the initial scan and that
+series' write. `dailySweep`'s `onSchedule` options set `timeoutSeconds: 540` and
+`memory: "512MiB"` (up from the 2nd-gen defaults) to give this real headroom at scale.
 
 ## Environment variables
 
@@ -187,6 +199,34 @@ string / no-op) by default and only matters for a production deploy.
 Web App Check only initializes when `NODE_ENV === "production"` **and** the site key is set
 (`apps/web/src/lib/firebase.ts`). Mobile Sentry is additionally gated on `!__DEV__`
 (`apps/mobile/app/_layout.tsx`), so it never fires in a dev build regardless of the DSN.
+
+### Geocoder secret setup (production)
+
+`GEOCODER_API_KEY` is a [`defineSecret()`](https://firebase.google.com/docs/functions/config-env#secret-manager)
+param (`functions/src/geocode.ts`'s `geocoderApiKey`), Secret Manager-backed rather than a bare env
+var — the v2 Cloud Functions mechanism that actually makes a secret available at invocation time in
+production. Setting it up:
+
+1. `firebase functions:secrets:set GEOCODER_API_KEY` (prompts for the value, stores it in Secret
+   Manager, grants the functions service account access).
+2. Deploy — every onCall that can trigger a geocode (`updateCuratorProfile`, `createGig`/
+   `updateGig`, `createSeries`/`updateSeries`) already declares `secrets: [geocoderApiKey]` in its
+   `onCall` options, which is what makes Cloud Functions inject the secret as
+   `process.env.GEOCODER_API_KEY` for that function at runtime. A new onCall that needs to geocode
+   must add the same `secrets: [...]` entry or the key will silently resolve to empty in production.
+
+**Emulator/local dev fallback**: the Functions emulator does not provision Secret Manager secrets by
+default, so `geocoderApiKey.value()` legitimately returns `""` there. `getGeocoder()` falls back to
+a bare `process.env.GEOCODER_API_KEY` read in that case — set it via a `functions/.env` file (or
+your shell) to test `GEOCODER_PROVIDER=google` against a real key locally without deploying.
+
+**Daily geocode budget**: every address-resolving call also consumes a per-uid daily budget
+(`geocodeBudgets/{uid}`, `functions/src/geocode.ts`'s `consumeGeocodeBudget`) — 50 geocode calls per
+uid per UTC calendar day, `resource-exhausted` ("Too many location updates today.") past the
+ceiling. A caller re-submitting the exact same address/city it already resolved is NOT charged
+again (the geocoded location is reused as-is via the stored `geocodedFrom` string) — only a
+genuinely new query consumes the budget. `geocodeBudgets/{uid}` is internal bookkeeping,
+`allow read, write: if false` in `firestore.rules` for every client including the owner.
 
 Set `FIREBASE_EMULATORS=1` to run a production build of the web app (`next build && next start`)
 against the local emulators instead of real Firebase — `apps/web/src/lib/firebase-server.ts`'s
@@ -269,10 +309,15 @@ before a real launch:
 
 ### Sub-project 3 launch checklist (gigs & series)
 
-- **Geocoder provider**: set `GEOCODER_PROVIDER=google` + `GEOCODER_API_KEY` on the production
-  functions deployment before launch. Without it, every gig/curator address silently geocodes
-  through `StubGeocoder` — a deterministic hash with a US-centric bounding box, fine for dev/test
-  but wrong (and non-US-safe) for real addresses. See the Environment variables table above.
+- **Geocoder provider**: set `GEOCODER_PROVIDER=google` on the production functions deployment, and
+  set `GEOCODER_API_KEY` via `firebase functions:secrets:set GEOCODER_API_KEY` (Secret Manager, not
+  a plain env var) before launch — see "Geocoder secret setup" above. Without it, every gig/curator
+  address silently geocodes through `StubGeocoder` — a deterministic hash with a US-centric
+  bounding box, fine for dev/test but wrong (and non-US-safe) for real addresses.
+- **Geocode budget ceiling**: the 50/day per-uid `geocodeBudgets/{uid}` ceiling (see "Geocoder
+  secret setup" above) is a fixed constant (`GEOCODE_DAILY_BUDGET` in `functions/src/geocode.ts`),
+  not an env var — revisit the number if real curator usage patterns turn out to need more than 50
+  distinct address lookups per person per day.
 - **Cloud Scheduler enablement**: `functions/src/scheduled.ts`'s `dailySweep` only starts actually
   running once `firebase deploy` provisions the underlying Cloud Scheduler job — there is nothing
   to enable by hand, but the first production deploy should be followed by a Cloud Console check
