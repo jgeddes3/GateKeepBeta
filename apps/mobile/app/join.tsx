@@ -17,13 +17,16 @@ export default function Join() {
   const [subtype, setSubtype] = useState("solo");
   const [name, setName] = useState("");
   const [handle, setHandle] = useState("");
+  const [busy, setBusy] = useState(false);
   const router = useRouter();
   const { switchTo } = useProfileContext();
 
   const submit = async () => {
+    if (busy) return; // guards a double-tap from minting two drafts
     const input = { type, subtype, name, handle: handle.toLowerCase() };
     const v = validateProfileDraft(input);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
+    setBusy(true);
     try {
       const { functions } = getFirebase();
       const { data } = await httpsCallable<typeof input, { profileId: string }>(
@@ -45,8 +48,10 @@ export default function Join() {
       await httpsCallable(functions, "submitProfileForReview")({ profileId: data.profileId });
       Alert.alert("Submitted!", "Our team will review your profile. We'll notify you.");
       router.back();
-    } catch (e: any) {
-      Alert.alert("Couldn't submit", e?.message ?? "Try again.");
+    } catch (e) {
+      Alert.alert("Couldn't submit", e instanceof Error ? e.message : "Try again.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -73,12 +78,15 @@ export default function Join() {
         style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
       <TextInput placeholder="Handle (yourname — lowercase, no spaces)" autoCapitalize="none"
         value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
-      <Pressable onPress={submit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
+      <Pressable onPress={() => void submit()} disabled={busy}
+        style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
         {/* Musician: create-only now (see the MUST FIX comment above) —
             "Submit for review" would be a lie until the portfolio tab's own
             gated button actually does that. Curator: unchanged, still
             submits immediately. */}
-        <Text style={{ color: "#fff", textAlign: "center" }}>{type === "musician" ? "Create my profile" : "Submit for review"}</Text>
+        <Text style={{ color: "#fff", textAlign: "center" }}>
+          {busy ? "Creating…" : type === "musician" ? "Create my profile" : "Submit for review"}
+        </Text>
       </Pressable>
     </ScrollView>
   );

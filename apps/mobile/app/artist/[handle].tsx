@@ -3,7 +3,7 @@ import { ScrollView, View, Text, Image, Pressable, Linking } from "react-native"
 import { useLocalSearchParams } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
-import { useAudioPlayer } from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { getFirebase } from "../../src/lib/firebase";
 import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
 
@@ -36,6 +36,23 @@ export default function Artist() {
   }>("loading");
   const [playingId, setPlayingId] = useState<string | null>(null);
   const player = useAudioPlayer(null);
+  const status = useAudioPlayerStatus(player);
+
+  // Clears the "now playing" row highlight when a clip ends on its own.
+  // play()'s manual toggle-off branch below already clears playingId itself
+  // synchronously, so this only needs to cover the case that branch
+  // doesn't: reaching the end of the clip unattended. Deliberately keyed on
+  // `didJustFinish` alone, not a broader "status.playing went false" check —
+  // replace() (switching straight from one track to another while one is
+  // still playing, in the same branch below) can report a transient
+  // playing:false while the new source loads, before play() resumes it; a
+  // generic playing-went-false clear would race that reload and wrongly
+  // un-highlight the row for the track that's actually about to play.
+  // didJustFinish is the native "actually reached the end" signal and isn't
+  // subject to that reload blip.
+  useEffect(() => {
+    if (status.didJustFinish) setPlayingId(null);
+  }, [status.didJustFinish]);
 
   useEffect(() => {
     let cancelled = false;

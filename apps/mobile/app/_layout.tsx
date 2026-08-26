@@ -9,13 +9,6 @@ import { ProfileProvider } from "../src/shell/ProfileContext";
 // EXPO_PUBLIC_SENTRY_DSN is set (see README manual follow-ups).
 Sentry.init({ dsn: process.env.EXPO_PUBLIC_SENTRY_DSN ?? "", enabled: !__DEV__ });
 
-// Silent preview on iOS: without this, TrimUploader's clip preview and
-// /artist/[handle]'s track playback are silent on a device with the ringer
-// switch off, which looks like a broken player rather than an unset audio
-// mode. Set once at app start, not per-screen — expo-audio's audio mode is
-// process-global.
-void setAudioModeAsync({ playsInSilentMode: true });
-
 function Gate() {
   const { user, loading } = useAuth();
   const segments = useSegments();
@@ -30,5 +23,25 @@ function Gate() {
 }
 
 export default function RootLayout() {
+  // Silent preview on iOS: without this, TrimUploader's clip preview and
+  // /artist/[handle]'s track playback are silent on a device with the
+  // ringer switch off, which looks like a broken player rather than an
+  // unset audio mode. Set once at app start, not per-screen — expo-audio's
+  // audio mode is process-global. Run from an effect, not module scope: a
+  // dev client built before Task 13's native modules were linked in (or any
+  // environment missing expo-audio's native module) throws here, and doing
+  // that at module-evaluation time crashed the whole app at launch with an
+  // error pointing at the JS bundle instead of the actual cause. try/catch
+  // + a warning keeps a missing/broken native module from taking down
+  // everything else — the rest of the app still works, just silently.
+  useEffect(() => {
+    (async () => {
+      try {
+        await setAudioModeAsync({ playsInSilentMode: true });
+      } catch (e) {
+        console.warn("setAudioModeAsync failed — rebuild the dev client if this is a fresh install", e);
+      }
+    })();
+  }, []);
   return <AuthProvider><ProfileProvider><Gate /></ProfileProvider></AuthProvider>;
 }

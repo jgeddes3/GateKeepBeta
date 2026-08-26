@@ -15,6 +15,10 @@ type TrackRow = TrackDoc & { id: string };
 // Placeholder host until a deployed web domain exists — swap this one
 // constant when it does; every public-page link on this screen reads it.
 const PUBLIC_PROFILE_HOST = "https://gatekeep.example";
+// Still the placeholder above — hide the "View public page" link entirely
+// rather than send an approved musician to a dead gatekeep.example URL.
+// Flips on its own once PUBLIC_PROFILE_HOST is updated to the real host.
+const PUBLIC_PROFILE_HOST_READY = !PUBLIC_PROFILE_HOST.includes("gatekeep.example");
 
 // Mirrors functions/src/profiles.ts's submitProfileForReview gate EXACTLY:
 // bio, >=1 genre, an avatar photo, AND >=1 track that's actually listenable
@@ -48,19 +52,59 @@ export default function Portfolio() {
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  const [booking, setBooking] = useState<BookingDoc | null>(null);
+  // Three states, not two: "loading" is load-bearing, not just a nicety.
+  // BookingForm seeds its local rate inputs from `initial` on mount — if
+  // `initial` were `null` for the ordinary "getDoc hasn't resolved yet" case
+  // (indistinguishable from "no booking doc saved"), a musician who already
+  // has saved rates would see the form mount blank, and its very next save
+  // would full-document-set() all-null rates over the real ones. Silent data
+  // loss. Mirrors web's Task 11 page.tsx exactly.
+  const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
   const [tracks, setTracks] = useState<TrackRow[]>([]);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Render-time reset, mirroring PhotoUploader's `baseline` pattern (Task
+  // 13) and web's `bookingProfileId` sentinel (Task 11): Expo Router's Tabs
+  // navigator keeps this screen mounted across a profile-context switch —
+  // ContextSwitcher only changes `activeContext`, it never unmounts this
+  // component — exactly like Next's App Router reusing the editor page
+  // across a profileId route-param change. Without this, switching from
+  // musician profile A to musician profile B leaves A's profile/booking/
+  // tracks state on screen (and editable, and save-able onto B) until each
+  // subscription's first snapshot for B lands. Adjusted synchronously during
+  // render (React's documented "adjust state while rendering" pattern —
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes)
+  // so React re-renders once more with the reset state before committing,
+  // instead of painting a stale frame first.
+  const [lastProfileId, setLastProfileId] = useState(profileId);
+  if (profileId !== lastProfileId) {
+    setLastProfileId(profileId);
+    setProfile(null);
+    setBooking("loading");
+    setTracks([]);
+  }
 
   useEffect(() => {
     if (!profileId) { setProfile(null); return; }
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, "profiles", profileId),
-      (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null));
+      (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
+      // A read failure (offline, a rules edge case) is treated as "gone"
+      // rather than left stale — same as web's page.tsx.
+      () => setProfile(null));
+    let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
-      .then((s) => setBooking(s.exists() ? (s.data() as BookingDoc) : null)).catch(() => {});
-    return unsub;
+      .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
+      .catch((e) => {
+        // MUST resolve the sentinel here too, not just on success — an
+        // unresolved "loading" left hanging after a failed read is exactly
+        // the state BookingForm's seed-from-initial bug above needs to stay
+        // safe from.
+        console.error("booking getDoc failed", e);
+        if (!cancelled) setBooking(null);
+      });
+    return () => { cancelled = true; unsub(); };
   }, [profileId]);
 
   // Own subscription, separate from TrackManager's below: the submit-lock
@@ -73,12 +117,13 @@ export default function Portfolio() {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => console.error("tracks onSnapshot failed", e));
   }, [profileId]);
 
-  if (!user || !profileId || !profile) {
+  if (!user || !profileId || !profile || booking === "loading") {
     return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>Switch to a musician profile to edit its portfolio.</Text></View>;
+      <Text>{!user || !profileId ? "Switch to a musician profile to edit its portfolio." : "Loading…"}</Text></View>;
   }
 
   const missing = missingForSubmit(profile, tracks);
@@ -130,7 +175,7 @@ export default function Portfolio() {
     <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }} keyboardShouldPersistTaps="handled">
       <Text style={{ fontSize: 22, fontWeight: "700" }}>{profile.name}</Text>
       <Text>Status: {profile.status.replace("_", " ")}</Text>
-      {profile.status === "approved" && (
+      {profile.status === "approved" && PUBLIC_PROFILE_HOST_READY && (
         <Pressable onPress={() => void Linking.openURL(`${PUBLIC_PROFILE_HOST}/@${profile.handle}`)}>
           <Text style={{ textDecorationLine: "underline" }}>View public page</Text>
         </Pressable>

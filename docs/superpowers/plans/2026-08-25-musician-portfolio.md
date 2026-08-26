@@ -5514,7 +5514,11 @@ fails, re-opens the same row pre-filled with that stashed text instead
 of silently dropping it — a musician who typed a rename during a
 network blip shouldn't have to retype it. The rename `TextInput` also
 wires `returnKeyType="done"` + `onSubmitEditing` to save without an
-extra tap to dismiss the keyboard first:
+extra tap to dismiss the keyboard first. (Updated post-Task-14 quality
+review: the track-list `onSnapshot` gained an error callback —
+`console.error`, matching the pattern the portfolio tab's own separate
+track subscription already used — instead of silently going stale on a
+read failure.)
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -5551,7 +5555,8 @@ export function TrackManager({ profileId }: { profileId: string }) {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => console.error("tracks onSnapshot failed", e));
   }, [profileId]);
 
   // Returns whether the call succeeded so callers that need to react to a
@@ -6130,18 +6135,41 @@ fixes; the Task 11 snippets above reflect the corrected code:
 
 - [ ] **Step 1: Rewrite `apps/mobile/app/(musician)/portfolio.tsx`**
 
-Final code, post quality-review fix pass. Sanctioned deviations from the
-sketch this section originally showed: a single canonical submit/resubmit
-button below the tracks section (gated identically, on the same
-`missingForSubmit()` result, for both `draft` and `rejected`) replaces the
-sketch's second "Resubmit for review" button embedded inside the rejected
-banner — one submit call site instead of two that could drift out of sync
-with each other; the missing-items hint (plain `.join(", ")`, per the
-DO-NOT-COPY note above) and the delete-draft affordance from the handoff
-notes above are filled in (the sketch omitted both); and the public-page
-link's host is a named `PUBLIC_PROFILE_HOST` constant at the top of the
-file — still a placeholder until a deployed web domain exists, swap that
-one constant when it does:
+Final code, post TWO rounds of quality-review fixes.
+
+Round 1 sanctioned deviations from the sketch this section originally
+showed: a single canonical submit/resubmit button below the tracks section
+(gated identically, on the same `missingForSubmit()` result, for both
+`draft` and `rejected`) replaces the sketch's second "Resubmit for review"
+button embedded inside the rejected banner — one submit call site instead
+of two that could drift out of sync with each other; the missing-items
+hint (plain `.join(", ")`, per the DO-NOT-COPY note above) and the
+delete-draft affordance from the handoff notes above are filled in (the
+sketch omitted both); and the public-page link's host is a named
+`PUBLIC_PROFILE_HOST` constant at the top of the file.
+
+Round 2 fixes (1 CRITICAL, 1 IMPORTANT, plus minors): `booking` gained
+web's three-state sentinel (`BookingDoc | null | "loading"`) — without it,
+`BookingForm` mounts with `initial=null` before the private-subcollection
+`getDoc` resolves (the profile `onSnapshot` is cache-warm and reliably wins
+that race), and its very next save full-document-`set()`s all-null rates
+over whatever the musician had actually saved; the `getDoc`'s `.catch` now
+also resolves the sentinel (never leaves `"loading"` hanging after a failed
+read), and the render guard waits on `booking === "loading"` too. A
+render-time `lastProfileId` reset — mirroring PhotoUploader's `baseline`
+pattern (Task 13) and web's `bookingProfileId` sentinel (Task 11) — clears
+`profile`/`booking`/`tracks` the instant `profileId` changes: Expo Router's
+Tabs navigator keeps this screen mounted across a profile-context switch
+(ContextSwitcher only reassigns `activeContext`, it never remounts the
+screen), so without the reset, switching from musician profile A to
+musician profile B left A's data on screen — and save-able onto B — until
+each subscription's first snapshot for B arrived. Minors: both `onSnapshot`
+calls (the profile subscription and this screen's own tracks subscription)
+gained error callbacks — a profile read failure is treated as "gone" (same
+as web's page.tsx), a tracks read failure just logs; and the "View public
+page" link is now hidden by a `PUBLIC_PROFILE_HOST_READY` check while
+`PUBLIC_PROFILE_HOST` is still the `gatekeep.example` placeholder, instead
+of offering a dead link:
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -6161,6 +6189,10 @@ type TrackRow = TrackDoc & { id: string };
 // Placeholder host until a deployed web domain exists — swap this one
 // constant when it does; every public-page link on this screen reads it.
 const PUBLIC_PROFILE_HOST = "https://gatekeep.example";
+// Still the placeholder above — hide the "View public page" link entirely
+// rather than send an approved musician to a dead gatekeep.example URL.
+// Flips on its own once PUBLIC_PROFILE_HOST is updated to the real host.
+const PUBLIC_PROFILE_HOST_READY = !PUBLIC_PROFILE_HOST.includes("gatekeep.example");
 
 // Mirrors functions/src/profiles.ts's submitProfileForReview gate EXACTLY:
 // bio, >=1 genre, an avatar photo, AND >=1 track that's actually listenable
@@ -6194,19 +6226,59 @@ export default function Portfolio() {
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  const [booking, setBooking] = useState<BookingDoc | null>(null);
+  // Three states, not two: "loading" is load-bearing, not just a nicety.
+  // BookingForm seeds its local rate inputs from `initial` on mount — if
+  // `initial` were `null` for the ordinary "getDoc hasn't resolved yet" case
+  // (indistinguishable from "no booking doc saved"), a musician who already
+  // has saved rates would see the form mount blank, and its very next save
+  // would full-document-set() all-null rates over the real ones. Silent data
+  // loss. Mirrors web's Task 11 page.tsx exactly.
+  const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
   const [tracks, setTracks] = useState<TrackRow[]>([]);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Render-time reset, mirroring PhotoUploader's `baseline` pattern (Task
+  // 13) and web's `bookingProfileId` sentinel (Task 11): Expo Router's Tabs
+  // navigator keeps this screen mounted across a profile-context switch —
+  // ContextSwitcher only changes `activeContext`, it never unmounts this
+  // component — exactly like Next's App Router reusing the editor page
+  // across a profileId route-param change. Without this, switching from
+  // musician profile A to musician profile B leaves A's profile/booking/
+  // tracks state on screen (and editable, and save-able onto B) until each
+  // subscription's first snapshot for B lands. Adjusted synchronously during
+  // render (React's documented "adjust state while rendering" pattern —
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes)
+  // so React re-renders once more with the reset state before committing,
+  // instead of painting a stale frame first.
+  const [lastProfileId, setLastProfileId] = useState(profileId);
+  if (profileId !== lastProfileId) {
+    setLastProfileId(profileId);
+    setProfile(null);
+    setBooking("loading");
+    setTracks([]);
+  }
 
   useEffect(() => {
     if (!profileId) { setProfile(null); return; }
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, "profiles", profileId),
-      (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null));
+      (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
+      // A read failure (offline, a rules edge case) is treated as "gone"
+      // rather than left stale — same as web's page.tsx.
+      () => setProfile(null));
+    let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
-      .then((s) => setBooking(s.exists() ? (s.data() as BookingDoc) : null)).catch(() => {});
-    return unsub;
+      .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
+      .catch((e) => {
+        // MUST resolve the sentinel here too, not just on success — an
+        // unresolved "loading" left hanging after a failed read is exactly
+        // the state BookingForm's seed-from-initial bug above needs to stay
+        // safe from.
+        console.error("booking getDoc failed", e);
+        if (!cancelled) setBooking(null);
+      });
+    return () => { cancelled = true; unsub(); };
   }, [profileId]);
 
   // Own subscription, separate from TrackManager's below: the submit-lock
@@ -6219,12 +6291,13 @@ export default function Portfolio() {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => console.error("tracks onSnapshot failed", e));
   }, [profileId]);
 
-  if (!user || !profileId || !profile) {
+  if (!user || !profileId || !profile || booking === "loading") {
     return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>Switch to a musician profile to edit its portfolio.</Text></View>;
+      <Text>{!user || !profileId ? "Switch to a musician profile to edit its portfolio." : "Loading…"}</Text></View>;
   }
 
   const missing = missingForSubmit(profile, tracks);
@@ -6276,7 +6349,7 @@ export default function Portfolio() {
     <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }} keyboardShouldPersistTaps="handled">
       <Text style={{ fontSize: 22, fontWeight: "700" }}>{profile.name}</Text>
       <Text>Status: {profile.status.replace("_", " ")}</Text>
-      {profile.status === "approved" && (
+      {profile.status === "approved" && PUBLIC_PROFILE_HOST_READY && (
         <Pressable onPress={() => void Linking.openURL(`${PUBLIC_PROFILE_HOST}/@${profile.handle}`)}>
           <Text style={{ textDecorationLine: "underline" }}>View public page</Text>
         </Pressable>
@@ -6338,18 +6411,25 @@ export default function Portfolio() {
 Musician joins stop auto-submitting; curator joins keep the old
 create-then-submit behavior unchanged.
 
-Final code, post quality-review fix pass. One sanctioned deviation from the
-plan text this section originally gave: after `createProfileDraft`, the
-musician branch calls `switchTo` (from `useProfileContext`) with the newly
-created profile summary directly, rather than only alerting and leaving the
-`ProfileContext` membership listener to pick the new profile up passively —
-so the portfolio tab has an active profile and renders its edit forms on
-the very next screen, instead of showing its own "switch to a musician
-profile" placeholder until the musician manually switches context by hand.
-The submit button's label is also now conditional (`"Create my profile"`
-for musician vs. `"Submit for review"` for curator), since "Submit for
-review" stopped being true for the musician path the moment it stopped
-calling `submitProfileForReview`:
+Final code, post TWO rounds of quality-review fixes.
+
+Round 1 sanctioned deviation from the plan text this section originally
+gave: after `createProfileDraft`, the musician branch calls `switchTo`
+(from `useProfileContext`) with the newly created profile summary directly,
+rather than only alerting and leaving the `ProfileContext` membership
+listener to pick the new profile up passively — so the portfolio tab has
+an active profile and renders its edit forms on the very next screen,
+instead of showing its own "switch to a musician profile" placeholder
+until the musician manually switches context by hand. The submit button's
+label is also now conditional (`"Create my profile"` for musician vs.
+`"Submit for review"` for curator), since "Submit for review" stopped
+being true for the musician path the moment it stopped calling
+`submitProfileForReview`.
+
+Round 2 fix (IMPORTANT): a `busy` flag now guards `submit` against
+re-entry (a double-tap could otherwise mint two drafts), disables the
+Pressable and swaps its label to `"Creating…"` while in flight, and the
+catch block's `e: any` narrowed to `e instanceof Error`:
 
 ```tsx
 import { useState } from "react";
@@ -6371,13 +6451,16 @@ export default function Join() {
   const [subtype, setSubtype] = useState("solo");
   const [name, setName] = useState("");
   const [handle, setHandle] = useState("");
+  const [busy, setBusy] = useState(false);
   const router = useRouter();
   const { switchTo } = useProfileContext();
 
   const submit = async () => {
+    if (busy) return; // guards a double-tap from minting two drafts
     const input = { type, subtype, name, handle: handle.toLowerCase() };
     const v = validateProfileDraft(input);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
+    setBusy(true);
     try {
       const { functions } = getFirebase();
       const { data } = await httpsCallable<typeof input, { profileId: string }>(
@@ -6399,8 +6482,10 @@ export default function Join() {
       await httpsCallable(functions, "submitProfileForReview")({ profileId: data.profileId });
       Alert.alert("Submitted!", "Our team will review your profile. We'll notify you.");
       router.back();
-    } catch (e: any) {
-      Alert.alert("Couldn't submit", e?.message ?? "Try again.");
+    } catch (e) {
+      Alert.alert("Couldn't submit", e instanceof Error ? e.message : "Try again.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -6427,12 +6512,15 @@ export default function Join() {
         style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
       <TextInput placeholder="Handle (yourname — lowercase, no spaces)" autoCapitalize="none"
         value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
-      <Pressable onPress={submit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
+      <Pressable onPress={() => void submit()} disabled={busy}
+        style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
         {/* Musician: create-only now (see the MUST FIX comment above) —
             "Submit for review" would be a lie until the portfolio tab's own
             gated button actually does that. Curator: unchanged, still
             submits immediately. */}
-        <Text style={{ color: "#fff", textAlign: "center" }}>{type === "musician" ? "Create my profile" : "Submit for review"}</Text>
+        <Text style={{ color: "#fff", textAlign: "center" }}>
+          {busy ? "Creating…" : type === "musician" ? "Create my profile" : "Submit for review"}
+        </Text>
       </Pressable>
     </ScrollView>
   );
@@ -6441,13 +6529,26 @@ export default function Join() {
 
 - [ ] **Step 3: Create `apps/mobile/app/artist/[handle].tsx` (hero-first native public view)**
 
-Final code. One sanctioned deviation from the sketch this section originally
+Final code, post TWO rounds of quality-review fixes.
+
+Round 1 sanctioned deviation from the sketch this section originally
 showed: track duration renders through a small shared `fmtDuration` helper
 (general `mm:ss`, matching `TrimUploader`'s own `fmt`) instead of the
 sketch's hardcoded `` `0:${...}` `` prefix — the sketch's version only ever
 read correctly because clips are capped at `MAX_CLIP_SECONDS` (30s), so it
 happened to never need a minutes digit; the helper is equivalent today but
-doesn't silently break if that cap ever changes:
+doesn't silently break if that cap ever changes.
+
+Round 2 fix: `playingId` (the "now playing" row highlight) now clears
+itself via a `useAudioPlayerStatus(player)` effect keyed on
+`status.didJustFinish`, for the one case `play()`'s own manual toggle-off
+branch doesn't cover — a clip that reaches its end unattended. Deliberately
+NOT keyed on a broader "`status.playing` went false" check: `replace()`
+(switching straight from one track to another while one is still playing)
+can report a transient `playing: false` while the new source loads, before
+`play()` resumes it, and a generic playing-went-false clear would race that
+reload and wrongly un-highlight the row for the track that's actually
+about to start:
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -6455,7 +6556,7 @@ import { ScrollView, View, Text, Image, Pressable, Linking } from "react-native"
 import { useLocalSearchParams } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
-import { useAudioPlayer } from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { getFirebase } from "../../src/lib/firebase";
 import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
 
@@ -6488,6 +6589,23 @@ export default function Artist() {
   }>("loading");
   const [playingId, setPlayingId] = useState<string | null>(null);
   const player = useAudioPlayer(null);
+  const status = useAudioPlayerStatus(player);
+
+  // Clears the "now playing" row highlight when a clip ends on its own.
+  // play()'s manual toggle-off branch below already clears playingId itself
+  // synchronously, so this only needs to cover the case that branch
+  // doesn't: reaching the end of the clip unattended. Deliberately keyed on
+  // `didJustFinish` alone, not a broader "status.playing went false" check —
+  // replace() (switching straight from one track to another while one is
+  // still playing, in the same branch below) can report a transient
+  // playing:false while the new source loads, before play() resumes it; a
+  // generic playing-went-false clear would race that reload and wrongly
+  // un-highlight the row for the track that's actually about to play.
+  // didJustFinish is the native "actually reached the end" signal and isn't
+  // subject to that reload blip.
+  useEffect(() => {
+    if (status.didJustFinish) setPlayingId(null);
+  }, [status.didJustFinish]);
 
   useEffect(() => {
     let cancelled = false;
@@ -6711,6 +6829,17 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
     `Blob` materialized in JS) and then lift the mobile-only 25 MB cap
     (`MOBILE_MAX_AUDIO_BYTES` in `TrimUploader.tsx`) back up toward the server's real 50 MB
     limit once that lands.
+- Manual follow-ups (mobile, from Task 14's quality review):
+  - `ProfileContext`'s `switchTo` currently accepts any `ProfileSummary` the caller hands it —
+    `join.tsx` hand-builds one (`{ profileId, type: "musician", name, status: "draft" }`) right
+    after `createProfileDraft` so the portfolio tab has an active profile immediately, instead of
+    waiting on the `myProfiles` collection-group listener to notice the new membership. That
+    hand-built summary is never reconciled against `myProfiles` once the listener's own snapshot
+    for the same profile does arrive — today the two are identical at creation time, so this is
+    not a live bug, but it's a loaded gun for the next consumer of `switchTo`: `ProfileContext`
+    should reconcile `activeContext` against `myProfiles` by `profileId` (swap in the listener's
+    copy once it shows up, or at least warn on a mismatch) rather than trusting a caller-supplied
+    summary to stay accurate indefinitely.
 
 - [ ] **Step 2: Commit**
 
@@ -6735,6 +6864,14 @@ pnpm --filter @gatekeep/web build
 Expected: everything green. `next build` also exercises the SSR page + config redirects/rewrites.
 
 - [ ] **Step 2:** Manual E2E against emulators (spec §8): sign up → join wizard → bio/genres/avatar → upload track, pick window → submit blocked until minimums → submit → admin approves profile + track (hears clip) → public `/@handle` renders SSR with playing clip → admin rejects a second track → musician sees reason → delete + re-upload → deleteProfile cascades storage. On mobile: same loop through the portfolio tab + `/artist/<handle>`. Include: click-to-play a real approved track's `TrackPlayer` button on `/@handle` in an actual browser (a headless/curl smoke test can confirm the audio URL and markup but can't verify playback starts/stops correctly).
+  On-device mobile checklist, added from Task 14's quality review (none of this is exercised by typecheck/emulator tests):
+  - **Rebuild the dev client FIRST, before anything else below** — Task 13's native modules (`expo-audio`, `expo-document-picker`, `@react-native-community/slider`, `expo-file-system`) now fail at APP LAUNCH, not just first use: `_layout.tsx`'s `setAudioModeAsync` call runs in a `useEffect` on every cold start, so a dev client built before Task 13 landed hits a missing-native-module error the moment the app opens, before you can even navigate to a screen that uses one of these packages.
+  - iOS: flip the ringer switch to silent, then preview a clip in `TrimUploader` and play an approved track on `/artist/<handle>` — both must still be audible (confirms `playsInSilentMode` actually took effect, not just that the call didn't throw).
+  - Background the app mid-upload (a track or photo upload in progress) and mid-playback (a clip playing on `/artist/<handle>`), then foreground it again — confirm the upload either completes or fails cleanly (no stuck "Processing…" with nothing behind it), and playback either continues or stops cleanly (no crash, no stuck "now playing" highlight with no audio).
+  - Leave the artist screen while a clip is playing: back-navigate (confirm audio stops) and navigate to a DIFFERENT screen that pushes on top (confirm whether audio keeps playing underneath — note whether that's the intended behavior or a gap, since this task never explicitly decided it).
+  - Android: pick an audio file via SAF from a cloud-backed provider (Google Drive/Files "recent" cloud entries, not local storage) — this is the path most likely to hit `TrimUploader`'s size-unknown branch (`picked.size === null`, resolved later from the fetched blob in `upload()`), which is rarely exercised by a local-file pick.
+  - On the Portfolio tab: with two musician profiles under one account, switch from profile A to profile B via `ContextSwitcher` while A's forms have unsaved edits — confirm B's bio/links/rates/tracks render (not A's stale data left over from the mounted screen instance), matching the Task 14 quality-review fix for the profile-switch render-time reset.
+  - Regression check for the same fix pass's CRITICAL booking-sentinel bug: open the Portfolio tab for a musician who already has SAVED rates (`BookingForm` should show them, not a blank form) — then save the rates form unchanged and confirm the stored rates are still there afterward (not overwritten with nulls).
 - [ ] **Step 3:** Process gates (foundation spec §"Process gates"): run the security review of the whole branch (custom opus security-reviewer per foundation ruling 7 if the `security-review` skill still trips on `origin/HEAD`), and an independent audit of **both** `firestore.rules` and `storage.rules`. Apply all fixes before merge.
 - [ ] **Step 4:** Merge via superpowers:finishing-a-development-branch.
 

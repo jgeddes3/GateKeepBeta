@@ -32,7 +32,8 @@ export function TrackManager({ profileId }: { profileId: string }) {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => console.error("tracks onSnapshot failed", e));
   }, [profileId]);
 
   // Returns whether the call succeeded so callers that need to react to a
