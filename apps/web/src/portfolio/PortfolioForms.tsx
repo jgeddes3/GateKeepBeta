@@ -17,11 +17,15 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   { profileId: string; initial: PortfolioData | undefined; onSaved?: () => void }) {
   const [bio, setBio] = useState(initial?.bio ?? "");
   const [genres, setGenres] = useState<string[]>(initial?.genres ?? []);
+  // Tracks what the SERVER currently holds, not just the mount-time value —
+  // select 2 → save → deselect all → save must hit the guard below even
+  // though `initial` still says zero.
+  const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
   const [busy, setBusy] = useState(false);
   const toggleGenre = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
   const save = async () => {
-    if (genres.length === 0 && (initial?.genres?.length ?? 0) > 0) {
+    if (genres.length === 0 && savedGenres.length > 0) {
       // Genres were saved before and the musician has now deselected all of
       // them. The omit-when-empty branch below exists for the never-set-yet
       // case (a bio-only save while onboarding); reusing it here would
@@ -42,7 +46,10 @@ export function BioGenresForm({ profileId, initial, onSaved }:
     const v = validatePortfolioUpdate(payload);
     if (!v.ok) { window.alert(v.reason); return; }
     setBusy(true);
-    if (await callOrAlert("updatePortfolio", payload)) onSaved?.();
+    if (await callOrAlert("updatePortfolio", payload)) {
+      if (genres.length > 0) setSavedGenres(genres);
+      onSaved?.();
+    }
     setBusy(false);
   };
   return (

@@ -93,16 +93,15 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
   }, [user, profileId]);
 
-  // `booking === "loading"` is load-bearing here, not just a nicety: the
-  // render-time reset above sets `booking` back to "loading" the instant
-  // profileId changes, but React commits that state change to the DOM on
-  // the SAME render pass unless something short-circuits it. This early
-  // return is what actually keeps that reset from being purely cosmetic —
-  // without it, profile A's already-loaded `profile`/`tracks` state (and
-  // the forms below) would render through the gap between the reset and B's
-  // getDoc resolving, showing A's rates/preferences under profile B's
-  // name/status for a beat. Do not drop this condition as "redundant" with
-  // the render-time reset alone.
+  // `booking === "loading"` is load-bearing here, not just a nicety. When
+  // profileId changes, the render-time reset above only resets `booking` —
+  // `profile` and `tracks` still hold profile A's data until their new
+  // subscriptions deliver B's. This early return is what keeps that stale
+  // state off the screen (and out of the forms) during that window; drop it
+  // and A's rates/bio/tracks render under B's route params until B's
+  // snapshots land. (React re-renders before committing after a render-phase
+  // setState, so the reset itself is never committed stale — the gap is the
+  // un-reset profile/tracks state, not the reset mechanism.)
   if (loading || !user || profile === "loading" || booking === "loading") return <main><p>Loading…</p></main>;
   if (!profile || profile.type !== "musician") return <main><p>No musician profile here.</p></main>;
 
