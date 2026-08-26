@@ -187,7 +187,14 @@ export interface CuratorDetails {
   advertisingInterest: boolean;
   // venues: full street address (public). planners/hosts: city only.
   location: { address: string | null; city: string; neighborhood: string | null;
-              geo: { lat: number; lng: number } | null };
+              geo: { lat: number; lng: number } | null;
+              // S2 (geocoder throttle): the exact query string (address or
+              // city) that produced this geo — lets updateCuratorProfile
+              // skip a redundant geocode call (and its budget charge) when a
+              // caller re-submits the same location input. Optional so
+              // pre-S2 seed data / admin-SDK test fixtures without this
+              // field remain valid; absent is treated as "never matches."
+              geocodedFrom?: string };
   photoPaths: string[];          // public/photos/... "gallery" kind (SP2 photo pipeline, widened in Task 4b)
 }
 // Curator gallery cap — enforced by media.ts's processPhoto trigger when
@@ -221,7 +228,15 @@ export interface GigDoc {
   status: GigStatus; createdAt: number; updatedAt: number;
 }
 // gigs/{id}/private/location:
-export interface GigPrivateLocation { address: string; geo: { lat: number; lng: number } | null; }
+export interface GigPrivateLocation {
+  address: string; geo: { lat: number; lng: number } | null;
+  // S2 (geocoder throttle): pass-through of the exact query string that
+  // produced `address`/`geo` — mirrors CuratorDetails.location.geocodedFrom.
+  // Optional for the same reason (pre-S2 fixtures/materialized copies of an
+  // older template omit it; absent never matches, so it never wrongly skips
+  // a geocode).
+  geocodedFrom?: string;
+}
 export interface GigSeriesDoc {
   curatorProfileId: string;
   recurrence: { weekday: number; hour: number; minute: number; cadence: SeriesCadence; endDate: number | null };

@@ -294,6 +294,20 @@ describe("validateLookingFor", () => {
   it("rejects an unknown act size", () => {
     expect(validateLookingFor({ ...ok, actSizes: ["orchestra"] as never }).ok).toBe(false);
   });
+  it("S1: rejects an oversized genres array (longer than GENRES itself) even if every element is valid", () => {
+    const oversized = Array.from({ length: GENRES.length + 1 }, (_, i) => GENRES[i % GENRES.length]);
+    expect(validateLookingFor({ ...ok, genres: oversized }).ok).toBe(false);
+  });
+  it("S1: rejects duplicate genres", () => {
+    expect(validateLookingFor({ ...ok, genres: [GENRES[0], GENRES[0]] }).ok).toBe(false);
+  });
+  it("S1: rejects an oversized actSizes array (longer than ACT_SIZES itself) even if every element is valid", () => {
+    const oversized = Array.from({ length: ACT_SIZES.length + 1 }, (_, i) => ACT_SIZES[i % ACT_SIZES.length]);
+    expect(validateLookingFor({ ...ok, actSizes: oversized as never }).ok).toBe(false);
+  });
+  it("S1: rejects duplicate act sizes", () => {
+    expect(validateLookingFor({ ...ok, actSizes: [ACT_SIZES[0], ACT_SIZES[0]] }).ok).toBe(false);
+  });
   it("accepts notes at exactly 500 chars and rejects 501", () => {
     expect(validateLookingFor({ ...ok, notes: "x".repeat(500) }).ok).toBe(true);
     expect(validateLookingFor({ ...ok, notes: "x".repeat(501) }).ok).toBe(false);
@@ -341,6 +355,14 @@ describe("validateGigContent", () => {
     expect(validateGigContent({ ...ok, wants: { genres: [], actSizes: [ACT_SIZES[0]] } }).ok).toBe(false);
     expect(validateGigContent({ ...ok, wants: { genres: [GENRES[0]], actSizes: [] } }).ok).toBe(false);
     expect(validateGigContent({ ...ok, wants: { genres: ["nonsense-genre"], actSizes: [ACT_SIZES[0]] } as never }).ok).toBe(false);
+  });
+  it("S1: delegates the oversized/duplicate-array caps to the looking-for rules for wants.genres and wants.actSizes", () => {
+    const oversizedGenres = Array.from({ length: GENRES.length + 1 }, (_, i) => GENRES[i % GENRES.length]);
+    expect(validateGigContent({ ...ok, wants: { genres: oversizedGenres, actSizes: [ACT_SIZES[0]] } }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, wants: { genres: [GENRES[0], GENRES[0]], actSizes: [ACT_SIZES[0]] } }).ok).toBe(false);
+    const oversizedActSizes = Array.from({ length: ACT_SIZES.length + 1 }, (_, i) => ACT_SIZES[i % ACT_SIZES.length]);
+    expect(validateGigContent({ ...ok, wants: { genres: [GENRES[0]], actSizes: oversizedActSizes as never } }).ok).toBe(false);
+    expect(validateGigContent({ ...ok, wants: { genres: [GENRES[0]], actSizes: [ACT_SIZES[0], ACT_SIZES[0]] } }).ok).toBe(false);
   });
   it("accepts duration boundaries 15 and 720, rejects 14 and 721", () => {
     expect(validateGigContent({ ...ok, durationMinutes: 15 }).ok).toBe(true);

@@ -223,10 +223,20 @@ export function validateTrackCreate(input: CreateTrackInput): Result {
 // validateLookingFor wholesale).
 function validateGenresAndActSizes(genres: unknown, actSizes: unknown): Result {
   if (!Array.isArray(genres) || genres.length < 1) return fail("Pick at least one genre.");
+  // Array caps + dedupe (S1), mirroring validatePortfolioUpdate's identical
+  // genres pattern: an untrusted onCall payload could otherwise submit a
+  // wildly oversized or duplicate-padded array — length alone doesn't catch
+  // "same genre repeated N times", and an unbounded array is a cheap
+  // resource-exhaustion vector even before considering the per-element
+  // membership check below.
+  if (genres.length > GENRES.length) return fail("Too many genres.");
+  if (new Set(genres).size !== genres.length) return fail("Duplicate genres.");
   for (const g of genres) {
     if (typeof g !== "string" || !(GENRES as readonly string[]).includes(g)) return fail("Unknown genre.");
   }
   if (!Array.isArray(actSizes) || actSizes.length < 1) return fail("Pick at least one act size.");
+  if (actSizes.length > ACT_SIZES.length) return fail("Too many act sizes.");
+  if (new Set(actSizes).size !== actSizes.length) return fail("Duplicate act sizes.");
   for (const a of actSizes) {
     if (typeof a !== "string" || !(ACT_SIZES as readonly string[]).includes(a)) return fail("Unknown act size.");
   }
