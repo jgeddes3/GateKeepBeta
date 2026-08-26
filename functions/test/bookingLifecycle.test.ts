@@ -466,6 +466,64 @@ describe("reportNoShow", () => {
     await expect(callFn("reportNoShow", { bookingId, reason: "n/a" }, musician.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+
+  // Plan amendment (docs/superpowers/plans/2026-08-26-booking-flow.md, Task
+  // 6 reportNoShow bullet): a whole-run no-show ends the run for this
+  // booking exactly like cancelBooking does — the run's remaining future
+  // dates must reopen and the series linkage must clear, not sit "filled"
+  // against a booking that has already flipped to cancelled_by_musician.
+  it("whole-run: reopens the run's future filled occurrences, clears series linkage, leaves the reported (past) occurrence untouched", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("nswrc");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("nswrm");
+    const series = await seedSeries(curatorProfileId);
+    try {
+      // publishGig rejects a past startsAt outright — create with a future
+      // placeholder, then push it into the past (mirrors setGigStartsAt's
+      // rationale elsewhere in this file).
+      const gigPast = await createOpenGig(curatorProfileId, curator.user);
+      await setGigStartsAt(gigPast, -3);
+      const gigNext = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 20 * 3_600_000 });
+      const gigLater = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 100 * 3_600_000 });
+      await Promise.all([gigPast, gigNext, gigLater].map((id) =>
+        adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigNext, musicianProfileId, offer: offerPayload() }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+
+      // Sanity: acceptBooking filled all three, including the past one.
+      expect((await adb.doc(`gigs/${gigPast}`).get()).data()?.status).toBe("filled");
+
+      await callFn("reportNoShow", { bookingId, reason: "Never showed up for the run." }, curator.user);
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(after.status).toBe("cancelled_by_musician");
+      expect(after.cancellation?.hoursBeforeStart).toBeLessThan(0);
+
+      const [pastAfter, nextAfter, laterAfter] = await Promise.all(
+        [gigPast, gigNext, gigLater].map((id) => adb.doc(`gigs/${id}`).get()));
+      expect(pastAfter.data()?.status).toBe("filled"); // untouched — this is the reported occurrence itself
+      expect(pastAfter.data()?.bookingId).toBe(bookingId);
+      expect(nextAfter.data()?.status).toBe("open");
+      expect(nextAfter.data()?.bookingId).toBeNull();
+      expect(nextAfter.data()?.bookedMusicianProfileId).toBeNull();
+      expect(laterAfter.data()?.status).toBe("open");
+      expect(laterAfter.data()?.bookedMusicianProfileId).toBeNull();
+
+      const seriesAfter = (await adb.doc(`gigSeries/${series.id}`).get()).data();
+      expect(seriesAfter?.activeBookingId).toBeNull();
+      expect(seriesAfter?.bookedMusicianProfileId).toBeNull();
+
+      const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
+        .data() as ReliabilityDoc;
+      expect(reliability.marks).toHaveLength(1);
+      expect(reliability.marks[0]).toMatchObject({ bookingId, gigId: gigPast, kind: "reported_no_show" });
+    } finally {
+      // Never leave an active series behind for the shared emulator's
+      // dailySweep scan (mirrors this file's other whole-run fixtures).
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
 });
 
 describe("removeReliabilityMark", () => {

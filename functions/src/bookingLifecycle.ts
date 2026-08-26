@@ -111,6 +111,45 @@ export async function recomputeReliability(musicianProfileId: string): Promise<v
   );
 }
 
+// Every FUTURE, currently-filled occurrence of a whole-run series (via the
+// (seriesId,status,startsAt) composite index — see firestore.indexes.json).
+// A past/started occurrence (startsAt <= now) is excluded — it keeps its
+// "filled" status untouched (Task 8's sweep is what eventually resolves it
+// to completed/no-show, not these callables). Shared by cancelBooking's
+// "next affected occurrence" lookup and reportNoShow's post-no-show unwind
+// of a whole-run booking's remaining dates. Read-only — must be called
+// during the transaction's read phase, before any tx.update/tx.set.
+async function getFutureFilledOccurrences(
+  tx: FirebaseFirestore.Transaction, db: FirebaseFirestore.Firestore, seriesId: string, now: number,
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const snap = await tx.get(
+    db.collection("gigs")
+      .where("seriesId", "==", seriesId)
+      .where("status", "==", "filled")
+      .where("startsAt", ">", now)
+      .orderBy("startsAt", "asc"));
+  return snap.docs;
+}
+
+// Write-side counterpart to getFutureFilledOccurrences: reopens every given
+// occurrence (filled -> open, clear bookingId/bookedMusicianProfileId) and
+// unconditionally clears the series' own activeBookingId/
+// bookedMusicianProfileId — the run is over for this booking either way,
+// even when `occurrenceDocs` is empty (e.g. reportNoShow called on the
+// run's very last date, with no future dates left to reopen). Shared by
+// cancelBooking and reportNoShow's whole-run unwind.
+function reopenSeriesOccurrences(
+  tx: FirebaseFirestore.Transaction, db: FirebaseFirestore.Firestore,
+  seriesId: string, occurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[], now: number,
+): void {
+  for (const doc of occurrenceDocs) {
+    tx.update(doc.ref, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
+  }
+  tx.update(db.doc(`gigSeries/${seriesId}`), {
+    activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now,
+  });
+}
+
 // Shared outcome-dependent notification copy for cancelBooking/
 // cancelOccurrence — NOT reportNoShow (that one is always the same shape:
 // musician-side-only, no forfeiture branch) or removeReliabilityMark (also
@@ -185,22 +224,12 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
     let singleGigRef: FirebaseFirestore.DocumentReference | null = null;
 
     if (freshBooking.seriesId) {
-      // Every FUTURE, currently-filled occurrence of the run — the earliest
-      // (by startsAt) is the "next affected occurrence" the window math is
-      // computed against; ALL of them get reopened below. A past/started
-      // occurrence (startsAt <= now) is excluded from both the math and the
-      // reopen — it keeps its "filled" status untouched (Task 8's sweep is
-      // what eventually resolves it to completed/no-show, not this
-      // callable). Needs the (seriesId,status,startsAt) composite index —
-      // added to firestore.indexes.json alongside this task.
-      const occSnap = await tx.get(
-        db.collection("gigs")
-          .where("seriesId", "==", freshBooking.seriesId)
-          .where("status", "==", "filled")
-          .where("startsAt", ">", now)
-          .orderBy("startsAt", "asc"));
-      if (occSnap.empty) throw new HttpsError("failed-precondition", ALREADY_STARTED_MESSAGE);
-      occurrenceDocs = occSnap.docs;
+      // The earliest (by startsAt) of every future, currently-filled
+      // occurrence is the "next affected occurrence" the window math is
+      // computed against; ALL of them get reopened below (see
+      // getFutureFilledOccurrences/reopenSeriesOccurrences).
+      occurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, now);
+      if (occurrenceDocs.length === 0) throw new HttpsError("failed-precondition", ALREADY_STARTED_MESSAGE);
       nextGigId = occurrenceDocs[0].id;
       nextStartsAt = occurrenceDocs[0].data().startsAt as number;
     } else {
@@ -245,12 +274,7 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
     // ---- WRITES ----
     tx.update(bookingRef, bookingUpdate);
     if (freshBooking.seriesId) {
-      for (const doc of occurrenceDocs) {
-        tx.update(doc.ref, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
-      }
-      tx.update(db.doc(`gigSeries/${freshBooking.seriesId}`), {
-        activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now,
-      });
+      reopenSeriesOccurrences(tx, db, freshBooking.seriesId, occurrenceDocs, now);
     } else {
       tx.update(singleGigRef!, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
     }
@@ -439,6 +463,15 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
 
     let occurrenceGigId: string;
     let occurrenceStartsAt: number;
+    // Whole-run only: every future filled occurrence gets reopened below,
+    // since the no-show ends this run for this booking exactly the way a
+    // cancelBooking does — a plan amendment (see docs/superpowers/plans/
+    // 2026-08-26-booking-flow.md's Task 6 reportNoShow bullet) closing a gap
+    // where the run's remaining dates were otherwise left "filled" against a
+    // booking that had already flipped to cancelled_by_musician. Read here
+    // (transaction read phase); reopened in the write phase below via
+    // reopenSeriesOccurrences.
+    let futureOccurrenceDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
     if (freshBooking.seriesId) {
       // Most recent occurrence of the run whose start has already passed —
       // served by the existing (seriesId,startsAt) composite index (a
@@ -455,6 +488,7 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       }
       occurrenceGigId = pastSnap.docs[0].id;
       occurrenceStartsAt = pastSnap.docs[0].data().startsAt as number;
+      futureOccurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, now);
     } else {
       const gigSnap = await tx.get(db.doc(`gigs/${freshBooking.gigId}`));
       const gig = gigSnap.data() as GigDoc | undefined;
@@ -492,6 +526,11 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
     };
     const marks = appendMarkCapped(existingMarks, mark);
     tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
+
+    // Whole-run unwind — see the read-phase comment above.
+    if (freshBooking.seriesId) {
+      reopenSeriesOccurrences(tx, db, freshBooking.seriesId, futureOccurrenceDocs, now);
+    }
 
     return { occurrenceGigId };
   });
