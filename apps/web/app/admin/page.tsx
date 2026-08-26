@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useState } from "react";
 import {
-  collection, collectionGroup, query, where, onSnapshot, orderBy, limit, getDoc, getDocs,
+  collection, collectionGroup, query, where, onSnapshot, orderBy, limit, getDoc, getDocs, doc,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
+import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import { getFirebase } from "../../src/lib/firebase";
 import { AdminGate } from "./AdminGate";
-import type { ProfileDoc, AuditLogDoc, UserDoc } from "@gatekeep/shared";
+import type { ProfileDoc, AuditLogDoc, UserDoc, TrackDoc } from "@gatekeep/shared";
 
 type Row<T> = T & { id: string };
 
@@ -62,6 +63,184 @@ function Queue() {
       </p>
       {pending.map((p) => <QueueRow key={p.id} p={p} />)}
       {pending.length === 0 && <p>Nothing waiting.</p>}
+    </section>
+  );
+}
+
+type TrackRow = Row<TrackDoc> & { profileId: string; profileName: string };
+
+// Owns the Approve/Reject actions for exactly one pending track — same
+// per-row-busy-state rationale as QueueRow above. Also resolves and plays the
+// review clip inline (spec §6: admin listens before approving), via
+// getDownloadURL on the track's review/... storagePath — admins can read any
+// review clip under storage.rules. url stays null (and the row shows a
+// loading placeholder) until that resolves or fails. storagePath is typed
+// nullable on TrackDoc (other statuses can have no file yet); the transcode
+// trigger only ever writes status:"pending_review" and storagePath together
+// in the same update, so in practice every row here has one, but the effect
+// still guards against a falsy path rather than assuming that invariant.
+function TrackQueueRow({ t }: { t: TrackRow }) {
+  const [busy, setBusy] = useState(false);
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!t.storagePath) return;
+    let cancelled = false;
+    void getDownloadURL(storageRef(getFirebase().storage, t.storagePath))
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => { if (!cancelled) setUrl(null); });
+    return () => { cancelled = true; };
+  }, [t.storagePath]);
+  const review = async (decision: "approved" | "rejected") => {
+    const reason = decision === "rejected"
+      ? window.prompt("Rejection reason (shown to the musician):") ?? "" : undefined;
+    if (decision === "rejected" && !reason) return;
+    setBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewTrack")(
+        { profileId: t.profileId, trackId: t.id, decision, reason });
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not submit the review — try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
+      <strong>{t.title}</strong> — {t.profileName} · {t.durationSec ?? "?"}s
+      {t.storagePath == null
+        ? <p style={{ color: "#888" }}>No clip on file.</p>
+        : url
+          ? <audio controls src={url} style={{ display: "block", margin: "8px 0" }} />
+          : <p style={{ color: "#888" }}>clip loading…</p>}
+      <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
+      <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
+    </div>
+  );
+}
+
+// Pending-track review queue (spec §6). collectionGroup('tracks') mirrors
+// Queue's flat collection query above, but tracks live under
+// profiles/{profileId}/tracks — collectionGroup + the admin CG-read rule and
+// fieldOverride index (already in place) is what makes a single
+// cross-profile "everything pending" listener possible. Each snapshot also
+// resolves the parent profile doc for its name (deleted-profile-safe, same
+// "(deleted)" fallback the mobile/web dashboards use elsewhere).
+function TracksQueue() {
+  const [pending, setPending] = useState<TrackRow[]>([]);
+  useEffect(() => {
+    const { db } = getFirebase();
+    return onSnapshot(
+      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review")),
+      async (s) => {
+        const rows: TrackRow[] = [];
+        for (const d of s.docs) {
+          const profileRef = d.ref.parent.parent!;
+          const p = await getDoc(profileRef);
+          rows.push({
+            id: d.id,
+            profileId: profileRef.id,
+            profileName: p.exists() ? (p.data() as ProfileDoc).name : "(deleted)",
+            ...(d.data() as TrackDoc),
+          });
+        }
+        setPending(rows);
+      },
+    );
+  }, []);
+  return (
+    <section>
+      <h2>Track review queue ({pending.length})</h2>
+      {/* Screening guidance per spec §6: admins hear exactly what the public would. */}
+      <p style={{ background: "#fff8e1", border: "1px solid #f0d878", padding: "8px 12px", borderRadius: 4 }}>
+        You are hearing exactly what the public would hear. Screening call: does this
+        sound like the artist&apos;s own performance (not AI-generated / not someone
+        else&apos;s recording)? When unsure, reject with a note asking for context.
+      </p>
+      {pending.map((t) => <TrackQueueRow key={`${t.profileId}-${t.id}`} t={t} />)}
+      {pending.length === 0 && <p>Nothing waiting.</p>}
+    </section>
+  );
+}
+
+// Retroactive-takedown panel (spec §6: "admins can retroactively unpublish").
+// reviewTrack already accepts decision:"rejected" against an already-approved
+// track — TracksQueue above can't reach that path since it only ever lists
+// pending_review tracks, so this gives admins a way in: look a profile up by
+// handle, see its live (approved) tracks, remove one with a reason. Same
+// handles/{handle} -> profileId indirection the public /u/[handle] route
+// uses, and handles are stored lowercase there too.
+function TakedownsPanel() {
+  const [handle, setHandle] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [tracks, setTracks] = useState<Row<TrackDoc>[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const lookup = async () => {
+    const h = handle.trim().toLowerCase();
+    if (!h) return;
+    setLookupBusy(true);
+    // Clear any previous handle's results up front, so a failed lookup (or a
+    // slow one) never leaves a stale profile's tracks on screen under a new
+    // handle in the input.
+    setProfileId(null);
+    setTracks([]);
+    try {
+      const { db } = getFirebase();
+      const handleDoc = await getDoc(doc(db, "handles", h));
+      if (!handleDoc.exists()) { window.alert("No profile with that handle."); return; }
+      const pid = (handleDoc.data() as { profileId: string }).profileId;
+      const snap = await getDocs(query(
+        collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order")));
+      setProfileId(pid);
+      setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
+  const remove = async (trackId: string) => {
+    if (!profileId) return;
+    const reason = window.prompt(
+      "Takedown reason (shown to the musician) — this removes the track from their live profile immediately:",
+    ) ?? "";
+    if (!reason) return;
+    setBusyId(trackId);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewTrack")(
+        { profileId, trackId, decision: "rejected", reason });
+      setTracks((ts) => ts.filter((t) => t.id !== trackId));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <section>
+      <h2>Takedowns</h2>
+      <p>Retroactively remove a live track from an approved profile (spec §6).</p>
+      <input
+        placeholder="@handle"
+        value={handle}
+        onChange={(e) => setHandle(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") void lookup(); }}
+      />{" "}
+      <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
+      {tracks.map((t) => (
+        <div key={t.id} style={{ border: "1px solid #ddd", padding: 12, marginTop: 8 }}>
+          <strong>{t.title}</strong> · {t.durationSec ?? "?"}s
+          <div>
+            <button disabled={busyId === t.id} onClick={() => remove(t.id)}>
+              {busyId === t.id ? "Removing…" : "Remove…"}
+            </button>
+          </div>
+        </div>
+      ))}
+      {profileId && tracks.length === 0 && <p>No approved tracks.</p>}
     </section>
   );
 }
@@ -152,7 +331,7 @@ export default function AdminPage() {
     <AdminGate>
       <main style={{ maxWidth: 860, margin: "40px auto", display: "grid", gap: 32 }}>
         <h1>GateKeep Admin</h1>
-        <Queue /><UserLookup /><AuditLog />
+        <Queue /><TracksQueue /><TakedownsPanel /><UserLookup /><AuditLog />
       </main>
     </AdminGate>
   );
