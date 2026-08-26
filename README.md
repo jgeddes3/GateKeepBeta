@@ -218,9 +218,13 @@ Smaller items from the sub-project 2 quality-review rounds — recorded in full 
   `window.alert`/`confirm`/`prompt` in the editor/wizard with a shared toast/modal primitive; add
   an upload cancel button + `beforeunload` guard to `TrimUploader`/`PhotoUploader`; an
   accessibility pass (`aria-pressed`, label/id pairing, focus-visible); positive save-success
-  feedback, not just failure alerts. `deleteProfile` being draft/rejected-only is a conscious
-  ruling, not a gap — revisit only if support requests show a real need for self-service delete on
-  live profiles.
+  feedback, not just failure alerts. `deleteProfile` being draft/rejected-only is enforced
+  server-side (`functions/src/profiles.ts` checks the profile's status after `requireProfileAdmin`
+  and throws `failed-precondition` otherwise) — not just a client-side UI convention as earlier
+  drafts of this doc described. An approved or pending-review profile must go through
+  `reviewProfile`'s reject decision (which also supports retroactive unpublish of an already-live
+  profile) before it becomes deletable; revisit only if support requests show a real need for
+  self-service delete straight from a live profile.
 - **`TrimUploader` native streaming** (mobile, Task 13): `upload()` currently reads the whole
   picked file into memory via `fetch().blob()` before handing it to `uploadBytesResumable`.
   Switch to `expo-file-system`'s `uploadAsync` for native streaming (no full-file `Blob`

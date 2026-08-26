@@ -657,8 +657,22 @@ service firebase.storage {
 
     // Serving path: only ever contains approved/instantly-publishable content
     // (the transcode/photo pipelines are the only writers). World-readable.
-    match /public/{allPaths=**} {
-      allow get: if true;
+    //
+    // **Pre-merge security-gate finding (F1), fixed:** the original version
+    // of this rule used a bare recursive wildcard (`match
+    // /public/{allPaths=**} { allow get: if true; ... }`), which also
+    // matches a literal object name like "public/../review/tracks/p1/x.m4a"
+    // — GCS object names are flat strings, so ".." there is just a literal
+    // path segment, not filesystem traversal, and the wildcard doesn't care
+    // what the segments contain. Nothing in this codebase writes such a
+    // name (reviewTrackPath/publicTrackPath in @gatekeep/shared always emit
+    // clean ids), but a fully-permissive `get: if true` over `**` served it
+    // anyway if one ever existed — defense-in-depth, not a live exploit
+    // against this pipeline. Segment-constrained the match to close the gap:
+    match /public/{kind}/{profileId}/{fileName} {
+      allow get: if (kind == 'tracks' || kind == 'photos')
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && fileName.matches('[A-Za-z0-9_.-]{1,128}');
       // Paths are resolved from Firestore docs, never by listing. Listing would
       // enumerate every profileId (drafts included) — mirrors the /handles
       // get/list split in firestore.rules.
@@ -926,10 +940,20 @@ After the existing `/{path=**}/members/` block, add the admin queue's collection
 
 The `tracks.status` fieldOverride below (COLLECTION + COLLECTION_GROUP) replaces
 the default single-field index Firestore would otherwise auto-create for that
-field — it does not add ordering by `status` on its own; the admin queue's
-`orderBy` (if any is ever added) would need its own composite entry, so don't
-add `orderBy("status", "desc")` to a query without adding the matching index
-back here first.
+field. **Pre-merge security-gate finding (F3), fixed:** the override as
+originally written only listed ASCENDING for both scopes, silently dropping
+the DESCENDING single-field index Firestore auto-creates by default — any
+future `orderBy("status", "desc")` (collection or collection-group) would
+have hit a missing-index error in production with no local warning (the
+emulator doesn't enforce index requirements). Cheap insurance: both scopes
+now carry ASCENDING and DESCENDING, so a future desc `orderBy` on `status`
+just works without another index-file round-trip.
+The pre-existing `members.uid` override below has the same shape (and the
+same latent gap) but is intentionally left ASCENDING-only for now — every
+`members.uid` query in this codebase (collection-group "my profiles" /
+admin user lookups) is a bare equality filter with no `orderBy`, so there's
+nothing to add yet; revisit the same way (add DESCENDING) the day a query
+needs it.
 
 ```json
 { "indexes": [
@@ -948,7 +972,9 @@ back here first.
     "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
   { "collectionGroup": "tracks", "fieldPath": "status",
     "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },
-                 { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] } ] }
+                 { "queryScope": "COLLECTION", "order": "DESCENDING" },
+                 { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" },
+                 { "queryScope": "COLLECTION_GROUP", "order": "DESCENDING" } ] } ] }
 ```
 
 - [ ] **Step 5: Run rules tests**
@@ -1088,6 +1114,20 @@ describe("storage: public and review", () => {
   });
 });
 ```
+
+**Pre-merge security-gate follow-up (F1), added:** two more cases in the
+`"storage: public and review"` describe block, added when Task 2's
+`public/{allPaths=**}` rule was segment-constrained (see that Task's Step 1
+note) — `pnpm emu:rules` runs both files together, so these live in the same
+`storage-rules.test.ts` this task created:
+- a literal `public/../review/tracks/p1/secret.m4a` object name is DENIED
+  for both an anonymous reader and an admin (the segment-constrained rule's
+  `kind` resolves to `".."`, which fails the tracks/photos allowlist either
+  way — the point is defense-in-depth, not an admin-vs-anon distinction).
+- the two real serving shapes — `public/tracks/{profileId}/{trackId}.m4a`
+  and `public/photos/{profileId}/{avatar|cover}-{uuid}.jpg` — still resolve
+  for an anonymous reader, and `listAll` on a `public/tracks/{profileId}`
+  prefix still fails.
 
 - [ ] **Step 2: Run**
 
@@ -2098,6 +2138,20 @@ describe("processUpload: photos", () => {
 });
 ```
 
+**Pre-merge security-gate follow-up (F4), added:** two more cases in the
+`"processUpload: photos"` describe block, added alongside the format
+allowlist in Step 3's `processPhoto` below:
+- a real, validly-encoded GIF built via `sharp(...).gif().toBuffer()`,
+  uploaded declaring `contentType: "image/jpeg"` (the actual attack shape —
+  storage.rules only checks the declared Content-Type, so real GIF bytes
+  alone would be rejected at the rules layer before ever reaching this
+  trigger) — asserts nothing lands under `public/photos/{profileId}/`, the
+  profile doc's `avatarPhotoPath` stays null, and the staging object is
+  still cleaned up (the format check `return`s before the pipeline, inside
+  the same `try`, so the surrounding `finally` still runs).
+- valid PNG and WebP uploads still succeed end-to-end (the allowlist is
+  three formats, not just JPEG).
+
 - [ ] **Step 2: Run to verify failure**
 
 Run: `pnpm emu:test`
@@ -2369,6 +2423,22 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     // "error" still rejects truncated/genuinely corrupt data, just not mere
     // warnings. limitInputPixels bounds decompression-bomb-style inputs.
     const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
+
+    // **Pre-merge security-gate finding (F4), fixed:** nothing below this
+    // point used to check the DECODED format — sharp/libvips happily
+    // decodes SVG (real XML/parser attack surface), GIF, TIFF, and HEIF too,
+    // none of which storage.rules catches (it only checks the client-set
+    // Content-Type header on the staging upload, which is trivially spoofed
+    // — upload arbitrary bytes declaring `contentType: "image/jpeg"`).
+    // Probe the real format and refuse anything outside the three this app
+    // intends to accept before running attacker-controlled bytes through
+    // the resize/encode pipeline below.
+    const { format } = await sharp(bytes, sharpOpts).metadata();
+    if (!["jpeg", "png", "webp"].includes(format ?? "")) {
+      console.error("processUpload: rejected disallowed photo format", objectName, format);
+      return; // finally below still deletes the staging object
+    }
+
     // Avatars intentionally do NOT set withoutEnlargement — the 512x512
     // output is a contract the rest of the app relies on (fixed-size crop
     // targets), so a tiny source still gets upscaled to fill it. Covers use
@@ -3217,6 +3287,48 @@ In `deleteProfile`, after `recursiveDelete` (which already removes the tracks su
   });
 ```
 
+**Pre-merge security-gate finding (finding 3), fixed — added ahead of the
+cascade above, right after `requireProfileAdmin`:** `deleteProfile`'s
+draft/rejected-only rule used to be enforced only by the web dashboard's UI
+(which simply never rendered a delete button for a live profile) — the
+callable itself deleted whatever profile id a caller passed, as long as they
+were one of its admins. A co-admin could call `deleteProfile` directly on a
+LIVE `approved` profile and immediately free its handle for takeover, or
+delete a `pending_review` profile out from under a reviewer. Fixed with a
+server-side status check between `requireProfileAdmin` and the
+handle/`recursiveDelete` work:
+
+```ts
+  const snap = await profileRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
+  // Finding 3: this used to be enforced client-side only. draft/rejected are
+  // the only statuses with nothing publicly live to lose; pending_review and
+  // approved profiles must go through reviewProfile's reject (which, per the
+  // retroactive-unpublish fix above Task 9's original scope, now also
+  // accepts an already-approved profile) before they're deletable.
+  const status = snap.data()?.status;
+  if (status !== "draft" && status !== "rejected") {
+    throw new HttpsError("failed-precondition",
+      "Approved or in-review profiles can't be deleted — contact support / unpublish first.");
+  }
+```
+
+Same pass also replaced the top-of-function `typeof profileId !== "string" ||
+profileId.trim().length === 0` check with `@gatekeep/shared`'s `isValidDocId`
+(the char-class + length guard every other callable's `profileId` input
+uses), and added the `requireVerifiedEmail(req)` call `deleteProfile` was
+missing — every other member-mutation callable already gates on it, and its
+absence here meant an unverified account (e.g. one created but never
+confirmed) could still delete a profile it administers.
+
+New cases in `functions/test/profiles.test.ts`'s `describe("deleteProfile", ...)`
+block (above the storage-cascade describe below): an approved profile's
+delete attempt fails `failed-precondition` and the profile/handle both
+survive; a `pending_review` profile's delete fails the same way; draft and
+rejected profiles still delete successfully (unchanged happy path); an
+unverified-email caller is rejected before the membership check even runs;
+and a malformed profile id (`"../etc"`) is rejected `invalid-argument`.
+
 **Race-closing note (added post Task-8 hardening):** this storage cascade and
 Task 8's `reviewTrack` post-storage-guard are a matched pair. Without the
 guard, a `reviewTrack("approved")` that's mid-copy when `deleteProfile` runs
@@ -3399,7 +3511,7 @@ import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
+import { validateHandle, type ProfileDoc, type TrackDoc } from "@gatekeep/shared";
 import { TrackPlayer } from "./TrackPlayer";
 import styles from "./portfolio.module.css";
 
@@ -3445,6 +3557,18 @@ async function storageUrl(path: string | null | undefined): Promise<string | nul
 // cache means the Firestore/Storage reads only actually happen once.
 const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
   const handle = rawHandle.toLowerCase(); // handles are stored lowercase
+  // **Pre-merge security-gate finding 5, fixed:** an unvalidated handle
+  // segment (e.g. "/@a/b" via an encoded slash, or "/@.." — Firestore
+  // rejects a bare ".." document id outright) used to reach
+  // `doc(db, "handles", handle)` directly. `doc()` throws synchronously on
+  // both shapes, which propagated past the try/catch's permission-denied /
+  // not-found special-casing below as an uncaught 500 instead of a normal
+  // 404 — and because it's a thrown error (not a `return null`), ISR never
+  // cached it either, so every hit on a malformed handle paid a fresh
+  // Firestore round-trip AND rendered as a 500. `validateHandle` (imported
+  // from `@gatekeep/shared`, same source of truth `createProfileDraft`
+  // enforces server-side) is the correct pre-doc() guard.
+  if (!validateHandle(handle).ok) return null;
   try {
     const { db } = getServerFirebase();
     const h = await getDoc(doc(db, "handles", handle));
@@ -4876,11 +5000,27 @@ remove one with a reason (same `reviewTrack` call, `decision: "rejected"`).
 Same `handles/{handle} -> profileId` indirection the public `/u/[handle]`
 route uses, and handles are stored lowercase there too.
 
+**Pre-merge security-gate item C, added:** `reviewProfile` (foundation,
+`functions/src/review.ts`) got the same retroactive-takedown treatment as
+`reviewTrack` above — its `rejected` decision now also accepts an
+already-`approved` profile (spec §6 promised this for "anything", but only
+tracks had it), which flips the profile to `rejected` and lets
+`firestore.rules`' `profileApproved()` gate hide the profile AND every one
+of its tracks from public reads in one call, with no per-track takedown
+needed first. `TakedownsPanel` grew a matching UI entry point: the same
+handle lookup now also fetches the profile doc itself (`Promise.all`
+alongside the tracks query) and, when it's `approved`, shows an "Unpublish
+profile…" button that prompts for a reason and calls `reviewProfile({
+profileId, decision: "rejected", reason })` — same busy/confirm pattern as
+the per-track `remove()` below.
+
 ```tsx
 function TakedownsPanel() {
   const [handle, setHandle] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<Row<ProfileDoc> | null>(null);
+  const [profileBusy, setProfileBusy] = useState(false);
   const [tracks, setTracks] = useState<Row<TrackDoc>[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   // Track ids whose most recent removal attempt committed the reject
@@ -4907,6 +5047,7 @@ function TakedownsPanel() {
     // slow one) never leaves a stale profile's tracks on screen under a new
     // handle in the input.
     setProfileId(null);
+    setProfile(null);
     setTracks([]);
     setIncompleteIds(new Set());
     try {
@@ -4915,17 +5056,40 @@ function TakedownsPanel() {
       if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
       if (!handleDoc.exists()) { window.alert("No profile with that handle."); return; }
       const pid = (handleDoc.data() as { profileId: string }).profileId;
-      const snap = await getDocs(query(
-        collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order")));
+      const [profileDoc, tracksSnap] = await Promise.all([
+        getDoc(doc(db, "profiles", pid)),
+        getDocs(query(
+          collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order"))),
+      ]);
       if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
       setProfileId(pid);
-      setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+      setProfile(profileDoc.exists() ? { id: profileDoc.id, ...(profileDoc.data() as ProfileDoc) } : null);
+      setTracks(tracksSnap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
     } catch (e) {
       if (mySeq === lookupSeq.current) {
         window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
       }
     } finally {
       if (mySeq === lookupSeq.current) setLookupBusy(false);
+    }
+  };
+
+  const unpublishProfile = async () => {
+    if (!profileId) return;
+    const reason = window.prompt(
+      "Unpublish reason (shown to the profile's admins) — this removes the profile, and everything on it, from public immediately:",
+    ) ?? "";
+    if (!reason) return;
+    if (reason.length > 500) { window.alert("Reason must be 500 characters or fewer."); return; }
+    setProfileBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewProfile")(
+        { profileId, decision: "rejected", reason });
+      setProfile((p) => (p ? { ...p, status: "rejected", rejectionReason: reason } : p));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not unpublish the profile — try again.");
+    } finally {
+      setProfileBusy(false);
     }
   };
 
@@ -4965,7 +5129,7 @@ function TakedownsPanel() {
   return (
     <section>
       <h2>Takedowns</h2>
-      <p>Retroactively remove a live track from an approved profile (spec §6).</p>
+      <p>Retroactively remove a live profile or track (spec §6).</p>
       <input
         placeholder="@handle"
         value={handle}
@@ -4973,6 +5137,20 @@ function TakedownsPanel() {
         onKeyDown={(e) => { if (e.key === "Enter" && !lookupBusy) void lookup(); }}
       />{" "}
       <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
+      {profile && (
+        <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 8, background: "#fafafa" }}>
+          <strong>{profile.name}</strong> @{profile.handle} — {profile.status.replace("_", " ")}
+          {profile.status === "approved" ? (
+            <div>
+              <button disabled={profileBusy} onClick={unpublishProfile}>
+                {profileBusy ? "Unpublishing…" : "Unpublish profile…"}
+              </button>
+            </div>
+          ) : (
+            <p style={{ color: "#888", margin: "4px 0 0" }}>Not currently live — nothing to unpublish.</p>
+          )}
+        </div>
+      )}
       {tracks.map((t) => (
         <div key={t.id} style={{ border: "1px solid #ddd", padding: 12, marginTop: 8 }}>
           <strong>{t.title}</strong> · {t.durationSec ?? "?"}s
@@ -4996,6 +5174,51 @@ function TakedownsPanel() {
 ```
 
 Render it in `AdminPage` between `<Queue />` and `<UserLookup />`, after `TracksQueue`: `<Queue /><TracksQueue /><TakedownsPanel /><UserLookup /><AuditLog />`.
+
+- [ ] **Step 1c: Show submitted portfolio content in the profile approvals `QueueRow` (pre-merge security-gate finding 2, added)**
+
+`QueueRow` (foundation's `Queue` section, above `TracksQueue` in this same
+file) approved/rejected a musician profile from nothing but its name,
+handle, type, and subtype — the checklist banner above `Queue` told
+reviewers to "check submitted details for impersonation" while showing them
+none of those details. `ProfileDoc.portfolio` (bio, genres, external links,
+avatar/cover paths) is already present on the snapshot `Queue`'s listener
+hands to each row, so no extra Firestore read is needed for the text
+fields — only the two photo paths need resolving to a displayable URL,
+via a small `PhotoThumb` helper reusing `TrackQueueRow`'s three-state
+(`null` while resolving / `"error"` / resolved url) `getDownloadURL`
+pattern:
+
+```tsx
+function PhotoThumb({ path, alt }: { path: string | null | undefined; alt: string }) {
+  const [url, setUrl] = useState<string | null | "error">(null);
+  useEffect(() => {
+    if (!path) return;
+    let cancelled = false;
+    void getDownloadURL(storageRef(getFirebase().storage, path))
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch((e) => {
+        console.error("PhotoThumb: getDownloadURL failed", path, e);
+        if (!cancelled) setUrl("error");
+      });
+    return () => { cancelled = true; };
+  }, [path]);
+  if (!path) return null;
+  if (url === "error") return <p style={{ color: "#b00020", fontSize: 12, margin: 0 }}>{alt} unavailable</p>;
+  if (!url) return <p style={{ color: "#888", fontSize: 12, margin: 0 }}>{alt} loading…</p>;
+  return <img src={url} alt={alt} style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 4, border: "1px solid #ccc" }} />;
+}
+```
+
+In `QueueRow`, after computing `pf = p.type === "musician" ? p.portfolio : undefined`
+(curator profiles have no `portfolio` field, so they render unchanged) and
+the same https-only `links` filter the public `/u/[handle]` page and mobile
+artist screen already apply to `externalLinks`: render `pf.genres.join(" · ")`,
+`pf.bio`, `<PhotoThumb path={pf.avatarPhotoPath} alt="Avatar" />` +
+`<PhotoThumb path={pf.coverPhotoPath} alt="Cover" />` side by side, and the
+filtered links as plain `<a target="_blank" rel="noopener noreferrer nofollow">`
+tags — all above the existing Approve/Reject buttons, only when `pf` is
+defined.
 
 - [ ] **Step 2: Verify**
 
@@ -6911,11 +7134,20 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
   - `deleteProfile` (the "Delete this profile" button) is currently offered only for
     `draft`/`rejected` profiles, matching `submitProfileForReview`'s allowed source statuses —
     a musician cannot self-service-delete an `approved` or `pending_review` profile from the
-    editor. This is a conscious ruling (recorded here, not an oversight): a live/under-review
-    profile has curator-facing consequences (broken links, an in-flight review) that a bare
-    confirm-dialog delete shouldn't short-circuit. Revisit if support requests show this is a
-    real gap — likely wants an admin-mediated or cool-down-gated path rather than the same
-    one-click confirm used for a never-published draft.
+    editor. This is a conscious ruling: a live/under-review profile has curator-facing
+    consequences (broken links, an in-flight review) that a bare confirm-dialog delete shouldn't
+    short-circuit. **Pre-merge security-gate finding 3, closed:** this used to be enforced only
+    by the UI never rendering the button for those statuses — the callable itself deleted
+    whatever profile id a caller passed as long as they were one of its admins, so a co-admin
+    calling `deleteProfile` directly (bypassing the UI) could delete a LIVE `approved` profile
+    server-side and immediately free its handle for takeover. `functions/src/profiles.ts`'s
+    `deleteProfile` now enforces the same rule server-side (`failed-precondition` outside
+    draft/rejected), so this is a real invariant, not just a UI convention. Revisit the *product*
+    question (should musicians ever self-service-delete a live profile) if support requests show
+    a real gap — likely wants an admin-mediated or cool-down-gated path rather than the same
+    one-click confirm used for a never-published draft; either way any such path must call through
+    `reviewProfile`'s reject decision (or an equivalent admin-gated unpublish) first, not just
+    relax `deleteProfile`'s own gate.
 - Manual follow-ups (mobile, from Task 13's quality review):
   - `TrimUploader`'s `upload()` has no native streaming yet — it reads the whole picked file
     into memory via `fetch().blob()` before handing it to `uploadBytesResumable`, and the
