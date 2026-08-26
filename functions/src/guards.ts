@@ -40,3 +40,14 @@ export async function requireCuratorProfile(profileId: string): Promise<Document
   }
   return p;
 }
+
+// Sub-project 3: gig-posting actions (createGig) require not just a curator
+// profile but one that has cleared review — an unapproved (draft/pending/
+// rejected) curator has nothing public to post against yet.
+export async function requireApprovedCuratorProfile(profileId: string): Promise<DocumentSnapshot> {
+  const p = await requireCuratorProfile(profileId);
+  if (p.data()?.status !== "approved") {
+    throw new HttpsError("failed-precondition", "This curator profile is not approved yet.");
+  }
+  return p;
+}
