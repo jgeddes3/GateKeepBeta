@@ -4,7 +4,13 @@ service cloud.firestore {
 
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
-    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
+    // token.get(..., false) rather than `token.admin == true`: a missing
+    // claim (every non-admin caller) resolves to `false` cleanly instead of
+    // throwing an EvaluationException on the direct property access — only
+    // absorbed into `false` by CEL's `||` short-circuiting today, which
+    // silently floods the rules-evaluation logs for every non-admin read.
+    // Mirrors storage.rules' isAdmin() already.
+    function isAdmin() { return signedIn() && request.auth.token.get('admin', false) == true; }
     function isMember(profileId) {
       return signedIn()
         && exists(/databases/$(database)/documents/profiles/$(profileId)/members/$(request.auth.uid));
@@ -57,13 +63,34 @@ service cloud.firestore {
       allow write: if false; // Cloud Functions only
 
       match /members/{memberUid} {
-        // self-read clause serves the collection-group "my profiles" query
-        allow get: if profileApproved(profileId) || isMember(profileId)
-          || (signedIn() && request.auth.uid == resource.data.uid) || isAdmin();
+        // self-read clause serves the collection-group "my profiles" query.
+        // Ordered read-free/cheap checks first — profileApproved() is a
+        // billed get() — so the common non-admin, non-approved-profile
+        // paths short-circuit before paying for it.
+        allow get: if isAdmin() || isMember(profileId)
+          || (signedIn() && request.auth.uid == resource.data.uid) || profileApproved(profileId);
         // Listing the whole roster is narrower than a single get — an
         // unauthenticated/non-member caller could otherwise page through
         // every member of even an approved profile via a collection list.
         allow list: if isMember(profileId) || isAdmin();
+        allow write: if false; // Cloud Functions only
+      }
+
+      match /tracks/{trackId} {
+        // Public track reads require BOTH the profile and the track approved.
+        // List queries must filter status == 'approved' (unfiltered lists fail),
+        // which keeps pending/rejected titles out of public reach.
+        // Read-free checks first — profileApproved() is a billed get() — so
+        // member/admin reads short-circuit before paying for it.
+        allow read: if isAdmin() || isMember(profileId)
+          || (profileApproved(profileId) && resource.data.status == 'approved');
+        allow write: if false; // Cloud Functions only
+      }
+
+      match /private/booking {
+        // Rates/preferences: never public. Sub-project 3 widens this to
+        // members of approved curator profiles.
+        allow read: if isMember(profileId) || isAdmin();
         allow write: if false; // Cloud Functions only
       }
     }
@@ -78,6 +105,12 @@ service cloud.firestore {
     // lookup (collectionGroup('members').where('uid','==', targetUid)) works.
     match /{path=**}/members/{memberUid} {
       allow read: if signedIn() && (request.auth.uid == resource.data.uid || isAdmin());
+    }
+
+    // Admin review queue: collectionGroup('tracks').where('status','==','pending_review').
+    // The nested tracks rule above does not apply to collection-group queries.
+    match /{path=**}/tracks/{trackId} {
+      allow read: if isAdmin();
     }
 
     match /invites/{inviteId} {

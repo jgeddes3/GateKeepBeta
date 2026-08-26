@@ -33,11 +33,13 @@ firestore.rules                        M  tracks + private/booking rules
 firestore.indexes.json                 M  tracks indexes
 package.json                           M  emu scripts gain storage
 functions/package.json                 M  ffmpeg-static, ffprobe-static, sharp
+functions/src/guards.ts                 C  requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile
 functions/src/storage.ts               C  bucket helper + STORAGE_BUCKET
-functions/src/portfolio.ts             C  updatePortfolio, updateBookingInfo, requireProfileMember
-functions/src/tracks.ts                C  createTrack, updateTrack, deleteTrack, reviewTrack
+functions/src/portfolio.ts             C  updatePortfolio, updateBookingInfo
+functions/src/tracks.ts                C  createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack
 functions/src/media.ts                 C  processUpload trigger (audio transcode + photo resize)
 functions/src/profiles.ts              M  submit minimum-content gate, portfolio seed, delete cascade
+functions/src/members.ts               M  verified-email gate on respondToInvite
 functions/src/review.ts                M  export requireAdmin
 functions/src/index.ts                 M  new exports
 functions/test/helpers.ts              M  storage emulator wiring, wav fixture, poll helper
@@ -49,8 +51,11 @@ tests-rules/storage-rules.test.ts      C  storage rules tests
 apps/web/src/lib/firebase.ts           M  + storage
 apps/web/src/lib/firebase-server.ts    C  RSC-side anonymous Firebase (public reads)
 apps/web/app/u/[handle]/page.tsx       M  server-rendered portfolio page
+apps/web/app/u/[handle]/not-found.tsx  C  generic 404 UI (real HTTP 404 via notFound())
 apps/web/app/u/[handle]/portfolio.module.css C
 apps/web/app/u/[handle]/TrackPlayer.tsx C  client audio player
+apps/web/app/globals.css               M  drop the body copy of overflow-x: hidden
+apps/web/app/layout.tsx                M  metadataBase for relative canonical/OG URLs
 apps/web/next.config.ts                M  vanity redirect + rewrite
 apps/web/src/portfolio/*.tsx           C  editor components (forms, TrimUploader, TrackManager)
 apps/web/app/join/page.tsx             C  musician wizard (+ resubmit)
@@ -85,6 +90,7 @@ import { describe, it, expect } from "vitest";
 import {
   validatePortfolioUpdate, validateBookingUpdate, validateTrackCreate,
   GENRES, GIG_TYPES, MAX_TRACKS, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES,
+  ACT_SIZES, AVAILABILITY_PATTERNS, TRACK_STATUSES,
 } from "../src/index.js";
 
 describe("validatePortfolioUpdate", () => {
@@ -116,6 +122,40 @@ describe("validatePortfolioUpdate", () => {
     expect(validatePortfolioUpdate({ profileId: "p1", bio: 42 } as never).ok).toBe(false);
     expect(validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "spotify" }] } as never).ok).toBe(false);
   });
+  it("rejects spotify-lookalike hosts (subdomain suffix, userinfo trick, homograph) and accepts an uppercase scheme", () => {
+    const link = (kind: string, url: string) =>
+      validatePortfolioUpdate({ ...ok, externalLinks: [{ kind: kind as never, url }] });
+    expect(link("spotify", "https://open.spotify.com.evil.example/x").ok).toBe(false);
+    expect(link("spotify", "https://open.spotify.com@evil.example/x").ok).toBe(false);
+    expect(link("spotify", "https://opеn.spotify.com/x").ok).toBe(false); // е is Cyrillic "е", not Latin "e"
+    expect(link("spotify", "HTTPS://OPEN.SPOTIFY.COM/artist/a").ok).toBe(true); // regex has /i — uppercase scheme+host are fine
+  });
+  it("accepts query/fragment/explicit-port URL shapes and whitespace padding, and rejects the host:port@ userinfo trick", () => {
+    const link = (kind: string, url: string) =>
+      validatePortfolioUpdate({ ...ok, externalLinks: [{ kind: kind as never, url }] });
+    expect(link("spotify", "https://open.spotify.com?si=1").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com#x").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com:443/artist/a").ok).toBe(true);
+    expect(link("spotify", "  https://open.spotify.com/artist/a  ").ok).toBe(true);
+    expect(link("spotify", "https://open.spotify.com:80@evil.example/").ok).toBe(false);
+  });
+  it("rejects the 'Nothing to update' case when bio/genres/externalLinks are all omitted", () => {
+    expect(validatePortfolioUpdate({ profileId: "p1" }).ok).toBe(false);
+  });
+  it("rejects duplicate genres", () => {
+    expect(validatePortfolioUpdate({ ...ok, genres: [GENRES[0], GENRES[0]] }).ok).toBe(false);
+  });
+  it("rejects duplicate links", () => {
+    const dup = [
+      { kind: "website" as const, url: "https://x.example" },
+      { kind: "website" as const, url: "https://x.example" },
+    ];
+    expect(validatePortfolioUpdate({ ...ok, externalLinks: dup }).ok).toBe(false);
+  });
+  it("rejects an invalid profileId (empty, or containing a path separator)", () => {
+    expect(validatePortfolioUpdate({ profileId: "", bio: "hi" }).ok).toBe(false);
+    expect(validatePortfolioUpdate({ profileId: "p1/members/attacker", bio: "hi" }).ok).toBe(false);
+  });
 });
 
 describe("validateBookingUpdate", () => {
@@ -143,6 +183,32 @@ describe("validateBookingUpdate", () => {
     expect(validateBookingUpdate({ ...ok, preferences: { ...ok.preferences, travelRadiusKm: -1 } }).ok).toBe(false);
     expect(validateBookingUpdate({ ...ok, preferences: { ...ok.preferences, typicalSetMinutes: 5000 } }).ok).toBe(false);
   });
+  it("rejects too many gig types and duplicate gig types", () => {
+    const tooMany = Array.from({ length: GIG_TYPES.length + 1 }, () => GIG_TYPES[0]);
+    expect(validateBookingUpdate({ ...ok, preferences: { ...ok.preferences, gigTypes: tooMany } }).ok).toBe(false);
+    expect(validateBookingUpdate({
+      ...ok, preferences: { ...ok.preferences, gigTypes: [GIG_TYPES[0], GIG_TYPES[0]] },
+    }).ok).toBe(false);
+  });
+  it("treats an omitted rate (undefined, not present in the payload) the same as explicit null", () => {
+    expect(validateBookingUpdate({ profileId: "p1", rates: {} as never, preferences: ok.preferences }).ok).toBe(true);
+  });
+  it("treats an omitted rate note (undefined) the same as explicit null", () => {
+    expect(validateBookingUpdate({
+      ...ok, rates: { ...ok.rates, perHour: { amountCents: 100 } as never },
+    }).ok).toBe(true);
+  });
+  it("rejects an invalid profileId (empty, or containing a path separator)", () => {
+    expect(validateBookingUpdate({ ...ok, profileId: "" }).ok).toBe(false);
+    expect(validateBookingUpdate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
+  it("treats preferences with all scalar fields omitted (undefined, not just explicit null) as valid", () => {
+    expect(validateBookingUpdate({
+      profileId: "p1",
+      rates: { perHour: null, perSong: null, perSet: null },
+      preferences: { gigTypes: [] } as never,
+    }).ok).toBe(true);
+  });
 });
 
 describe("validateTrackCreate", () => {
@@ -161,6 +227,15 @@ describe("validateTrackCreate", () => {
     expect(validateTrackCreate({ ...ok, sizeBytes: MAX_AUDIO_UPLOAD_BYTES + 1 }).ok).toBe(false);
     expect(validateTrackCreate({ ...ok, contentType: "video/mp4" }).ok).toBe(false);
   });
+  it("checks the length bound against the trimmed title, not the raw string", () => {
+    const padded = "  " + "x".repeat(80) + "  "; // trims to exactly 80
+    expect(validateTrackCreate({ ...ok, title: padded }).ok).toBe(true);
+    expect(validateTrackCreate({ ...ok, title: "x".repeat(81) }).ok).toBe(false);
+  });
+  it("rejects an invalid profileId (empty, or containing a path separator)", () => {
+    expect(validateTrackCreate({ ...ok, profileId: "" }).ok).toBe(false);
+    expect(validateTrackCreate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
+  });
 });
 
 describe("constants", () => {
@@ -168,6 +243,66 @@ describe("constants", () => {
     expect(MAX_TRACKS).toBe(10);
     expect(MAX_CLIP_SECONDS).toBe(30);
   });
+  it("derives the runtime allowlist arrays that back the ActSize/AvailabilityPattern/TrackStatus unions", () => {
+    expect(ACT_SIZES).toEqual(["solo", "duo", "band"]);
+    expect(AVAILABILITY_PATTERNS).toEqual(["weekends", "weeknights", "anytime", "limited"]);
+    expect(TRACK_STATUSES).toEqual(["processing", "pending_review", "approved", "rejected", "failed"]);
+  });
+});
+
+describe("never throws on hostile payloads (defensive runtime guards)", () => {
+  // Each of these previously either threw (prototype-chain `in` lookup) or
+  // silently validated as ok (missing array/length/id checks). All must now
+  // fail cleanly — no uncaught exception, ok: false.
+  const hostileCases: Array<{ name: string; run: () => { ok: boolean } }> = [
+    {
+      name: "link kind 'constructor' (prototype-chain lookup bypass)",
+      run: () => validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "constructor" as never, url: "https://x.example" }] }),
+    },
+    {
+      name: "link kind 'toString'",
+      run: () => validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "toString" as never, url: "https://x.example" }] }),
+    },
+    {
+      name: "link kind '__proto__'",
+      run: () => validatePortfolioUpdate({ profileId: "p1", externalLinks: [{ kind: "__proto__" as never, url: "https://x.example" }] }),
+    },
+    {
+      name: "booking rates as an array",
+      run: () => validateBookingUpdate({
+        profileId: "p1",
+        rates: [] as never,
+        preferences: { gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null },
+      }),
+    },
+    {
+      name: "booking preferences as null",
+      run: () => validateBookingUpdate({
+        profileId: "p1",
+        rates: { perHour: null, perSong: null, perSet: null },
+        preferences: null as never,
+      }),
+    },
+    {
+      name: "portfolio genres as a plain object",
+      run: () => validatePortfolioUpdate({ profileId: "p1", genres: {} as never }),
+    },
+    {
+      name: "track startSec as NaN",
+      run: () => validateTrackCreate({ profileId: "p1", title: "T", startSec: NaN, sizeBytes: 1000, contentType: "audio/mpeg" }),
+    },
+    {
+      name: "profileId containing a path separator",
+      run: () => validatePortfolioUpdate({ profileId: "a/b", bio: "hi" }),
+    },
+  ];
+  for (const { name, run } of hostileCases) {
+    it(`does not throw and reports ok:false — ${name}`, () => {
+      let result: { ok: boolean } | undefined;
+      expect(() => { result = run(); }).not.toThrow();
+      expect(result?.ok).toBe(false);
+    });
+  }
 });
 ```
 
@@ -183,7 +318,8 @@ Append to `packages/shared/src/types.ts`:
 ```ts
 // ---------- Sub-project 2: musician portfolio ----------
 
-export type TrackStatus = "processing" | "pending_review" | "approved" | "rejected" | "failed";
+export const TRACK_STATUSES = ["processing", "pending_review", "approved", "rejected", "failed"] as const;
+export type TrackStatus = (typeof TRACK_STATUSES)[number];
 
 export interface TrackDoc {
   title: string;
@@ -216,8 +352,10 @@ export interface BookingRates {
   perSong: RateAmount | null;    // pay scales with songs requested (e.g. wedding playlists)
   perSet: RateAmount | null;     // flat rate for a defined set
 }
-export type ActSize = "solo" | "duo" | "band";
-export type AvailabilityPattern = "weekends" | "weeknights" | "anytime" | "limited";
+export const ACT_SIZES = ["solo", "duo", "band"] as const;
+export type ActSize = (typeof ACT_SIZES)[number];
+export const AVAILABILITY_PATTERNS = ["weekends", "weeknights", "anytime", "limited"] as const;
+export type AvailabilityPattern = (typeof AVAILABILITY_PATTERNS)[number];
 export interface BookingPreferences {
   gigTypes: string[];            // subset of GIG_TYPES
   travelRadiusKm: number | null;
@@ -310,6 +448,7 @@ Append to `packages/shared/src/validation.ts`:
 ```ts
 import {
   GENRES, GIG_TYPES, AUDIO_CONTENT_TYPES, MAX_AUDIO_UPLOAD_BYTES,
+  ACT_SIZES, AVAILABILITY_PATTERNS,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
 } from "./types.js";
@@ -317,24 +456,41 @@ import {
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
 
+// Guards Firestore document-id-shaped fields (profileId, etc.) against empty
+// strings, path traversal ("a/b"), and absurdly long values before they reach
+// a doc() call — Firestore would throw on "/" in an id, and we want a clean
+// validation failure from an onCall handler, not an uncaught exception.
+export const isValidDocId = (s: unknown): s is string =>
+  typeof s === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(s);
+
 // Domain allowlists per link kind. Regex-based host extraction (not `new URL`)
 // so behavior is identical on Node and React Native/Hermes.
+// NOTE: "website" accepts any https host, which may resolve to localhost,
+// private IPs, or internal hostnames. These links are display-only (rendered
+// as an <a href>) and MUST NEVER be fetched server-side — that would be an
+// SSRF vector.
 const LINK_HOSTS: Record<ExternalLink["kind"], readonly string[] | null> = {
   spotify: ["open.spotify.com"],
   youtube: ["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"],
   instagram: ["instagram.com", "www.instagram.com"],
   website: null, // any https host
 };
-const HTTPS_HOST_RE = /^https:\/\/([a-z0-9.-]+)(\/|$)/i;
+const HTTPS_HOST_RE = /^https:\/\/([a-z0-9.-]+)(?::\d{1,5})?(?=[/?#]|$)/i;
 
 function validateLink(link: unknown): Result {
   const l = link as ExternalLink;
   if (typeof l !== "object" || l === null || typeof l.kind !== "string" || typeof l.url !== "string") {
     return fail("Invalid link.");
   }
-  if (!(l.kind in LINK_HOSTS)) return fail("Unknown link type.");
-  if (l.url.length > 300) return fail("Link URLs must be 300 characters or fewer.");
-  const m = HTTPS_HOST_RE.exec(l.url);
+  // hasOwnProperty, not `in` — `in` walks the prototype chain, so kind values
+  // like "constructor"/"toString"/"__proto__" would otherwise pass this guard
+  // and crash `hosts.includes` below with an uncaught TypeError. Called via
+  // Object.prototype (not Object.hasOwn) to avoid an engine-version
+  // assumption on RN/JSC.
+  if (!Object.prototype.hasOwnProperty.call(LINK_HOSTS, l.kind)) return fail("Unknown link type.");
+  const url = l.url.trim();
+  if (url.length > 300) return fail("Link URLs must be 300 characters or fewer.");
+  const m = HTTPS_HOST_RE.exec(url);
   if (!m) return fail("Links must be https:// URLs.");
   const hosts = LINK_HOSTS[l.kind];
   if (hosts && !hosts.includes(m[1].toLowerCase())) {
@@ -345,9 +501,10 @@ function validateLink(link: unknown): Result {
 
 export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
   // Untrusted onCall payload — same defensive-runtime rationale as validateHandle.
-  if (typeof input !== "object" || input === null || typeof input.profileId !== "string") {
+  if (typeof input !== "object" || input === null) {
     return fail("Invalid portfolio update.");
   }
+  if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
   if (input.bio === undefined && input.genres === undefined && input.externalLinks === undefined) {
     return fail("Nothing to update.");
   }
@@ -360,6 +517,7 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
     if (!Array.isArray(input.genres) || input.genres.length < 1 || input.genres.length > 3) {
       return fail("Pick 1-3 genres.");
     }
+    if (new Set(input.genres).size !== input.genres.length) return fail("Duplicate genres.");
     for (const g of input.genres) {
       if (!(GENRES as readonly string[]).includes(g)) return fail("Unknown genre.");
     }
@@ -372,62 +530,71 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
       const v = validateLink(l);
       if (!v.ok) return v;
     }
+    const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url.trim()}`);
+    if (new Set(linkKeys).size !== linkKeys.length) return fail("Duplicate links.");
   }
   return { ok: true };
 }
 
 function validateRate(rate: unknown, label: string): Result {
-  if (rate === null) return { ok: true };
+  if (rate == null) return { ok: true }; // absent (undefined) and explicit null both mean "not set"
   const r = rate as RateAmount;
   if (typeof r !== "object" || typeof r.amountCents !== "number"
       || !Number.isInteger(r.amountCents) || r.amountCents < 1 || r.amountCents > 100_000_000) {
     return fail(`${label} must be a whole number of cents between 1 and 100,000,000.`);
   }
-  if (r.note !== null && (typeof r.note !== "string" || r.note.length > 200)) {
+  if (r.note != null && (typeof r.note !== "string" || r.note.length > 200)) {
     return fail(`${label} note must be at most 200 characters.`);
   }
   return { ok: true };
 }
 
 export function validateBookingUpdate(input: BookingUpdateInput): Result {
-  if (typeof input !== "object" || input === null || typeof input.profileId !== "string"
-      || typeof input.rates !== "object" || input.rates === null
-      || typeof input.preferences !== "object" || input.preferences === null) {
+  if (typeof input !== "object" || input === null
+      || typeof input.rates !== "object" || input.rates === null || Array.isArray(input.rates)
+      || typeof input.preferences !== "object" || input.preferences === null || Array.isArray(input.preferences)) {
     return fail("Invalid booking info.");
   }
+  if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
   for (const [k, label] of [["perHour", "Hourly rate"], ["perSong", "Per-song rate"], ["perSet", "Per-set rate"]] as const) {
     const v = validateRate(input.rates[k], label);
     if (!v.ok) return v;
   }
   const p = input.preferences;
   if (!Array.isArray(p.gigTypes)) return fail("Invalid gig types.");
+  if (p.gigTypes.length > GIG_TYPES.length) return fail("Too many gig types.");
+  if (new Set(p.gigTypes).size !== p.gigTypes.length) return fail("Duplicate gig types.");
   for (const g of p.gigTypes) {
     if (!(GIG_TYPES as readonly string[]).includes(g)) return fail("Unknown gig type.");
   }
-  if (p.travelRadiusKm !== null && (typeof p.travelRadiusKm !== "number"
+  // != null (not !==) on these five scalars: an absent (undefined) field is
+  // treated the same as an explicit null, matching validateRate's
+  // absent-means-unset semantics — the musician just hasn't filled it in yet.
+  if (p.travelRadiusKm != null && (typeof p.travelRadiusKm !== "number"
       || !Number.isInteger(p.travelRadiusKm) || p.travelRadiusKm < 0 || p.travelRadiusKm > 3000)) {
     return fail("Travel radius must be 0-3000 km.");
   }
-  if (p.actSize !== null && !["solo", "duo", "band"].includes(p.actSize as string)) {
+  if (p.actSize != null && !(ACT_SIZES as readonly string[]).includes(p.actSize)) {
     return fail("Invalid act size.");
   }
-  if (p.typicalSetMinutes !== null && (typeof p.typicalSetMinutes !== "number"
+  if (p.typicalSetMinutes != null && (typeof p.typicalSetMinutes !== "number"
       || !Number.isInteger(p.typicalSetMinutes) || p.typicalSetMinutes < 15 || p.typicalSetMinutes > 480)) {
     return fail("Set length must be 15-480 minutes.");
   }
-  if (p.bringsOwnPA !== null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
-  if (p.availabilityPattern !== null
-      && !["weekends", "weeknights", "anytime", "limited"].includes(p.availabilityPattern as string)) {
+  if (p.bringsOwnPA != null && typeof p.bringsOwnPA !== "boolean") return fail("Invalid PA answer.");
+  if (p.availabilityPattern != null
+      && !(AVAILABILITY_PATTERNS as readonly string[]).includes(p.availabilityPattern)) {
     return fail("Invalid availability.");
   }
   return { ok: true };
 }
 
 export function validateTrackCreate(input: CreateTrackInput): Result {
-  if (typeof input !== "object" || input === null || typeof input.profileId !== "string") {
+  if (typeof input !== "object" || input === null) {
     return fail("Invalid track.");
   }
-  if (typeof input.title !== "string" || input.title.trim().length < 1 || input.title.length > 80) {
+  if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
+  if (typeof input.title !== "string" || input.title.trim().length < 1 || input.title.trim().length > 80) {
     return fail("Track titles are 1-80 characters.");
   }
   if (typeof input.startSec !== "number" || !Number.isFinite(input.startSec)
@@ -483,12 +650,33 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
-    function isAdmin() { return request.auth != null && request.auth.token.admin == true; }
+    // Uses token.get(..., false) rather than firestore.rules' `token.admin == true`
+    // style deliberately: a missing claim resolves to `false` cleanly instead of
+    // throwing an EvaluationException that would otherwise spam the logs.
+    function isAdmin() { return request.auth != null && request.auth.token.get('admin', false) == true; }
 
     // Serving path: only ever contains approved/instantly-publishable content
     // (the transcode/photo pipelines are the only writers). World-readable.
-    match /public/{allPaths=**} {
-      allow read: if true;
+    //
+    // **Pre-merge security-gate finding (F1), fixed:** the original version
+    // of this rule used a bare recursive wildcard (`match
+    // /public/{allPaths=**} { allow get: if true; ... }`), which also
+    // matches a literal object name like "public/../review/tracks/p1/x.m4a"
+    // — GCS object names are flat strings, so ".." there is just a literal
+    // path segment, not filesystem traversal, and the wildcard doesn't care
+    // what the segments contain. Nothing in this codebase writes such a
+    // name (reviewTrackPath/publicTrackPath in @gatekeep/shared always emit
+    // clean ids), but a fully-permissive `get: if true` over `**` served it
+    // anyway if one ever existed — defense-in-depth, not a live exploit
+    // against this pipeline. Segment-constrained the match to close the gap:
+    match /public/{kind}/{profileId}/{fileName} {
+      allow get: if (kind == 'tracks' || kind == 'photos')
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && fileName.matches('[A-Za-z0-9_.-]{1,128}');
+      // Paths are resolved from Firestore docs, never by listing. Listing would
+      // enumerate every profileId (drafts included) — mirrors the /handles
+      // get/list split in firestore.rules.
+      allow list: if false;
       allow write: if false;
     }
 
@@ -502,18 +690,32 @@ service firebase.storage {
     // trigger; a 24h lifecycle rule (console/deploy config) reaps strays.
     // Membership of {profileId} is NOT checkable here — the trigger verifies it
     // before any content reaches a profile.
+    // customMetadata on staging objects is client-controlled and untrusted — the
+    // processUpload trigger derives uid/profileId from the OBJECT PATH only and
+    // must never read object.metadata.
     match /staging/audio/{uid}/{profileId}/{trackId} {
-      allow write: if isOwner(uid)
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && trackId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
         && request.resource.size <= 50 * 1024 * 1024
         && request.resource.contentType.matches('audio/.*');
-      allow read: if false;
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
     }
     match /staging/photos/{uid}/{profileId}/{fileName} {
-      allow write: if isOwner(uid)
+      // fileName is deliberately extensionless: the path builder emits
+      // `${kind}-${nonce}` with no extension; nonces must stick to A-Za-z0-9 and hyphen.
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
         && request.resource.size <= 10 * 1024 * 1024
         && request.resource.contentType.matches('image/(jpeg|png|webp)')
-        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]+');
-      allow read: if false;
+        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]{1,80}');
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
     }
 
     match /{allPaths=**} { allow read, write: if false; }
@@ -610,7 +812,7 @@ describe("tracks", () => {
     await assertSucceeds(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
     await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t2")));
     await assertSucceeds(getDocs(query(
-      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"))));
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
     await assertFails(getDocs(collection(anon, "profiles/prof1/tracks"))); // unfiltered list
   });
   it("no public track reads on a non-approved profile; members read all their own", async () => {
@@ -620,6 +822,10 @@ describe("tracks", () => {
     const anon = env.unauthenticatedContext().firestore();
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+    // Even the production-shaped filtered+ordered list query must fail here —
+    // the profile itself is not approved, so no list shape helps.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
     await assertSucceeds(getDoc(doc(alice, "profiles/prof1/tracks/t2")));
     await assertSucceeds(getDocs(collection(alice, "profiles/prof1/tracks")));
   });
@@ -630,11 +836,23 @@ describe("tracks", () => {
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
     await assertFails(setDoc(doc(alice, "profiles/prof1/tracks/hax"), { title: "h", status: "approved" }));
     await assertFails(updateDoc(doc(alice, "profiles/prof1/tracks/t1"), { status: "approved" }));
+    // Admins get elevated read, never write — writes stay Cloud Functions only.
+    await assertFails(setDoc(doc(admin, "profiles/prof1/tracks/hax2"), { title: "h", status: "approved" }));
     await assertSucceeds(getDocs(query(
       collectionGroup(admin, "tracks"), where("status", "==", "pending_review"))));
     const bob = env.authenticatedContext("bob").firestore();
     await assertFails(getDocs(query(
       collectionGroup(bob, "tracks"), where("status", "==", "pending_review"))));
+  });
+  it("membership does not leak across profiles", async () => {
+    await seedProfile("approved"); // prof1 / alice, as the existing helper does
+    await seed("profiles/prof2", { type: "musician", name: "B", handle: "b", status: "approved" });
+    await seed("profiles/prof2/tracks/p", { title: "SECRET", status: "pending_review", order: 0 });
+    await seed("profiles/prof2/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDoc(doc(alice, "profiles/prof2/tracks/p")));
+    await assertFails(getDocs(collection(alice, "profiles/prof2/tracks")));
+    await assertFails(getDoc(doc(alice, "profiles/prof2/private/booking")));
   });
 });
 
@@ -643,6 +861,9 @@ describe("private booking subdoc", () => {
     await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
     await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    // A sibling doc under private/ — pins that the rule is scoped to the
+    // literal `booking` doc id, not a wildcard over all of private/.
+    await seed("profiles/prof1/private/secrets", { apiKey: "nope" });
     const alice = env.authenticatedContext("alice").firestore();
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
     const bob = env.authenticatedContext("bob").firestore();
@@ -651,10 +872,15 @@ describe("private booking subdoc", () => {
     await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking")));
     await assertFails(getDoc(doc(bob, "profiles/prof1/private/booking")));
     await assertFails(getDoc(doc(anon, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(alice, "profiles/prof1/private/secrets")));
+    await assertFails(getDoc(doc(admin, "profiles/prof1/private/secrets")));
     await assertFails(setDoc(doc(alice, "profiles/prof1/private/booking"), { rates: {} }));
+    await assertFails(setDoc(doc(admin, "profiles/prof1/private/booking"), { rates: {} }));
   });
 });
 ```
+
+(`orderBy` must be imported alongside the existing `query`/`where` import.)
 
 - [ ] **Step 2: Run to verify failures**
 
@@ -670,8 +896,10 @@ In `firestore.rules`, inside `match /profiles/{profileId} { ... }` after the `me
         // Public track reads require BOTH the profile and the track approved.
         // List queries must filter status == 'approved' (unfiltered lists fail),
         // which keeps pending/rejected titles out of public reach.
-        allow read: if (profileApproved(profileId) && resource.data.status == 'approved')
-          || isMember(profileId) || isAdmin();
+        // Read-free checks first — profileApproved() is a billed get() — so
+        // member/admin reads short-circuit before paying for it.
+        allow read: if isAdmin() || isMember(profileId)
+          || (profileApproved(profileId) && resource.data.status == 'approved');
         allow write: if false; // Cloud Functions only
       }
 
@@ -680,6 +908,21 @@ In `firestore.rules`, inside `match /profiles/{profileId} { ... }` after the `me
         // members of approved curator profiles.
         allow read: if isMember(profileId) || isAdmin();
         allow write: if false; // Cloud Functions only
+      }
+```
+
+Also reorder the existing `members` block's `get` clause for the same read-free-first
+reason (profileApproved() moves last):
+
+```
+      match /members/{memberUid} {
+        // self-read clause serves the collection-group "my profiles" query.
+        // Ordered read-free/cheap checks first — profileApproved() is a
+        // billed get() — so the common non-admin, non-approved-profile
+        // paths short-circuit before paying for it.
+        allow get: if isAdmin() || isMember(profileId)
+          || (signedIn() && request.auth.uid == resource.data.uid) || profileApproved(profileId);
+        ...
       }
 ```
 
@@ -694,6 +937,23 @@ After the existing `/{path=**}/members/` block, add the admin queue's collection
 ```
 
 - [ ] **Step 4: Add indexes to `firestore.indexes.json`**
+
+The `tracks.status` fieldOverride below (COLLECTION + COLLECTION_GROUP) replaces
+the default single-field index Firestore would otherwise auto-create for that
+field. **Pre-merge security-gate finding (F3), fixed:** the override as
+originally written only listed ASCENDING for both scopes, silently dropping
+the DESCENDING single-field index Firestore auto-creates by default — any
+future `orderBy("status", "desc")` (collection or collection-group) would
+have hit a missing-index error in production with no local warning (the
+emulator doesn't enforce index requirements). Cheap insurance: both scopes
+now carry ASCENDING and DESCENDING, so a future desc `orderBy` on `status`
+just works without another index-file round-trip.
+The pre-existing `members.uid` override below has the same shape (and the
+same latent gap) but is intentionally left ASCENDING-only for now — every
+`members.uid` query in this codebase (collection-group "my profiles" /
+admin user lookups) is a bare equality filter with no `orderBy`, so there's
+nothing to add yet; revisit the same way (add DESCENDING) the day a query
+needs it.
 
 ```json
 { "indexes": [
@@ -712,7 +972,9 @@ After the existing `/{path=**}/members/` block, add the admin queue's collection
     "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
   { "collectionGroup": "tracks", "fieldPath": "status",
     "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },
-                 { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] } ] }
+                 { "queryScope": "COLLECTION", "order": "DESCENDING" },
+                 { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" },
+                 { "queryScope": "COLLECTION_GROUP", "order": "DESCENDING" } ] } ] }
 ```
 
 - [ ] **Step 5: Run rules tests**
@@ -737,12 +999,12 @@ git commit -m "feat(rules): tracks visibility matrix, private booking subdoc, ad
 - [ ] **Step 1: Write the tests (they run against the storage emulator)**
 
 ```ts
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach } from "vitest";
 import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { ref, uploadBytes, getBytes } from "firebase/storage";
+import { ref, uploadBytes, getBytes, getDownloadURL, listAll, deleteObject } from "firebase/storage";
 
 let env: RulesTestEnvironment;
 
@@ -753,22 +1015,42 @@ beforeAll(async () => {
   });
 });
 afterAll(async () => { await env.cleanup(); });
+beforeEach(async () => { await env.clearStorage(); });
 
 const bytes = new Uint8Array([1, 2, 3]);
 const meta = (contentType: string) => ({ contentType });
 
 describe("storage: staging/audio", () => {
-  it("owner uploads audio to own staging path; wrong uid, wrong type fail", async () => {
+  it("owner uploads audio to own staging path; wrong uid, wrong type, zero-byte fail", async () => {
     const alice = env.authenticatedContext("alice").storage();
     const bob = env.authenticatedContext("bob").storage();
     await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/t1"), bytes, meta("audio/mpeg")));
     await assertFails(uploadBytes(ref(bob, "staging/audio/alice/p1/t2"), bytes, meta("audio/mpeg")));
     await assertFails(uploadBytes(ref(alice, "staging/audio/alice/p1/t3"), bytes, meta("video/mp4")));
+    await assertFails(uploadBytes(ref(alice, "staging/audio/alice/p1/t4"), new Uint8Array(0), meta("audio/mpeg")));
   });
   it("staging is never readable, even by the owner", async () => {
     const alice = env.authenticatedContext("alice").storage();
     await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/t9"), bytes, meta("audio/mpeg")));
     await assertFails(getBytes(ref(alice, "staging/audio/alice/p1/t9")));
+  });
+  it("owner cannot delete their own staging object; the trigger owns cleanup", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/t10"), bytes, meta("audio/mpeg")));
+    await assertFails(deleteObject(ref(alice, "staging/audio/alice/p1/t10")));
+  });
+  it("retrying an upload (create then update) to the same staging path is allowed", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/retry1"), bytes, meta("audio/mpeg")));
+    await assertSucceeds(uploadBytes(ref(alice, "staging/audio/alice/p1/retry1"), bytes, meta("audio/mpeg"))); // retry = update
+  });
+  it("a literal '..' profileId or trackId segment, or a dot-containing profileId, is rejected", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertFails(uploadBytes(ref(alice, "staging/audio/alice/../t11"), bytes, meta("audio/mpeg")));
+    await assertFails(uploadBytes(ref(alice, "staging/audio/alice/p1/.."), bytes, meta("audio/mpeg")));
+    // "bad.id" fails the profileId char class regardless of whether the SDK
+    // normalizes ".." segments before the request reaches the rules engine.
+    await assertFails(uploadBytes(ref(alice, "staging/audio/alice/bad.id/t1"), bytes, meta("audio/mpeg")));
   });
 });
 
@@ -777,8 +1059,14 @@ describe("storage: staging/photos", () => {
     const alice = env.authenticatedContext("alice").storage();
     await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/avatar-abc123"), bytes, meta("image/jpeg")));
     await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/cover-xyz"), bytes, meta("image/png")));
+    await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/avatar-webp1"), bytes, meta("image/webp")));
     await assertFails(uploadBytes(ref(alice, "staging/photos/alice/p1/banner-abc"), bytes, meta("image/jpeg")));
     await assertFails(uploadBytes(ref(alice, "staging/photos/alice/p1/avatar-abc"), bytes, meta("application/pdf")));
+  });
+  it("owner cannot delete a staging photo either; the trigger owns cleanup", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/avatar-del1"), bytes, meta("image/jpeg")));
+    await assertFails(deleteObject(ref(alice, "staging/photos/alice/p1/avatar-del1")));
   });
 });
 
@@ -790,10 +1078,11 @@ describe("storage: public and review", () => {
     const anon = env.unauthenticatedContext().storage();
     await assertSucceeds(getBytes(ref(anon, "public/tracks/p1/t1.m4a")));
     await assertFails(uploadBytes(ref(anon, "public/tracks/p1/evil.m4a"), bytes, meta("audio/mp4")));
+    await assertFails(listAll(ref(anon, "public")));
     const alice = env.authenticatedContext("alice").storage();
     await assertFails(uploadBytes(ref(alice, "public/photos/p1/avatar-x.jpg"), bytes, meta("image/jpeg")));
   });
-  it("review is admin-read-only", async () => {
+  it("review reads are admin-only", async () => {
     await env.withSecurityRulesDisabled(async (ctx) => {
       await uploadBytes(ref(ctx.storage(), "review/tracks/p1/t1.m4a"), bytes, meta("audio/mp4"));
     });
@@ -804,8 +1093,41 @@ describe("storage: public and review", () => {
     await assertFails(getBytes(ref(alice, "review/tracks/p1/t1.m4a")));
     await assertFails(getBytes(ref(anon, "review/tracks/p1/t1.m4a")));
   });
+  it("review and public are pipeline-only, even for admins", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), "public/tracks/pz/t.m4a"), bytes, meta("audio/mp4"));
+    });
+    const admin = env.authenticatedContext("root", { admin: true }).storage();
+    // Admin context is required: rules are default-deny, so a non-admin assertion
+    // cannot tell `write: if false` from `write: if isAdmin()`.
+    await assertFails(uploadBytes(ref(admin, "review/tracks/pz/evil.m4a"), bytes, meta("audio/mp4")));
+    await assertFails(uploadBytes(ref(admin, "public/tracks/pz/evil.m4a"), bytes, meta("audio/mp4")));
+    await assertFails(deleteObject(ref(admin, "public/tracks/pz/t.m4a")));
+  });
+  it("regression guard: public getDownloadURL works", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), "public/tracks/p1/t2.m4a"), bytes, meta("audio/mp4"));
+    });
+    const anon = env.unauthenticatedContext().storage();
+    // The app's real read path — must survive any future tightening of the get/list split.
+    await assertSucceeds(getDownloadURL(ref(anon, "public/tracks/p1/t2.m4a")));
+  });
 });
 ```
+
+**Pre-merge security-gate follow-up (F1), added:** two more cases in the
+`"storage: public and review"` describe block, added when Task 2's
+`public/{allPaths=**}` rule was segment-constrained (see that Task's Step 1
+note) — `pnpm emu:rules` runs both files together, so these live in the same
+`storage-rules.test.ts` this task created:
+- a literal `public/../review/tracks/p1/secret.m4a` object name is DENIED
+  for both an anonymous reader and an admin (the segment-constrained rule's
+  `kind` resolves to `".."`, which fails the tracks/photos allowlist either
+  way — the point is defense-in-depth, not an admin-vs-anon distinction).
+- the two real serving shapes — `public/tracks/{profileId}/{trackId}.m4a`
+  and `public/photos/{profileId}/{avatar|cover}-{uuid}.jpg` — still resolve
+  for an anonymous reader, and `listAll` on a `public/tracks/{profileId}`
+  prefix still fails.
 
 - [ ] **Step 2: Run**
 
@@ -817,6 +1139,7 @@ Expected: all PASS (Task 2 already added `storage` to the emulator set; if `init
 ```bash
 git add tests-rules/storage-rules.test.ts
 git commit -m "test(rules): storage rules coverage for staging/review/public paths"
+git commit -m "test(rules): mutation-killing storage cases — admin write denial, trackId pattern, webp/zero-byte"
 ```
 
 ---
@@ -824,10 +1147,13 @@ git commit -m "test(rules): storage rules coverage for staging/review/public pat
 ### Task 5: Functions — portfolio + booking callables
 
 **Files:**
+- Create: `functions/src/guards.ts` (requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile)
 - Create: `functions/src/portfolio.ts`
+- Modify: `functions/src/members.ts` (verified-email gate on `respondToInvite`)
 - Modify: `functions/src/index.ts`
 - Modify: `functions/src/profiles.ts` (seed empty portfolio on musician drafts)
 - Test: `functions/test/portfolio.test.ts`
+- Test: `functions/test/members.test.ts` (unverified invitee case)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -924,15 +1250,16 @@ describe("updateBookingInfo", () => {
 Run: `pnpm emu:test`
 Expected: new file FAILS (functions not found / portfolio undefined); existing suites PASS.
 
-- [ ] **Step 3: Create `functions/src/portfolio.ts`**
+- [ ] **Step 3: Create `functions/src/guards.ts`**
+
+Shared onCall guards used by portfolio.ts (and, from Task 6 on, tracks.ts).
+`profiles.ts`/`members.ts` keep their own local `requireAuth`/`requireVerifiedEmail`
+copies for now — consolidating those is deferred to sub-project 3 — except that
+`members.ts` gains one new call site (Step 4a below) reusing its existing local copy.
 
 ```ts
-import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, FieldPath } from "firebase-admin/firestore";
-import {
-  validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc,
-} from "@gatekeep/shared";
+import { HttpsError } from "firebase-functions/v2/https";
+import { getFirestore, type DocumentSnapshot } from "firebase-admin/firestore";
 
 export function requireAuthUid(req: { auth?: { uid?: string } }): string {
   const uid = req.auth?.uid;
@@ -940,14 +1267,20 @@ export function requireAuthUid(req: { auth?: { uid?: string } }): string {
   return uid;
 }
 
+export function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
+  if (req.auth?.token?.email_verified !== true) {
+    throw new HttpsError("failed-precondition", "Please verify your email address first.");
+  }
+}
+
 // Any member may edit portfolio content (spec §6) — contrast requireProfileAdmin
 // in profiles.ts, which gates membership/deletion actions.
-export async function requireProfileMember(profileId: string, uid: string) {
+export async function requireProfileMember(profileId: string, uid: string): Promise<void> {
   const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
   if (!m.exists) throw new HttpsError("permission-denied", "Only profile members can do that.");
 }
 
-export async function requireMusicianProfile(profileId: string) {
+export async function requireMusicianProfile(profileId: string): Promise<DocumentSnapshot> {
   const p = await getFirestore().doc(`profiles/${profileId}`).get();
   if (!p.exists) throw new HttpsError("not-found", "Profile not found.");
   if (p.data()?.type !== "musician") {
@@ -955,43 +1288,121 @@ export async function requireMusicianProfile(profileId: string) {
   }
   return p;
 }
+```
+
+- [ ] **Step 4: Create `functions/src/portfolio.ts`**
+
+```ts
+import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { getFirestore } from "firebase-admin/firestore";
+import {
+  validatePortfolioUpdate, validateBookingUpdate,
+  type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount, type PortfolioData,
+} from "@gatekeep/shared";
+import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
+
+// Strips any extra/untrusted keys off a rate object and normalizes an
+// absent (undefined) rate the same as an explicit null. Without this, a
+// member could persist arbitrary extra keys/nested JSON into
+// private/booking by reference — and `note` could end up absent from the
+// stored doc even though RateAmount promises it present-and-nullable.
+const rate = (r: RateAmount | null | undefined): RateAmount | null =>
+  r == null ? null : { amountCents: r.amountCents, note: r.note ?? null };
 
 export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validatePortfolioUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+  // sequential is deliberate — parallelizing makes rejection order
+  // nondeterministic and would leak profile existence/type to non-members
   await requireProfileMember(input.profileId, uid);
-  await requireMusicianProfile(input.profileId);
+  const snap = await requireMusicianProfile(input.profileId);
 
-  // Dotted-path updates merge into the portfolio map without clobbering the
-  // photo paths the media pipeline owns.
+  // Dotted-string-keys form: the Admin SDK treats dotted string keys in a
+  // plain object passed to update() as field paths, so this merges into the
+  // portfolio map without clobbering the photo paths the media pipeline owns.
   const updates: Record<string, unknown> = { updatedAt: Date.now() };
-  if (input.bio !== undefined) updates["portfolio.bio"] = input.bio;
+  if (input.bio !== undefined) updates["portfolio.bio"] = input.bio.trim();
   if (input.genres !== undefined) updates["portfolio.genres"] = input.genres;
-  if (input.externalLinks !== undefined) updates["portfolio.externalLinks"] = input.externalLinks;
-  const ref = getFirestore().doc(`profiles/${input.profileId}`);
-  const pairs = Object.entries(updates).flatMap(([k, val]) => [new FieldPath(...k.split(".")), val] as const);
-  await ref.update(pairs[0] as FieldPath, pairs[1], ...pairs.slice(2));
+  // Explicit mapping: stores only the validated fields (an untrusted link object
+  // could carry extra keys) and the trimmed URL the validator actually checked.
+  if (input.externalLinks !== undefined) {
+    updates["portfolio.externalLinks"] = input.externalLinks.map((l) => ({ kind: l.kind, url: l.url.trim() }));
+  }
+
+  // Legacy data: profiles created before the portfolio seed (this task) may
+  // lack the portfolio map entirely, or hold only a partial map (e.g. the
+  // media pipeline wrote avatarPhotoPath before any updatePortfolio call
+  // ever ran). Backfill is field-wise, not map-level, so a partial legacy
+  // map still ends up complete — and photo paths are only null-defaulted
+  // when genuinely absent, never clobbered.
+  const pf = snap.data()?.portfolio as Partial<PortfolioData> | undefined;
+  if (input.bio === undefined && pf?.bio === undefined) updates["portfolio.bio"] = "";
+  if (input.genres === undefined && pf?.genres === undefined) updates["portfolio.genres"] = [];
+  if (input.externalLinks === undefined && pf?.externalLinks === undefined) updates["portfolio.externalLinks"] = [];
+  if (pf?.avatarPhotoPath === undefined) updates["portfolio.avatarPhotoPath"] = null;
+  if (pf?.coverPhotoPath === undefined) updates["portfolio.coverPhotoPath"] = null;
+
+  await getFirestore().doc(`profiles/${input.profileId}`).update(updates);
   return { ok: true };
 });
 
 export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
   const input = req.data;
   const v = validateBookingUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+  // sequential is deliberate — parallelizing makes rejection order
+  // nondeterministic and would leak profile existence/type to non-members
   await requireProfileMember(input.profileId, uid);
   await requireMusicianProfile(input.profileId);
-  const docData: BookingDoc = { rates: input.rates, preferences: input.preferences, updatedAt: Date.now() };
+  // Normalize absent → null and strip untrusted extra keys via `rate()`:
+  // the validator accepts omitted keys, the stored BookingDoc promises
+  // present-and-nullable, and Firestore rejects `undefined`.
+  const docData: BookingDoc = {
+    rates: {
+      perHour: rate(input.rates.perHour),
+      perSong: rate(input.rates.perSong),
+      perSet: rate(input.rates.perSet),
+    },
+    preferences: {
+      gigTypes: input.preferences.gigTypes,
+      travelRadiusKm: input.preferences.travelRadiusKm ?? null,
+      actSize: input.preferences.actSize ?? null,
+      typicalSetMinutes: input.preferences.typicalSetMinutes ?? null,
+      bringsOwnPA: input.preferences.bringsOwnPA ?? null,
+      availabilityPattern: input.preferences.availabilityPattern ?? null,
+    },
+    updatedAt: Date.now(),
+  };
+  // full-doc last-write-wins between members is accepted for v1; a delete
+  // racing this write can recreate an orphaned booking doc — accepted,
+  // mirrors account.ts's documented-race precedent
   await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
   return { ok: true };
 });
 ```
 
-(If the `FieldPath` spread reads awkward during implementation, the simpler equivalent is fine: build a plain object keyed by dotted strings and call `ref.update(updatesObject)` — the Admin SDK treats dotted string keys as field paths. Use that form.)
+- [ ] **Step 4a: Gate `respondToInvite` on verified email in `functions/src/members.ts`**
 
-- [ ] **Step 4: Seed empty portfolio in `functions/src/profiles.ts`**
+Closes a pre-existing gap: an unverified pre-registered account could otherwise
+accept an invite and immediately edit content. `members.ts` already defines a
+local `requireVerifiedEmail` (used by `inviteMember`) — reuse it rather than
+duplicating; add one call at the top of `respondToInvite`:
+
+```ts
+export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuth(req.auth?.uid);
+    requireVerifiedEmail(req);
+    const { inviteId, accept } = req.data;
+    // ...unchanged...
+```
+
+- [ ] **Step 4b: Seed empty portfolio in `functions/src/profiles.ts`**
 
 In `createProfileDraft`'s transaction, extend the `profile` literal:
 
@@ -1030,7 +1441,7 @@ git commit -m "feat(functions): updatePortfolio + updateBookingInfo, portfolio s
 
 **Files:**
 - Create: `functions/src/storage.ts`
-- Create: `functions/src/tracks.ts` (createTrack/updateTrack/deleteTrack here; reviewTrack in Task 8)
+- Create: `functions/src/tracks.ts` (createTrack/updateTrack/deleteTrack/reorderTracks here; reviewTrack in Task 8)
 - Modify: `functions/src/index.ts`
 - Modify: `functions/package.json`
 - Modify: `functions/test/helpers.ts`
@@ -1053,7 +1464,8 @@ import { getStorage } from "firebase-admin/storage";
 // bucket the processUpload trigger listens on — the emulator namespaces buckets
 // by name, so a bare getStorage().bucket() (projectId.appspot.com) would watch
 // a different, empty bucket than the one clients upload to.
-export const STORAGE_BUCKET = "gatekeep-dev-jg.firebasestorage.app";
+// env override so a future prod deploy can't silently write to the dev bucket.
+export const STORAGE_BUCKET = process.env.STORAGE_BUCKET ?? "gatekeep-dev-jg.firebasestorage.app";
 export const bucket = () => getStorage().bucket(STORAGE_BUCKET);
 ```
 
@@ -1097,7 +1509,7 @@ export function makeWav(seconds: number): Uint8Array {
 
 // Polls a track doc until its status is one of `statuses` (transcode is async).
 export async function waitForTrackStatus(
-  adb: Firestore, docPath: string, statuses: string[], timeoutMs = 30_000,
+  adb: Firestore, docPath: string, statuses: string[], timeoutMs = 45_000,
 ): Promise<FirebaseFirestore.DocumentData> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -1154,21 +1566,32 @@ describe("createTrack", () => {
     await first.ref.update({ status: "rejected" });
     await callFn("createTrack", input(profileId, "fits-now"), user);
   });
-  it("rejects non-members, unverified email, and curator profiles", async () => {
+  it("rejects a non-member with permission-denied", async () => {
     const { profileId } = await makeMusician("ct3");
     const { user: stranger } = await signUpTestUser(`ct3s-${Date.now()}@test.com`);
     await expect(callFn("createTrack", input(profileId), stranger))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+  // Split from a single overclaiming test during code review: the original
+  // title promised unverified-email and curator-profile coverage it didn't
+  // actually exercise. See functions/test/tracks.test.ts for the full cases
+  // (unverified member via an admin-SDK-seeded membership doc, and a curator
+  // profile via createProfileDraft), plus a concurrent-create regression test
+  // that seeds 8 active tracks and fires 6 parallel createTrack calls to
+  // confirm the transaction serializes to exactly 2 fulfilled + 4
+  // resource-exhausted (never 11 tracks).
 });
 
 describe("updateTrack / deleteTrack", () => {
-  it("member retitles and reorders; deleteTrack removes the doc", async () => {
+  // updateTrack is title-only — order lives on reorderTracks now (see below);
+  // a lone updateTrack("order") writer would race a concurrent reorderTracks
+  // transaction and silently reintroduce duplicate order values.
+  it("member retitles; deleteTrack removes the doc", async () => {
     const { user, profileId } = await makeMusician("ut1");
     const { trackId } = await callFn<CreateTrackInput, { trackId: string }>("createTrack", input(profileId), user);
-    await callFn("updateTrack", { profileId, trackId, title: "Renamed", order: 4 }, user);
+    await callFn("updateTrack", { profileId, trackId, title: "Renamed" }, user);
     let t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
-    expect(t.data()).toMatchObject({ title: "Renamed", order: 4 });
+    expect(t.data()).toMatchObject({ title: "Renamed" });
     await callFn("deleteTrack", { profileId, trackId }, user);
     t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
     expect(t.exists).toBe(false);
@@ -1183,6 +1606,31 @@ describe("updateTrack / deleteTrack", () => {
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
 });
+
+describe("reorderTracks", () => {
+  it("normalizes order 0..n-1 for the given sequence, then heals unmentioned tracks in their prior relative order", async () => {
+    const { user, profileId } = await makeMusician("rt1");
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { trackId } = await callFn<CreateTrackInput, { trackId: string }>(
+        "createTrack", input(profileId, `T${i}`), user);
+      ids.push(trackId);
+    }
+    const [t0, t1, t2] = ids;
+    await callFn("reorderTracks", { profileId, trackIds: [t2, t0, t1] }, user); // → order 0,1,2
+    // A later partial/stale list — only [t1] — puts t1 first; t2/t0 keep
+    // their prior relative order (t2 before t0) rather than resetting.
+    await callFn("reorderTracks", { profileId, trackIds: [t1] }, user); // → t1, t2, t0
+  });
+  // See functions/test/tracks.test.ts for the full suite, including a
+  // duplicate-order healing case: reject the highest-order track (it drops
+  // out of the active-track max used by createTrack's order calc, but its
+  // own order field is untouched), create a replacement (which can reuse
+  // that same order number), then confirm reorderTracks renormalizes every
+  // track in the collection — active or not — back to unique 0..n-1. Also a
+  // 21-doc case (10 active + 11 dead, seeded via the admin SDK) confirming
+  // the 200-id bound comfortably clears real-world reject/create churn.
+});
 ```
 
 - [ ] **Step 5: Run to verify failure**
@@ -1192,25 +1640,55 @@ Expected: tracks tests FAIL (createTrack not found).
 
 - [ ] **Step 6: Create `functions/src/tracks.ts` (CRUD part)**
 
+Note (reviewed, accepted): `uploaderUid` on track docs is world-readable once a track is approved. This matches the existing posture (member docs of approved profiles are already `get`-able) and the trigger needs it; do not "fix" it silently — any change is a product decision.
+
+Note (code review, applied): the first-cut version of this file had two bugs
+and a missing feature, fixed in the snippet below —
+1. `order: active.size` reused order numbers after a delete-then-add cycle
+   (the deleted track's slot number gets handed to the next create, but nothing
+   guarantees uniqueness against a track that was merely rejected, not
+   deleted — see the `reorderTracks` duplicate-order-healing test). Fixed by
+   computing `max(existing ACTIVE orders) + 1` instead of counting. Note this
+   max is only over active docs, so a reject-then-create can still collide
+   with a dead (rejected/failed) doc's leftover order value — accepted,
+   since `reorderTracks` heals it on the next reorder.
+2. The planned web `TrackManager.move()` UI would have done its reordering as
+   two sequential `updateTrack({ order })` calls per swap — non-atomic (a
+   crash/reload between the two calls leaves two tracks with the same order),
+   and a no-op on ties. Replaced with a dedicated `reorderTracks` callable
+   that renormalizes the whole list to 0..n-1 in one transaction.
+3. `updateTrack`/`deleteTrack` used plain `typeof` checks instead of
+   `isValidDocId`, and neither gated on verified email (every other mutating
+   callable in this codebase does). Both fixed. `updateTrack` also lost its
+   `order` parameter (subsumed by `reorderTracks`) and its pre-`get()`
+   existence check, which had a TOCTOU gap against a racing `deleteTrack` —
+   it now lets `update()` itself throw NOT_FOUND (gRPC code 5) and maps that
+   to `HttpsError("not-found", ...)`.
+
+Note (second review pass, applied): `reorderTracks`'s id-count bound was
+originally 20, matching `MAX_TRACKS`-ish intuition — but the list it validates
+is every doc in the collection (the web `TrackManager` sends `tracks.map(t =>
+t.id)` for its full onSnapshot result, not just the 10 active ones), and
+rejected/failed docs persist by design. Ordinary reject-then-create churn can
+reach 21+ docs over a profile's lifetime, so the bound is now 200 (comfortably
+under Firestore's 500-writes-per-transaction limit) with its own error
+message, split out from the other (non-empty/unique/valid-id) checks.
+
 ```ts
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  validateTrackCreate, stagingAudioPath, MAX_TRACKS,
+  validateTrackCreate, isValidDocId, stagingAudioPath, reviewTrackPath, publicTrackPath, MAX_TRACKS,
   type CreateTrackInput, type TrackDoc,
 } from "@gatekeep/shared";
-import { requireAuthUid, requireProfileMember, requireMusicianProfile } from "./portfolio.js";
+import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 import { bucket } from "./storage.js";
 
-function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
-  if (req.auth?.token?.email_verified !== true) {
-    throw new HttpsError("failed-precondition", "Please verify your email address first.");
-  }
-}
-
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
-// docs (for the reason display) but don't count.
-const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
+// docs (for the reason display) but don't count. Exported (Task 8 hardening)
+// so Task 9's submit minimum-content gate can import it instead of
+// re-hardcoding the list.
+export const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
 
 export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
@@ -1234,7 +1712,14 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
     const doc: TrackDoc = {
       title: input.title.trim(), status: "processing", uploaderUid: uid,
       startSec: input.startSec, durationSec: null, storagePath: null,
-      rejectionReason: null, failureReason: null, order: active.size,
+      rejectionReason: null, failureReason: null,
+      // Max ACTIVE order + 1, not active.size — delete-then-add otherwise
+      // produces duplicate order values once a track has ever been removed.
+      // The max is only over active docs, so a reject-then-create can still
+      // collide with a dead (rejected/failed) doc's leftover order value —
+      // accepted, since reorderTracks heals it on the next reorder (see the
+      // duplicate-order-healing test).
+      order: Math.max(-1, ...active.docs.map((d) => (d.data().order as number) ?? -1)) + 1,
       createdAt: now, updatedAt: now,
     };
     tx.set(trackRef, doc);
@@ -1242,45 +1727,52 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
   return { trackId: trackRef.id, uploadPath: stagingAudioPath(uid, input.profileId, trackRef.id) };
 });
 
-export const updateTrack = onCall<{ profileId: string; trackId: string; title?: string; order?: number }>(
+export const updateTrack = onCall<{ profileId: string; trackId: string; title?: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
-    const { profileId, trackId, title, order } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string") {
+    requireVerifiedEmail(req);
+    const { profileId, trackId, title } = req.data;
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)) {
       throw new HttpsError("invalid-argument", "profileId and trackId are required.");
     }
-    if (title === undefined && order === undefined) {
+    if (title === undefined) {
       throw new HttpsError("invalid-argument", "Nothing to update.");
     }
-    if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.length > 80)) {
+    if (typeof title !== "string" || title.trim().length < 1 || title.trim().length > 80) {
       throw new HttpsError("invalid-argument", "Track titles are 1-80 characters.");
-    }
-    if (order !== undefined && (typeof order !== "number" || !Number.isInteger(order) || order < 0 || order > 100)) {
-      throw new HttpsError("invalid-argument", "Invalid order.");
     }
     await requireProfileMember(profileId, uid);
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
-    if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
-    const updates: Record<string, unknown> = { updatedAt: Date.now() };
-    if (title !== undefined) updates.title = title.trim();
-    if (order !== undefined) updates.order = order;
-    await ref.update(updates);
+    try {
+      await ref.update({ title: title.trim(), updatedAt: Date.now() });
+    } catch (err) {
+      // Firestore's NOT_FOUND status maps to gRPC code 5 — thrown by update()
+      // against a missing doc instead of a separate pre-read, since a plain
+      // get()-then-update() has a TOCTOU gap (the doc can vanish between the
+      // two calls, e.g. a racing deleteTrack).
+      if ((err as { code?: number }).code === 5) {
+        throw new HttpsError("not-found", "Track not found.");
+      }
+      throw err;
+    }
     return { ok: true };
   });
 
 export const deleteTrack = onCall<{ profileId: string; trackId: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
     const { profileId, trackId } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string") {
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)) {
       throw new HttpsError("invalid-argument", "profileId and trackId are required.");
     }
     await requireProfileMember(profileId, uid);
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
     if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
-    // Storage cleanup is best-effort: the doc is the source of truth, and the
-    // objects are unreachable once it's gone (public path is only listed via docs).
-    const { reviewTrackPath, publicTrackPath } = await import("@gatekeep/shared");
+    // Storage cleanup is best-effort: a transcode in flight when the doc is
+    // deleted can still write a review clip afterwards — Task 7's trigger
+    // must re-check the doc after transcoding and remove its own output if
+    // the doc is gone (see plan Task 7).
     await Promise.allSettled([
       bucket().file(reviewTrackPath(profileId, trackId)).delete(),
       bucket().file(publicTrackPath(profileId, trackId)).delete(),
@@ -1288,14 +1780,53 @@ export const deleteTrack = onCall<{ profileId: string; trackId: string }>(
     await ref.delete();
     return { ok: true };
   });
-```
 
-(Import `reviewTrackPath`/`publicTrackPath` statically at the top with the other shared imports rather than the inline `await import` — write it that way.)
+export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { profileId, trackIds } = req.data;
+    if (!isValidDocId(profileId) || !Array.isArray(trackIds) || trackIds.length < 1
+        || !trackIds.every((t) => isValidDocId(t))
+        || new Set(trackIds).size !== trackIds.length) {
+      throw new HttpsError("invalid-argument", "A profile id and a list of unique track ids are required.");
+    }
+    // The reordered list spans every doc in the collection, not just the 10
+    // active ones — rejected/failed tracks persist by design (for the reason
+    // display), so ordinary reject-then-create churn can reach 21+ docs over
+    // a profile's lifetime. 200 stays comfortably clear of Firestore's
+    // 500-writes-per-transaction limit.
+    if (trackIds.length > 200) {
+      throw new HttpsError("invalid-argument", "Too many tracks to reorder at once.");
+    }
+    await requireProfileMember(profileId, uid);
+    const db = getFirestore();
+    // Normalizes order to 0..n-1 in one transaction: the given ids first (in the
+    // given order), then any unmentioned tracks in their current order. Also
+    // heals any duplicate order values left by historic delete-then-add.
+    await db.runTransaction(async (tx) => {
+      const col = db.collection(`profiles/${profileId}/tracks`);
+      const all = await tx.get(col);
+      const byId = new Map(all.docs.map((d) => [d.id, d]));
+      const mentioned = trackIds.filter((id) => byId.has(id));
+      const mentionedSet = new Set(mentioned);
+      const rest = all.docs
+        .filter((d) => !mentionedSet.has(d.id))
+        .sort((a, b) => ((a.data().order ?? 0) - (b.data().order ?? 0)) || a.id.localeCompare(b.id))
+        .map((d) => d.id);
+      [...mentioned, ...rest].forEach((id, i) => {
+        const d = byId.get(id)!;
+        if (d.data().order !== i) tx.update(d.ref, { order: i, updatedAt: Date.now() });
+      });
+    });
+    return { ok: true };
+  });
+```
 
 - [ ] **Step 7: Export from `functions/src/index.ts`**
 
 ```ts
-export { createTrack, updateTrack, deleteTrack } from "./tracks.js";
+export { createTrack, updateTrack, deleteTrack, reorderTracks } from "./tracks.js";
 ```
 
 - [ ] **Step 8: Run tests**
@@ -1309,6 +1840,12 @@ Expected: all PASS. (The `status in [...]` transaction query needs no composite 
 git add functions
 git commit -m "feat(functions): createTrack/updateTrack/deleteTrack with 10-track cap"
 ```
+
+Note: a code review pass after this task landed found the `order`-reuse bug,
+the non-atomic reorder shape, and the missing verified-email/isValidDocId
+gates described above — landed as a follow-up commit,
+`fix(functions): reorderTracks normalizer, monotonic order, id validation, verified-email gates`.
+The snippets above already reflect the fixed, shipped code.
 
 ---
 
@@ -1329,6 +1866,7 @@ import { signUpTestUser, callFn, uploadTestAudio, makeWav, waitForTrackStatus } 
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getStorage as adminStorage } from "firebase-admin/storage";
+import sharp from "sharp";
 import type { ProfileDraftInput, CreateTrackInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -1386,11 +1924,84 @@ describe("processUpload: audio", () => {
   });
   it("ignores uploads with no matching processing track doc", async () => {
     const { user, uid, profileId } = await makeMusician("tx4");
-    await uploadTestAudio(`staging/audio/${uid}/${profileId}/forged-track-id`, makeWav(2), "audio/wav", user);
+    const stagingPath = `staging/audio/${uid}/${profileId}/forged-track-id`;
+    await uploadTestAudio(stagingPath, makeWav(2), "audio/wav", user);
     // No doc to flip — just assert nothing lands in review for that id.
     await new Promise((r) => setTimeout(r, 4000));
     const [exists] = await abucket.file(`review/tracks/${profileId}/forged-track-id.m4a`).exists();
     expect(exists).toBe(false);
+    const [stagingExists] = await abucket.file(stagingPath).exists();
+    expect(stagingExists).toBe(false); // forged staging object discarded too
+  });
+  it("ignores an upload whose object-path uid doesn't match the track doc's uploaderUid, even from a fellow member", async () => {
+    const { user: userA, profileId } = await makeMusician("tx5a");
+    const { user: userB, uid: uidB } = await signUpTestUser(`tx5b-${Date.now()}@test.com`);
+    // B is a genuine member of the same profile — this isn't the
+    // "non-member" rejection path, it's specifically the uploaderUid guard:
+    // a fellow member still can't hijack another member's track slot by
+    // uploading under their own uid segment into someone else's trackId.
+    await adb.doc(`profiles/${profileId}/members/${uidB}`)
+      .set({ uid: uidB, role: "member", label: "", joinedAt: Date.now() });
+    const wav = makeWav(10);
+    const { trackId } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Mismatch", startSec: 1, sizeBytes: wav.byteLength, contentType: "audio/wav" }, userA);
+    const mismatchedPath = `staging/audio/${uidB}/${profileId}/${trackId}`;
+    await uploadTestAudio(mismatchedPath, wav, "audio/wav", userB);
+    await new Promise((r) => setTimeout(r, 4000));
+    const doc = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(doc.data()?.status).toBe("processing");
+    const [stagingExists] = await abucket.file(mismatchedPath).exists();
+    expect(stagingExists).toBe(false);
+    const [reviewExists] = await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(reviewExists).toBe(false);
+  });
+  it("holds the delete-during-transcode invariant: no review or staging object survives a track doc deleted immediately after upload", async () => {
+    const { user, profileId } = await makeMusician("tx6");
+    const wav = makeWav(20);
+    const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Race", startSec: 2, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
+    await uploadTestAudio(uploadPath, wav, "audio/wav", user);
+    // Delete the track doc immediately — this races the trigger under
+    // either interleaving (before it even reads the doc, mid-transcode, or
+    // after the review upload but before the status write). The invariant
+    // under test — no review object AND no staging object ever survive —
+    // must hold no matter which interleaving actually happens.
+    await adb.doc(`profiles/${profileId}/tracks/${trackId}`).delete();
+    const reviewPath = `review/tracks/${profileId}/${trackId}.m4a`;
+    const deadline = Date.now() + 15_000;
+    let reviewGone = false;
+    let stagingGone = false;
+    while (Date.now() < deadline && !(reviewGone && stagingGone)) {
+      reviewGone = !(await abucket.file(reviewPath).exists())[0];
+      stagingGone = !(await abucket.file(uploadPath).exists())[0];
+      if (!(reviewGone && stagingGone)) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(reviewGone).toBe(true);
+    expect(stagingGone).toBe(true);
+  });
+  it("ignores a re-upload to the same staging path after the track already reached pending_review", async () => {
+    const { user, profileId } = await makeMusician("tx7");
+    const wav1 = makeWav(20);
+    const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Stable", startSec: 2, sizeBytes: wav1.byteLength, contentType: "audio/wav" }, user);
+    await uploadTestAudio(uploadPath, wav1, "audio/wav", user);
+    const data = await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review", "failed"]);
+    expect(data.status).toBe("pending_review");
+    const reviewPath = `review/tracks/${profileId}/${trackId}.m4a`;
+    const [beforeMeta] = await abucket.file(reviewPath).getMetadata();
+    const beforeGeneration = beforeMeta.generation;
+
+    // Re-upload different bytes to the same (already-consumed) staging path.
+    const wav2 = makeWav(9);
+    await uploadTestAudio(uploadPath, wav2, "audio/wav", user);
+    await new Promise((r) => setTimeout(r, 4000));
+
+    const after = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(after.data()?.status).toBe("pending_review");
+    const [afterMeta] = await abucket.file(reviewPath).getMetadata();
+    expect(afterMeta.generation).toBe(beforeGeneration); // review clip untouched
+    const [stagingExists] = await abucket.file(uploadPath).exists();
+    expect(stagingExists).toBe(false); // the re-upload is still discarded
   });
 });
 
@@ -1400,9 +2011,34 @@ describe("processUpload: photos", () => {
     "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
     "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
     "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
-  it("processes an avatar into public/photos and updates the profile doc", async () => {
+  // Same 1x1 image, 3 bytes longer — decodes fine but trips libjpeg's
+  // "extraneous bytes" warning, as many real phone encoders do; pins
+  // failOn:"error" tolerance (media.ts must not reject on this).
+  const warnJpeg = () => Uint8Array.from(atob(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
+    "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
+
+  // Shared poll helper for tests that just need the eventual value of one
+  // portfolio photo field.
+  async function waitForPortfolioField(
+    profileId: string, field: "avatarPhotoPath" | "coverPhotoPath", timeoutMs = 30_000,
+  ): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const v = (await adb.doc(`profiles/${profileId}`).get()).data()?.portfolio?.[field] ?? null;
+      if (v) return v as string;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(`portfolio.${field} not set for profile ${profileId} after ${timeoutMs}ms`);
+  }
+
+  it("processes an avatar into public/photos, updates the profile doc, and upscales a tiny source to exactly 512x512", async () => {
     const { user, uid, profileId } = await makeMusician("ph1");
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    // tinyJpeg is a 1x1 source — this doubles as the small-source case:
+    // avatars deliberately upscale (no withoutEnlargement) because 512x512
+    // is a fixed-size contract the rest of the app relies on.
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user); // same uploader helper works for any bytes
     const deadline = Date.now() + 30_000;
     let avatarPath: string | null = null;
@@ -1411,8 +2047,10 @@ describe("processUpload: photos", () => {
       if (!avatarPath) await new Promise((r) => setTimeout(r, 500));
     }
     expect(avatarPath).toMatch(new RegExp(`^public/photos/${profileId}/avatar-`));
-    const [exists] = await abucket.file(avatarPath!).exists();
-    expect(exists).toBe(true);
+    const [bytes] = await abucket.file(avatarPath!).download();
+    const meta = await sharp(bytes).metadata();
+    expect(meta.width).toBe(512);
+    expect(meta.height).toBe(512);
   });
   it("ignores photo uploads from a non-member of the target profile", async () => {
     const { profileId } = await makeMusician("ph2");
@@ -1422,9 +2060,97 @@ describe("processUpload: photos", () => {
     await new Promise((r) => setTimeout(r, 4000));
     const p = await adb.doc(`profiles/${profileId}`).get();
     expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull();
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0);
+  });
+  it("processes a warning-tripping-but-valid cover JPEG successfully", async () => {
+    const { user, uid, profileId } = await makeMusician("ph3");
+    const path = `staging/photos/${uid}/${profileId}/cover-${Date.now()}`;
+    await uploadTestAudio(path, warnJpeg(), "image/jpeg", user);
+    const coverPath = await waitForPortfolioField(profileId, "coverPhotoPath");
+    expect(coverPath).toMatch(new RegExp(`^public/photos/${profileId}/cover-`));
+    const [exists] = await abucket.file(coverPath).exists();
+    expect(exists).toBe(true);
+  });
+  it("strips EXIF metadata from an uploaded avatar", async () => {
+    const { user, uid, profileId } = await makeMusician("ph4");
+    const withExifJpeg = await sharp(Buffer.from(tinyJpeg()))
+      .withExif({ IFD0: { ImageDescription: "gps-ish" } })
+      .jpeg()
+      .toBuffer();
+    const srcMeta = await sharp(withExifJpeg).metadata();
+    expect(srcMeta.exif).toBeDefined(); // sanity: the fixture really does carry EXIF before upload
+    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    await uploadTestAudio(path, withExifJpeg, "image/jpeg", user);
+    const avatarPath = await waitForPortfolioField(profileId, "avatarPhotoPath");
+    const [bytes] = await abucket.file(avatarPath).download();
+    const outMeta = await sharp(bytes).metadata();
+    expect(outMeta.exif).toBeUndefined();
+  });
+  it("deletes the old public photo when a new one replaces it", async () => {
+    const { user, uid, profileId } = await makeMusician("ph5");
+    await uploadTestAudio(`staging/photos/${uid}/${profileId}/avatar-${Date.now()}-a`, tinyJpeg(), "image/jpeg", user);
+    const firstPath = await waitForPortfolioField(profileId, "avatarPhotoPath");
+    const [firstExists] = await abucket.file(firstPath).exists();
+    expect(firstExists).toBe(true);
+
+    await uploadTestAudio(`staging/photos/${uid}/${profileId}/avatar-${Date.now()}-b`, tinyJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let secondPath: string | null = null;
+    while (Date.now() < deadline && !secondPath) {
+      const cur = (await adb.doc(`profiles/${profileId}`).get()).data()?.portfolio?.avatarPhotoPath ?? null;
+      if (cur && cur !== firstPath) secondPath = cur;
+      else await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(secondPath).not.toBeNull();
+    const [secondExists] = await abucket.file(secondPath!).exists();
+    expect(secondExists).toBe(true);
+    const [firstStillExists] = await abucket.file(firstPath).exists();
+    expect(firstStillExists).toBe(false); // superseded photo cleaned up
+  });
+  it("holds the delete-during-photo-processing invariant: no public photo survives a profile doc deleted before the upload lands", async () => {
+    const { user, uid, profileId } = await makeMusician("ph6");
+    // Delete only the top-level profile doc (not a full recursiveDelete) so
+    // the members subcollection survives — the trigger's membership check
+    // still passes. Deleting BEFORE the upload (rather than racing it
+    // afterward) makes profileRef.update() deterministically hit a missing
+    // doc every run, instead of depending on upload/trigger timing: an
+    // earlier version of this test deleted after uploading and asserted
+    // public/photos/{profileId}/ was empty via a poll — that's vacuously
+    // true at iteration 0 (nothing has been written yet) and would have
+    // gone undetected as a false pass if the trigger ever won the race.
+    await adb.doc(`profiles/${profileId}`).delete();
+    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    // Poll until staging is gone — that's the trigger's finally block
+    // running, proof the whole pipeline (including the post-write cleanup)
+    // has actually completed, not just that nothing has happened yet.
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true);
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0);
   });
 });
 ```
+
+**Pre-merge security-gate follow-up (F4), added:** two more cases in the
+`"processUpload: photos"` describe block, added alongside the format
+allowlist in Step 3's `processPhoto` below:
+- a real, validly-encoded GIF built via `sharp(...).gif().toBuffer()`,
+  uploaded declaring `contentType: "image/jpeg"` (the actual attack shape —
+  storage.rules only checks the declared Content-Type, so real GIF bytes
+  alone would be rejected at the rules layer before ever reaching this
+  trigger) — asserts nothing lands under `public/photos/{profileId}/`, the
+  profile doc's `avatarPhotoPath` stays null, and the staging object is
+  still cleaned up (the format check `return`s before the pipeline, inside
+  the same `try`, so the surrounding `finally` still runs).
+- valid PNG and WebP uploads still succeed end-to-end (the allowlist is
+  three formats, not just JPEG).
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1438,64 +2164,182 @@ import { onObjectFinalized, type StorageEvent } from "firebase-functions/v2/stor
 import { getFirestore } from "firebase-admin/firestore";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import ffmpegPath from "ffmpeg-static";
+import ffmpegPathRaw from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 import sharp from "sharp";
-import { reviewTrackPath, publicPhotoPath, MAX_CLIP_SECONDS } from "@gatekeep/shared";
+import { reviewTrackPath, publicPhotoPath, isValidDocId, MAX_CLIP_SECONDS } from "@gatekeep/shared";
 import { STORAGE_BUCKET, bucket } from "./storage.js";
 
 const run = promisify(execFile);
+
+// A subprocess run against untrusted input (ffprobe/ffmpeg on a user-supplied
+// file) that never returns would otherwise tie up the trigger until the
+// 300s function timeout kills it mid-cleanup, leaving the track stuck in
+// "processing" with no failureReason. Bounding it converts a hang into a
+// clean "failed" status well before that cap.
+const SUBPROCESS_TIMEOUT_MS = 120_000;
+
+// ffmpeg-static's own types/index.d.ts declares `export default: string | null`,
+// but under this package's NodeNext + "type":"module" setup TS resolves the
+// default import as the whole CJS module namespace instead (a known
+// ffmpeg-static/NodeNext interop quirk) — the runtime value is still the raw
+// string (or null) per Node's CJS/ESM interop, so assert the real type here
+// rather than trust the inferred one.
+const ffmpegPath = ffmpegPathRaw as unknown as string | null;
+
+// Every best-effort storage cleanup in this module goes through here instead
+// of a bare `.catch(() => {})` — a cleanup that silently fails (quota, a
+// permissions drift, an emulator hiccup) previously left no trace anywhere.
+// Still non-fatal: logging, never rethrowing, so a cleanup failure can never
+// turn into a stuck/duplicate-processed object.
+function logDeleteFailure(phase: string, path: string) {
+  return (e: unknown) => console.error(`processUpload: ${phase} cleanup failed`, path, e);
+}
+
+// Thrown only for conditions with a controlled, safe-to-display message (no
+// file paths, no ffmpeg/ffprobe stderr) — every other error in processAudio
+// collapses to a generic failureReason so raw error text (which can carry
+// local tmp paths or 100KB+ of subprocess stderr) never lands in a
+// member-readable track doc.
+class ClipValidationError extends Error {} // bad input from the musician (the clip window)
+class ServerConfigError extends Error {}   // this deployment is broken, not the musician's upload
+
+// ffmpeg-static's default export is `string | null` — null when the package
+// has no prebuilt binary for this platform/arch. Fail loudly (and only) at
+// first use, inside processAudio's try/catch, so a missing binary surfaces
+// as a normal "failed" track rather than crashing every export in this
+// module at deploy time. Thrown as ServerConfigError (not
+// ClipValidationError): this is a deployment problem, not something wrong
+// with the musician's upload, so it gets its own safe, accurate message
+// instead of collapsing into the generic "file may be corrupt" reason.
+function requireFfmpegPath(): string {
+  if (!ffmpegPath) {
+    throw new ServerConfigError("Audio processing is temporarily unavailable — try again later.");
+  }
+  return ffmpegPath;
+}
 
 async function probeDurationSec(file: string): Promise<number> {
   const { stdout } = await run(ffprobe.path, [
     "-v", "error", "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1", file,
-  ]);
+  ], { timeout: SUBPROCESS_TIMEOUT_MS });
   const d = Number.parseFloat(stdout.trim());
   if (!Number.isFinite(d) || d <= 0) throw new Error("Could not read audio duration.");
   return d;
 }
 
-async function processAudio(objectName: string): Promise<void> {
-  // staging/audio/{uid}/{profileId}/{trackId}
-  const [, , uid, profileId, trackId] = objectName.split("/");
-  if (!uid || !profileId || !trackId) return;
-  const db = getFirestore();
-  const trackRef = db.doc(`profiles/${profileId}/tracks/${trackId}`);
-  const snap = await trackRef.get();
-  const stagingFile = bucket().file(objectName);
-  // Forged/mismatched uploads (no doc, wrong uploader, wrong state): discard the
-  // object and do nothing — createTrack is the only path that arms this pipeline.
-  if (!snap.exists || snap.data()?.uploaderUid !== uid || snap.data()?.status !== "processing") {
-    await stagingFile.delete().catch(() => {});
+// generation is typed number in firebase-functions but arrives as a string at
+// runtime (GCS serializes int64 as JSON string) — accept both, coerce at use.
+async function processAudio(objectName: string, generation: string | number): Promise<void> {
+  // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
+  const stagingFile = bucket().file(objectName, { generation: Number(generation) });
+
+  // staging/audio/{uid}/{profileId}/{trackId} — validated defensively (not
+  // just trusted from storage.rules) before any of it is used to build
+  // Firestore paths.
+  const segments = objectName.split("/");
+  const [, , uid, profileId, trackId] = segments;
+  if (segments.length !== 5 || !isValidDocId(uid) || !isValidDocId(profileId) || !isValidDocId(trackId)) {
+    await stagingFile.delete().catch(logDeleteFailure("malformed staging audio path", objectName));
     return;
   }
-  const startSec = snap.data()?.startSec as number;
 
-  const tmp = await mkdtemp(join(tmpdir(), "gk-audio-"));
+  const db = getFirestore();
+  const trackRef = db.doc(`profiles/${profileId}/tracks/${trackId}`);
+
+  // tmp/uploadedReviewPath are declared here (not inside the try) so the
+  // shared finally below can always see them. The try now starts BEFORE the
+  // Firestore guard read: a throwing read (network blip, emulator hiccup)
+  // previously skipped the finally entirely and leaked the staging object
+  // forever — now any exception from this point on still runs the cleanup.
+  let tmp: string | null = null;
+  let uploadedReviewPath: string | null = null;
   try {
+    const snap = await trackRef.get();
+    const data = snap.data();
+    // Forged/mismatched uploads (no doc, wrong uploader, wrong state, or a
+    // malformed startSec): discard the object and do nothing — createTrack
+    // is the only path that arms this pipeline, and it always writes a
+    // numeric startSec, so a non-number here means a corrupt/tampered doc,
+    // not a real in-flight upload worth reporting back to the musician.
+    if (!snap.exists || data?.uploaderUid !== uid || data?.status !== "processing"
+        || typeof data?.startSec !== "number") {
+      return;
+    }
+    const startSec = data.startSec;
+
+    tmp = await mkdtemp(join(tmpdir(), "gk-audio-"));
     const inFile = join(tmp, "in");
     const outFile = join(tmp, "out.m4a");
-    await stagingFile.download({ destination: inFile });
+    try {
+      await stagingFile.download({ destination: inFile });
+    } catch (err) {
+      // NOTE: this is a STORAGE error — @google-cloud/storage ApiError carries
+      // HTTP codes (404), unlike the Firestore gRPC code 5 checked elsewhere
+      // in this file. Do not "fix" this back to 5.
+      if ((err as { code?: number }).code === 404) {
+        // Generation-pinned reads 404 only when the object no longer
+        // exists — and the only thing that ever deletes a staging/audio
+        // object is this trigger itself (storage.rules makes staging
+        // deletes trigger-only). A 404 here means a prior/duplicate
+        // delivery of this same event already consumed and cleaned up
+        // this exact generation — Cloud Functions storage triggers are
+        // at-least-once, so a second delivery racing (or arriving after)
+        // the first is expected, not an error. Writing "failed" here would
+        // risk clobbering whatever terminal status that other invocation
+        // already reached (or is about to reach), so just log and stop —
+        // no track-doc write at all.
+        console.error("processUpload: staging object already consumed by another delivery", objectName, err);
+        return;
+      }
+      throw err;
+    }
     const sourceDuration = await probeDurationSec(inFile);
     if (startSec >= sourceDuration) {
-      throw new Error(`Clip start (${startSec}s) is past the end of the audio (${Math.floor(sourceDuration)}s).`);
+      throw new ClipValidationError(
+        `Clip start (${startSec}s) is past the end of the audio (${Math.floor(sourceDuration)}s).`);
     }
-    // -ss before -i = fast seek; -t caps the clip at 30s; AAC 128k in an mp4
-    // container streams natively in every target player.
-    await run(ffmpegPath as string, [
+    if (sourceDuration - startSec < 1) {
+      throw new ClipValidationError("Clip window is too close to the end of the audio.");
+    }
+    // -ss before -i = fast seek to the clip start. -t here is an INPUT
+    // option (it precedes -i, so it bounds how much of the input is read
+    // from that seek point) rather than an output duration cap — for a
+    // straight single-stream re-encode like this the practical effect is
+    // the same either way: the clip tops out at MAX_CLIP_SECONDS. -map
+    // 0:a:0 pins the first audio stream explicitly (some containers carry
+    // embedded cover art as a "video" stream ffmpeg would otherwise try to
+    // touch). AAC 128k in an mp4 container streams natively everywhere.
+    await run(requireFfmpegPath(), [
       "-hide_banner", "-nostdin", "-y",
       "-ss", String(startSec), "-t", String(MAX_CLIP_SECONDS), "-i", inFile,
-      "-vn", "-acodec", "aac", "-b:a", "128k", "-movflags", "+faststart",
+      "-vn", "-map", "0:a:0", "-acodec", "aac", "-b:a", "128k", "-movflags", "+faststart",
       outFile,
-    ]);
+    ], { timeout: SUBPROCESS_TIMEOUT_MS });
     const clipDuration = await probeDurationSec(outFile);
     const destPath = reviewTrackPath(profileId, trackId);
     await bucket().upload(outFile, { destination: destPath, metadata: { contentType: "audio/mp4" } });
+    uploadedReviewPath = destPath;
+
+    // A transcode can take several seconds — long enough for deleteTrack to
+    // race it and remove the doc mid-flight. Re-read before writing
+    // pending_review; if the doc is gone or someone else already moved it
+    // off "processing" (e.g. deleteTrack ran), the upload above is now
+    // orphaned — delete it and bail without writing. This narrows the race
+    // to the few milliseconds between this read and the update() below,
+    // not closes it outright; any residual orphan in that window is reaped
+    // by deleteTrack's/deleteProfile's own best-effort storage cleanup.
+    const postSnap = await trackRef.get();
+    if (!postSnap.exists || postSnap.data()?.status !== "processing") {
+      await bucket().file(destPath).delete().catch(logDeleteFailure("orphaned review (race)", destPath));
+      return;
+    }
+
     await trackRef.update({
       status: "pending_review",
       durationSec: Math.round(clipDuration * 10) / 10,
@@ -1504,35 +2348,105 @@ async function processAudio(objectName: string): Promise<void> {
       updatedAt: Date.now(),
     });
   } catch (e) {
-    await trackRef.update({
-      status: "failed",
-      failureReason: e instanceof Error ? e.message : "Audio processing failed.",
-      updatedAt: Date.now(),
-    });
+    console.error("processUpload: audio processing failed", objectName, e);
+    const failureReason = (e instanceof ClipValidationError || e instanceof ServerConfigError
+      ? e.message
+      : "Audio processing failed — the file may be corrupt or unsupported."
+    ).slice(0, 500);
+    if (uploadedReviewPath) {
+      await bucket().file(uploadedReviewPath).delete()
+        .catch(logDeleteFailure("orphaned review (failed after upload)", uploadedReviewPath));
+    }
+    try {
+      // Same status guard as the success path above: only write "failed" if
+      // the doc is still there and still "processing" — never blindly
+      // overwrite a doc that deleteTrack (or a second trigger invocation)
+      // already moved on from.
+      const failSnap = await trackRef.get();
+      if (failSnap.exists && failSnap.data()?.status === "processing") {
+        await trackRef.update({ status: "failed", failureReason, updatedAt: Date.now() });
+      }
+    } catch (err) {
+      // gRPC code 5 (NOT_FOUND): the doc vanished between the guard-read
+      // above and this update — expected under the same delete race,
+      // nothing to log. Anything else is unexpected; log it but still
+      // swallow rather than rethrow — storage-trigger retry is off, so
+      // rethrowing here buys nothing and would just strand the doc in
+      // "processing" forever with staging already deleted.
+      if ((err as { code?: number }).code !== 5) {
+        console.error("processUpload: failed-status write failed", objectName, err);
+      }
+    }
   } finally {
-    await stagingFile.delete().catch(() => {});
-    await rm(tmp, { recursive: true, force: true });
+    await stagingFile.delete().catch(logDeleteFailure("staging (audio, finally)", objectName));
+    if (tmp) await rm(tmp, { recursive: true, force: true });
   }
 }
 
-async function processPhoto(objectName: string): Promise<void> {
+// Mirrors storage.rules' staging/photos filename pattern — validated here
+// too (not just trusted from the rules) before it's used to pick a Firestore
+// field or an output path.
+const PHOTO_FILENAME_RE = /^(avatar|cover)-[A-Za-z0-9-]{1,80}$/;
+
+async function processPhoto(objectName: string, generation: string | number): Promise<void> {
+  // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
+  const stagingFile = bucket().file(objectName, { generation: Number(generation) });
+
   // staging/photos/{uid}/{profileId}/{kind}-{nonce}
-  const [, , uid, profileId, fileName] = objectName.split("/");
-  if (!uid || !profileId || !fileName) return;
-  const kind = fileName.startsWith("avatar-") ? "avatar" : fileName.startsWith("cover-") ? "cover" : null;
-  const db = getFirestore();
-  const stagingFile = bucket().file(objectName);
-  const member = kind ? await db.doc(`profiles/${profileId}/members/${uid}`).get() : null;
-  if (!kind || !member?.exists) {
-    await stagingFile.delete().catch(() => {}); // non-member or malformed: discard
+  const segments = objectName.split("/");
+  const [, , uid, profileId, fileName] = segments;
+  const nameMatch = typeof fileName === "string" ? PHOTO_FILENAME_RE.exec(fileName) : null;
+  if (segments.length !== 5 || !isValidDocId(uid) || !isValidDocId(profileId) || !nameMatch) {
+    await stagingFile.delete().catch(logDeleteFailure("malformed staging photo path", objectName));
     return;
   }
+  const kind = nameMatch[1] as "avatar" | "cover";
+  const db = getFirestore();
+
   try {
+    // Membership is derived from the OBJECT PATH's {uid}/{profileId}
+    // segments, never from object.metadata (client-controlled and
+    // untrusted — see storage.rules' note on staging paths). The read is
+    // inside this try/finally (not before it) so a throwing read still
+    // triggers the staging cleanup below, instead of leaking the object.
+    const member = await db.doc(`profiles/${profileId}/members/${uid}`).get();
+    if (!member.exists) {
+      return; // non-member or malformed: discard, no further processing
+    }
+
     const [bytes] = await stagingFile.download();
     // Re-encode via sharp: strips EXIF (GPS!) and bounds dimensions.
+    // failOn: "error" (sharp's default is "warning", the strictest level) —
+    // real-world phone/app JPEG encoders commonly emit warning-level defects
+    // (e.g. libjpeg's "extraneous bytes before marker") on otherwise-valid
+    // photos; the default "warning" level would reject those uploads.
+    // "error" still rejects truncated/genuinely corrupt data, just not mere
+    // warnings. limitInputPixels bounds decompression-bomb-style inputs.
+    const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
+
+    // **Pre-merge security-gate finding (F4), fixed:** nothing below this
+    // point used to check the DECODED format — sharp/libvips happily
+    // decodes SVG (real XML/parser attack surface), GIF, TIFF, and HEIF too,
+    // none of which storage.rules catches (it only checks the client-set
+    // Content-Type header on the staging upload, which is trivially spoofed
+    // — upload arbitrary bytes declaring `contentType: "image/jpeg"`).
+    // Probe the real format and refuse anything outside the three this app
+    // intends to accept before running attacker-controlled bytes through
+    // the resize/encode pipeline below.
+    const { format } = await sharp(bytes, sharpOpts).metadata();
+    if (!["jpeg", "png", "webp"].includes(format ?? "")) {
+      console.error("processUpload: rejected disallowed photo format", objectName, format);
+      return; // finally below still deletes the staging object
+    }
+
+    // Avatars intentionally do NOT set withoutEnlargement — the 512x512
+    // output is a contract the rest of the app relies on (fixed-size crop
+    // targets), so a tiny source still gets upscaled to fill it. Covers use
+    // withoutEnlargement since they're display-only and any size up to
+    // 1600x1600 is fine.
     const pipeline = kind === "avatar"
-      ? sharp(bytes).rotate().resize(512, 512, { fit: "cover" })
-      : sharp(bytes).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
+      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
+      : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
     const jpeg = await pipeline.jpeg({ quality: 82 }).toBuffer();
     const destPath = publicPhotoPath(profileId, kind, randomUUID());
     await bucket().file(destPath).save(jpeg, { contentType: "image/jpeg" });
@@ -1540,10 +2454,28 @@ async function processPhoto(objectName: string): Promise<void> {
     const profileRef = db.doc(`profiles/${profileId}`);
     const field = kind === "avatar" ? "portfolio.avatarPhotoPath" : "portfolio.coverPhotoPath";
     const prev = (await profileRef.get()).data()?.portfolio?.[`${kind}PhotoPath`] as string | null | undefined;
-    await profileRef.update({ [field]: destPath, updatedAt: Date.now() });
-    if (prev) await bucket().file(prev).delete().catch(() => {});
+    try {
+      await profileRef.update({ [field]: destPath, updatedAt: Date.now() });
+    } catch (err) {
+      // Profile can be deleted mid-flight too (deleteProfile's
+      // recursiveDelete races this trigger) — gRPC code 5 (NOT_FOUND).
+      // There's no live doc to point at destPath any more, so the
+      // freshly-written public object would otherwise survive as an orphan
+      // even after the profile is gone; clean it up regardless of the
+      // error's cause. Same swallow-not-rethrow reasoning as the audio
+      // failure path — only log when the cause wasn't the expected
+      // "doc is gone" case.
+      await bucket().file(destPath).delete().catch(logDeleteFailure("orphaned public photo", destPath));
+      if ((err as { code?: number }).code !== 5) {
+        console.error("processUpload: profile photo update failed", objectName, err);
+      }
+      return;
+    }
+    if (prev) {
+      await bucket().file(prev).delete().catch(logDeleteFailure("old photo", prev));
+    }
   } finally {
-    await stagingFile.delete().catch(() => {});
+    await stagingFile.delete().catch(logDeleteFailure("staging (photo, finally)", objectName));
   }
 }
 
@@ -1551,8 +2483,9 @@ export const processUpload = onObjectFinalized(
   { region: "us-central1", bucket: STORAGE_BUCKET, memory: "1GiB", timeoutSeconds: 300 },
   async (event: StorageEvent) => {
     const name = event.data.name ?? "";
-    if (name.startsWith("staging/audio/")) return processAudio(name);
-    if (name.startsWith("staging/photos/")) return processPhoto(name);
+    const generation = event.data.generation;
+    if (name.startsWith("staging/audio/")) return processAudio(name, generation);
+    if (name.startsWith("staging/photos/")) return processPhoto(name, generation);
   });
 ```
 
@@ -1578,44 +2511,41 @@ git commit -m "feat(functions): processUpload — ffmpeg 30s clip transcode + sh
 
 ### Task 8: Functions — `reviewTrack` (admin gate)
 
+> **Post-review revision:** this section documents the FINAL shipped code
+> after TWO quality-review passes hardened the naive first cut (see
+> "Quality-review hardening" and "Quality-review hardening (pass 2)" below the
+> original steps). The steps below are kept in their original TDD order but
+> their code blocks now show the final, byte-exact implementation — not the
+> version that first went green.
+
 **Files:**
 - Modify: `functions/src/tracks.ts`
 - Modify: `functions/src/review.ts` (export `requireAdmin`)
 - Modify: `functions/src/index.ts`
+- Modify: `functions/src/storage.ts` (export `logDeleteFailure`, moved here from `media.ts` so `reviewTrack` can reuse the same logged-catch pattern)
+- Modify: `functions/src/media.ts` (imports `logDeleteFailure` instead of defining it locally — behavior unchanged)
+- Modify: `functions/test/helpers.ts` (export `makeAdminUser`, lifted out of this task's test file so `review.test.ts` can share it too)
+- Modify: `functions/test/review.test.ts` (drops its local `makeAdminUser` copy for the shared one)
 - Test: append to `functions/test/tracks.test.ts`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `functions/test/tracks.test.ts` (grantAdmin needs a Google-linked account — mirror the existing pattern in `functions/test/review.test.ts` for minting an admin user; reuse its helper if one exists, otherwise set the claim directly via the Admin SDK):
+Append to `functions/test/tracks.test.ts` (imports `makeAdminUser` from `./helpers` instead of defining it locally):
 
 ```ts
-import { getAuth as adminAuth } from "firebase-admin/auth";
-import { getStorage as adminStorage } from "firebase-admin/storage";
-import { uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
-
-const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
-
-async function makeAdminUser(prefix: string) {
-  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
-  await adminAuth(admin).setCustomUserClaims(uid, { admin: true });
-  await user.getIdToken(true); // refresh claims
-  return { user, uid };
-}
-
 async function makePendingTrack(prefix: string) {
-  const { user, profileId } = await makeMusician(prefix);
+  const { user, uid, profileId } = await makeMusician(prefix);
   const wav = makeWav(35);
   const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
     "createTrack", { profileId, title: "For review", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
   await uploadTestAudio(uploadPath, wav, "audio/wav", user);
   await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
-  return { user, profileId, trackId };
+  return { user, uid, profileId, trackId };
 }
 
 describe("reviewTrack", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("approve copies the clip to public, deletes review copy, flips status, audits, notifies", async () => {
-    const { profileId, trackId } = await makePendingTrack("rv1");
+    const { uid, profileId, trackId } = await makePendingTrack("rv1");
     const { user: adminUser } = await makeAdminUser("rv1a");
     await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
     const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
@@ -1627,6 +2557,10 @@ describe("reviewTrack", () => {
     expect(rev).toBe(false);
     const audit = await adb.collection("auditLogs").where("targetId", "==", `${profileId}/${trackId}`).get();
     expect(audit.docs.some((d) => d.data().action === "track_approved")).toBe(true);
+    // Pins the notification path: notifyProfileMembers writes an inbox
+    // notification for every member (the sole musician member here).
+    const notifs = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifs.empty).toBe(false);
   });
   it("reject requires a reason ≤500, deletes the clip, keeps the doc with the reason", async () => {
     const { profileId, trackId } = await makePendingTrack("rv2");
@@ -1639,7 +2573,7 @@ describe("reviewTrack", () => {
     const [rev] = await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).exists();
     expect(rev).toBe(false);
   });
-  it("non-admin cannot review; non-pending tracks are refused", async () => {
+  it("non-admin cannot review; a second 'approved' decision is refused (already approved, not pending)", async () => {
     const { user, profileId, trackId } = await makePendingTrack("rv3");
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -1648,8 +2582,119 @@ describe("reviewTrack", () => {
     await expect(callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+  it("reject also works on an already-approved track (retroactive takedown, spec §6): public object removed, storagePath cleared, audit records the prior state, musician notified", async () => {
+    const { uid, profileId, trackId } = await makePendingTrack("rv4");
+    const { user: adminUser, uid: adminUid } = await makeAdminUser("rv4a");
+    await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
+    const [pubBefore] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(pubBefore).toBe(true);
+    await callFn("reviewTrack",
+      { profileId, trackId, decision: "rejected", reason: "Copyright complaint." }, adminUser);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "Copyright complaint.", storagePath: null });
+    const [pubAfter] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(pubAfter).toBe(false);
+    const audit = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    expect(audit.size).toBe(1);
+    expect(audit.docs[0].data().actorUid).toBe(adminUid);
+    expect(audit.docs[0].data().detail).toMatch(/^\[was approved\]/);
+    // Pins that a takedown's notification fires at claim time (right after
+    // the transaction, alongside the audit) rather than after storage
+    // cleanup — see reviewTrack's comment on that ordering: it exists so a
+    // storage-cleanup failure (HttpsError "unavailable") can't swallow the
+    // notification the way it could when notification lived at the very
+    // end. Reproducing that exact storage failure isn't practical against
+    // the real Storage emulator (the Admin SDK bypasses storage.rules, and
+    // there's no supported way to force a non-404 delete error), so this
+    // instead confirms the notification exists for the ordinary success
+    // path at the new call site.
+    const notifs = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifs.docs.some((d) => /removed from your portfolio/.test(d.data().title as string))).toBe(true);
+  });
+  it("approve fails cleanly when the review clip is already gone: failed-precondition, doc rolled back to pending_review", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv5");
+    const { user: adminUser } = await makeAdminUser("rv5a");
+    // Simulates storage/doc drift (e.g. a prior partial failure, or a
+    // hand-edited emulator state) — the doc says pending_review but the
+    // review object backing it is gone.
+    await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).delete();
+    let err: unknown;
+    try {
+      await callFn("reviewTrack", { profileId, trackId, decision: "approved" }, adminUser);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({ code: "functions/failed-precondition" });
+    expect((err as Error).message).toMatch(/review clip is missing/i);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()?.status).toBe("pending_review");
+  });
+  it("accepts a rejection reason of exactly 500 characters (checked/stored trimmed); 501 is invalid-argument", async () => {
+    const { profileId, trackId } = await makePendingTrack("rv6");
+    const { user: adminUser } = await makeAdminUser("rv6a");
+    const padded = "  " + "x".repeat(500) + "  "; // trims to exactly 500
+    await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: padded }, adminUser);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()?.rejectionReason).toBe("x".repeat(500));
+
+    const { profileId: p2, trackId: t2 } = await makePendingTrack("rv6b");
+    await expect(callFn("reviewTrack", { profileId: p2, trackId: t2, decision: "rejected", reason: "x".repeat(501) }, adminUser))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+  it("rejecting an already-rejected track is an idempotent retry: storage re-attempted, no duplicate audit/notification", async () => {
+    const { uid, profileId, trackId } = await makePendingTrack("rv7");
+    const { user: adminUser } = await makeAdminUser("rv7a");
+    await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+
+    // Simulates storage drift after the first reject (e.g. a stray copy that
+    // landed here despite the doc already saying "rejected") — the retry
+    // must still find and remove it, proving the retry re-attempts storage
+    // work rather than short-circuiting on "already rejected".
+    await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).save(Buffer.from([9]), { contentType: "audio/mp4" });
+
+    const auditBefore = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    const notifsBefore = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+
+    const res = await callFn<{ profileId: string; trackId: string; decision: "rejected"; reason: string },
+      { ok: boolean }>("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
+    expect(res.ok).toBe(true);
+    const t = await adb.doc(`profiles/${profileId}/tracks/${trackId}`).get();
+    expect(t.data()).toMatchObject({ status: "rejected", rejectionReason: "First reason.", storagePath: null });
+
+    // Storage work was re-attempted: the stray public object is gone.
+    const [pubExists] = await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).exists();
+    expect(pubExists).toBe(false);
+
+    const auditAfter = await adb.collection("auditLogs")
+      .where("targetId", "==", `${profileId}/${trackId}`).where("action", "==", "track_rejected").get();
+    expect(auditAfter.size).toBe(auditBefore.size); // no duplicate audit row
+    const notifsAfter = await adb.collection(`users/${uid}/notifications`).where("kind", "==", "track_review").get();
+    expect(notifsAfter.size).toBe(notifsBefore.size); // no duplicate notification
+  });
 });
 ```
+
+The test file's top also changes: the local `makeAdminUser` function is deleted, `makeAdminUser` is added to the `./helpers` import, the now-unused `getAuth as adminAuth` import is dropped, and the file-level `vi.setConfig({ testTimeout: 20_000 })` becomes `60_000` (the reviewTrack tests upload and wait on a real ffmpeg transcode via `makePendingTrack`, same as `media.test.ts`) — the block's own nested `vi.setConfig` is removed rather than duplicated.
+
+`functions/test/helpers.ts` gains (placed after `signUpUnverifiedTestUser`, using the file's existing `getAdminAuth`/`adminAppInstance`):
+
+```ts
+// Signs up a fresh test user and grants the `admin` custom claim directly via
+// the Admin SDK — bypasses grantAdmin's Google-linked-account-only rule,
+// which is fine for tests (every review-flow test needs an admin caller
+// without wiring up a fake Google OAuth provider). Centralized here so
+// review.test.ts and tracks.test.ts share one implementation.
+export async function makeAdminUser(prefix: string) {
+  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
+  await getAdminAuth(adminAppInstance).setCustomUserClaims(uid, { admin: true });
+  await user.getIdToken(true); // refresh claims
+  return { user, uid };
+}
+```
+
+`functions/test/review.test.ts` drops its own local `makeAdminUser()` (no-arg) function, imports the shared one from `./helpers`, and every call site becomes `makeAdminUser("admin")` (its `getAuth as adminAuth` import stays — `grantAdmin`'s own tests still use it directly for `importUsers`/`getUser`).
 
 - [ ] **Step 2: Export `requireAdmin` from `functions/src/review.ts`**
 
@@ -1657,16 +2702,43 @@ Change `function requireAdmin(` to `export function requireAdmin(`.
 
 - [ ] **Step 3: Add `reviewTrack` to `functions/src/tracks.ts`**
 
+First, move the storage-cleanup logger out of `media.ts` into `functions/src/storage.ts` (it was private to `processUpload`; `reviewTrack` needs the same logged-catch pattern):
+
 ```ts
+// functions/src/storage.ts — appended after `bucket`
+// Every best-effort storage cleanup across the media/tracks pipelines goes
+// through here instead of a bare `.catch(() => {})` — a cleanup that
+// silently fails (quota, a permissions drift, an emulator hiccup) would
+// otherwise leave no trace anywhere. Still non-fatal: logging, never
+// rethrowing, so a cleanup failure can never turn into a stuck/duplicate
+// object. Originally private to media.ts (processUpload); moved here so
+// tracks.ts's reviewTrack can reuse the same logged-catch pattern — `source`
+// identifies the caller (e.g. "processUpload", "reviewTrack") so the log
+// line doesn't misattribute a cleanup to the wrong pipeline.
+export function logDeleteFailure(source: string, phase: string, path: string) {
+  return (e: unknown) => console.error(`${source}: ${phase} cleanup failed`, path, e);
+}
+```
+
+In `media.ts`: delete the local `logDeleteFailure` definition (and its now-redundant leading comment) and add it to the existing `./storage.js` import: `import { STORAGE_BUCKET, bucket, logDeleteFailure } from "./storage.js";`. Every one of its 8 call sites (`.catch(logDeleteFailure(...))`) gains a leading `"processUpload"` source argument — otherwise unchanged, behavior identical, only the definition moved and the signature gained a parameter.
+
+Then, in `functions/src/tracks.ts`:
+
+```ts
+import { bucket, logDeleteFailure } from "./storage.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { reviewTrackPath, publicTrackPath } from "@gatekeep/shared";
+
+// Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
+// docs (for the reason display) but don't count. Exported so Task 9's submit
+// minimum-content gate can import it instead of re-hardcoding the list.
+export const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
 
 export const reviewTrack = onCall<{ profileId: string; trackId: string; decision: "approved" | "rejected"; reason?: string }>(
   { region: "us-central1" }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, trackId, decision, reason } = req.data;
-    if (typeof profileId !== "string" || typeof trackId !== "string"
+    if (!isValidDocId(profileId) || !isValidDocId(trackId)
         || (decision !== "approved" && decision !== "rejected")) {
       throw new HttpsError("invalid-argument", "profileId, trackId, and a decision are required.");
     }
@@ -1676,58 +2748,204 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
     if (decision === "rejected" && reason!.trim().length > 500) {
       throw new HttpsError("invalid-argument", "Rejection reason must be 500 characters or fewer.");
     }
-    const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
-    const snap = await ref.get();
-    if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
-    if (snap.data()?.status !== "pending_review") {
-      throw new HttpsError("failed-precondition", "Track is not pending review.");
+
+    const db = getFirestore();
+    const ref = db.doc(`profiles/${profileId}/tracks/${trackId}`);
+
+    // Claims the decision (flips status/storagePath/rejectionReason) inside a
+    // transaction BEFORE any storage work, so two concurrent reviews of the
+    // same track can't both pass their precondition check and both go on to
+    // touch storage. Whichever transaction commits first claims the track;
+    // Firestore silently retries the loser's read against the now-updated
+    // doc, so it sees the new status and fails its own precondition check.
+    // The Functions emulator serializes concurrent invocations of the same
+    // callable, so this race is untestable there — the transaction itself is
+    // the guarantee, deliberately with no accompanying test.
+    const prior = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new HttpsError("not-found", "Track not found.");
+      const data = snap.data() as TrackDoc;
+      if (decision === "approved" && data.status !== "pending_review") {
+        throw new HttpsError("failed-precondition", "Track is not pending review.");
+      }
+      // Reject also accepts "approved" (retroactive takedown, spec §6) AND a
+      // second "rejected" (idempotent retry — lets an admin re-run a
+      // takedown whose storage cleanup failed the first time; see the
+      // "unavailable" throw below).
+      if (decision === "rejected" && data.status !== "pending_review"
+          && data.status !== "approved" && data.status !== "rejected") {
+        throw new HttpsError("failed-precondition", "Track is not reviewable.");
+      }
+      if (decision === "approved") {
+        tx.update(ref, {
+          status: "approved", storagePath: publicTrackPath(profileId, trackId),
+          rejectionReason: null, updatedAt: Date.now(),
+        });
+      } else {
+        tx.update(ref, {
+          status: "rejected", storagePath: null,
+          rejectionReason: reason!.trim(), updatedAt: Date.now(),
+        });
+      }
+      return data;
+    });
+
+    // Reject's decision is final the instant the transaction above commits —
+    // unlike approve (which can still be rolled back below if the copy
+    // fails), nothing downstream undoes "rejected". Write the audit AND
+    // notify the musician right here, unconditionally-once at claim time —
+    // not gated on the storage outcome below. This used to live at the very
+    // end, alongside approve's notification, but the storage-cleanup step
+    // below can throw HttpsError("unavailable", ...) when the public delete
+    // fails for a non-404 reason (see that throw's comment) — that aborts
+    // the call before ever reaching a post-storage notification block, so a
+    // takedown whose first storage attempt failed would silently never
+    // notify the musician, even on a successful retry (the retry's `prior`
+    // is already "rejected" by then, which is exactly the idempotency guard
+    // below and correctly suppresses a second notification). Firing both
+    // here instead — before any storage work — means the musician always
+    // hears about a reject exactly once, regardless of how storage cleanup
+    // goes. Both are guarded on prior.status !== "rejected" so an idempotent
+    // reject-from-rejected retry doesn't produce a duplicate audit row or
+    // tell the musician twice.
+    if (decision === "rejected" && prior.status !== "rejected") {
+      await writeAudit({
+        actorUid,
+        action: "track_rejected",
+        // Detail records the prior status too — a takedown trail (was
+        // "approved" and live, vs. a routine first-time reject from
+        // "pending_review") is worth more to an auditor than the reason alone.
+        detail: `[was ${prior.status}] ${reason!.trim()}`,
+        targetId: `${profileId}/${trackId}`,
+      });
+      const rejectTitle = prior.title ?? "Your track";
+      const wasApproved = prior.status === "approved";
+      await notifyProfileMembers(profileId, {
+        kind: "track_review",
+        title: wasApproved ? `"${rejectTitle}" was removed from your portfolio` : `"${rejectTitle}" needs attention`,
+        body: wasApproved
+          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
+          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+      });
     }
+
     const reviewFile = bucket().file(reviewTrackPath(profileId, trackId));
+    const publicFile = bucket().file(publicTrackPath(profileId, trackId));
 
     if (decision === "approved") {
-      // Copy-then-delete keeps the public-path invariant: the clip appears in
-      // public/ only as part of an approval.
-      await reviewFile.copy(bucket().file(publicTrackPath(profileId, trackId)));
-      await reviewFile.delete().catch(() => {});
-      await ref.update({
-        status: "approved", storagePath: publicTrackPath(profileId, trackId),
-        rejectionReason: null, updatedAt: Date.now(),
-      });
+      try {
+        // Copy-then-delete keeps the public-path invariant: the clip appears
+        // in public/ only as part of an approval that already committed.
+        await reviewFile.copy(publicFile);
+      } catch (err) {
+        // The Firestore claim above already committed "approved" — if the
+        // copy itself fails, roll the doc back to pending_review inside its
+        // own transaction, and only if it's still OUR claim: a concurrent
+        // reject (often the very thing that deleted the review clip and
+        // made this copy fail) may have already taken the track down, and
+        // that decision must stand rather than being clobbered back to
+        // pending_review by a plain unconditional update.
+        await db.runTransaction(async (tx) => {
+          const s = await tx.get(ref);
+          // Only roll back OUR claim. If another admin has since taken the
+          // track down — often the very thing that deleted the clip and
+          // made the copy fail — their decision stands.
+          if (!s.exists || s.data()?.status !== "approved") return;
+          tx.update(ref, { status: "pending_review", storagePath: prior.storagePath ?? null, updatedAt: Date.now() });
+        }).catch((e) => console.error("reviewTrack: approve rollback failed", `${profileId}/${trackId}`, e));
+        // @google-cloud/storage surfaces a missing source object as an
+        // ApiError with HTTP code 404 (unlike Firestore's gRPC code 5 used
+        // elsewhere) — the review clip was already gone (a race, or a prior
+        // partial failure that already consumed it). That's a recoverable
+        // admin action (reject + ask for a re-upload), not a server error.
+        if ((err as { code?: number }).code === 404) {
+          throw new HttpsError("failed-precondition",
+            "The review clip is missing — reject this track and ask the musician to re-upload.");
+        }
+        throw err;
+      }
+      await reviewFile.delete()
+        .catch(logDeleteFailure("reviewTrack", "review copy after approve", reviewTrackPath(profileId, trackId)));
     } else {
-      await reviewFile.delete().catch(() => {});
-      await ref.update({
-        status: "rejected", storagePath: null,
-        rejectionReason: reason!.trim(), updatedAt: Date.now(),
+      const [reviewResult, publicResult] = await Promise.allSettled([reviewFile.delete(), publicFile.delete()]);
+      if (reviewResult.status === "rejected" && (reviewResult.reason as { code?: number })?.code !== 404) {
+        logDeleteFailure("reviewTrack", "reject: review delete", reviewTrackPath(profileId, trackId))(reviewResult.reason);
+      }
+      if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
+        logDeleteFailure("reviewTrack", "reject: public delete", publicTrackPath(profileId, trackId))(publicResult.reason);
+      }
+      // A pending track's public object shouldn't exist, so its delete 404s
+      // harmlessly. If the public delete fails for any OTHER reason — for
+      // ANY prior status, not just a retroactive takedown from "approved" —
+      // the object may still exist and be publicly reachable even though
+      // the doc says "rejected"; surface that to the admin as a retryable
+      // failure instead of quietly reporting success. The audit row for
+      // this decision is already written above; the transactional claim
+      // accepts reject-from-rejected, so a second reviewTrack("rejected")
+      // call safely re-attempts the same delete without duplicating it.
+      if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
+        throw new HttpsError("unavailable",
+          "Takedown incomplete — the public clip could not be removed. Try again.");
+      }
+    }
+
+    // Storage work finishes asynchronously after the transactional claim
+    // committed — a concurrent review of the SAME track (e.g. another admin
+    // rejects it while this approve's copy is still in flight) can move the
+    // status again before we get here, or deleteTrack/deleteProfile's
+    // cascade can remove the doc entirely. Re-read and require the status to
+    // still match what THIS call claimed, not just that the doc exists — an
+    // existence-only check would let a superseded approve still write its
+    // audit/notification and leave the public object it just copied behind
+    // as the only trace of a decision that no longer stands.
+    const postSnap = await ref.get();
+    const stillOurs = postSnap.exists && postSnap.data()?.status === decision;
+    if (!stillOurs) {
+      if (decision === "approved") {
+        await publicFile.delete()
+          .catch(logDeleteFailure("reviewTrack", "superseded public (post-review race)", publicTrackPath(profileId, trackId)));
+      }
+      // Only approve's audit/notify are skipped here — the other admin's
+      // decision stands. Reject's already fired unconditionally above,
+      // before this re-read, so there's nothing to skip for it.
+      return { ok: true };
+    }
+
+    // Reject's audit + notification already ran (right after the
+    // transaction, above, unconditionally-once at claim time — see the
+    // comment there for why). Approve's are gated here instead because
+    // approve — unlike reject — can still be superseded by a concurrent
+    // reject between the copy finishing and this re-read; the `stillOurs`
+    // check above already returned early without audit/notify if so.
+    if (decision === "approved") {
+      await writeAudit({
+        actorUid,
+        action: "track_approved",
+        detail: prior.title ?? "",
+        targetId: `${profileId}/${trackId}`,
+      });
+      await notifyProfileMembers(profileId, {
+        kind: "track_review",
+        title: `"${prior.title ?? "Your track"}" is live!`,
+        body: "Your track passed review and now plays on your public portfolio.",
       });
     }
-    await writeAudit({
-      actorUid,
-      action: decision === "approved" ? "track_approved" : "track_rejected",
-      targetId: `${profileId}/${trackId}`,
-      detail: decision === "rejected" ? reason!.trim() : (snap.data()?.title ?? ""),
-    });
-    const title = snap.data()?.title ?? "Your track";
-    await notifyProfileMembers(profileId, {
-      kind: "track_review",
-      title: decision === "approved" ? `"${title}" is live!` : `"${title}" needs attention`,
-      body: decision === "approved"
-        ? "Your track passed review and now plays on your public portfolio."
-        : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
-    });
     return { ok: true };
   });
 ```
 
+(`getFirestore`, `HttpsError`, `isValidDocId`, `reviewTrackPath`, `publicTrackPath`, and the `TrackDoc` type were already imported at the top of `tracks.ts` by Task 6.)
+
 - [ ] **Step 4: Export from `functions/src/index.ts`**
 
 ```ts
-export { createTrack, updateTrack, deleteTrack, reviewTrack } from "./tracks.js";
+export { createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack } from "./tracks.js";
 ```
 
 - [ ] **Step 5: Run tests**
 
 Run: `pnpm emu:test`
-Expected: all PASS.
+Expected: all PASS (9 test files, 89 tests once this task's 7 `reviewTrack` cases land).
 
 - [ ] **Step 6: Commit**
 
@@ -1735,6 +2953,139 @@ Expected: all PASS.
 git add functions
 git commit -m "feat(functions): reviewTrack — admin approve/reject with audit + notification"
 ```
+
+#### Quality-review hardening (folded into the Step 3/Step 1 code above)
+
+A review pass on the first cut found three gaps, closed in a single follow-up
+commit (`fix(functions): transactional review claim, recoverable approve
+failures, takedown integrity`) — the code blocks above already reflect the
+fix, not the original:
+
+1. **TOCTOU between the read-then-write precondition check and storage work.**
+   The original code did a plain `get()`, checked `status`, then did storage
+   work, then `update()` — two concurrent `reviewTrack` calls on the same
+   track could both pass the precondition check before either wrote. Fixed by
+   moving the read-check-write into a Firestore transaction that runs BEFORE
+   any storage I/O and returns the prior doc data; storage work (and any
+   rollback) happens after the claim has already committed.
+2. **Approve had no failure path.** `reviewFile.copy(publicFile)` was
+   unguarded — a failed copy (e.g. the review clip already gone) left the doc
+   permanently `approved` with no object behind it, and the caller got an
+   opaque 500. Fixed by wrapping the copy in try/catch: on any failure the
+   transactional claim is rolled back to `pending_review` (restoring the
+   prior `storagePath`), and a missing-source (HTTP 404) collapses to a
+   specific, actionable `failed-precondition`.
+3. **Reject could silently under-deliver on a retroactive takedown.** The
+   original reject path used `Promise.allSettled` and never inspected the
+   results — if the PUBLIC object's delete failed (not 404) after an
+   already-approved track was rejected, the doc would say "rejected" while
+   the clip stayed live, with nothing surfaced to the admin. Fixed by
+   inspecting both delete results, logging non-404 failures, and throwing
+   `unavailable` specifically when the previously-live public object failed
+   to delete — recoverable because the transactional claim now also accepts
+   reject-from-rejected as an idempotent retry.
+
+**Accepted product decision (v1):** a retroactive takedown (`reviewTrack`
+`rejected` on a previously `approved` track) can drop an approved *profile*
+below the submit-time minimum-content bar that Task 9 adds (e.g. rejecting a
+musician's only track leaves zero tracks). The profile itself stays
+`approved`/public regardless — the minimum-content gate in Task 9 only runs
+at submit time, not continuously. Re-enforcing it on every track mutation is
+out of scope for this sub-project; noted here for whoever picks up curator
+discovery/quality signals later.
+
+#### Quality-review hardening (pass 2 — folded into the Step 3/Step 1 code above)
+
+A second review pass on pass 1's transactional design found the transaction
+closed the precondition race but re-introduced two narrower ones around it,
+plus a reporting-integrity gap — all three closed in one follow-up commit
+(`fix(functions): status-aware post-guard, transactional rollback, takedown
+audit integrity`):
+
+A. **The post-storage guard was existence-aware, not status-aware.** It only
+   checked `postSnap.exists`, so a concurrent reject that took the track down
+   *while an approve's copy was still in flight* left the just-copied public
+   object stranded — `stillOurs` still passed (the doc existed), so approve's
+   audit/notification fired over a decision that no longer stood. Fixed by
+   comparing `postSnap.data()?.status === decision`: any status other than
+   the one this call itself claimed means someone else's decision has since
+   taken over, so the call cleans up its own orphaned public object (if it
+   wrote one) and returns early without writing audit/notification.
+B. **The approve rollback was a regression, not a fix.** Pass 1 rolled a
+   failed copy back with a bare `ref.update(...)` — unconditional, so it
+   could stomp a *concurrent reject* that had already taken the track down
+   for an unrelated reason (e.g. the very reject whose delete of the review
+   clip is what made this copy 404 in the first place), resurrecting a
+   rejected track back to `pending_review`. Fixed by moving the rollback into
+   its own transaction that re-reads the doc and only writes if
+   `status === "approved"` still — i.e., only ever reverts this call's own
+   claim, never someone else's.
+C. **Takedown audit/notification integrity.** Three related gaps: (1) reject
+   audits were written only after the post-storage guard passed, so an admin
+   could reject a track, have deleteTrack race the doc away before the
+   re-read, and the takedown would leave no audit trail at all even though it
+   happened — fixed by writing reject's audit immediately after the
+   transaction commits (the decision is final there; approve's audit stays
+   gated on the post-guard since approve alone can still be undone). (2) the
+   `unavailable` throw on a failed public-object delete was gated on
+   `prior.status === "approved"`, so a failed delete against a *pending*
+   track's public object (which shouldn't exist, but could via storage drift)
+   silently reported success — fixed by dropping that gate: any non-404
+   public-delete failure now throws, regardless of prior status. (3) an
+   idempotent reject-from-rejected retry re-notified the member and (before
+   fix 1 above) could have double-audited — fixed by suppressing the
+   notification whenever `prior.status === decision`, and guarding the reject
+   audit on `prior.status !== "rejected"`.
+
+Minor cleanup in the same commit: `logDeleteFailure` (in `storage.ts`) gained
+a leading `source` parameter so a `reviewTrack` cleanup no longer logs under
+the misleading `"processUpload:"` prefix; the approve-rollback catch uses a
+plain `console.error` (it's a doc write, not a storage delete, so it doesn't
+route through `logDeleteFailure`); and `rv7`'s test was strengthened to seed
+a stray object at the public path before the retry and assert it gets
+cleaned up (proving the retry re-attempts storage work) while also asserting
+no duplicate audit row or notification is produced.
+
+#### Quality-review hardening (pass 3 — folded into the Step 3/Step 1 code above)
+
+A review pass during Task 12 (the admin Takedowns panel that actually
+exercises the retroactive-takedown path end-to-end) found a notification
+could be lost across a takedown retry — closed in the same commit as Task
+12's web fixes (`fix(web,functions): admin queue race guards, clip-error
+states, takedown notification integrity`):
+
+D. **A takedown whose first storage attempt failed never notified the
+   musician, even after a successful retry.** Reject's notification lived at
+   the very end of the function, alongside approve's, gated on
+   `prior.status !== decision`. But the storage-cleanup step can throw
+   `HttpsError("unavailable", ...)` when the public object's delete fails for
+   a non-404 reason (pass 2's fix C.2) — that throw aborts the call before
+   ever reaching the end-of-function notification block. On retry, the
+   transaction's `prior.status` is now `"rejected"` (the first attempt's
+   claim already committed it), so the retry's own idempotency guard
+   (`prior.status !== decision` — now `false`) suppresses the notification a
+   *second* time, except there was never a first time: the musician is never
+   told at all. Fixed by moving reject's notification to fire alongside its
+   audit, immediately after the transaction commits and before any storage
+   work — the same `prior.status !== "rejected"` guard that already gated
+   the audit now gates the notification too, so it's unconditional-once at
+   claim time and can't be lost to a downstream storage failure. Approve's
+   notification stays where it was (gated on the post-storage `stillOurs`
+   guard), since approve — unlike reject — really can still be undone after
+   the claim commits.
+
+   Reproducing the exact `unavailable` storage failure in a test wasn't
+   practical: the whole `functions/test` suite drives real callables against
+   the Functions/Firestore/Storage emulators over HTTP (no in-process
+   mocking of `bucket()`), and the Admin SDK bypasses `storage.rules`
+   entirely, so there's no supported way to force a non-404 delete error
+   from a test. `rv4`'s test (the retroactive-takedown case) was instead
+   strengthened to assert a notification exists after an ordinary successful
+   takedown, pinning that the new call site still fires correctly; the
+   reordering itself is provably safe by inspection (reject's decision is
+   already final the instant its transaction commits, per the standing
+   comment on that transaction — nothing downstream can un-reject it, so
+   nothing downstream should gate telling the musician about it either).
 
 ---
 
@@ -1744,22 +3095,26 @@ git commit -m "feat(functions): reviewTrack — admin approve/reject with audit 
 - Modify: `functions/src/profiles.ts`
 - Test: append to `functions/test/profiles.test.ts`
 
+**As-built note:** the snippets below are the final shape (post quality-review
+fixes) — `LISTENABLE_TRACK_STATUSES` (not `ACTIVE_TRACK_STATUSES`), `force:
+true` on the storage cascade, `Intl.ListFormat` for the gate message, and the
+`firebase-admin/storage`/helpers imports live at the top of
+`functions/test/profiles.test.ts`, not mid-file. The original TDD-draft
+snippets have been replaced in place rather than kept as a stale historical
+record.
+
 - [ ] **Step 1: Write failing tests**
 
-Append to `functions/test/profiles.test.ts`:
+Append to `functions/test/profiles.test.ts` (imports/env-var setup folded
+into the file's existing top-of-file block — `uploadTestAudio`, `makeWav`,
+`waitForTrackStatus` added to the existing `./helpers` import;
+`getStorage as adminStorage` and `abucket` added alongside the existing
+`adb`; `FIREBASE_STORAGE_EMULATOR_HOST` set alongside `FIRESTORE_EMULATOR_HOST`):
 
 ```ts
-import { getStorage as adminStorage } from "firebase-admin/storage";
-import { uploadTestAudio, makeWav, waitForTrackStatus } from "./helpers";
-import type { CreateTrackInput } from "@gatekeep/shared";
-
-process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
-const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
-
 describe("submitProfileForReview minimum content (musicians)", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("refuses an empty musician draft, listing what's missing; passes once bio+genre+avatar+track exist", async () => {
-    const { user, uid } = await signUpTestUser(`gate-${Date.now()}@test.com`);
+    const { user } = await signUpTestUser(`gate-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "musician", subtype: "solo", name: "Ava", handle: `gate_${Date.now()}` }, user);
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -1778,7 +3133,31 @@ describe("submitProfileForReview minimum content (musicians)", () => {
     await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  }, 60_000); // per-test timeout for the slow gate test, not a file-wide vi.setConfig bump
+
+  it("lists all four missing items when nothing has been filled in", async () => {
+    const { user } = await signUpTestUser(`gatem-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Empty", handle: `gatem_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/bio.*genre.*photo.*track/i);
   });
+
+  it("a track stuck in 'processing' (upload never completed) does not satisfy the gate", async () => {
+    const { user } = await signUpTestUser(`gatep-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Stalled", handle: `gatep_${Date.now()}` }, user);
+    await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    // createTrack writes the doc (status: "processing") before any bytes are
+    // uploaded — abandon it here. LISTENABLE_TRACK_STATUSES excludes
+    // "processing", so this must not satisfy the gate.
+    await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: 1000, contentType: "audio/wav" }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/track/i);
+  });
+
   it("curator drafts submit without portfolio checks (unchanged from foundation)", async () => {
     const { user } = await signUpTestUser(`gatec-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
@@ -1789,7 +3168,6 @@ describe("submitProfileForReview minimum content (musicians)", () => {
 });
 
 describe("deleteProfile storage cascade", () => {
-  vi.setConfig({ testTimeout: 60_000 });
   it("deletes the profile's public/review storage objects along with the docs", async () => {
     const { user } = await signUpTestUser(`delc-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
@@ -1804,7 +3182,20 @@ describe("deleteProfile storage cascade", () => {
       const [exists] = await abucket.file(p).exists();
       expect(exists).toBe(false);
     }
-  });
+  }, 60_000);
+
+  it("does not touch another profile's storage objects — negative control on the prefix sweep", async () => {
+    const { user } = await signUpTestUser(`delcn-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava2", handle: `delcn_${Date.now()}` }, user);
+    const { profileId: otherProfileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Bystander", handle: `delcn2_${Date.now()}` }, user);
+    const survivor = `public/tracks/${otherProfileId}/t9.m4a`;
+    await abucket.file(survivor).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await callFn("deleteProfile", { profileId }, user);
+    const [exists] = await abucket.file(survivor).exists();
+    expect(exists).toBe(true);
+  }, 60_000);
 });
 ```
 
@@ -1819,7 +3210,18 @@ Add imports:
 
 ```ts
 import type { PortfolioData } from "@gatekeep/shared";
-import { bucket } from "./storage.js";
+import { bucket, logDeleteFailure } from "./storage.js";
+```
+
+Add a module-level constant, distinct from tracks.ts's `ACTIVE_TRACK_STATUSES`
+(slot-occupancy — a `processing` track still counts against the 10-track
+cap). This gate cares about actually-uploaded, listenable content:
+`createTrack` writes the doc *before* the client uploads bytes, so a
+`processing` track can be an abandoned upload with nothing behind it — that
+must not satisfy the gate:
+
+```ts
+const LISTENABLE_TRACK_STATUSES = ["pending_review", "approved"] as const;
 ```
 
 In `submitProfileForReview`, after the status check and before the `ref.update`:
@@ -1833,12 +3235,18 @@ In `submitProfileForReview`, after the status check and before the `ref.update`:
     if (!p?.bio?.trim()) missing.push("a bio");
     if (!p?.genres?.length) missing.push("at least one genre");
     if (!p?.avatarPhotoPath) missing.push("a profile photo");
-    const tracks = await ref.collection("tracks").get();
-    if (!tracks.docs.some((t) => ["processing", "pending_review", "approved"].includes(t.data().status))) {
-      missing.push("at least one track");
-    }
+    // This read (and the status check above) is not transactional with the
+    // ref.update below — a deleteTrack racing this call could remove the
+    // one qualifying track between the query and the update. That leaves
+    // the profile pending_review with no listenable content, which
+    // self-heals: an admin rejects it as empty and the musician resubmits.
+    // Accepted rather than wrapping the whole gate in a transaction.
+    const tracksSnap = await ref.collection("tracks")
+      .where("status", "in", [...LISTENABLE_TRACK_STATUSES]).limit(1).get();
+    if (tracksSnap.empty) missing.push("at least one track");
     if (missing.length > 0) {
-      throw new HttpsError("failed-precondition", `Add ${missing.join(", ")} before submitting.`);
+      const list = new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(missing);
+      throw new HttpsError("failed-precondition", `Add ${list} before submitting.`);
     }
   }
 ```
@@ -1846,19 +3254,97 @@ In `submitProfileForReview`, after the status check and before the `ref.update`:
 In `deleteProfile`, after `recursiveDelete` (which already removes the tracks subcollection and `private/booking`):
 
 ```ts
-  // Storage cascade — best-effort: any stragglers are unreachable (their doc
-  // paths are gone) and carry no PII beyond the content itself.
-  await Promise.allSettled([
-    bucket().deleteFiles({ prefix: `public/tracks/${profileId}/` }),
-    bucket().deleteFiles({ prefix: `review/tracks/${profileId}/` }),
-    bucket().deleteFiles({ prefix: `public/photos/${profileId}/` }),
-  ]);
+  // Storage cascade — best-effort. force: true is required: without it,
+  // deleteFiles aborts the ENTIRE prefix sweep on the first per-object
+  // error, silently abandoning every remaining object in that prefix; with
+  // it, deletion continues past individual failures and collects them
+  // instead. staging/audio/{uid}/... and staging/photos/{uid}/... are
+  // deliberately NOT swept here even though every {uid} is technically
+  // reachable — a members subcollection query, run before recursiveDelete
+  // removes it, would enumerate them — but the processUpload trigger always
+  // deletes its own staging object in a `finally` on every path (success,
+  // validation failure, or a crash-recovery retry), so a residual staging
+  // object means the trigger never fired at all, not that this cascade
+  // missed it. Those are backstopped by the Storage bucket's 24h lifecycle
+  // rule on staging/, which is a LAUNCH BLOCKER follow-up (not yet
+  // configured — see README).
+  const cascadeTargets = [
+    `public/tracks/${profileId}/`,
+    `review/tracks/${profileId}/`,
+    `public/photos/${profileId}/`,
+  ];
+  const results = await Promise.allSettled(
+    cascadeTargets.map((prefix) => bucket().deleteFiles({ prefix, force: true })));
+  results.forEach((r, i) => {
+    if (r.status !== "rejected") return;
+    // force: true's rejection reason is an ARRAY of per-object errors
+    // (@google-cloud/storage batches them), not a single Error — log each
+    // one individually rather than dumping the array as one opaque entry.
+    const errors = Array.isArray(r.reason) ? r.reason : [r.reason];
+    for (const e of errors) {
+      logDeleteFailure("deleteProfile", `storage cascade (${cascadeTargets[i]})`, cascadeTargets[i])(e);
+    }
+  });
 ```
+
+**Pre-merge security-gate finding (finding 3), fixed — added ahead of the
+cascade above, right after `requireProfileAdmin`:** `deleteProfile`'s
+draft/rejected-only rule used to be enforced only by the web dashboard's UI
+(which simply never rendered a delete button for a live profile) — the
+callable itself deleted whatever profile id a caller passed, as long as they
+were one of its admins. A co-admin could call `deleteProfile` directly on a
+LIVE `approved` profile and immediately free its handle for takeover, or
+delete a `pending_review` profile out from under a reviewer. Fixed with a
+server-side status check between `requireProfileAdmin` and the
+handle/`recursiveDelete` work:
+
+```ts
+  const snap = await profileRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
+  // Finding 3: this used to be enforced client-side only. draft/rejected are
+  // the only statuses with nothing publicly live to lose; pending_review and
+  // approved profiles must go through reviewProfile's reject (which, per the
+  // retroactive-unpublish fix above Task 9's original scope, now also
+  // accepts an already-approved profile) before they're deletable.
+  const status = snap.data()?.status;
+  if (status !== "draft" && status !== "rejected") {
+    throw new HttpsError("failed-precondition",
+      "Approved or in-review profiles can't be deleted — contact support / unpublish first.");
+  }
+```
+
+Same pass also replaced the top-of-function `typeof profileId !== "string" ||
+profileId.trim().length === 0` check with `@gatekeep/shared`'s `isValidDocId`
+(the char-class + length guard every other callable's `profileId` input
+uses), and added the `requireVerifiedEmail(req)` call `deleteProfile` was
+missing — every other member-mutation callable already gates on it, and its
+absence here meant an unverified account (e.g. one created but never
+confirmed) could still delete a profile it administers.
+
+New cases in `functions/test/profiles.test.ts`'s `describe("deleteProfile", ...)`
+block (above the storage-cascade describe below): an approved profile's
+delete attempt fails `failed-precondition` and the profile/handle both
+survive; a `pending_review` profile's delete fails the same way; draft and
+rejected profiles still delete successfully (unchanged happy path); an
+unverified-email caller is rejected before the membership check even runs;
+and a malformed profile id (`"../etc"`) is rejected `invalid-argument`.
+
+**Race-closing note (added post Task-8 hardening):** this storage cascade and
+Task 8's `reviewTrack` post-storage-guard are a matched pair. Without the
+guard, a `reviewTrack("approved")` that's mid-copy when `deleteProfile` runs
+here could land a new object in `public/tracks/{profileId}/` *after* this
+`deleteFiles({ prefix: ... })` sweep already ran, orphaning it forever (the
+doc — and thus every other cleanup path that keys off it — is already gone).
+`reviewTrack`'s post-storage guard (re-read the track doc; if it no longer
+exists, delete the public object it just wrote) closes that specific
+approve-after-delete window from the other side. Neither half is sufficient
+alone: this cascade handles tracks that were already public before the
+delete; the guard handles one that lands mid-flight during it.
 
 - [ ] **Step 4: Run tests**
 
 Run: `pnpm emu:test`
-Expected: all PASS, including foundation's existing profiles tests (curator path untouched; existing musician-draft tests in `profiles.test.ts` submit without portfolio content — **check**: foundation's `submitProfileForReview` tests use musician drafts. Update those existing tests to seed the minimum content the same way the new test does, or switch their fixtures to curator profiles — prefer curator fixtures where the test's subject is the status transition, not the gate.)
+Expected: all PASS, including foundation's existing profiles tests (curator path untouched; existing musician-draft tests in `profiles.test.ts` submit without portfolio content — **check**: foundation's `submitProfileForReview` tests use musician drafts. Update those existing tests to seed the minimum content the same way the new test does, or switch their fixtures to curator profiles — prefer curator fixtures where the test's subject is the status transition, not the gate. **As-built:** `profiles.test.ts`'s "moves draft to pending_review..." and "rejects re-submitting..." tests switched to a `curatorDraft()` fixture; `notifications.test.ts`'s three review-notification tests (approve/reject/multi-member fan-out) switched from musician to curator drafts for the same reason — their subject is notification behavior, not the gate.)
 
 - [ ] **Step 5: Commit**
 
@@ -1875,7 +3361,10 @@ git commit -m "feat(functions): musician submit minimum-content gate + deletePro
 - Create: `apps/web/src/lib/firebase-server.ts`
 - Create: `apps/web/app/u/[handle]/TrackPlayer.tsx`
 - Create: `apps/web/app/u/[handle]/portfolio.module.css`
+- Create: `apps/web/app/u/[handle]/not-found.tsx` (generic 404 UI for `notFound()`)
 - Modify: `apps/web/app/u/[handle]/page.tsx` (full rewrite: client → server component)
+- Modify: `apps/web/app/globals.css` (drop `overflow-x: hidden` from `body`, keep on `html`)
+- Modify: `apps/web/app/layout.tsx` (`metadataBase`, needed for relative canonical/OG URLs)
 - Modify: `apps/web/next.config.ts`
 
 **Before coding:** skim `apps/web/node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/page.md` and `04-functions/generate-metadata.md` (verified: `params` is a Promise; `PageProps<'/u/[handle]'>` is global after `next typegen`).
@@ -1906,7 +3395,10 @@ export function getServerFirebase() {
     ? getApp("server") : initializeApp(firebaseConfig, "server");
   const db = getFirestore(app);
   const storage = getStorage(app);
-  if (process.env.NODE_ENV !== "production") {
+  // FIREBASE_EMULATORS=1 lets `next start` (a production build) still target
+  // the emulators locally — useful for testing the production bundle without
+  // pointing it at real Firebase.
+  if (process.env.NODE_ENV !== "production" || process.env.FIREBASE_EMULATORS === "1") {
     connectFirestoreEmulator(db, "localhost", 8080);
     connectStorageEmulator(storage, "localhost", 9199);
   }
@@ -1919,33 +3411,49 @@ export function getServerFirebase() {
 
 ```tsx
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // One clip playing at a time across the page.
 let currentAudio: HTMLAudioElement | null = null;
 
+// null → no measured duration yet (still show nothing); 0 is a real
+// (if degenerate) duration and must render "0:00", not be treated as falsy.
+function formatDuration(durationSec: number | null): string {
+  if (durationSec === null) return "";
+  return `${Math.floor(durationSec / 60)}:${String(Math.round(durationSec % 60)).padStart(2, "0")}`;
+}
+
 export function TrackPlayer({ title, url, durationSec }: { title: string; url: string; durationSec: number | null }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
+
+  // Unmount cleanup: stop playback and release the module-level "now
+  // playing" pointer so a departed track can't block the next one.
+  useEffect(() => () => {
+    audioRef.current?.pause();
+    if (currentAudio === audioRef.current) currentAudio = null;
+  }, []);
+
   const toggle = () => {
     let audio = audioRef.current;
     if (!audio) {
       audio = new Audio(url);
       audio.onended = () => setPlaying(false);
       audio.onpause = () => setPlaying(false);
+      audio.onerror = () => setPlaying(false);
       audioRef.current = audio;
     }
     if (playing) { audio.pause(); return; }
     if (currentAudio && currentAudio !== audio) currentAudio.pause();
     currentAudio = audio;
-    void audio.play();
+    audio.play().catch(() => setPlaying(false));
     setPlaying(true);
   };
   return (
-    <button className="trackRow" onClick={toggle} aria-label={`${playing ? "Pause" : "Play"} ${title}`}>
+    <button className="trackRow" onClick={toggle} aria-pressed={playing} aria-label={`${playing ? "Pause" : "Play"} ${title}`}>
       <span aria-hidden>{playing ? "❚❚" : "▶"}</span>
       <span>{title}</span>
-      <span className="trackDur">{durationSec ? `0:${String(Math.round(durationSec)).padStart(2, "0")}` : ""}</span>
+      <span className="trackDur">{formatDuration(durationSec)}</span>
     </button>
   );
 }
@@ -1954,18 +3462,25 @@ export function TrackPlayer({ title, url, durationSec }: { title: string; url: s
 - [ ] **Step 3: Create `apps/web/app/u/[handle]/portfolio.module.css`**
 
 ```css
-/* Hybrid layout: hero-first single column on mobile, EPK split on desktop. */
+/* Hybrid layout: hero-first single column on mobile, EPK split on desktop.
+   Colors derive from the --foreground/--background tokens in globals.css so
+   the page follows light/dark scheme instead of hardcoding a light palette. */
 .page { max-width: 960px; margin: 0 auto; padding: 16px; }
-.cover { width: 100%; aspect-ratio: 16 / 6; object-fit: cover; border-radius: 12px; background: #ddd; }
+.cover { width: 100%; aspect-ratio: 16 / 6; object-fit: cover; border-radius: 12px;
+  background: color-mix(in srgb, var(--foreground) 12%, var(--background)); }
 .layout { display: grid; gap: 24px; grid-template-columns: 1fr; margin-top: 16px; }
 .identity { display: flex; flex-direction: column; gap: 8px; }
 .avatar { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; margin-top: -64px;
-  border: 4px solid #fff; background: #eee; }
-.genres { color: #666; }
+  border: 4px solid var(--background);
+  background: color-mix(in srgb, var(--foreground) 10%, var(--background)); }
+/* opacity (not a fixed gray) so it tracks --foreground across schemes and
+   still clears WCAG AA (4.5:1) text contrast against --background in both. */
+.genres { color: var(--foreground); opacity: 0.72; }
 .section { margin-top: 24px; }
 .bio { white-space: pre-wrap; line-height: 1.5; }
 .links { display: flex; gap: 12px; flex-wrap: wrap; }
 .links a { text-decoration: underline; }
+.empty { color: var(--foreground); opacity: 0.72; margin-top: 24px; }
 @media (min-width: 900px) {
   .layout { grid-template-columns: 300px 1fr; }
   .identity { position: sticky; top: 24px; align-self: start; }
@@ -1977,23 +3492,47 @@ Plus global styles for `.trackRow` (add to the module as `:global` or inline in 
 
 ```css
 .tracks :global(.trackRow) { display: flex; gap: 12px; align-items: center; width: 100%;
-  padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 6px;
-  background: none; font-size: 15px; cursor: pointer; text-align: left; }
-.tracks :global(.trackDur) { margin-left: auto; color: #888; }
+  padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--foreground) 20%, var(--background));
+  border-radius: 8px; margin-bottom: 6px; background: none; color: inherit; font: inherit;
+  font-size: 15px; cursor: pointer; text-align: left; }
+.tracks :global(.trackDur) { margin-left: auto; color: var(--foreground); opacity: 0.72; }
 ```
+
+Also remove `overflow-x: hidden` from the shared `html, body` rule in `apps/web/app/globals.css` —
+keep it on `html` only. A second copy on `body` silently breaks `position: sticky` in any
+descendant (this page's sticky `.identity` sidebar included), and `html`'s copy already propagates.
 
 - [ ] **Step 4: Rewrite `apps/web/app/u/[handle]/page.tsx` as a server component**
 
 ```tsx
+import { cache } from "react";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
+import { validateHandle, type ProfileDoc, type TrackDoc } from "@gatekeep/shared";
 import { TrackPlayer } from "./TrackPlayer";
 import styles from "./portfolio.module.css";
 
-export const dynamic = "force-dynamic"; // live approval state on every request
+// Takedowns/approvals need to propagate within about a minute, and this page
+// can't be gated behind App Check (it's plain SSR, no client attestation) —
+// so ISR bounds repeat Firestore/Storage reads to once per handle per
+// revalidate window instead of `force-dynamic`'s unbounded per-request reads.
+// (A flood of distinct/random handles still costs one cold render each —
+// this caps *repeat* hits on the same handle, not a broad crawl.)
+export const revalidate = 60;
+// Required for `revalidate` to take effect on a dynamic-params route: without
+// this, Next treats the route as fully dynamic (no caching, revalidate is a
+// no-op) per generate-static-params.md ("you must return an empty array ...
+// in order to revalidate (ISR) paths at runtime"). An empty array means no
+// paths are prerendered at build time; each handle is rendered (and cached)
+// on its first request instead. Verified: without this, `next build` marks
+// the route `ƒ` (fully dynamic); with it, `●` (SSG, ISR-eligible), and a
+// second request to the same handle comes back `x-nextjs-cache: HIT`.
+export function generateStaticParams() {
+  return [];
+}
 
 type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 type Loaded = {
@@ -2004,12 +3543,34 @@ type Loaded = {
 async function storageUrl(path: string | null | undefined): Promise<string | null> {
   if (!path) return null;
   try { return await getDownloadURL(ref(getServerFirebase().storage, path)); }
-  catch { return null; }
+  catch (e) {
+    // Swallowed to null on purpose (a missing/racing object shouldn't 500 the
+    // whole page), but a Storage-wide outage would otherwise silently empty
+    // every avatar/cover/track URL with no signal anywhere — log it.
+    console.warn("storageUrl failed", path, e);
+    return null;
+  }
 }
 
-async function loadProfile(handle: string): Promise<Loaded | null> {
-  const { db } = getServerFirebase();
+// cache() dedupes this per-request across generateMetadata and the page body —
+// both call loadProfile(handle) with the same argument, so React's per-request
+// cache means the Firestore/Storage reads only actually happen once.
+const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
+  const handle = rawHandle.toLowerCase(); // handles are stored lowercase
+  // **Pre-merge security-gate finding 5, fixed:** an unvalidated handle
+  // segment (e.g. "/@a/b" via an encoded slash, or "/@.." — Firestore
+  // rejects a bare ".." document id outright) used to reach
+  // `doc(db, "handles", handle)` directly. `doc()` throws synchronously on
+  // both shapes, which propagated past the try/catch's permission-denied /
+  // not-found special-casing below as an uncaught 500 instead of a normal
+  // 404 — and because it's a thrown error (not a `return null`), ISR never
+  // cached it either, so every hit on a malformed handle paid a fresh
+  // Firestore round-trip AND rendered as a 500. `validateHandle` (imported
+  // from `@gatekeep/shared`, same source of truth `createProfileDraft`
+  // enforces server-side) is the correct pre-doc() guard.
+  if (!validateHandle(handle).ok) return null;
   try {
+    const { db } = getServerFirebase();
     const h = await getDoc(doc(db, "handles", handle));
     if (!h.exists()) return null;
     const profileId = h.data().profileId as string;
@@ -2020,32 +3581,62 @@ async function loadProfile(handle: string): Promise<Loaded | null> {
     const trackSnap = await getDocs(query(
       collection(db, `profiles/${profileId}/tracks`),
       where("status", "==", "approved"), orderBy("order")));
-    const tracks = (await Promise.all(trackSnap.docs.map(async (t) => {
-      const d = t.data() as TrackDoc;
-      const url = await storageUrl(d.storagePath);
-      return url ? { id: t.id, title: d.title, durationSec: d.durationSec, url } : null;
-    }))).filter((t): t is LoadedTrack => t !== null);
-    return {
-      profile, tracks,
-      avatarUrl: await storageUrl(profile.portfolio?.avatarPhotoPath),
-      coverUrl: await storageUrl(profile.portfolio?.coverPhotoPath),
-    };
-  } catch { return null; } // permission-denied = not approved = not found
-}
+    const [tracks, avatarUrl, coverUrl] = await Promise.all([
+      Promise.all(trackSnap.docs.map(async (t) => {
+        const d = t.data() as TrackDoc;
+        const url = await storageUrl(d.storagePath);
+        return url ? { id: t.id, title: d.title, durationSec: d.durationSec, url } : null;
+      })).then((rows) => rows.filter((t): t is LoadedTrack => t !== null)),
+      storageUrl(profile.portfolio?.avatarPhotoPath),
+      storageUrl(profile.portfolio?.coverPhotoPath),
+    ]);
+    return { profile, tracks, avatarUrl, coverUrl };
+  } catch (e) {
+    // Duck-typed, not `e instanceof FirestoreError`: FirebaseError's own
+    // constructor runs `Object.setPrototypeOf(this, FirebaseError.prototype)`
+    // (an ES5-target workaround in @firebase/util, still present in the
+    // built SDK) which clobbers the prototype chain of every subclass
+    // instance — so a real FirestoreError never passes `instanceof
+    // FirestoreError`, only `instanceof FirebaseError`. Trusting that check
+    // would send every FirestoreError down the "rethrow as 500" path below,
+    // including permission-denied ones — turning "not approved" into a
+    // 404-vs-500 enumeration oracle for handle existence.
+    //
+    // permission-denied = the profile/track isn't approved (rules deny the
+    // read) — that's a legitimate "not found" from the public's point of
+    // view. not-found only fires if a doc vanishes between reads. Anything
+    // else (offline, a missing index, a backend outage) is a real failure —
+    // surface it as a truthful 500, not a silent "Not found" 200.
+    const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
+    if (code === "permission-denied" || code === "not-found") return null;
+    console.error("portfolio load failed", handle, e);
+    throw e;
+  }
+});
 
 export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise<Metadata> {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
-  if (!data) return { title: "Not found · GateKeep" };
+  // The page component calls notFound() for the same null case, which
+  // renders not-found.tsx's own `metadata` (its title) instead of whatever
+  // this function returns — so only robots survives here in practice; keep
+  // it anyway as a fallback for any caller that resolves metadata without
+  // rendering the page (e.g. a metadata-only route consumer).
+  if (!data) return { robots: { index: false } };
   const { profile } = data;
-  const description = profile.portfolio?.bio?.slice(0, 160)
-    || `${profile.name} on GateKeep — ${profile.portfolio?.genres?.join(", ")}`;
+  const pf = profile.portfolio;
+  const description = pf?.bio?.slice(0, 160)
+    || [`${profile.name} on GateKeep`, pf?.genres?.length ? pf.genres.join(", ") : null]
+      .filter(Boolean).join(" — ");
   return {
     title: `${profile.name} (@${profile.handle}) · GateKeep`,
     description,
+    alternates: { canonical: `/@${profile.handle}` },
     openGraph: {
       title: `${profile.name} on GateKeep`,
       description,
+      url: `/@${profile.handle}`,
+      type: "profile",
       ...(data.coverUrl ? { images: [data.coverUrl] } : {}),
     },
   };
@@ -2054,11 +3645,13 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
 export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
-  if (!data) {
-    return <main className={styles.page}><h1>Not found</h1><p>No profile at @{handle}.</p></main>;
-  }
+  if (!data) notFound(); // real HTTP 404 — data resolves before anything streams
   const { profile, tracks, avatarUrl, coverUrl } = data;
   const pf = profile.portfolio;
+  // Defense in depth: links are validated https-only at write time
+  // (validatePortfolioUpdate), but never trust stored data to render an
+  // <a href> unchecked.
+  const links = (pf?.externalLinks ?? []).filter((l) => l.url.startsWith("https://"));
   return (
     <main className={styles.page}>
       {coverUrl
@@ -2070,10 +3663,10 @@ export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
           <h1>{profile.name}</h1>
           <p>@{profile.handle}</p>
           {pf?.genres && pf.genres.length > 0 && <p className={styles.genres}>{pf.genres.join(" · ")}</p>}
-          {pf?.externalLinks && pf.externalLinks.length > 0 && (
+          {links.length > 0 && (
             <div className={styles.links}>
-              {pf.externalLinks.map((l) => (
-                <a key={l.url} href={l.url} rel="noopener noreferrer nofollow" target="_blank">{l.kind}</a>
+              {links.map((l) => (
+                <a key={`${l.kind}:${l.url}`} href={l.url} rel="noopener noreferrer nofollow" target="_blank">{l.kind}</a>
               ))}
             </div>
           )}
@@ -2091,12 +3684,99 @@ export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
               <p className={styles.bio}>{pf.bio}</p>
             </section>
           )}
+          {tracks.length === 0 && !pf?.bio && (
+            <p className={styles.empty}>This artist hasn&apos;t added content yet.</p>
+          )}
           {/* Shows: platform events only (spec §2). The events collection ships in
               sub-projects 4/6 — this section stays hidden until it has data. */}
         </div>
       </div>
     </main>
   );
+}
+```
+
+- [ ] **Step 4b: Create `apps/web/app/u/[handle]/not-found.tsx`**
+
+Rendered when `loadProfile()` returns `null` and the page calls `notFound()` — handle doesn't
+exist, the profile isn't approved, or it's not a musician profile. Deliberately generic: never
+confirms or denies that a draft exists at this handle. `notFound()` injects
+`<meta name="robots" content="noindex">` automatically, but NOT a title — this segment's own
+`metadata` export is what actually renders once `notFound()` throws (page.tsx's
+`generateMetadata` return value never reaches the response for that request), so the title has
+to live here.
+
+```tsx
+import type { Metadata } from "next";
+import styles from "./portfolio.module.css";
+
+export const metadata: Metadata = { title: "Not found · GateKeep" };
+
+export default function NotFound() {
+  return (
+    <main className={styles.page}>
+      <h1>Not found</h1>
+      <p>No profile at that handle.</p>
+    </main>
+  );
+}
+```
+
+- [ ] **Step 4c: Add a safe `metadataBase` fallback to the root layout**
+
+`alternates.canonical` and `openGraph.url` above are relative paths (`/@handle`) — resolving
+those to absolute URLs needs `metadataBase` set somewhere in the tree. Do NOT hardcode a
+`http://localhost:3000` fallback: that would ship a canonical/og:url pointing at localhost in
+production if `NEXT_PUBLIC_SITE_URL` is ever left unset. Instead fall back to Vercel's own
+auto-populated `VERCEL_PROJECT_PRODUCTION_URL` env var, and omit `metadataBase` entirely (not a
+guessed URL) if neither is set — verified empirically: `generateMetadata`'s relative
+`alternates.canonical`/`openGraph.url` degrade gracefully to relative `<link>`/`<meta>` values
+when `metadataBase` is absent (browsers/crawlers resolve those against the current origin; no
+build error was observed for this ISR/runtime-rendered route). Add to `apps/web/app/layout.tsx`:
+
+```ts
+// NEXT_PUBLIC_SITE_URL is the explicit override (set it once a production
+// domain exists); VERCEL_PROJECT_PRODUCTION_URL is Vercel's own env var,
+// available automatically on Vercel deployments without any config. If
+// neither is set, metadataBase is omitted entirely rather than falling back
+// to a localhost URL — a missing canonical/og:url is invisible, but a
+// canonical link pointing at http://localhost:3000 would ship broken SEO/
+// share metadata into production.
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
+  ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : undefined);
+
+export const metadata: Metadata = {
+  ...(siteUrl ? { metadataBase: new URL(siteUrl) } : {}),
+  title: "GateKeep",
+  description: "Find the music. Book the night.",
+};
+```
+
+- [ ] **Step 4d: Fix `overflow-x: hidden` in `apps/web/app/globals.css`**
+
+The existing `html, body { max-width: 100vw; overflow-x: hidden; }` rule breaks
+`position: sticky` on any descendant once both elements carry `overflow-x: hidden` (`html`'s
+copy already propagates). Split it so only `html` keeps `overflow-x: hidden`, and fold
+`max-width: 100vw` into the existing `body { ... }` rule below rather than adding a second
+`body` block:
+
+```css
+html {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  /* max-width: 100vw folded in here — no overflow-x: hidden (inherited from html). */
+  max-width: 100vw;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 ```
 
@@ -2123,9 +3803,24 @@ export default nextConfig;
 - [ ] **Step 6: Verify**
 
 Run: `pnpm --filter @gatekeep/web exec next typegen && pnpm --filter @gatekeep/web typecheck && pnpm --filter @gatekeep/web lint`
-Expected: green.
+Expected: green (0 errors — the two `@next/next/no-img-element` warnings on the avatar/cover
+`<img>` tags are expected and fine; Storage download URLs aren't eligible for `next/image`
+without a configured remote pattern).
 
-Manual (needs `pnpm emu` + seeded approved profile with an approved track): `pnpm --filter @gatekeep/web dev`, open `http://localhost:3000/@<handle>` — page renders server-side (view-source shows content), track plays, `/u/<handle>` redirects to `/@<handle>`.
+Manual (needs `pnpm emu` + seeded approved profile with an approved track): `pnpm --filter @gatekeep/web dev`, open `http://localhost:3000/@<handle>` — page renders server-side (view-source shows content), track plays, `/u/<handle>` redirects to `/@<handle>`. Also check: `/@<MixedCaseHandle>` resolves the same profile (handles are lowercased before the Firestore lookup), and a nonexistent handle (`/@doesnotexist`) returns a true HTTP 404 (`curl -s -o /dev/null -w "%{http_code}"`), not a 200 with "not found" text in the body.
+
+Also seed a **`pending_review`** (not `approved`) profile and request its handle — firestore.rules
+denies the public read (`permission-denied`), which must still resolve to a real HTTP 404, not a
+500. This is the case the duck-typed error narrowing in `loadProfile`'s catch exists for; a 500
+here instead of a 404 is a live enumeration oracle (free handle = 404, taken-but-unapproved
+handle = 500) and was caught exactly this way in review.
+
+To verify the ISR/cache-HIT behavior specifically, use a production build rather than `next dev`
+(dev always renders fresh): `pnpm --filter @gatekeep/web build`, confirm the route table shows
+`● /u/[handle]` ("SSG ... uses generateStaticParams") rather than `ƒ`, then
+`FIREBASE_EMULATORS=1 pnpm --filter @gatekeep/web start` and `curl -sD - http://localhost:3000/@<handle>`
+twice — first response `x-nextjs-cache: MISS` with `Cache-Control: s-maxage=60, ...`, second
+response `x-nextjs-cache: HIT`.
 
 - [ ] **Step 7: Commit**
 
@@ -2146,7 +3841,47 @@ git commit -m "feat(web): server-rendered public portfolio with @handle vanity U
 - Create: `apps/web/app/join/page.tsx`
 - Modify: `apps/web/app/dashboard/page.tsx`
 
+**Handoff from Task 9 (server gate — `functions/src/profiles.ts`):**
+`submitProfileForReview` now rejects a musician submit unless the profile has
+a bio, at least one genre, an avatar photo, AND at least one track whose
+status is `pending_review` or `approved` — explicitly NOT `processing` (a
+track doc that's still transcoding, or whose upload was abandoned, does not
+count). If this task's "Submit for review" button implements any client-side
+disable/lock state ahead of clicking submit (the current step snippets below
+render the button unconditionally on `status === "draft"` and surface the
+server's rejection message via `window.alert`), that lock must mirror the
+server gate exactly: bio non-empty, ≥1 genre, avatar set, AND ≥1 track in
+`pending_review`/`approved` — which means waiting for a just-uploaded track's
+transcode to finish (poll or listen for status leaving `processing`) before
+the lock releases, not merely confirming the upload request succeeded.
+Getting this wrong in either direction is a real UX bug: locking on
+`processing` alone lets the button unlock before there's anything to
+review; not polling at all leaves the button clickable through a doomed
+submit with no feedback until the round-trip fails. Also see Task 14's
+handoff note — this same lock must be replicated on mobile, not just web.
+
+**Delete-draft affordance:** `deleteProfile` (built in Task 9's foundation
+work, before this plan) has zero client call sites as of this task —
+foundation-rulings.md names it the intended cleanup path for an
+orphaned/unwanted draft, but nothing in either app surfaces it yet. This
+wizard (and/or the editor page, for a draft that's gone stale) should offer
+a "delete this draft" action wired to `deleteProfile`, so a musician who
+bails partway through onboarding isn't stuck with a permanent handle-holding
+draft and no way to release it short of an admin/support action. See Task
+14's handoff note — mobile needs the same affordance.
+
 - [ ] **Step 1: Create `apps/web/src/portfolio/TrimUploader.tsx`**
+
+Final code, post TWO rounds of quality-review fixes: decode-error handling,
+an empty-vs-known-bad content-type distinction (empty is let through — some
+OSes report "" for legit m4a/flac — but a non-empty unrecognized type is
+still rejected), a `duration < 1` reject, stale-metadata reset, a clamped
+clip window with a "whole file" fallback under 30s (also covering a
+computed slider max of exactly 0), a re-pickable file input, mid-upload
+failure cleanup via `deleteTrack`, and — the second round's Important
+finding — the try block now closes immediately after `await task` resolves,
+with the success-path side effects (including the caller-supplied `onDone`)
+running OUTSIDE the try/catch:
 
 ```tsx
 "use client";
@@ -2154,7 +3889,12 @@ import { useEffect, useRef, useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
-import { validateTrackCreate, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput } from "@gatekeep/shared";
+import {
+  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput,
+} from "@gatekeep/shared";
+
+const UNREADABLE_MSG = "Couldn't read that audio file — try mp3, wav, m4a, aac, flac, or ogg.";
+const UNSUPPORTED_MSG = "Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.";
 
 // Pick a local audio file, preview it, drag the 30s window, upload the original.
 // The server pipeline trims/transcodes; we never keep the full track.
@@ -2167,6 +3907,11 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrl = useRef<string | null>(null);
+  // ontimeupdate closes over state — keep the live value in a ref so the
+  // handler (registered once per file, in pick()) always sees the current
+  // slider position instead of the value at the time it was attached.
+  const startRef = useRef(0);
+  useEffect(() => { startRef.current = startSec; }, [startSec]);
 
   useEffect(() => () => { // revoke on unmount
     if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
@@ -2175,11 +3920,40 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
 
   const pick = (f: File) => {
     setError(null);
+    // Reset stale metadata from any previously picked file immediately —
+    // otherwise a leftover `duration` from the last file renders a window
+    // slider against the WRONG file's length until (if ever) this file's
+    // onloadedmetadata fires.
+    setDuration(0);
+    // Reject only a KNOWN-bad type — a non-empty MIME type outside the
+    // allowlist (e.g. "video/mp4", "text/plain"). An EMPTY f.type is let
+    // through on purpose: some OSes/browsers report "" for legitimate but
+    // less common containers (m4a, flac) instead of a proper audio/* MIME
+    // type, and the server doesn't trust this field either way — ffmpeg
+    // sniffs the actual container/codec from the bytes server-side. `pick`
+    // is only a cheap client-side triage; gating on "empty" specifically
+    // would reject real files this allowlist is supposed to accept. (See
+    // upload() below, which falls back to "audio/mpeg" as a generic-but-
+    // sniffable contentType for the empty case.)
+    if (f.type && !(AUDIO_CONTENT_TYPES as readonly string[]).includes(f.type)) {
+      setError(UNSUPPORTED_MSG);
+      return;
+    }
     if (f.size > MAX_AUDIO_UPLOAD_BYTES) { setError("File is over 50 MB."); return; }
     if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
     objectUrl.current = URL.createObjectURL(f);
     const audio = new Audio(objectUrl.current);
-    audio.onloadedmetadata = () => setDuration(audio.duration);
+    audio.onloadedmetadata = () => {
+      const d = audio.duration;
+      // A file can pass the content-type check above yet still be
+      // corrupt/unplayable (or report a nonsensical duration) — don't let
+      // that silently produce a near-0-length or NaN clip window. `< 1`,
+      // not `<= 0`: a sub-1-second "clip" isn't practically previewable or
+      // trimmable either, so it's treated the same as unreadable.
+      if (!Number.isFinite(d) || d < 1) { setError(UNREADABLE_MSG); return; }
+      setDuration(d);
+    };
+    audio.onerror = () => setError(UNREADABLE_MSG);
     // Preview stops at the end of the 30s window.
     audio.ontimeupdate = () => {
       if (audio.currentTime >= Math.min(startRef.current + MAX_CLIP_SECONDS, audio.duration)) audio.pause();
@@ -2190,9 +3964,6 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
     setStartSec(0);
     if (!title) setTitle(f.name.replace(/\.[^.]+$/, ""));
   };
-  // ontimeupdate closes over state — keep the live value in a ref.
-  const startRef = useRef(0);
-  useEffect(() => { startRef.current = startSec; }, [startSec]);
 
   const preview = () => {
     const a = audioRef.current;
@@ -2205,45 +3976,95 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
     if (!file) return;
     const input: CreateTrackInput = {
       profileId, title: title.trim(), startSec: Math.floor(startSec),
+      // file.type can legitimately be "" (see pick()'s comment above) — fall
+      // back to a generic-but-sniffable contentType rather than sending an
+      // empty string the server would reject outright; ffmpeg determines
+      // the real container/codec from the bytes regardless of this value.
       sizeBytes: file.size, contentType: file.type || "audio/mpeg",
     };
     const v = validateTrackCreate(input);
     if (!v.ok) { setError(v.reason); return; }
     setBusy("Requesting upload…"); setError(null);
+    // Tracked outside the try so the catch below can tell "createTrack
+    // itself failed" (created stays null — nothing to clean up) apart from
+    // "the track doc exists but the storage upload after it failed" (created
+    // is set — the doc must be cleaned up, or it lingers as a dead
+    // "Processing…" row with nothing behind it).
+    let created: { trackId: string; uploadPath: string } | null = null;
     try {
       const { functions, storage } = getFirebase();
       const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
         functions, "createTrack")(input);
+      created = data;
+      // uploadPath comes straight from createTrack's response — never
+      // reconstructed client-side, so the client and server always agree on
+      // the staging object path even if stagingAudioPath's shape changes.
       const task = uploadBytesResumable(storageRef(storage, data.uploadPath), file,
         { contentType: input.contentType });
       task.on("state_changed",
         (s) => setBusy(`Uploading… ${Math.round((s.bytesTransferred / s.totalBytes) * 100)}%`));
       await task;
-      setBusy(null); setFile(null); setTitle("");
-      onDone();
+      // The try closes HERE, right after the upload itself resolves — the
+      // success-path side effects below run OUTSIDE the try/catch on
+      // purpose. onDone() is a callback supplied by the parent; if it (or
+      // anything else down here) were to throw while still inside the try,
+      // the catch below would see `created` set and delete the track this
+      // upload just successfully finished, mistaking a downstream error for
+      // an upload failure.
     } catch (e) {
       setBusy(null);
-      setError(e instanceof Error ? e.message : "Upload failed — try again.");
+      console.error(e); // the alert below is deliberately generic — keep the real error in the console
+      if (created) {
+        try {
+          await httpsCallable(getFirebase().functions, "deleteTrack")({ profileId, trackId: created.trackId });
+          setError("Upload failed — try again.");
+        } catch {
+          // Best-effort cleanup itself failed — tell the musician exactly
+          // what's left behind instead of a generic message that leaves a
+          // dead "Processing…" row unexplained.
+          setError("Upload failed — delete the stuck 'Processing…' entry below and try again.");
+        }
+      } else {
+        setError(e instanceof Error ? e.message : "Upload failed — try again.");
+      }
+      return;
     }
+    setBusy(null); setFile(null); setTitle("");
+    if (objectUrl.current) { URL.revokeObjectURL(objectUrl.current); objectUrl.current = null; }
+    onDone();
   };
 
   const windowEnd = Math.min(startSec + MAX_CLIP_SECONDS, duration);
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const sliderMax = Math.max(0, Math.floor(duration - MAX_CLIP_SECONDS));
+  // Also covers the case where duration is JUST over 30s (e.g. 30.4s): the
+  // slider's max would compute to 0 — a degenerate range with nowhere to
+  // drag — so treat that the same as "whole file" instead of rendering a
+  // slider that can't move.
+  const wholeFileUsed = duration > 0 && (duration <= MAX_CLIP_SECONDS || sliderMax === 0);
   return (
     <div style={{ border: "1px dashed #bbb", borderRadius: 8, padding: 16, display: "grid", gap: 8 }}>
       <strong>Add a track (30-second snippet)</strong>
-      <input type="file" accept="audio/*"
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) pick(f); }} />
+      <input type="file" accept={AUDIO_CONTENT_TYPES.join(",")}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = ""; // allows re-picking the same file after an error/removal
+          if (f) pick(f);
+        }} />
       {file && duration > 0 && (
         <>
           <input placeholder="Track title" value={title} maxLength={80}
             onChange={(e) => setTitle(e.target.value)} />
-          <label>
-            Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})
-            <input type="range" min={0} max={Math.max(0, Math.floor(duration - 1))} step={1}
-              value={startSec} style={{ width: "100%" }}
-              onChange={(e) => setStartSec(Number(e.target.value))} />
-          </label>
+          {wholeFileUsed ? (
+            <p style={{ margin: 0 }}>Whole file will be used (30 seconds or less)</p>
+          ) : (
+            <label>
+              Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})
+              <input type="range" min={0} max={sliderMax} step={1}
+                value={startSec} style={{ width: "100%" }}
+                onChange={(e) => setStartSec(Number(e.target.value))} />
+            </label>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={preview}>▶ Preview window</button>
             <button type="button" onClick={() => audioRef.current?.pause()}>Stop</button>
@@ -2259,13 +4080,17 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
 
 - [ ] **Step 2: Create `apps/web/src/portfolio/TrackManager.tsx`**
 
+Final code, post quality-review fix pass (an in-flight `busy` lock across
+move/rename/delete, `MAX_TRACKS` instead of a hardcoded `10`, and a trimmed,
+empty-safe rename prompt):
+
 ```tsx
 "use client";
 import { useEffect, useState } from "react";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import type { TrackDoc } from "@gatekeep/shared";
+import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
 
 type Row = TrackDoc & { id: string };
@@ -2277,6 +4102,12 @@ const STATUS_LABEL: Record<TrackDoc["status"], string> = {
 
 export function TrackManager({ profileId }: { profileId: string }) {
   const [tracks, setTracks] = useState<Row[]>([]);
+  // Single flag, not per-row: reorderTracks affects TWO rows at once (the
+  // swapped pair), so a per-row lock wouldn't stop a second click from
+  // racing the first move's still-in-flight call against a still-stale
+  // `tracks` array. Locking every action button while ANY call is in
+  // flight is simpler and fully covers that.
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
@@ -2285,19 +4116,26 @@ export function TrackManager({ profileId }: { profileId: string }) {
   }, [profileId]);
 
   const call = async (name: string, data: object) => {
+    setBusy(true);
     try { await httpsCallable(getFirebase().functions, name)(data); }
     catch (e) { window.alert(e instanceof Error ? e.message : "That didn't work — try again."); }
+    finally { setBusy(false); }
   };
   const move = (i: number, dir: -1 | 1) => {
-    const a = tracks[i], b = tracks[i + dir];
-    if (!a || !b) return;
-    void call("updateTrack", { profileId, trackId: a.id, order: b.order });
-    void call("updateTrack", { profileId, trackId: b.id, order: a.order });
+    if (busy || !tracks[i] || !tracks[i + dir]) return;
+    // A single reorderTracks call with the whole reordered id list, not two
+    // sequential updateTrack({ order }) calls — updateTrack no longer takes
+    // an order field (reorderTracks owns ordering, atomically), and two
+    // separate calls would be non-atomic (a reload between them leaves two
+    // tracks sharing an order) and a no-op on ties.
+    const ids = tracks.map((t) => t.id);
+    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+    void call("reorderTracks", { profileId, trackIds: ids });
   };
 
   return (
     <section style={{ display: "grid", gap: 8 }}>
-      <h2>Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/10)</h2>
+      <h2>Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})</h2>
       {tracks.map((t, i) => (
         <div key={t.id} style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
           <strong>{t.title}</strong>{" "}
@@ -2309,13 +4147,13 @@ export function TrackManager({ profileId }: { profileId: string }) {
             <p style={{ margin: "4px 0 0", color: "#991b1b" }}>{t.rejectionReason ?? t.failureReason}</p>
           )}
           <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
-            <button onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
-            <button onClick={() => move(i, 1)} disabled={i === tracks.length - 1}>↓</button>
-            <button onClick={() => {
-              const title = window.prompt("New title:", t.title);
+            <button onClick={() => move(i, -1)} disabled={busy || i === 0}>↑</button>
+            <button onClick={() => move(i, 1)} disabled={busy || i === tracks.length - 1}>↓</button>
+            <button disabled={busy} onClick={() => {
+              const title = window.prompt("New title:", t.title)?.trim();
               if (title) void call("updateTrack", { profileId, trackId: t.id, title });
             }}>Rename</button>
-            <button onClick={() => {
+            <button disabled={busy} onClick={() => {
               if (window.confirm(`Delete "${t.title}"?`)) void call("deleteTrack", { profileId, trackId: t.id });
             }} style={{ color: "#dc2626" }}>Delete</button>
           </div>
@@ -2329,15 +4167,33 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
 - [ ] **Step 3: Create `apps/web/src/portfolio/PortfolioForms.tsx`**
 
+Final code, post TWO rounds of quality-review fixes: `BioGenresForm` omits
+`genres` from the payload entirely when none are picked yet (a bio-only
+save has to work), and — second round — blocks the save with an explicit
+message if genres were previously set and the musician deselects all of
+them (silently omitting would leave the OLD value in place while looking
+saved); `LinksForm` clears its url input only on success and gets a busy
+lock; `PhotoUploader` takes the current photo path as a prop (not a
+boolean), enforces the 10MB client-side cap, uses a visually-hidden (not
+`display:none`) file input for keyboard focus with an `e.target.value = ""`
+reset so the same file can be re-picked after a failure, shows a
+"Processing…" state that persists until the path prop itself changes, and —
+second round's Important finding — bounds that wait to 60s (some pipeline
+failures never write anything back to the doc at all, which would otherwise
+deadlock the control permanently) with a "still processing, try a smaller
+one" fallback hint; `BookingForm` keeps rate inputs as raw strings
+(converting to cents only in `save()`), rejects a `$0` rate client-side, and
+adds `step`+a rounding note to the radius/minutes inputs:
+
 ```tsx
 "use client";
-import { useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
-  GENRES, GIG_TYPES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind,
+  GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
+  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind, type RateAmount,
 } from "@gatekeep/shared";
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
@@ -2353,10 +4209,28 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   const toggleGenre = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
   const save = async () => {
-    const v = validatePortfolioUpdate({ profileId, bio, genres });
+    if (genres.length === 0 && (initial?.genres?.length ?? 0) > 0) {
+      // Genres were saved before and the musician has now deselected all of
+      // them. The omit-when-empty branch below exists for the never-set-yet
+      // case (a bio-only save while onboarding); reusing it here would
+      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side —
+      // which looks to the musician like their change was saved (the chips
+      // show empty) when it wasn't. Block it with an explicit message
+      // instead.
+      window.alert("Keep at least one genre — it's required for review.");
+      return;
+    }
+    // Omit genres entirely (rather than sending []) when none are picked
+    // yet — a bio-only save has to work while a musician is still filling
+    // in the rest of the form; validatePortfolioUpdate (and the server)
+    // both treat an omitted field as "leave it alone", but an explicit []
+    // fails the 1-3-genres check.
+    const payload = genres.length > 0 ? { profileId, bio, genres } : { profileId, bio };
+    const v = validatePortfolioUpdate(payload);
     if (!v.ok) { window.alert(v.reason); return; }
     setBusy(true);
-    if (await callOrAlert("updatePortfolio", { profileId, bio, genres })) onSaved?.();
+    if (await callOrAlert("updatePortfolio", payload)) onSaved?.();
     setBusy(false);
   };
   return (
@@ -2383,83 +4257,174 @@ export function LinksForm({ profileId, initial }:
   const [links, setLinks] = useState<ExternalLink[]>(initial?.externalLinks ?? []);
   const [kind, setKind] = useState<ExternalLinkKind>("spotify");
   const [url, setUrl] = useState("");
-  const save = async (next: ExternalLink[]) => {
+  const [busy, setBusy] = useState(false);
+  const save = async (next: ExternalLink[]): Promise<boolean> => {
     const v = validatePortfolioUpdate({ profileId, externalLinks: next });
-    if (!v.ok) { window.alert(v.reason); return; }
-    if (await callOrAlert("updatePortfolio", { profileId, externalLinks: next })) setLinks(next);
+    if (!v.ok) { window.alert(v.reason); return false; }
+    setBusy(true);
+    const ok = await callOrAlert("updatePortfolio", { profileId, externalLinks: next });
+    if (ok) setLinks(next);
+    setBusy(false);
+    return ok;
   };
   return (
     <section style={{ display: "grid", gap: 8 }}>
       <h2>Links</h2>
       {links.map((l, i) => (
-        <p key={`${l.url}-${i}`} style={{ margin: 0 }}>
+        <p key={`${l.kind}-${l.url}-${i}`} style={{ margin: 0 }}>
           {l.kind}: {l.url}{" "}
-          <button onClick={() => void save(links.filter((_, j) => j !== i))}>Remove</button>
+          <button disabled={busy} onClick={() => void save(links.filter((_, j) => j !== i))}>Remove</button>
         </p>
       ))}
       <div style={{ display: "flex", gap: 6 }}>
-        <select value={kind} onChange={(e) => setKind(e.target.value as ExternalLinkKind)}>
+        <select value={kind} disabled={busy} onChange={(e) => setKind(e.target.value as ExternalLinkKind)}>
           <option value="spotify">Spotify</option><option value="youtube">YouTube</option>
           <option value="instagram">Instagram</option><option value="website">Website</option>
         </select>
-        <input placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} style={{ flex: 1 }} />
-        <button onClick={() => { if (url) { void save([...links, { kind, url }]); setUrl(""); } }}>Add</button>
+        <input placeholder="https://…" value={url} disabled={busy} onChange={(e) => setUrl(e.target.value)} style={{ flex: 1 }} />
+        <button disabled={busy} onClick={async () => {
+          if (!url) return;
+          // Clear the input only once the save actually succeeds — clearing
+          // unconditionally (as before) silently threw away what the
+          // musician typed on a validation failure or a network error.
+          if (await save([...links, { kind, url }])) setUrl("");
+        }}>Add</button>
       </div>
     </section>
   );
 }
 
-export function PhotoUploader({ profileId, uid, kind }:
-  { profileId: string; uid: string; kind: "avatar" | "cover" }) {
+// Off-screen but still in the layout/tab order (unlike display:none, which
+// pulls the element out of tab order entirely) — the visible label text
+// stays clickable via <label>/<input> association, but keyboard users can
+// still Tab to and activate the file input directly.
+const VISUALLY_HIDDEN_INPUT: CSSProperties = {
+  position: "absolute", width: 1, height: 1, padding: 0, margin: -1,
+  overflow: "hidden", whiteSpace: "nowrap", border: 0, opacity: 0,
+};
+
+export function PhotoUploader({ profileId, uid, kind, currentPath }:
+  { profileId: string; uid: string; kind: "avatar" | "cover"; currentPath: string | null }) {
   const [busy, setBusy] = useState(false);
+  // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
+  // seconds after the storage upload lands — we don't know its eventual
+  // value client-side, so instead we keep showing "Processing…" until the
+  // `currentPath` PROP itself moves. `baseline` tracks the last path we've
+  // actually seen; when it disagrees with the incoming prop we're mid-render
+  // with fresh data, so we adjust state right here (not in a useEffect —
+  // this is React's documented "adjust state while rendering" escape hatch
+  // for resetting state when a prop changes: since it runs synchronously
+  // before commit, React just re-renders once more with the corrected
+  // state instead of committing a stale frame first). This also closes the
+  // double-upload race: while awaiting, the input is disabled instead of
+  // sitting idle and inviting a second upload before the first has landed.
+  const [awaiting, setAwaiting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [baseline, setBaseline] = useState(currentPath);
+  if (currentPath !== baseline) {
+    setBaseline(currentPath);
+    if (awaiting) setAwaiting(false);
+    if (timedOut) setTimedOut(false);
+  }
+  // Bounds the wait: some failures never write ANYTHING back to the profile
+  // doc (an oversized/corrupt image the resize step rejects outright before
+  // ever reaching a write, for instance), so `currentPath` would never move
+  // and `awaiting` — and the disabled input — would otherwise deadlock
+  // permanently. This is a legitimate useEffect (subscribing to an external
+  // timer and calling setState from ITS callback, not synchronously in the
+  // effect body), unlike the render-time adjustment above.
+  useEffect(() => {
+    if (!awaiting) return;
+    const t = setTimeout(() => { setAwaiting(false); setTimedOut(true); }, 60_000);
+    return () => clearTimeout(t);
+  }, [awaiting]);
+
   const upload = async (f: File) => {
+    if (f.size > MAX_PHOTO_UPLOAD_BYTES) { window.alert("Photos must be under 10 MB."); return; }
     setBusy(true);
+    setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
       const path = stagingPhotoPath(uid, profileId, kind, crypto.randomUUID());
       await uploadBytes(storageRef(storage, path), f, { contentType: f.type });
+      setAwaiting(true);
       // The photo pipeline resizes/strips and updates the profile doc; the
-      // parent page's snapshot listener picks the new path up automatically.
+      // parent page's snapshot listener feeds the new path back in as
+      // `currentPath`, which the render-time check above picks up and
+      // flips `awaiting` back to false.
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Upload failed.");
     } finally { setBusy(false); }
   };
+  const processing = awaiting;
   return (
-    <label style={{ display: "inline-block" }}>
-      {busy ? "Uploading…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
-      <input type="file" accept="image/jpeg,image/png,image/webp" style={{ display: "none" }} disabled={busy}
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); }} />
-    </label>
+    <>
+      <label style={{ display: "inline-block" }}>
+        {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
+        {currentPath && !processing && <span style={{ color: "#16a34a" }}> ✓</span>}
+        <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = ""; // allows re-picking the same file (e.g. after a failed upload)
+            if (f) void upload(f);
+          }} />
+      </label>
+      {timedOut && (
+        <span style={{ display: "block", color: "#92400e", fontSize: 12 }}>
+          Still processing — if your photo doesn&apos;t appear, try a smaller one.
+        </span>
+      )}
+    </>
   );
 }
 
+type RateKey = "perHour" | "perSong" | "perSet";
+type RateInput = { amount: string; note: string | null };
+const rateInputFrom = (r: RateAmount | null | undefined): RateInput =>
+  r ? { amount: (r.amountCents / 100).toString(), note: r.note ?? null } : { amount: "", note: null };
+
 export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
-  const [rates, setRates] = useState(initial?.rates ??
-    { perHour: null, perSong: null, perSet: null });
+  // Raw strings, not derived cents: converting dollars -> cents -> back to a
+  // display string on every keystroke (the old approach) fights the user
+  // mid-entry — e.g. typing "1.50" round-trips through 150 cents and
+  // re-renders as "1.5", dropping the trailing zero and disrupting the
+  // cursor. Conversion now happens exactly once, in save().
+  const [rateInputs, setRateInputs] = useState<Record<RateKey, RateInput>>({
+    perHour: rateInputFrom(initial?.rates.perHour),
+    perSong: rateInputFrom(initial?.rates.perSong),
+    perSet: rateInputFrom(initial?.rates.perSet),
+  });
   const [prefs, setPrefs] = useState(initial?.preferences ??
     { gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null,
       bringsOwnPA: null, availabilityPattern: null });
   const [busy, setBusy] = useState(false);
 
-  const rateField = (key: "perHour" | "perSong" | "perSet", label: string) => (
+  const rateField = (key: RateKey, label: string) => (
     <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
       <span style={{ width: 120 }}>{label}</span>
       $<input type="number" min={0} step="0.01" style={{ width: 100 }}
-        value={rates[key] ? (rates[key]!.amountCents / 100).toString() : ""}
-        onChange={(e) => {
-          const dollars = e.target.value;
-          setRates((r) => ({ ...r, [key]: dollars === "" ? null
-            : { amountCents: Math.round(Number(dollars) * 100), note: r[key]?.note ?? null } }));
-        }} />
+        value={rateInputs[key].amount}
+        onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: e.target.value } }))} />
       <input placeholder="note (optional)" maxLength={200} style={{ flex: 1 }}
-        value={rates[key]?.note ?? ""} disabled={!rates[key]}
-        onChange={(e) => setRates((r) => ({ ...r,
-          [key]: r[key] ? { ...r[key]!, note: e.target.value || null } : null }))} />
+        value={rateInputs[key].note ?? ""} disabled={rateInputs[key].amount.trim() === ""}
+        onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: e.target.value || null } }))} />
     </label>
   );
 
   const save = async () => {
+    const rates: { perHour: RateAmount | null; perSong: RateAmount | null; perSet: RateAmount | null } =
+      { perHour: null, perSong: null, perSet: null };
+    for (const key of ["perHour", "perSong", "perSet"] as const) {
+      const raw = rateInputs[key].amount.trim();
+      if (raw === "") continue; // stays null — field left blank on purpose
+      const dollars = Number(raw);
+      if (!Number.isFinite(dollars) || dollars <= 0) {
+        window.alert("Rates must be more than $0, or leave the field blank.");
+        return;
+      }
+      rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
+    }
     const input = { profileId, rates, preferences: prefs };
     const v = validateBookingUpdate(input);
     if (!v.ok) { window.alert(v.reason); return; }
@@ -2490,20 +4455,22 @@ export function BookingForm({ profileId, initial }:
           </button>
         ))}
       </div>
-      <label>Travel radius (km): <input type="number" min={0} max={3000} style={{ width: 90 }}
+      <label>Travel radius (km): <input type="number" min={0} max={3000} step={1} style={{ width: 90 }}
         value={prefs.travelRadiusKm ?? ""}
         onChange={(e) => setPrefs((p) => ({ ...p,
-          travelRadiusKm: e.target.value === "" ? null : Number(e.target.value) }))} /></label>
+          travelRadiusKm: e.target.value === "" ? null : Math.round(Number(e.target.value)) }))} />
+        <span style={{ color: "#666", fontSize: 12 }}> (whole numbers only)</span></label>
       <label>Act size:{" "}
         <select value={prefs.actSize ?? ""} onChange={(e) => setPrefs((p) => ({ ...p,
           actSize: (e.target.value || null) as typeof p.actSize }))}>
           <option value="">—</option><option value="solo">Solo</option>
           <option value="duo">Duo</option><option value="band">Band</option>
         </select></label>
-      <label>Typical set (minutes): <input type="number" min={15} max={480} style={{ width: 90 }}
+      <label>Typical set (minutes): <input type="number" min={15} max={480} step={1} style={{ width: 90 }}
         value={prefs.typicalSetMinutes ?? ""}
         onChange={(e) => setPrefs((p) => ({ ...p,
-          typicalSetMinutes: e.target.value === "" ? null : Number(e.target.value) }))} /></label>
+          typicalSetMinutes: e.target.value === "" ? null : Math.round(Number(e.target.value)) }))} />
+        <span style={{ color: "#666", fontSize: 12 }}> (whole numbers only)</span></label>
       <label>Bring own PA:{" "}
         <select value={prefs.bringsOwnPA === null ? "" : String(prefs.bringsOwnPA)}
           onChange={(e) => setPrefs((p) => ({ ...p,
@@ -2526,17 +4493,57 @@ export function BookingForm({ profileId, initial }:
 
 - [ ] **Step 4: Create the editor page `apps/web/app/dashboard/portfolio/[profileId]/page.tsx`**
 
+Final code, post quality-review fix pass: a `missingForSubmit()` helper that
+mirrors `submitProfileForReview`'s gate exactly (own tracks subscription,
+not borrowed from `TrackManager`) with an `Intl.ListFormat` missing-items
+hint matching the server's message construction; a "Delete this profile"
+affordance for `draft`/`rejected`; `key={profileId}` on the three
+`initial`-seeded forms so an in-app navigation between two profiles' editors
+(same route/component, different params — this does NOT remount) can't leak
+one profile's form state onto another's; and a render-time (not
+`useEffect`) reset of `booking` back to `"loading"` on a profileId change,
+paired with a `cancelled` guard on the booking `getDoc` so a slow fetch for
+the OLD profileId can't overwrite the new one's state after the fact:
+
 ```tsx
 "use client";
 import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { doc, onSnapshot, getDoc } from "firebase/firestore";
+import { doc, onSnapshot, getDoc, collection, query, orderBy } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../../../src/portfolio/PortfolioForms";
 import { TrackManager } from "../../../../src/portfolio/TrackManager";
-import type { ProfileDoc, BookingDoc } from "@gatekeep/shared";
+import type { ProfileDoc, BookingDoc, TrackDoc } from "@gatekeep/shared";
+
+type TrackRow = TrackDoc & { id: string };
+
+// Mirrors functions/src/profiles.ts's submitProfileForReview gate EXACTLY:
+// bio, >=1 genre, an avatar photo, AND >=1 track that's actually listenable
+// (status pending_review or approved). A still-transcoding "processing"
+// track deliberately does NOT count — see the server's
+// LISTENABLE_TRACK_STATUSES, which excludes it because createTrack writes
+// the doc before the client finishes uploading bytes, so "processing" can
+// be an abandoned upload with nothing behind it. Getting this out of sync
+// with the server is a real UX bug in either direction: locking on
+// "processing" alone lets the button unlock before there's anything to
+// review; not checking tracks at all leaves it clickable through a doomed
+// submit with no feedback until the round-trip fails.
+function missingForSubmit(profile: ProfileDoc, tracks: TrackRow[]): string[] {
+  const missing: string[] = [];
+  const pf = profile.portfolio;
+  if (!pf?.bio?.trim()) missing.push("a bio");
+  if (!pf?.genres?.length) missing.push("at least one genre");
+  if (!pf?.avatarPhotoPath) missing.push("a profile photo");
+  const hasListenableTrack = tracks.some((t) => t.status === "pending_review" || t.status === "approved");
+  if (!hasListenableTrack) {
+    missing.push(tracks.some((t) => t.status === "processing")
+      ? "a track that's finished processing (still transcoding — this can take a minute)"
+      : "at least one track");
+  }
+  return missing;
+}
 
 export default function PortfolioEditor(props: { params: Promise<{ profileId: string }> }) {
   const { profileId } = use(props.params); // client components unwrap params with use()
@@ -2544,6 +4551,24 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
   const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
+  const [tracks, setTracks] = useState<TrackRow[]>([]);
+  const [submitBusy, setSubmitBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Resets `booking` back to "loading" the instant profileId changes — an
+  // in-app navigation from profile A's editor to profile B's (same
+  // route/component, different params) does NOT remount this page, so
+  // without this, B's first render(s) would show A's still-cached booking
+  // data. Adjusted during render (React's documented pattern for resetting
+  // state when a prop/param changes — https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes),
+  // not in a useEffect: this runs synchronously before commit, so React
+  // re-renders once more with the reset state instead of painting a stale
+  // frame first.
+  const [bookingProfileId, setBookingProfileId] = useState(profileId);
+  if (profileId !== bookingProfileId) {
+    setBookingProfileId(profileId);
+    setBooking("loading");
+  }
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   useEffect(() => {
@@ -2552,18 +4577,76 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     const unsub = onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
       () => setProfile(null));
+    // `cancelled` guards against a stale WRITE (as opposed to the stale
+    // READ the render-time reset above handles): without it, navigating
+    // from profile A's editor to profile B's can let A's getDoc resolve
+    // AFTER B's effect has already started, overwriting B's freshly-reset
+    // booking state with A's data.
+    let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
-      .then((s) => setBooking(s.exists() ? (s.data() as BookingDoc) : null))
-      .catch(() => setBooking(null));
-    return unsub;
-  }, [user?.uid, profileId]);
+      .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
+      .catch(() => { if (!cancelled) setBooking(null); });
+    return () => { cancelled = true; unsub(); };
+  }, [user, profileId]);
+  // Own subscription, separate from TrackManager's below: the submit-lock
+  // gate below needs live track statuses at THIS level (to enable/disable
+  // the button and render the missing-items hint) independent of
+  // TrackManager's own list UI — listening for a track's status leaving
+  // "processing" without polling.
+  useEffect(() => {
+    if (!user) return;
+    const { db } = getFirebase();
+    return onSnapshot(
+      query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+  }, [user, profileId]);
 
+  // `booking === "loading"` is load-bearing here, not just a nicety: the
+  // render-time reset above sets `booking` back to "loading" the instant
+  // profileId changes, but React commits that state change to the DOM on
+  // the SAME render pass unless something short-circuits it. This early
+  // return is what actually keeps that reset from being purely cosmetic —
+  // without it, profile A's already-loaded `profile`/`tracks` state (and
+  // the forms below) would render through the gap between the reset and B's
+  // getDoc resolving, showing A's rates/preferences under profile B's
+  // name/status for a beat. Do not drop this condition as "redundant" with
+  // the render-time reset alone.
   if (loading || !user || profile === "loading" || booking === "loading") return <main><p>Loading…</p></main>;
   if (!profile || profile.type !== "musician") return <main><p>No musician profile here.</p></main>;
 
-  const resubmit = async () => {
-    try { await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId }); }
-    catch (e) { window.alert(e instanceof Error ? e.message : "Could not submit."); }
+  const missing = missingForSubmit(profile, tracks);
+  const canSubmit = missing.length === 0;
+  const showSubmit = profile.status === "draft" || profile.status === "rejected";
+
+  const submit = async () => {
+    setSubmitBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+    } catch (e) {
+      // The server's failed-precondition message is user-ready — surface it
+      // verbatim. This is the backstop for a race the client gate's snapshot
+      // hasn't caught up to yet (e.g. a track flips out of pending_review
+      // between renders), not the primary UX (the button is disabled while
+      // `missing` is non-empty).
+      window.alert(e instanceof Error ? e.message : "Could not submit.");
+    } finally {
+      setSubmitBusy(false);
+    }
+  };
+
+  const deleteDraft = async () => {
+    const ok = window.confirm(
+      `Delete "${profile.name}"? This permanently deletes the profile, its tracks, and its photos, ` +
+      `and releases the handle @${profile.handle}. This can't be undone.`);
+    if (!ok) return;
+    setDeleteBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      router.push("/dashboard");
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not delete this profile.");
+      setDeleteBusy(false);
+    }
   };
 
   return (
@@ -2571,26 +4654,54 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       <h1>{profile.name} — portfolio</h1>
       <p>
         Status: <strong>{profile.status.replace("_", " ")}</strong>
-        {profile.status === "approved" && <> · <a href={`/@${profile.handle}`} target="_blank">view public page</a></>}
+        {profile.status === "approved" && (
+          <> · <a href={`/@${profile.handle}`} target="_blank" rel="noopener noreferrer">view public page</a></>
+        )}
       </p>
       {profile.status === "rejected" && (
         <div style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, padding: 12 }}>
-          <strong>Changes requested:</strong> {profile.rejectionReason}
-          <div><button onClick={resubmit}>Resubmit for review</button></div>
+          <strong>Changes requested:</strong> {profile.rejectionReason ?? "(no reason provided)"}
         </div>
       )}
       <section>
         <h2>Photos</h2>
-        <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar" />{" · "}
-        <PhotoUploader profileId={profileId} uid={user.uid} kind="cover" />
+        <p>
+          <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar" currentPath={profile.portfolio?.avatarPhotoPath ?? null} />
+          {" · "}
+          <PhotoUploader profileId={profileId} uid={user.uid} kind="cover" currentPath={profile.portfolio?.coverPhotoPath ?? null} />
+        </p>
         <p style={{ color: "#666" }}>Photos appear on your page a few seconds after upload.</p>
       </section>
-      <BioGenresForm profileId={profileId} initial={profile.portfolio} />
-      <LinksForm profileId={profileId} initial={profile.portfolio} />
+      {/* Keyed by profileId: these forms seed their local state from `initial`
+          only once, on mount (see PortfolioForms.tsx). Without the key, an
+          in-app navigation from one profile's editor to another's (same
+          route/component, different params) would reuse these instances and
+          leave the FIRST profile's bio/links/rates showing — and editable —
+          on top of the second profile's data until a full reload. */}
+      <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
+      <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
-      <BookingForm profileId={profileId} initial={booking} />
-      {(profile.status === "draft") && (
-        <button onClick={resubmit} style={{ padding: 12, fontSize: 16 }}>Submit for review</button>
+      <BookingForm key={profileId} profileId={profileId} initial={booking} />
+      {showSubmit && (
+        <section style={{ display: "grid", gap: 8, borderTop: "1px solid #eee", paddingTop: 24 }}>
+          <button onClick={submit} disabled={!canSubmit || submitBusy} style={{ padding: 12, fontSize: 16 }}>
+            {submitBusy ? "Submitting…" : profile.status === "rejected" ? "Resubmit for review" : "Submit for review"}
+          </button>
+          {!canSubmit && (
+            <p style={{ color: "#92400e", margin: 0 }}>
+              {/* Same construction as the server's failed-precondition message
+                  (functions/src/profiles.ts) — "a bio, at least one genre, and
+                  a profile photo" instead of a raw comma join, so the client
+                  hint reads identically to what the server would say if this
+                  lock were somehow bypassed. */}
+              Add {new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(missing)} before submitting.
+            </p>
+          )}
+          <button onClick={deleteDraft} disabled={deleteBusy}
+            style={{ color: "#dc2626", justifySelf: "start", background: "none", border: "1px solid #fca5a5", borderRadius: 6, padding: "6px 12px" }}>
+            {deleteBusy ? "Deleting…" : "Delete this profile"}
+          </button>
+        </section>
       )}
     </main>
   );
@@ -2601,9 +4712,15 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
 
 The wizard is the same editor flow with hand-holding: create the draft, then walk the editor sections in order, then submit. Keep it thin — steps reuse the Task 11 components.
 
+Final code, post quality-review fix pass: the sign-in redirect moved from
+render into a `useEffect` (matching the editor page's auth guard exactly —
+calling `router.replace` directly in the render body updates router state
+while a different component is mid-render, which React 19 and Strict Mode
+both flag), rendering `null` while unauthenticated instead:
+
 ```tsx
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
@@ -2612,10 +4729,17 @@ import { validateProfileDraft, type ProfileDraftInput } from "@gatekeep/shared";
 
 // Step 1 of the musician wizard: identity → creates the draft, then hands off
 // to the portfolio editor which owns bio/photos/tracks/rates and the submit
-// button (its gate messaging comes from the server).
+// button (its gate messaging comes from the server). Musician-only — curator
+// onboarding is sub-project 3. Deliberately does NOT auto-submit: the editor
+// is where the required minimums (bio, genre, avatar, a listenable track) get
+// filled in, and its submit button is locked until the server's gate is
+// satisfied.
 export default function Join() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  // Mirrors the editor page's auth guard exactly: the redirect is a side
+  // effect, not something to trigger during render.
+  useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   const [subtype, setSubtype] = useState<"solo" | "band">("solo");
   const [name, setName] = useState("");
   const [handle, setHandle] = useState("");
@@ -2623,7 +4747,7 @@ export default function Join() {
   const [error, setError] = useState<string | null>(null);
 
   if (loading) return <main><p>Loading…</p></main>;
-  if (!user) { router.replace("/sign-in"); return null; }
+  if (!user) return null; // redirecting via the effect above
 
   const createDraft = async () => {
     const input: ProfileDraftInput = { type: "musician", subtype, name, handle: handle.toLowerCase() };
@@ -2635,6 +4759,10 @@ export default function Join() {
         getFirebase().functions, "createProfileDraft")(input);
       router.push(`/dashboard/portfolio/${data.profileId}`);
     } catch (e) {
+      // Server errors are user-ready here too — e.g. "That handle is taken."
+      // or the unsubmitted-drafts cap ("finish or delete an existing draft
+      // first"), which points a stuck user at the editor's delete-draft
+      // affordance.
       setError(e instanceof Error ? e.message : "Could not create your profile.");
       setBusy(false);
     }
@@ -2642,8 +4770,9 @@ export default function Join() {
 
   return (
     <main style={{ maxWidth: 480, margin: "40px auto", display: "grid", gap: 12 }}>
+      <a href="/dashboard" style={{ color: "#666", fontSize: 14 }}>← Dashboard</a>
       <h1>Join as a musician</h1>
-      <p>Create your act. You'll add your bio, photos, and a first track next —
+      <p>Create your act. You&apos;ll add your bio, photos, and a first track next —
         those are required before you can submit for review.</p>
       <div style={{ display: "flex", gap: 8 }}>
         {(["solo", "band"] as const).map((s) => (
@@ -2672,10 +4801,14 @@ In `ProfilesList`, render each musician profile row as a link to its editor, and
 // row becomes:
 <li key={p.profileId}>
   {p.name} — {p.type} — {p.status.replace("_", " ")}
-  {p.type === "musician" && <> · <a href={`/dashboard/portfolio/${p.profileId}`}>
-    {p.status === "draft" ? "finish setup" : p.status === "rejected" ? "revise & resubmit" : "edit portfolio"}</a></>}
+  {p.type === "musician" && (
+    <> · <a href={`/dashboard/portfolio/${p.profileId}`}>
+      {p.status === "draft" ? "finish setup" : p.status === "rejected" ? "revise & resubmit" : "edit portfolio"}
+    </a></>
+  )}
 </li>
-// empty state gains: <a href="/join">Join as a musician</a>
+// empty state:
+{profiles.length === 0 && <p>None yet — <a href="/join">join as a musician</a>, or from the mobile app.</p>}
 ```
 
 - [ ] **Step 7: Verify**
@@ -2696,6 +4829,12 @@ git commit -m "feat(web): portfolio editor, musician wizard, dashboard wiring"
 
 ### Task 12: Web — admin Tracks review queue
 
+> **Post-review revision:** this section documents the FINAL shipped code
+> after a quality-review pass hardened the first cut (see "Quality-review
+> hardening" below the original steps). The steps below are kept in their
+> original order but their code blocks now show the final, byte-exact
+> implementation — not the version that first went green.
+
 **Files:**
 - Modify: `apps/web/app/admin/page.tsx`
 
@@ -2704,20 +4843,41 @@ git commit -m "feat(web): portfolio editor, musician wizard, dashboard wiring"
 Add to `apps/web/app/admin/page.tsx` (following the existing `Queue` component's patterns exactly — per-row busy state, checklist banner):
 
 ```tsx
+import { useEffect, useState, useRef } from "react";
+import {
+  collection, collectionGroup, query, where, onSnapshot, orderBy, limit, getDoc, getDocs, doc,
+  type DocumentReference,
+} from "firebase/firestore";
 import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import type { TrackDoc } from "@gatekeep/shared";
 
-type TrackRow = TrackDoc & { id: string; profileId: string; profileName: string };
+type TrackRow = Row<TrackDoc> & { profileId: string; profileName: string };
 
+// Owns the Approve/Reject actions for exactly one pending track — same
+// per-row-busy-state rationale as QueueRow above. Also resolves and plays the
+// review clip inline (spec §6: admin listens before approving), via
+// getDownloadURL on the track's review/... storagePath — admins can read any
+// review clip under storage.rules. url is three-state: null while resolving
+// (loading placeholder), "error" if getDownloadURL rejects (e.g. the object
+// is missing — surfaced as an explicit dead-end rather than an infinite
+// "clip loading…", since nothing will ever move it out of that state), or
+// the resolved string. storagePath is typed nullable on TrackDoc (other
+// statuses can have no file yet); the transcode trigger only ever writes
+// status:"pending_review" and storagePath together in the same update, so in
+// practice every row here has one, but the effect still guards against a
+// falsy path rather than assuming that invariant.
 function TrackQueueRow({ t }: { t: TrackRow }) {
   const [busy, setBusy] = useState(false);
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null | "error">(null);
   useEffect(() => {
     if (!t.storagePath) return;
     let cancelled = false;
     void getDownloadURL(storageRef(getFirebase().storage, t.storagePath))
       .then((u) => { if (!cancelled) setUrl(u); })
-      .catch(() => { if (!cancelled) setUrl(null); });
+      .catch((e) => {
+        console.error("TrackQueueRow: getDownloadURL failed", t.storagePath, e);
+        if (!cancelled) setUrl("error");
+      });
     return () => { cancelled = true; };
   }, [t.storagePath]);
   const review = async (decision: "approved" | "rejected") => {
@@ -2730,44 +4890,96 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
         { profileId: t.profileId, trackId: t.id, decision, reason });
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Could not submit the review — try again.");
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
       <strong>{t.title}</strong> — {t.profileName} · {t.durationSec ?? "?"}s
-      {url ? <audio controls src={url} style={{ display: "block", margin: "8px 0" }} />
-           : <p style={{ color: "#888" }}>clip loading…</p>}
+      {t.storagePath == null
+        ? <p style={{ color: "#888" }}>No clip on file.</p>
+        : url === "error"
+          ? <p style={{ color: "#b00020" }}>Clip unavailable — reject and ask the musician to re-upload.</p>
+          : url
+            ? <audio controls preload="none" src={url} style={{ display: "block", margin: "8px 0" }} />
+            : <p style={{ color: "#888" }}>clip loading…</p>}
       <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
       <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
     </div>
   );
 }
 
+// Pending-track review queue (spec §6). collectionGroup('tracks') mirrors
+// Queue's flat collection query above, but tracks live under
+// profiles/{profileId}/tracks — collectionGroup + the admin CG-read rule and
+// fieldOverride index (already in place) is what makes a single
+// cross-profile "everything pending" listener possible. Bounded with
+// limit(100), same reasoning as AuditLog's limit(50): an admin listener
+// should never fan out unboundedly. This intentionally doesn't order by
+// createdAt (i.e. isn't FIFO-oldest-first) — collectionGroup + an equality
+// filter + orderBy on a different field needs its own composite index,
+// which doesn't exist yet; deferred until the queue realistically nears
+// this cap and ordering starts to matter.
+//
+// Each snapshot also resolves the parent profile doc for its name
+// (deleted-profile-safe, same "(deleted)" fallback the mobile/web
+// dashboards use elsewhere) — batched via Promise.all over the *unique*
+// profile ids in this snapshot (several pending tracks routinely share a
+// profile), not one sequential getDoc per track. Two race guards on top of
+// that N+1 resolution, since it's async work hanging off a listener that
+// can fire again before it finishes: `cancelled` (composed into the
+// cleanup, same convention as UserProfiles below) for unmount, and a
+// monotonic `seq` token so a slower, older snapshot's resolution can never
+// finish after and repaint over a newer one's already-committed state.
 function TracksQueue() {
   const [pending, setPending] = useState<TrackRow[]>([]);
   useEffect(() => {
     const { db } = getFirebase();
-    return onSnapshot(
-      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review")),
+    let cancelled = false;
+    let seq = 0;
+    const unsubscribe = onSnapshot(
+      query(collectionGroup(db, "tracks"), where("status", "==", "pending_review"), limit(100)),
       async (s) => {
+        const mySeq = ++seq;
+        const profileRefs = new Map<string, DocumentReference>();
+        for (const d of s.docs) {
+          const profileRef = d.ref.parent.parent;
+          if (!profileRef) continue;
+          profileRefs.set(profileRef.id, profileRef);
+        }
+        const nameEntries = await Promise.all(
+          Array.from(profileRefs.values()).map(async (profileRef) => {
+            const p = await getDoc(profileRef);
+            return [profileRef.id, p.exists() ? (p.data() as ProfileDoc).name : "(deleted)"] as const;
+          }),
+        );
+        if (cancelled || mySeq !== seq) return;
+        const names = new Map(nameEntries);
         const rows: TrackRow[] = [];
         for (const d of s.docs) {
-          const profileRef = d.ref.parent.parent!;
-          const p = await getDoc(profileRef);
-          rows.push({ id: d.id, profileId: profileRef.id,
-            profileName: p.exists() ? (p.data() as ProfileDoc).name : "(deleted)",
-            ...(d.data() as TrackDoc) });
+          const profileRef = d.ref.parent.parent;
+          if (!profileRef) continue;
+          rows.push({
+            id: d.id,
+            profileId: profileRef.id,
+            profileName: names.get(profileRef.id) ?? "(deleted)",
+            ...(d.data() as TrackDoc),
+          });
         }
         setPending(rows);
-      });
+      },
+    );
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
   return (
     <section>
       <h2>Track review queue ({pending.length})</h2>
+      {/* Screening guidance per spec §6: admins hear exactly what the public would. */}
       <p style={{ background: "#fff8e1", border: "1px solid #f0d878", padding: "8px 12px", borderRadius: 4 }}>
         You are hearing exactly what the public would hear. Screening call: does this
-        sound like the artist's own performance (not AI-generated / not someone
-        else's recording)? When unsure, reject with a note asking for context.
+        sound like the artist&apos;s own performance (not AI-generated / not someone
+        else&apos;s recording)? When unsure, reject with a note asking for context.
       </p>
       {pending.map((t) => <TrackQueueRow key={`${t.profileId}-${t.id}`} t={t} />)}
       {pending.length === 0 && <p>Nothing waiting.</p>}
@@ -2776,11 +4988,241 @@ function TracksQueue() {
 }
 ```
 
-Render it in `AdminPage` between `<Queue />` and `<UserLookup />`: `<Queue /><TracksQueue /><UserLookup /><AuditLog />`.
+- [ ] **Step 1b: Add a `TakedownsPanel` section**
+
+`reviewTrack` (Task 8) accepts `decision: "rejected"` on an already-`approved`
+track as a retroactive takedown (spec §6: "admins can retroactively
+unpublish"), but as of Task 8 that path is backend-only — nothing in the
+admin UI can reach it, since `TracksQueue` above only ever lists
+`pending_review` tracks. Below the pending queue, a small handle-lookup
+panel: type a profile's `@handle`, see its currently-`approved` tracks, and
+remove one with a reason (same `reviewTrack` call, `decision: "rejected"`).
+Same `handles/{handle} -> profileId` indirection the public `/u/[handle]`
+route uses, and handles are stored lowercase there too.
+
+**Pre-merge security-gate item C, added:** `reviewProfile` (foundation,
+`functions/src/review.ts`) got the same retroactive-takedown treatment as
+`reviewTrack` above — its `rejected` decision now also accepts an
+already-`approved` profile (spec §6 promised this for "anything", but only
+tracks had it), which flips the profile to `rejected` and lets
+`firestore.rules`' `profileApproved()` gate hide the profile AND every one
+of its tracks from public reads in one call, with no per-track takedown
+needed first. `TakedownsPanel` grew a matching UI entry point: the same
+handle lookup now also fetches the profile doc itself (`Promise.all`
+alongside the tracks query) and, when it's `approved`, shows an "Unpublish
+profile…" button that prompts for a reason and calls `reviewProfile({
+profileId, decision: "rejected", reason })` — same busy/confirm pattern as
+the per-track `remove()` below.
+
+```tsx
+function TakedownsPanel() {
+  const [handle, setHandle] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<Row<ProfileDoc> | null>(null);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [tracks, setTracks] = useState<Row<TrackDoc>[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // Track ids whose most recent removal attempt committed the reject
+  // server-side but then hit reviewTrack's "unavailable" (public clip
+  // couldn't be deleted) — see the remove() catch below for why these stay
+  // in `tracks` and get a visible marker instead of disappearing.
+  const [incompleteIds, setIncompleteIds] = useState<Set<string>>(new Set());
+  // Guards lookup() the same way TracksQueue's `seq` guards its snapshot
+  // handler: the Enter-key handler and the Look-up button both call
+  // lookup(), and disabling on lookupBusy narrows but doesn't fully close
+  // the window for a second call to start before React commits the first's
+  // setLookupBusy(true) (both can read the same stale closure mid-event). A
+  // ref (not state — needs to be readable synchronously the instant a
+  // response resolves) means a slower, superseded lookup's response can
+  // never overwrite a newer one's already-displayed results.
+  const lookupSeq = useRef(0);
+
+  const lookup = async () => {
+    const h = handle.trim().toLowerCase();
+    if (!h) return;
+    const mySeq = ++lookupSeq.current;
+    setLookupBusy(true);
+    // Clear any previous handle's results up front, so a failed lookup (or a
+    // slow one) never leaves a stale profile's tracks on screen under a new
+    // handle in the input.
+    setProfileId(null);
+    setProfile(null);
+    setTracks([]);
+    setIncompleteIds(new Set());
+    try {
+      const { db } = getFirebase();
+      const handleDoc = await getDoc(doc(db, "handles", h));
+      if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
+      if (!handleDoc.exists()) { window.alert("No profile with that handle."); return; }
+      const pid = (handleDoc.data() as { profileId: string }).profileId;
+      const [profileDoc, tracksSnap] = await Promise.all([
+        getDoc(doc(db, "profiles", pid)),
+        getDocs(query(
+          collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order"))),
+      ]);
+      if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
+      setProfileId(pid);
+      setProfile(profileDoc.exists() ? { id: profileDoc.id, ...(profileDoc.data() as ProfileDoc) } : null);
+      setTracks(tracksSnap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+    } catch (e) {
+      if (mySeq === lookupSeq.current) {
+        window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
+      }
+    } finally {
+      if (mySeq === lookupSeq.current) setLookupBusy(false);
+    }
+  };
+
+  const unpublishProfile = async () => {
+    if (!profileId) return;
+    const reason = window.prompt(
+      "Unpublish reason (shown to the profile's admins) — this removes the profile, and everything on it, from public immediately:",
+    ) ?? "";
+    if (!reason) return;
+    if (reason.length > 500) { window.alert("Reason must be 500 characters or fewer."); return; }
+    setProfileBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewProfile")(
+        { profileId, decision: "rejected", reason });
+      setProfile((p) => (p ? { ...p, status: "rejected", rejectionReason: reason } : p));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not unpublish the profile — try again.");
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const remove = async (trackId: string) => {
+    if (!profileId) return;
+    const reason = window.prompt(
+      "Takedown reason (shown to the musician) — this removes the track from their live profile immediately:",
+    ) ?? "";
+    if (!reason) return;
+    setBusyId(trackId);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewTrack")(
+        { profileId, trackId, decision: "rejected", reason });
+      setTracks((ts) => ts.filter((t) => t.id !== trackId));
+      setIncompleteIds((ids) => { const next = new Set(ids); next.delete(trackId); return next; });
+    } catch (e) {
+      const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
+      if (code === "functions/unavailable") {
+        // reviewTrack already committed "rejected" before throwing this —
+        // the decision is final at the transaction, storage cleanup runs
+        // after (see that function's comments) — so the public object may
+        // still be reachable even though the doc says rejected. Don't
+        // filter the row out: a fresh lookup queries status=="approved",
+        // which this doc no longer matches, so re-looking-up would just
+        // silently drop the row and hide an incomplete takedown. Mark it
+        // instead, so the admin sees it needs a retry rather than assuming
+        // it's still an ordinary live track.
+        setIncompleteIds((ids) => new Set(ids).add(trackId));
+      } else {
+        window.alert(e instanceof Error ? e.message : "Could not remove the track — try again.");
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <section>
+      <h2>Takedowns</h2>
+      <p>Retroactively remove a live profile or track (spec §6).</p>
+      <input
+        placeholder="@handle"
+        value={handle}
+        onChange={(e) => setHandle(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !lookupBusy) void lookup(); }}
+      />{" "}
+      <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
+      {profile && (
+        <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 8, background: "#fafafa" }}>
+          <strong>{profile.name}</strong> @{profile.handle} — {profile.status.replace("_", " ")}
+          {profile.status === "approved" ? (
+            <div>
+              <button disabled={profileBusy} onClick={unpublishProfile}>
+                {profileBusy ? "Unpublishing…" : "Unpublish profile…"}
+              </button>
+            </div>
+          ) : (
+            <p style={{ color: "#888", margin: "4px 0 0" }}>Not currently live — nothing to unpublish.</p>
+          )}
+        </div>
+      )}
+      {tracks.map((t) => (
+        <div key={t.id} style={{ border: "1px solid #ddd", padding: 12, marginTop: 8 }}>
+          <strong>{t.title}</strong> · {t.durationSec ?? "?"}s
+          {incompleteIds.has(t.id) && (
+            <p style={{ color: "#b00020", margin: "4px 0" }}>
+              Removal incomplete — retry. (The track is already off review, but the public
+              clip may still be reachable.)
+            </p>
+          )}
+          <div>
+            <button disabled={busyId === t.id} onClick={() => remove(t.id)}>
+              {busyId === t.id ? "Removing…" : incompleteIds.has(t.id) ? "Retry removal…" : "Remove…"}
+            </button>
+          </div>
+        </div>
+      ))}
+      {profileId && tracks.length === 0 && <p>No approved tracks.</p>}
+    </section>
+  );
+}
+```
+
+Render it in `AdminPage` between `<Queue />` and `<UserLookup />`, after `TracksQueue`: `<Queue /><TracksQueue /><TakedownsPanel /><UserLookup /><AuditLog />`.
+
+- [ ] **Step 1c: Show submitted portfolio content in the profile approvals `QueueRow` (pre-merge security-gate finding 2, added)**
+
+`QueueRow` (foundation's `Queue` section, above `TracksQueue` in this same
+file) approved/rejected a musician profile from nothing but its name,
+handle, type, and subtype — the checklist banner above `Queue` told
+reviewers to "check submitted details for impersonation" while showing them
+none of those details. `ProfileDoc.portfolio` (bio, genres, external links,
+avatar/cover paths) is already present on the snapshot `Queue`'s listener
+hands to each row, so no extra Firestore read is needed for the text
+fields — only the two photo paths need resolving to a displayable URL,
+via a small `PhotoThumb` helper reusing `TrackQueueRow`'s three-state
+(`null` while resolving / `"error"` / resolved url) `getDownloadURL`
+pattern:
+
+```tsx
+function PhotoThumb({ path, alt }: { path: string | null | undefined; alt: string }) {
+  const [url, setUrl] = useState<string | null | "error">(null);
+  useEffect(() => {
+    if (!path) return;
+    let cancelled = false;
+    void getDownloadURL(storageRef(getFirebase().storage, path))
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch((e) => {
+        console.error("PhotoThumb: getDownloadURL failed", path, e);
+        if (!cancelled) setUrl("error");
+      });
+    return () => { cancelled = true; };
+  }, [path]);
+  if (!path) return null;
+  if (url === "error") return <p style={{ color: "#b00020", fontSize: 12, margin: 0 }}>{alt} unavailable</p>;
+  if (!url) return <p style={{ color: "#888", fontSize: 12, margin: 0 }}>{alt} loading…</p>;
+  return <img src={url} alt={alt} style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 4, border: "1px solid #ccc" }} />;
+}
+```
+
+In `QueueRow`, after computing `pf = p.type === "musician" ? p.portfolio : undefined`
+(curator profiles have no `portfolio` field, so they render unchanged) and
+the same https-only `links` filter the public `/u/[handle]` page and mobile
+artist screen already apply to `externalLinks`: render `pf.genres.join(" · ")`,
+`pf.bio`, `<PhotoThumb path={pf.avatarPhotoPath} alt="Avatar" />` +
+`<PhotoThumb path={pf.coverPhotoPath} alt="Cover" />` side by side, and the
+filtered links as plain `<a target="_blank" rel="noopener noreferrer nofollow">`
+tags — all above the existing Approve/Reject buttons, only when `pf` is
+defined.
 
 - [ ] **Step 2: Verify**
 
-Run: `pnpm --filter @gatekeep/web typecheck && pnpm --filter @gatekeep/web lint`
+Run: `pnpm --filter @gatekeep/web exec next typegen && pnpm --filter @gatekeep/web typecheck && pnpm --filter @gatekeep/web lint && pnpm --filter @gatekeep/web build`
 Manual: with a pending track from the Task 11 loop, admin hears the clip inline, approve flips it Live on the public page; reject shows the reason in the musician's TrackManager.
 
 - [ ] **Step 3: Commit**
@@ -2789,6 +5231,60 @@ Manual: with a pending track from the Task 11 loop, admin hears the clip inline,
 git add apps/web/app/admin/page.tsx
 git commit -m "feat(web): admin track review queue with inline playback"
 ```
+
+#### Quality-review hardening (folded into the Step 1/Step 1b code above)
+
+A review pass on the first cut found five gaps, closed in a single follow-up
+commit (`fix(web,functions): admin queue race guards, clip-error states,
+takedown notification integrity`) — the code blocks above already reflect the
+fix, not the original:
+
+1. **TracksQueue's snapshot handler had no unmount/staleness guards and did a
+   sequential N+1 profile lookup.** The original `onSnapshot` callback awaited
+   one `getDoc` per track in a `for` loop with no `cancelled` flag and no
+   protection against out-of-order completion — a slower, older snapshot's
+   resolution could finish after a newer one and repaint stale state over it,
+   and an unmounted component's listener could still call `setPending`. Fixed
+   by adding the same `cancelled` convention `UserProfiles` already uses
+   (composed into the `onSnapshot` cleanup alongside `unsubscribe`), a
+   monotonic `seq` token so only the latest snapshot's resolution can commit,
+   and replacing the sequential per-track lookups with `Promise.all` over the
+   *unique* profile ids in the snapshot (a `Map` cache keyed by profileId).
+   Also replaced the non-null-asserted `d.ref.parent.parent!` with the same
+   defensive `if (!profileRef) continue` `UserProfiles` uses.
+2. **TrackQueueRow's clip URL had no error state.** `getDownloadURL` failures
+   collapsed `url` back to `null`, which the row rendered as a permanent
+   "clip loading…" with no way out. Fixed by making `url` three-state
+   (`string | null | "error"`), logging the failure via `console.error`, and
+   rendering a distinct "Clip unavailable — reject and ask the musician to
+   re-upload." message on error.
+3. **TakedownsPanel's Enter-key handler ignored the busy lock, and `lookup()`
+   had no protection against out-of-order responses.** Fixed by gating the
+   Enter handler on `!lookupBusy` and adding a `useRef`-backed `lookupSeq`
+   token (same rationale as TracksQueue's `seq`) so a slower, superseded
+   lookup's response can never overwrite a newer one's already-displayed
+   results. Also: a removal that hits reviewTrack's `unavailable` throw (the
+   decision is already committed "rejected" server-side; only the public
+   object's delete failed) used to leave the row looking like an ordinary
+   still-live approved track. Fixed by tracking those track ids in an
+   `incompleteIds` set, keeping the row in `tracks` instead of hiding it
+   (hiding it via a fresh lookup would just silently drop it — the doc no
+   longer matches `status=="approved"`), and marking it "Removal incomplete —
+   retry."
+4. **The CG pending-track query was unbounded.** Fixed with `limit(100)`,
+   matching `AuditLog`'s `limit(50)` — with a comment noting FIFO
+   (oldest-pending-first) ordering would need its own composite index on the
+   `tracks` collectionGroup, deliberately deferred.
+5. **Cross-cutting: `functions/src/tracks.ts`'s `reviewTrack` could lose a
+   takedown notification across a retry.** See Task 8's "Quality-review
+   hardening (pass 3)" for the fix — reject's notification moved to fire
+   alongside its audit, at claim time, instead of at the end of the function
+   where a storage-cleanup failure could abort the call before ever reaching
+   it.
+
+Also `preload="none"` on the review-clip `<audio>` element — an admin
+scrolling the queue shouldn't eagerly fetch every clip's audio before
+choosing to play one.
 
 ---
 
@@ -2800,37 +5296,243 @@ git commit -m "feat(web): admin track review queue with inline playback"
 - Create: `apps/mobile/src/portfolio/TrackManager.tsx`
 - Create: `apps/mobile/src/portfolio/PortfolioForms.tsx`
 
+**DO NOT COPY from web — Task 11's quality-review fix pass found these bugs
+in the web components below; the RN ports in this task must NOT repeat
+them.** Web's components have already been rewritten with the fixes; the
+snippets in Task 11 above reflect the corrected code. When porting the same
+logic here, translate the FIX, not the original mistake:
+- **Render-phase `router.replace`.** Never call a navigation redirect
+  directly in a component's render body (web's `join/page.tsx` did this
+  before its fix). Do it in a `useEffect` gated on the auth-loaded
+  condition, and render nothing (or a loading state) while it's pending.
+- **Unkeyed child-form seeding.** `BioGenresForm`/`LinksForm`/`BookingForm`
+  seed local state from an `initial` prop only once, on mount
+  (`useState(initial?.x ?? default)`). Expo Router's stack navigator reuses
+  screen instances across param changes exactly like Next's App Router
+  does — switching the active profile context without a full remount will
+  leak the PREVIOUS profile's bio/links/rates into the new one unless these
+  forms are explicitly re-keyed by `profileId` (`key={profileId}` on each,
+  same as the web editor page does).
+- **`crypto.randomUUID` for nonces.** React Native/Hermes has no
+  `crypto.randomUUID`. `PhotoUploader`'s nonce must use the
+  `${Date.now()}-${Math.floor(Math.random() * 1e9)}` pattern already
+  specified in Step 4 below (uniqueness, not secrecy, is all that's
+  needed) — do not port web's `crypto.randomUUID()` call as-is.
+- **Try-block boundary around a successful upload.** Web's
+  `TrimUploader.upload()` originally kept the post-upload success side
+  effects (clearing local state, revoking the object URL, and calling the
+  parent-supplied `onDone()` callback) INSIDE the same `try` that awaited
+  the storage upload. That's a trap: if `onDone()` — a callback the PARENT
+  controls, not this component — threw for any reason, the `catch` block
+  would see the "track doc was created" flag set and delete the track that
+  had JUST finished uploading successfully, mistaking a downstream/unrelated
+  error for an upload failure. Fixed by closing the `try` immediately after
+  the upload itself resolves and moving every success-path side effect
+  OUTSIDE the try/catch. Any RN port of `TrimUploader`'s `upload()` (or
+  `PhotoUploader`'s) must keep that same boundary — do not fold the
+  post-upload cleanup back inside the try "for symmetry" with the
+  request/upload calls above it.
+- **`display:none`-equivalent file inputs.** Not applicable to RN's
+  `Pressable`-triggered `DocumentPicker` flow the same way (there's no
+  native `<input type="file">` to hide), but if any web accessibility
+  pattern gets ported by habit, remember RN has no DOM — use
+  `accessibilityRole`/`accessibilityLabel` on `Pressable`, not a CSS
+  visibility trick.
+- **`Intl.ListFormat` for the missing-items hint.** `Intl.ListFormat`
+  requires full-ICU data; Hermes (RN's default JS engine) ships without it
+  unless the app explicitly enables `hermes.icu` bundling. Verify
+  `Intl.ListFormat` actually works on-device before porting the web
+  editor's missing-items hint verbatim — if it's unavailable or unverified,
+  fall back to a plain `missing.join(", ")` (still correct, just less
+  polished prose) rather than crashing or silently no-op'ing.
+
 - [ ] **Step 1: Install Expo deps**
 
 Run in `apps/mobile/`:
 ```bash
 npx expo install expo-audio expo-document-picker @react-native-community/slider
 ```
-(`expo-av` is deprecated in this SDK — `expo-audio` is the playback API. No app.json plugin changes needed for playback-only use.)
+(`expo-av` is deprecated in this SDK — `expo-audio` is the playback API. As
+shipped, `expo install` auto-registered an `"expo-audio"` entry in
+`app.json`'s `plugins` array — despite this note's original expectation of
+no plugin changes for playback-only use, that's what `expo install` did on
+SDK 57, so it was kept.)
+
+A later quality-review fix pass (see Step 2's `TrimUploader.tsx` below) also
+needed `expo-file-system`, added the same way:
+```bash
+npx expo install expo-file-system
+```
+No `app.json` plugin registration resulted from this one.
 
 - [ ] **Step 2: Create `apps/mobile/src/portfolio/TrimUploader.tsx`**
 
+Final code — ported from the review-hardened web components, plus a
+mobile-only fix pass (quality review after the first cut of this file);
+see the DO-NOT-COPY checklist above. Decode errors and non-finite/
+sub-1s durations are detected via expo-audio's `status.error` and
+`status.duration` (folded into a derived `duration`, so a bad file
+renders as "still loading," never as usable) — but validity is only
+judged once `status.duration > 0`: expo-audio's `AudioStatus.duration`
+is 0 "until determined," including for a while after `isLoaded` flips,
+so gating on `isLoaded` alone (an earlier version of this file did)
+misjudges a file that simply hasn't reported its length YET as
+unreadable. A 15s bounded timer (mirroring `PhotoUploader`'s 60s
+timeout) catches the remaining case — a file that's neither erroring
+nor resolving a duration at all — instead of leaving the picker dead
+with no feedback. There is no separate local duration state to go
+stale on a re-pick, since a new `picked.uri` always spins up a fresh
+native `AudioPlayer` (unlike web's single `<audio>` element, whose
+`duration` state had to be manually reset). `useAudioPlayer` is called
+with `{ updateInterval: 100 }` (not the 500ms default) so the
+preview-stop effect can't overrun the 30s window by up to half a
+second. The trim window is clamped to `duration - MAX_CLIP_SECONDS`
+with a whole-file branch (covers the duration-just-over-30s degenerate
+case too). `upload()`'s `try` closes immediately after the storage
+upload resolves, with every success-path side effect — including
+`onDone()` — outside it, so the `catch` only runs `deleteTrack` cleanup
+when `created` is set (the upload itself didn't finish), never for a
+downstream throw after a completed upload.
+
+Two more things worth flagging for whoever reads this later:
+- **File size.** `DocumentPickerAsset.size` is optional on Android —
+  trusting `a.size ?? 0` would silently bypass every size check below
+  and could send `sizeBytes: 0` to `createTrack`. `pick()` instead asks
+  `expo-file-system`'s legacy `getInfoAsync` (imported from
+  `"expo-file-system/legacy"` — the un-suffixed `expo-file-system`
+  entry point's `getInfoAsync` is a deprecated shim that throws at
+  runtime in this SDK) for the real byte count on disk, falls back to
+  the picker's own `a.size`, and — if NEITHER is available — defers to
+  `blob.size` after the fetch inside `upload()`, re-checking the cap
+  there before `createTrack` is ever called.
+- **Mobile cap is 25 MB, not 50 MB.** RULING: `upload()` has no native
+  streaming yet — it reads the whole file into memory via
+  `fetch().blob()`, and the Firebase JS SDK's chunked resumable upload
+  roughly doubles peak memory while that blob is in flight. That's a
+  real Android OOM risk well under the server's actual 50 MB cap
+  (`MAX_AUDIO_UPLOAD_BYTES`, shared/enforced server-side, unchanged;
+  web is unchanged too). `MOBILE_MAX_AUDIO_BYTES` is a client-only 25 MB
+  ceiling for v1. Follow-up in Task 16: switch to expo-file-system's
+  `uploadAsync` for native streaming and lift this cap.
+
+A persistent inline error `<Text>` under the picker (cleared on every
+new pick attempt) backs up the Alert for the unsupported/unreadable/
+oversize cases, so dismissing the alert doesn't leave the musician
+staring at a picker with no visible explanation. The trim `Slider` also
+carries an `accessibilityLabel`:
+
 ```tsx
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystemLegacy from "expo-file-system/legacy";
 import Slider from "@react-native-community/slider";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
-import { validateTrackCreate, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput } from "@gatekeep/shared";
+import {
+  validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, type CreateTrackInput,
+} from "@gatekeep/shared";
 
-type Picked = { uri: string; name: string; size: number; mimeType: string };
+const UNREADABLE_MSG = "Couldn't read that audio file — try mp3, wav, m4a, aac, flac, or ogg.";
+const UNSUPPORTED_MSG = "Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.";
+// RULING (mobile-only, v1): upload() has no native streaming yet — it reads
+// the whole picked file into memory via fetch().blob(), and the Firebase JS
+// SDK's chunked resumable upload roughly doubles peak memory while that
+// blob is in flight. That's a real Android OOM risk well under the
+// SERVER's actual 50 MB cap (MAX_AUDIO_UPLOAD_BYTES, enforced by
+// validateTrackCreate/shared and unchanged), so mobile enforces a
+// stricter, client-only ceiling for now. Web is unchanged. Follow-up (Task
+// 16): switch to expo-file-system's uploadAsync for native streaming and
+// lift this cap.
+const MOBILE_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MOBILE_SIZE_MSG = "On this device, audio files must be under 25 MB — use the web app for larger files.";
+// How long to wait, after a pick, for expo-audio to report either a real
+// duration or an error before giving up on a file that's silently stuck.
+const LOAD_TIMEOUT_MS = 15_000;
 
+type Picked = {
+  uri: string; name: string; mimeType: string;
+  // null when neither expo-file-system nor the picker itself could confirm
+  // a byte count at pick time (rare) — upload() resolves it from the
+  // actually-fetched blob before doing anything server-side.
+  size: number | null;
+};
+
+// Pick a local audio file, preview it, drag the 30s window, upload the original.
+// The server pipeline trims/transcodes; we never keep the full track.
 export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?: () => void }) {
   const [picked, setPicked] = useState<Picked | null>(null);
   const [title, setTitle] = useState("");
   const [startSec, setStartSec] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
-  const player = useAudioPlayer(picked ? { uri: picked.uri } : null);
+  // True once the CURRENT `picked` file is known to be unreadable/too-short —
+  // set by the status effect below and cleared whenever a new file is picked.
+  // Distinguishes "still loading metadata" (duration 0, not yet invalid) from
+  // "loaded, but permanently unusable" so the effect fires its alert exactly
+  // once per bad pick instead of on every subsequent status tick.
+  const [invalid, setInvalid] = useState(false);
+  // Persistent, visible alongside the (dismissable) Alert — a musician who
+  // dismissed the alert shouldn't be left staring at a picker with no clue
+  // why nothing happened next. Cleared whenever a new pick attempt starts.
+  const [error, setError] = useState<string | null>(null);
+
+  // updateInterval: 100, not the 500ms default — the preview-stop effect
+  // below compares status.currentTime against the window end every tick;
+  // the default interval lets playback run up to half a second past the
+  // 30s boundary before it notices.
+  const player = useAudioPlayer(picked ? { uri: picked.uri } : null, { updateInterval: 100 });
   const status = useAudioPlayerStatus(player);
-  const duration = status.duration ?? 0;
+
+  // A NEW `picked.uri` always produces a brand-new native AudioPlayer instance
+  // (expo-audio keys the underlying player on JSON.stringify(source)), so
+  // `status` here starts from THAT player's own fresh status — duration
+  // resets to 0 on its own whenever the file changes. Unlike web's
+  // TrimUploader (one <audio> element whose `duration` state had to be
+  // manually reset in pick() to avoid leaking the PREVIOUS file's length),
+  // there's no separate local duration state that can go stale here.
+  const rawDuration = status.duration;
+  // Mirrors web's onloadedmetadata guard: a file can pass the content-type
+  // check yet still be corrupt/unplayable, or report a non-finite/near-0
+  // duration. Fold that into `duration` itself (not just into `invalid`) so
+  // every consumer below — the render gate, the slider math — automatically
+  // treats a bad file the same as "still loading" instead of rendering trim
+  // controls against a nonsensical length. `< 1`, not `<= 0`: a sub-1-second
+  // "clip" isn't practically previewable or trimmable either.
+  const duration = !invalid && Number.isFinite(rawDuration) && rawDuration >= 1 ? rawDuration : 0;
+
+  const flagInvalid = useCallback((msg: string) => {
+    setInvalid(true);
+    setError(msg);
+    Alert.alert("Couldn't read that file", msg);
+  }, []);
+
+  useEffect(() => {
+    if (!picked || invalid) return;
+    if (status.error) { flagInvalid(UNREADABLE_MSG); return; }
+    // expo-audio's AudioStatus.duration is 0 "until determined" — that can
+    // still be true even after isLoaded flips (per expo-audio's docs), so a
+    // bare `duration < 1` check would misjudge a file that just hasn't
+    // reported its length YET as unreadable. Only judge validity once a
+    // REAL (nonzero) duration has actually come back.
+    if (status.duration > 0 && (!Number.isFinite(status.duration) || status.duration < 1)) {
+      flagInvalid(UNREADABLE_MSG);
+    }
+  }, [picked, invalid, status.error, status.duration, flagInvalid]);
+
+  // Bounds the wait: a file that's neither erroring nor reporting a usable
+  // duration within 15s (e.g. a container expo-audio can open but never
+  // finishes probing) would otherwise leave the picker showing nothing,
+  // forever, with no feedback — the same silent-dead-UI risk PhotoUploader's
+  // 60s timeout guards against. Cleared as soon as the file resolves either
+  // way (duration > 0, or the effect above already flagged it invalid) or a
+  // new file is picked.
+  useEffect(() => {
+    if (!picked || invalid || duration > 0) return;
+    const t = setTimeout(() => flagInvalid(UNREADABLE_MSG), LOAD_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [picked, invalid, duration, flagInvalid]);
 
   // Stop preview at the end of the 30s window.
   useEffect(() => {
@@ -2840,64 +5542,174 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
   }, [status.currentTime, status.playing, startSec, duration, player]);
 
   const pick = async () => {
+    setError(null);
     const res = await DocumentPicker.getDocumentAsync({ type: "audio/*", copyToCacheDirectory: true });
     if (res.canceled || !res.assets[0]) return;
     const a = res.assets[0];
-    if ((a.size ?? 0) > MAX_AUDIO_UPLOAD_BYTES) { Alert.alert("Too big", "Audio files must be under 50 MB."); return; }
-    setPicked({ uri: a.uri, name: a.name, size: a.size ?? 0, mimeType: a.mimeType ?? "audio/mpeg" });
+    // Reject only a KNOWN-bad type — an empty/undefined mimeType is let
+    // through on purpose: some OSes report nothing for legitimate but less
+    // common containers (m4a, flac) instead of a proper audio/* MIME type,
+    // and the server doesn't trust this field either way — ffmpeg sniffs the
+    // actual container/codec from the bytes. This is only a cheap
+    // client-side triage.
+    if (a.mimeType && !(AUDIO_CONTENT_TYPES as readonly string[]).includes(a.mimeType)) {
+      setError(UNSUPPORTED_MSG);
+      Alert.alert("Unsupported format", UNSUPPORTED_MSG);
+      return;
+    }
+    // DocumentPickerAsset.size is OPTIONAL on Android — `a.size ?? 0` would
+    // silently bypass the cap below and go on to send sizeBytes: 0 to
+    // createTrack, producing a confusing "at most 50 MB" server error for a
+    // file that was never actually oversized. The file was just copied to
+    // cache (copyToCacheDirectory: true), so it's guaranteed to exist
+    // locally — ask expo-file-system for its real, authoritative byte
+    // count instead of trusting the picker's self-reported size.
+    let size: number | null = null;
+    try {
+      const info = await FileSystemLegacy.getInfoAsync(a.uri);
+      if (info.exists && info.size) size = info.size;
+    } catch {
+      // Fall through to the picker's own size, then to upload()'s
+      // blob.size re-check.
+    }
+    if (size === null && typeof a.size === "number" && a.size > 0) size = a.size;
+    if (size !== null && size > MOBILE_MAX_AUDIO_BYTES) {
+      setError(MOBILE_SIZE_MSG);
+      Alert.alert("Too big", MOBILE_SIZE_MSG);
+      return;
+    }
+    setInvalid(false);
+    setPicked({ uri: a.uri, name: a.name, size, mimeType: a.mimeType ?? "" });
     setStartSec(0);
     if (!title) setTitle(a.name.replace(/\.[^.]+$/, ""));
   };
 
-  const preview = () => { player.seekTo(startSec); player.play(); };
+  const preview = () => {
+    void player.seekTo(startSec).then(() => player.play()).catch(() => {});
+  };
 
   const upload = async () => {
     if (!picked) return;
-    const input: CreateTrackInput = { profileId, title: title.trim(), startSec: Math.floor(startSec),
-      sizeBytes: picked.size, contentType: picked.mimeType };
+    // Neither expo-file-system nor the picker could confirm a byte count at
+    // pick time (rare) — resolve it now from the actual fetched bytes and
+    // re-check the mobile cap BEFORE ever asking the server to create a
+    // track doc for a file that turns out to be oversized.
+    let sizeBytes = picked.size;
+    let prefetchedBlob: Blob | null = null;
+    if (sizeBytes === null) {
+      prefetchedBlob = await (await fetch(picked.uri)).blob();
+      sizeBytes = prefetchedBlob.size;
+      if (sizeBytes > MOBILE_MAX_AUDIO_BYTES) {
+        setError(MOBILE_SIZE_MSG);
+        Alert.alert("Too big", MOBILE_SIZE_MSG);
+        return;
+      }
+    }
+    // Never send a non-positive size — createTrack's validator would reject
+    // it anyway, but catching it here keeps the message specific to what
+    // actually went wrong instead of a generic validation failure.
+    if (sizeBytes < 1) {
+      setError(UNREADABLE_MSG);
+      Alert.alert("Couldn't read that file", UNREADABLE_MSG);
+      return;
+    }
+    const input: CreateTrackInput = {
+      profileId, title: title.trim(), startSec: Math.floor(startSec),
+      // picked.mimeType can legitimately be "" (see pick()'s comment above) —
+      // fall back to a generic-but-sniffable contentType rather than sending
+      // an empty string the server would reject outright.
+      sizeBytes, contentType: picked.mimeType || "audio/mpeg",
+    };
     const v = validateTrackCreate(input);
     if (!v.ok) { Alert.alert("Check your track", v.reason); return; }
-    setBusy("Starting…");
+    setBusy("Requesting upload…");
+    // Tracked outside the try so the catch below can tell "createTrack itself
+    // failed" (created stays null — nothing to clean up) apart from "the
+    // track doc exists but the storage upload after it failed" (created is
+    // set — the doc must be cleaned up, or it lingers as a dead
+    // "Processing…" row with nothing behind it).
+    let created: { trackId: string; uploadPath: string } | null = null;
     try {
       const { functions, storage } = getFirebase();
       const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
         functions, "createTrack")(input);
-      const blob = await (await fetch(picked.uri)).blob();
+      created = data;
+      const blob = prefetchedBlob ?? await (await fetch(picked.uri)).blob();
       const task = uploadBytesResumable(storageRef(storage, data.uploadPath), blob,
         { contentType: input.contentType });
       task.on("state_changed",
-        (s) => setBusy(`Uploading ${Math.round((s.bytesTransferred / s.totalBytes) * 100)}%`));
+        (s) => setBusy(`Uploading… ${Math.round((s.bytesTransferred / s.totalBytes) * 100)}%`));
       await task;
-      setBusy(null); setPicked(null); setTitle("");
-      onDone?.();
-    } catch (e: unknown) {
+      // The try closes HERE, right after the upload itself resolves — every
+      // success-path side effect below runs OUTSIDE the try/catch on
+      // purpose. onDone() is a callback supplied by the parent; if it (or
+      // anything else down here) were to throw while still inside the try,
+      // the catch below would see `created` set and delete the track this
+      // upload just successfully finished, mistaking a downstream error for
+      // an upload failure.
+    } catch (e) {
       setBusy(null);
-      Alert.alert("Upload failed", e instanceof Error ? e.message : "Try again.");
+      console.error(e); // the alerts below are deliberately generic — keep the real error in the console
+      if (created) {
+        try {
+          await httpsCallable(getFirebase().functions, "deleteTrack")({ profileId, trackId: created.trackId });
+          Alert.alert("Upload failed", "Try again.");
+        } catch {
+          // Best-effort cleanup itself failed — tell the musician exactly
+          // what's left behind instead of a generic message that leaves a
+          // dead "Processing…" row unexplained.
+          Alert.alert("Upload failed", "Delete the stuck \"Processing…\" entry below and try again.");
+        }
+      } else {
+        Alert.alert("Upload failed", e instanceof Error ? e.message : "Try again.");
+      }
+      return;
     }
+    setBusy(null); setPicked(null); setTitle(""); setInvalid(false); setError(null);
+    onDone?.();
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const windowEnd = Math.min(startSec + MAX_CLIP_SECONDS, duration);
+  const sliderMax = Math.max(0, Math.floor(duration - MAX_CLIP_SECONDS));
+  // Also covers duration JUST over 30s (e.g. 30.4s): sliderMax would compute
+  // to 0 — a degenerate range with nowhere to drag — so treat that the same
+  // as "whole file" instead of rendering a slider that can't move.
+  const wholeFileUsed = duration > 0 && (duration <= MAX_CLIP_SECONDS || sliderMax === 0);
+
   return (
     <View style={{ borderWidth: 1, borderStyle: "dashed", borderColor: "#bbb", borderRadius: 8, padding: 12, gap: 8 }}>
       <Text style={{ fontWeight: "700" }}>Add a track (30-second snippet)</Text>
-      <Pressable onPress={pick} style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
+      <Pressable onPress={() => void pick()} accessibilityRole="button" accessibilityLabel="Choose an audio file"
+        style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
         <Text>{picked ? picked.name : "Choose audio file…"}</Text>
       </Pressable>
+      {error && <Text style={{ color: "#dc2626" }}>{error}</Text>}
       {picked && duration > 0 && (
         <>
           <TextInput placeholder="Track title" value={title} onChangeText={setTitle} maxLength={80}
             style={{ borderWidth: 1, padding: 10, borderRadius: 8 }} />
-          <Text>Window: {fmt(startSec)} – {fmt(Math.min(startSec + MAX_CLIP_SECONDS, duration))} of {fmt(duration)}</Text>
-          <Slider minimumValue={0} maximumValue={Math.max(0, Math.floor(duration - 1))} step={1}
-            value={startSec} onValueChange={setStartSec} />
+          {wholeFileUsed ? (
+            <Text>Whole file will be used (30 seconds or less)</Text>
+          ) : (
+            <>
+              <Text>Clip window: {fmt(startSec)} – {fmt(windowEnd)} (of {fmt(duration)})</Text>
+              <Slider minimumValue={0} maximumValue={sliderMax} step={1}
+                value={startSec} onValueChange={setStartSec}
+                accessibilityLabel="Clip window start time" accessibilityRole="adjustable" />
+            </>
+          )}
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Pressable onPress={preview} style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
-              <Text>▶ Preview</Text></Pressable>
+              <Text>▶ Preview</Text>
+            </Pressable>
             <Pressable onPress={() => player.pause()} style={{ borderWidth: 1, padding: 10, borderRadius: 8 }}>
-              <Text>Stop</Text></Pressable>
-            <Pressable onPress={upload} disabled={busy !== null}
+              <Text>Stop</Text>
+            </Pressable>
+            <Pressable onPress={() => void upload()} disabled={busy !== null}
               style={{ backgroundColor: "#111", padding: 10, borderRadius: 8 }}>
-              <Text style={{ color: "#fff" }}>{busy ?? "Upload snippet"}</Text></Pressable>
+              <Text style={{ color: "#fff" }}>{busy ?? "Upload snippet"}</Text>
+            </Pressable>
           </View>
         </>
       )}
@@ -2908,53 +5720,156 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
 
 - [ ] **Step 3: Create `apps/mobile/src/portfolio/TrackManager.tsx`**
 
+Final code — ported from the review-hardened web components, plus a
+mobile-only fix pass; see the DO-NOT-COPY checklist above.
+`MAX_TRACKS` comes from `@gatekeep/shared` instead of a hardcoded `10`.
+A single `busy` flag locks every row action (reorder/rename/delete)
+while any call is in flight, for the same reason web's `TrackManager`
+does: `reorderTracks` swaps two rows at once, so a per-row lock
+wouldn't stop a second tap from racing the first move's still-in-flight
+call against a still-stale `tracks` array. Rename is an inline
+`TextInput` edit, not a ported `window.prompt` — RN's `Alert.prompt` is
+iOS-only and silently no-ops on Android. `call()` returns whether it
+succeeded so `saveRename` can react to a failure: it stashes exactly
+what the musician typed BEFORE closing the edit UI (mirroring a native
+prompt dismissing itself synchronously), and if `updateTrack` then
+fails, re-opens the same row pre-filled with that stashed text instead
+of silently dropping it — a musician who typed a rename during a
+network blip shouldn't have to retype it. The rename `TextInput` also
+wires `returnKeyType="done"` + `onSubmitEditing` to save without an
+extra tap to dismiss the keyboard first. (Updated post-Task-14 quality
+review: the track-list `onSnapshot` gained an error callback —
+`console.error`, matching the pattern the portfolio tab's own separate
+track subscription already used — instead of silently going stale on a
+read failure.)
+
 ```tsx
 import { useEffect, useState } from "react";
-import { View, Text, Pressable, Alert } from "react-native";
+import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import type { TrackDoc } from "@gatekeep/shared";
+import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
 
 type Row = TrackDoc & { id: string };
+
 const STATUS_LABEL: Record<TrackDoc["status"], string> = {
   processing: "Processing…", pending_review: "In review", approved: "Live",
   rejected: "Rejected", failed: "Failed",
 };
+const STATUS_BG: Record<TrackDoc["status"], string> = {
+  approved: "#dcfce7", rejected: "#fee2e2", failed: "#fee2e2",
+  processing: "#fef9c3", pending_review: "#fef9c3",
+};
 
 export function TrackManager({ profileId }: { profileId: string }) {
   const [tracks, setTracks] = useState<Row[]>([]);
+  // Single flag, not per-row: reorderTracks affects TWO rows at once (the
+  // swapped pair), so a per-row lock wouldn't stop a second tap from racing
+  // the first move's still-in-flight call against a still-stale `tracks`
+  // array. Locking every action across every row while ANY call is in
+  // flight is simpler and fully covers that.
+  const [busy, setBusy] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+
   useEffect(() => {
     const { db } = getFirebase();
-    return onSnapshot(query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
+    return onSnapshot(
+      query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => console.error("tracks onSnapshot failed", e));
   }, [profileId]);
-  const call = async (name: string, data: object) => {
-    try { await httpsCallable(getFirebase().functions, name)(data); }
-    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "Try again."); }
+
+  // Returns whether the call succeeded so callers that need to react to a
+  // failure (saveRename re-opening its edit UI below) can, without every
+  // fire-and-forget caller having to handle a return value it doesn't need.
+  const call = async (name: string, data: object): Promise<boolean> => {
+    setBusy(true);
+    try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); return false; }
+    finally { setBusy(false); }
   };
+
+  const move = (i: number, dir: -1 | 1) => {
+    if (busy || !tracks[i] || !tracks[i + dir]) return;
+    // A single reorderTracks call with the whole reordered id list, not two
+    // sequential updateTrack calls — reorderTracks owns ordering atomically;
+    // two separate calls would be non-atomic (a reload between them leaves
+    // two tracks sharing an order) and a no-op on ties.
+    const ids = tracks.map((t) => t.id);
+    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+    void call("reorderTracks", { profileId, trackIds: ids });
+  };
+
+  const startRename = (t: Row) => { setRenamingId(t.id); setRenameText(t.title); };
+  // Exits rename mode immediately (mirroring a native prompt dismissing
+  // itself synchronously) rather than waiting on the async call — the Alert
+  // inside call() explains a failure, and re-opening below (pre-filled with
+  // exactly what was typed, stashed BEFORE closing) means the musician
+  // doesn't have to retype it after a transient network/server error.
+  const saveRename = (trackId: string) => {
+    const typed = renameText;
+    const title = typed.trim();
+    setRenamingId(null);
+    if (!title) return;
+    void call("updateTrack", { profileId, trackId, title }).then((ok) => {
+      if (!ok) { setRenamingId(trackId); setRenameText(typed); }
+    });
+  };
+
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>
-        Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/10)
+        Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
       </Text>
-      {tracks.map((t) => (
-        <View key={t.id} style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10, gap: 4 }}>
-          <Text style={{ fontWeight: "600" }}>{t.title} · {STATUS_LABEL[t.status]}</Text>
+      {tracks.map((t, i) => (
+        <View key={t.id} style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10, gap: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text style={{ fontWeight: "600", flex: 1 }}>{t.title}</Text>
+            <View style={{ paddingVertical: 2, paddingHorizontal: 8, borderRadius: 10, backgroundColor: STATUS_BG[t.status] }}>
+              <Text style={{ fontSize: 12 }}>{STATUS_LABEL[t.status]}</Text>
+            </View>
+          </View>
           {(t.rejectionReason || t.failureReason) && (
             <Text style={{ color: "#991b1b" }}>{t.rejectionReason ?? t.failureReason}</Text>
           )}
-          <Pressable onPress={() => Alert.alert("Delete track?", t.title, [
-              { text: "Cancel" },
-              { text: "Delete", style: "destructive",
-                onPress: () => void call("deleteTrack", { profileId, trackId: t.id }) },
-            ])}>
-            <Text style={{ color: "#dc2626" }}>Delete</Text>
-          </Pressable>
+          {renamingId === t.id ? (
+            <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+              <TextInput value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
+                returnKeyType="done" onSubmitEditing={() => saveRename(t.id)}
+                style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
+              <Pressable disabled={busy} onPress={() => saveRename(t.id)}>
+                <Text style={{ fontWeight: "600" }}>Save</Text>
+              </Pressable>
+              <Pressable onPress={() => setRenamingId(null)}>
+                <Text style={{ color: "#666" }}>Cancel</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+              <Pressable disabled={busy || i === 0} onPress={() => move(i, -1)} accessibilityRole="button" accessibilityLabel="Move up">
+                <Text style={{ opacity: busy || i === 0 ? 0.4 : 1 }}>↑</Text>
+              </Pressable>
+              <Pressable disabled={busy || i === tracks.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down">
+                <Text style={{ opacity: busy || i === tracks.length - 1 ? 0.4 : 1 }}>↓</Text>
+              </Pressable>
+              <Pressable disabled={busy} onPress={() => startRename(t)}>
+                <Text style={{ opacity: busy ? 0.4 : 1 }}>Rename</Text>
+              </Pressable>
+              <Pressable disabled={busy} onPress={() => Alert.alert("Delete track?", t.title, [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Delete", style: "destructive",
+                    onPress: () => void call("deleteTrack", { profileId, trackId: t.id }) },
+                ])}>
+                <Text style={{ color: "#dc2626", opacity: busy ? 0.4 : 1 }}>Delete</Text>
+              </Pressable>
+            </View>
+          )}
         </View>
       ))}
-      <TrimUploader profileId={profileId} />
+      <TrimUploader profileId={profileId} onDone={() => { /* onSnapshot refreshes */ }} />
     </View>
   );
 }
@@ -2962,20 +5877,52 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
 - [ ] **Step 4: Create `apps/mobile/src/portfolio/PortfolioForms.tsx`**
 
-RN ports of the web forms — same callables, same validation, same field set:
+Final code — ported from the review-hardened web components; see the
+DO-NOT-COPY checklist above. `BioGenresForm` tracks a `savedGenres`
+state (what the server currently holds, not just the mount-time value)
+so an all-genres-deselected save is blocked with an explicit alert
+instead of silently no-op'ing, while a bio-only save still omits
+`genres` entirely so it keeps working before any genre has ever been
+picked. `LinksForm` clears its url input only once `save()` actually
+succeeds. `PhotoUploader` takes a `currentPath: string | null` prop —
+the pipeline rewrites the profile doc's avatar/coverPhotoPath a few
+seconds after the storage upload lands, so this component watches that
+PROP (via a render-time "adjust state while rendering" check, not a
+`useEffect`) to know when to drop its own "Processing…" state, bounded
+by a 60s `useEffect` timeout so an upload that never writes back doesn't
+leave the button disabled forever; it also enforces
+`MAX_PHOTO_UPLOAD_BYTES`, which the pre-hardening sketch omitted.
+`BookingForm` keeps rate inputs as raw strings (`RateInput`), converting
+dollars to cents exactly once, in `save()` — not on every keystroke,
+which would fight the user mid-entry (typing "1.50" round-tripping
+through cents and re-rendering as "1.5"). Whoever wires these into a
+screen (Task 14) MUST mount `BioGenresForm`/`LinksForm`/`BookingForm`
+with `key={profileId}` — they seed local state from `initial` only once,
+on mount, and Expo Router's stack navigator reuses screen instances
+across a profile-context switch instead of remounting:
 
 ```tsx
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
-  GENRES, GIG_TYPES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind,
+  GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
+  type PortfolioData, type BookingDoc, type BookingPreferences, type BookingRates,
+  type ExternalLink, type ExternalLinkKind, type RateAmount,
 } from "@gatekeep/shared";
 
+// RN ports of the web portfolio forms — same callables, same validation,
+// same field set. Expo Router's stack navigator reuses screen instances
+// across param changes exactly like Next's App Router does: each of these
+// components seeds its local state from `initial` ONLY ONCE, on mount
+// (`useState(initial?.x ?? default)`). Whoever wires these into a screen
+// (the wizard/dashboard tab) MUST re-key each instance by `profileId`
+// (`key={profileId}`) when switching the active profile context, or a
+// remount won't happen and the PREVIOUS profile's bio/links/rates will leak
+// into the new one.
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
   catch (e) { Alert.alert("Save failed", e instanceof Error ? e.message : "Try again."); return false; }
@@ -2983,25 +5930,54 @@ const callOrAlert = async (name: string, data: object): Promise<boolean> => {
 
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
+    <Pressable onPress={onPress} accessibilityRole="button" style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
       borderWidth: 1, borderColor: "#bbb", backgroundColor: active ? "#111" : "#fff" }}>
       <Text style={{ color: active ? "#fff" : "#111" }}>{label}</Text>
     </Pressable>
   );
 }
 
-export function BioGenresForm({ profileId, initial }:
-  { profileId: string; initial: PortfolioData | undefined }) {
+export function BioGenresForm({ profileId, initial, onSaved }:
+  { profileId: string; initial: PortfolioData | undefined; onSaved?: () => void }) {
   const [bio, setBio] = useState(initial?.bio ?? "");
   const [genres, setGenres] = useState<string[]>(initial?.genres ?? []);
+  // Tracks what the SERVER currently holds, not just the mount-time value —
+  // select 2 -> save -> deselect all -> save must hit the guard below even
+  // though `initial` still says zero.
+  const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
   const [busy, setBusy] = useState(false);
   const toggle = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
+
   const save = async () => {
-    const v = validatePortfolioUpdate({ profileId, bio, genres });
+    if (genres.length === 0 && savedGenres.length > 0) {
+      // Genres were saved before and the musician has now deselected all of
+      // them. The omit-when-empty branch below exists for the never-set-yet
+      // case (a bio-only save while onboarding); reusing it here would
+      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side —
+      // which looks to the musician like their change was saved (the chips
+      // show empty) when it wasn't. Block it with an explicit message
+      // instead.
+      Alert.alert("Keep at least one genre", "It's required for review.");
+      return;
+    }
+    // Omit genres entirely (rather than sending []) when none are picked
+    // yet — a bio-only save has to work while a musician is still filling
+    // in the rest of the form; validatePortfolioUpdate (and the server)
+    // both treat an omitted field as "leave it alone", but an explicit []
+    // fails the 1-3-genres check.
+    const payload = genres.length > 0 ? { profileId, bio, genres } : { profileId, bio };
+    const v = validatePortfolioUpdate(payload);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
-    setBusy(true); await callOrAlert("updatePortfolio", { profileId, bio, genres }); setBusy(false);
+    setBusy(true);
+    if (await callOrAlert("updatePortfolio", payload)) {
+      if (genres.length > 0) setSavedGenres(genres);
+      onSaved?.();
+    }
+    setBusy(false);
   };
+
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Bio & genres</Text>
@@ -3011,7 +5987,7 @@ export function BioGenresForm({ profileId, initial }:
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GENRES.map((g) => <Chip key={g} label={g} active={genres.includes(g)} onPress={() => toggle(g)} />)}
       </View>
-      <Pressable onPress={save} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
+      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
         <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save bio & genres"}</Text>
       </Pressable>
     </View>
@@ -3023,19 +5999,27 @@ export function LinksForm({ profileId, initial }:
   const [links, setLinks] = useState<ExternalLink[]>(initial?.externalLinks ?? []);
   const [kind, setKind] = useState<ExternalLinkKind>("spotify");
   const [url, setUrl] = useState("");
-  const save = async (next: ExternalLink[]) => {
+  const [busy, setBusy] = useState(false);
+
+  const save = async (next: ExternalLink[]): Promise<boolean> => {
     const v = validatePortfolioUpdate({ profileId, externalLinks: next });
-    if (!v.ok) { Alert.alert("Check the link", v.reason); return; }
-    if (await callOrAlert("updatePortfolio", { profileId, externalLinks: next })) setLinks(next);
+    if (!v.ok) { Alert.alert("Check the link", v.reason); return false; }
+    setBusy(true);
+    const ok = await callOrAlert("updatePortfolio", { profileId, externalLinks: next });
+    if (ok) setLinks(next);
+    setBusy(false);
+    return ok;
   };
+
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Links</Text>
       {links.map((l, i) => (
-        <View key={`${l.url}-${i}`} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+        <View key={`${l.kind}-${l.url}-${i}`} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
           <Text style={{ flex: 1 }} numberOfLines={1}>{l.kind}: {l.url}</Text>
-          <Pressable onPress={() => void save(links.filter((_, j) => j !== i))}>
-            <Text style={{ color: "#dc2626" }}>Remove</Text></Pressable>
+          <Pressable disabled={busy} onPress={() => void save(links.filter((_, j) => j !== i))}>
+            <Text style={{ color: "#dc2626" }}>Remove</Text>
+          </Pressable>
         </View>
       ))}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
@@ -3043,24 +6027,66 @@ export function LinksForm({ profileId, initial }:
           <Chip key={k} label={k} active={kind === k} onPress={() => setKind(k)} />)}
       </View>
       <View style={{ flexDirection: "row", gap: 6 }}>
-        <TextInput placeholder="https://…" autoCapitalize="none" value={url} onChangeText={setUrl}
+        <TextInput placeholder="https://…" autoCapitalize="none" editable={!busy} value={url} onChangeText={setUrl}
           style={{ borderWidth: 1, borderRadius: 8, padding: 10, flex: 1 }} />
-        <Pressable onPress={() => { if (url) { void save([...links, { kind, url }]); setUrl(""); } }}
-          style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}><Text>Add</Text></Pressable>
+        <Pressable disabled={busy} style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}
+          onPress={async () => {
+            if (!url) return;
+            // Clear the input only once the save actually succeeds —
+            // clearing unconditionally would silently throw away what the
+            // musician typed on a validation failure or a network error.
+            if (await save([...links, { kind, url }])) setUrl("");
+          }}>
+          <Text>Add</Text>
+        </Pressable>
       </View>
     </View>
   );
 }
 
-export function PhotoUploader({ profileId, uid, kind }:
-  { profileId: string; uid: string; kind: "avatar" | "cover" }) {
+export function PhotoUploader({ profileId, uid, kind, currentPath }:
+  { profileId: string; uid: string; kind: "avatar" | "cover"; currentPath: string | null }) {
   const [busy, setBusy] = useState(false);
+  // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
+  // seconds after the storage upload lands — we don't know its eventual
+  // value client-side, so instead we keep showing "Processing…" until the
+  // `currentPath` PROP itself moves. `baseline` tracks the last path we've
+  // actually seen; when it disagrees with the incoming prop we're mid-render
+  // with fresh data, so we adjust state right here (not in a useEffect —
+  // this is React's documented "adjust state while rendering" escape hatch
+  // for resetting state when a prop changes: since it runs synchronously
+  // before commit, React just re-renders once more with the corrected
+  // state instead of committing a stale frame first). This also closes the
+  // double-upload race: while awaiting, the button is disabled instead of
+  // sitting idle and inviting a second upload before the first has landed.
+  const [awaiting, setAwaiting] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [baseline, setBaseline] = useState(currentPath);
+  if (currentPath !== baseline) {
+    setBaseline(currentPath);
+    if (awaiting) setAwaiting(false);
+    if (timedOut) setTimedOut(false);
+  }
+  // Bounds the wait: some failures never write ANYTHING back to the profile
+  // doc (an oversized/corrupt image the resize step rejects outright before
+  // ever reaching a write, for instance), so `currentPath` would never move
+  // and `awaiting` — and the disabled button — would otherwise deadlock
+  // permanently. This is a legitimate useEffect (subscribing to an external
+  // timer and calling setState from ITS callback, not synchronously in the
+  // effect body), unlike the render-time adjustment above.
+  useEffect(() => {
+    if (!awaiting) return;
+    const t = setTimeout(() => { setAwaiting(false); setTimedOut(true); }, 60_000);
+    return () => clearTimeout(t);
+  }, [awaiting]);
+
   const upload = async () => {
-    // expo-image-picker is not installed; DocumentPicker covers image files fine.
     const res = await DocumentPicker.getDocumentAsync({ type: "image/*", copyToCacheDirectory: true });
     if (res.canceled || !res.assets[0]) return;
     const a = res.assets[0];
+    if ((a.size ?? 0) > MAX_PHOTO_UPLOAD_BYTES) { Alert.alert("Too big", "Photos must be under 10 MB."); return; }
     setBusy(true);
+    setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
       // RN has no crypto.randomUUID — timestamp+random nonce is fine (uniqueness, not secrecy of THIS value).
@@ -3068,60 +6094,107 @@ export function PhotoUploader({ profileId, uid, kind }:
       const blob = await (await fetch(a.uri)).blob();
       await uploadBytes(storageRef(storage, stagingPhotoPath(uid, profileId, kind, nonce)), blob,
         { contentType: a.mimeType ?? "image/jpeg" });
+      setAwaiting(true);
+      // The photo pipeline resizes/strips and updates the profile doc; the
+      // parent screen's snapshot listener feeds the new path back in as
+      // `currentPath`, which the render-time check above picks up and
+      // flips `awaiting` back to false.
     } catch (e) {
       Alert.alert("Upload failed", e instanceof Error ? e.message : "Try again.");
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
+  const processing = awaiting;
+  const label = busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`;
   return (
-    <Pressable onPress={upload} disabled={busy} style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}>
-      <Text>{busy ? "Uploading…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}</Text>
-    </Pressable>
+    <View style={{ gap: 4 }}>
+      <Pressable onPress={() => void upload()} disabled={busy || processing}
+        accessibilityRole="button" accessibilityLabel={`Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
+        style={{ borderWidth: 1, borderRadius: 8, padding: 10, alignSelf: "flex-start" }}>
+        <Text>{label}{currentPath && !processing ? " ✓" : ""}</Text>
+      </Pressable>
+      {timedOut && (
+        <Text style={{ color: "#92400e", fontSize: 12 }}>
+          Still processing — if your photo doesn&#39;t appear, try a smaller one.
+        </Text>
+      )}
+    </View>
   );
 }
 
+type RateKey = "perHour" | "perSong" | "perSet";
+type RateInput = { amount: string; note: string | null };
+const rateInputFrom = (r: RateAmount | null | undefined): RateInput =>
+  r ? { amount: (r.amountCents / 100).toString(), note: r.note ?? null } : { amount: "", note: null };
+
+const DEFAULT_PREFS: BookingPreferences = {
+  gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null,
+  bringsOwnPA: null, availabilityPattern: null,
+};
+
 export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
-  const [rates, setRates] = useState(initial?.rates ?? { perHour: null, perSong: null, perSet: null });
-  const [prefs, setPrefs] = useState(initial?.preferences ?? { gigTypes: [] as string[],
-    travelRadiusKm: null, actSize: null, typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null });
+  // Raw strings, not derived cents: converting dollars -> cents -> back to a
+  // display string on every keystroke (the naive approach) fights the user
+  // mid-entry — e.g. typing "1.50" round-trips through 150 cents and
+  // re-renders as "1.5", dropping the trailing zero and disrupting the
+  // cursor. Conversion now happens exactly once, in save().
+  const [rateInputs, setRateInputs] = useState<Record<RateKey, RateInput>>({
+    perHour: rateInputFrom(initial?.rates.perHour),
+    perSong: rateInputFrom(initial?.rates.perSong),
+    perSet: rateInputFrom(initial?.rates.perSet),
+  });
+  const [prefs, setPrefs] = useState<BookingPreferences>(initial?.preferences ?? DEFAULT_PREFS);
   const [busy, setBusy] = useState(false);
 
   const numField = (value: number | null, set: (n: number | null) => void, placeholder: string) => (
     <TextInput keyboardType="number-pad" placeholder={placeholder}
       value={value === null ? "" : String(value)}
-      onChangeText={(t) => set(t === "" ? null : Number(t))}
+      onChangeText={(t) => set(t === "" ? null : Math.round(Number(t)))}
       style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 100 }} />
   );
-  const rateRow = (key: "perHour" | "perSong" | "perSet", label: string) => (
-    <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+  const rateRow = (key: RateKey, label: string) => (
+    <View key={key} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
       <Text style={{ width: 100 }}>{label}</Text>
       <Text>$</Text>
       <TextInput keyboardType="decimal-pad" placeholder="—"
-        value={rates[key] ? String(rates[key]!.amountCents / 100) : ""}
-        onChangeText={(t) => setRates((r) => ({ ...r, [key]: t === "" ? null
-          : { amountCents: Math.round(Number(t) * 100), note: r[key]?.note ?? null } }))}
+        value={rateInputs[key].amount}
+        onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: t } }))}
         style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 90 }} />
-      <TextInput placeholder="note" maxLength={200} editable={rates[key] !== null}
-        value={rates[key]?.note ?? ""}
-        onChangeText={(t) => setRates((r) => ({ ...r,
-          [key]: r[key] ? { ...r[key]!, note: t || null } : null }))}
+      <TextInput placeholder="note (optional)" maxLength={200} editable={rateInputs[key].amount.trim() !== ""}
+        value={rateInputs[key].note ?? ""}
+        onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: t || null } }))}
         style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
     </View>
   );
   const save = async () => {
+    const rates: BookingRates = { perHour: null, perSong: null, perSet: null };
+    for (const key of ["perHour", "perSong", "perSet"] as const) {
+      const raw = rateInputs[key].amount.trim();
+      if (raw === "") continue; // stays null — field left blank on purpose
+      const dollars = Number(raw);
+      if (!Number.isFinite(dollars) || dollars <= 0) {
+        Alert.alert("Check your rates", "Rates must be more than $0, or leave the field blank.");
+        return;
+      }
+      rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
+    }
     const input = { profileId, rates, preferences: prefs };
-    const v = validateBookingUpdate(input as never);
+    const v = validateBookingUpdate(input);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
-    setBusy(true); await callOrAlert("updateBookingInfo", input); setBusy(false);
+    setBusy(true);
+    await callOrAlert("updateBookingInfo", input);
+    setBusy(false);
   };
 
   return (
     <View style={{ gap: 10 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Rates & preferences</Text>
-      <Text style={{ color: "#666" }}>Visible to curators only — never on your public page.</Text>
+      <Text style={{ color: "#666" }}>Visible to curators only — never on your public page. Offer any mix of the three.</Text>
       {rateRow("perHour", "Per hour")}
       {rateRow("perSong", "Per song")}
-      {rateRow("perSet", "Per set")}
+      {rateRow("perSet", "Per set (flat)")}
       <Text style={{ fontWeight: "700" }}>Gig types</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GIG_TYPES.map((g) => <Chip key={g} label={g.replace("_", " ")} active={prefs.gigTypes.includes(g)}
@@ -3152,10 +6225,9 @@ export function BookingForm({ profileId, initial }:
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {(["weekends", "weeknights", "anytime", "limited"] as const).map((a) =>
           <Chip key={a} label={a} active={prefs.availabilityPattern === a}
-            onPress={() => setPrefs((p) => ({ ...p,
-              availabilityPattern: p.availabilityPattern === a ? null : a }))} />)}
+            onPress={() => setPrefs((p) => ({ ...p, availabilityPattern: p.availabilityPattern === a ? null : a }))} />)}
       </View>
-      <Pressable onPress={save} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
+      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
         <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save rates & preferences"}</Text>
       </Pressable>
     </View>
@@ -3184,87 +6256,617 @@ git commit -m "feat(mobile): portfolio components — trim uploader, track manag
 - Modify: `apps/mobile/app/join.tsx`
 - Create: `apps/mobile/app/artist/[handle].tsx`
 
+**Wiring requirements** (things this task will hit the moment it imports
+Task 13's components or plays anything):
+- **NATIVE REBUILD REQUIRED.** `expo-audio`, `expo-document-picker`,
+  `@react-native-community/slider`, and `expo-file-system` all ship native
+  code — an existing dev client built before Task 13 landed does NOT have
+  them linked in, and will crash (not just warn) the first time
+  `useAudioPlayer` runs. Rebuild the dev client (`expo run:ios` /
+  `expo run:android`, or a new EAS dev build) before manually testing this
+  task; a plain `expo start` reload of an old client is not enough.
+- **Silent preview on iOS.** Call `setAudioModeAsync({ playsInSilentMode:
+  true })` once at app start (e.g. in the root layout, alongside other
+  startup setup) — without it, `TrimUploader`'s preview and
+  `/artist/[handle]`'s track playback are silent on a device with the
+  ringer switch off, which looks like a broken player rather than an
+  unset audio mode.
+- **Keyboard vs. scroll.** Wrap the portfolio screen's content in a
+  `ScrollView` with `keyboardShouldPersistTaps="handled"` — several of
+  Task 13's controls are `TextInput`s inside `Pressable`-heavy forms
+  (rename's inline edit, the bio/links/rates fields), and without
+  `keyboardShouldPersistTaps`, a tap on a button while the keyboard is up
+  gets eaten by the dismiss instead of reaching the button.
+- **`TrimUploader`'s `onDone` is optional here.** Unlike web's
+  `TrimUploader` (where `onDone` is required — the editor page always
+  passes one), Task 13's RN version made it `onDone?: () => void` since
+  `TrackManager` already refreshes its own track list via `onSnapshot`
+  regardless. Don't feel obligated to thread a completion callback through
+  this screen just to satisfy a required prop — there isn't one.
+
+**Handoff from Task 9 (server gate — `functions/src/profiles.ts`), mirrors
+the Task 11 note:** `submitProfileForReview` rejects a musician submit
+unless bio, ≥1 genre, avatar, AND ≥1 track with status `pending_review` or
+`approved` are all present — `processing` (still transcoding, or an
+abandoned upload) does not count. Any client-side submit-lock/disable state
+this task adds to the portfolio tab must mirror that exactly, which means
+waiting for a track's status to leave `processing` before the lock
+releases, not just confirming the upload call succeeded. Keep mobile and
+web (Task 11) in sync on this — a lock that's looser on one platform than
+the other means musicians get a different (and confusing) submit
+experience depending which app they used.
+
+**MUST FIX — mobile join is currently broken for musicians.** As of
+foundation, `apps/mobile/app/join.tsx` calls `createProfileDraft` and
+`submitProfileForReview` back-to-back in one flow for every profile type,
+musician included. That was fine pre-SP2 (there was no portfolio content to
+gate on), but Task 9's minimum-content gate means that auto-submit will now
+ALWAYS fail with `failed-precondition` for a brand-new musician draft (no
+bio/genre/avatar/track exists yet at the moment of creation) — the join flow
+is broken for musicians until this task lands. This task MUST rewrite
+`join.tsx` so a musician draft, after `createProfileDraft`, routes straight
+into the portfolio tab / wizard steps to collect the minimum content instead
+of auto-submitting (mirroring the web wizard's Task 11 `createDraft` →
+`router.push` handoff, not a create-then-submit call). Curator joins are
+unaffected (no gate) and can keep the existing create-then-submit behavior.
+
+**Delete-draft affordance (both wizards):** same as the Task 11 note —
+`deleteProfile` has zero client call sites today; foundation-rulings.md
+names it the orphaned-draft cleanup path. The mobile wizard/portfolio tab
+needs a "delete this draft" action wired to `deleteProfile` alongside web's,
+so a musician who abandons onboarding partway through isn't stuck holding a
+handle with no self-service way to release it.
+
+**DO NOT COPY from web — Task 11's quality-review fix pass found these bugs
+in web's editor page/components; the `(musician)/portfolio.tsx` tab in this
+task must NOT repeat them.** Web's page has already been rewritten with the
+fixes; the Task 11 snippets above reflect the corrected code:
+- **Render-phase `router.replace`.** Web's `join/page.tsx` originally called
+  `router.replace("/sign-in")` directly in the render body when
+  unauthenticated — fixed to a `useEffect` gated on the auth-loaded
+  condition. Any auth guard added to the portfolio tab or `join.tsx` here
+  must do the same: redirect from an effect, never from render.
+- **Unkeyed child-form seeding.** `BioGenresForm`/`LinksForm`/`BookingForm`
+  seed local state from an `initial` prop only once, on mount. Expo
+  Router's stack navigator reuses screen instances across a profile-context
+  switch exactly like Next's App Router reuses the editor page across a
+  `profileId` change — this is even MORE routine on mobile, where switching
+  the active profile context (not a full app restart) is the normal way a
+  multi-profile musician moves between profiles. Without re-keying these
+  forms by `profileId` (`key={profileId}` on each, same as web), the
+  PREVIOUS profile's bio/links/rates will leak onto the newly-selected
+  profile's form until the tab is force-remounted.
+- **`crypto.randomUUID` for nonces.** RN/Hermes has no `crypto.randomUUID`.
+  Step 4 of Task 13 already specifies the correct
+  `${Date.now()}-${Math.floor(Math.random() * 1e9)}` nonce pattern for
+  `PhotoUploader` — use that, not a ported `crypto.randomUUID()` call.
+- **Try-block boundary around a successful upload.** Same trap as Task 13's
+  note on `TrimUploader.upload()`: the post-upload success side effects
+  (including any parent-supplied "done" callback) must run OUTSIDE the try
+  that awaits the upload, not inside it — otherwise a throw from that
+  callback gets mistaken for an upload failure and deletes the track that
+  just succeeded. `TrimUploader.tsx` itself is created once in Task 13 and
+  reused here by the portfolio tab; if this task touches or duplicates any
+  of that upload-then-callback logic (e.g. wiring its own completion
+  handling around `TrackManager`/`TrimUploader`), keep the same boundary.
+- **`Intl.ListFormat` for the missing-items hint.** If this tab's
+  submit-lock (see the handoff note above) renders a missing-items hint
+  mirroring web's, verify `Intl.ListFormat` is actually available under
+  Hermes (it needs full-ICU data, not enabled by default) before porting
+  web's `new Intl.ListFormat("en", { style: "long", type: "conjunction"
+  })` call — fall back to a plain `missing.join(", ")` if unverified.
+
 - [ ] **Step 1: Rewrite `apps/mobile/app/(musician)/portfolio.tsx`**
 
+Final code, post THREE rounds of quality-review fixes.
+
+Round 1 sanctioned deviations from the sketch this section originally
+showed: a single canonical submit/resubmit button below the tracks section
+(gated identically, on the same `missingForSubmit()` result, for both
+`draft` and `rejected`) replaces the sketch's second "Resubmit for review"
+button embedded inside the rejected banner — one submit call site instead
+of two that could drift out of sync with each other; the missing-items
+hint (plain `.join(", ")`, per the DO-NOT-COPY note above) and the
+delete-draft affordance from the handoff notes above are filled in (the
+sketch omitted both); and the public-page link's host is a named
+`PUBLIC_PROFILE_HOST` constant at the top of the file.
+
+Round 2 fixes (1 CRITICAL, 1 IMPORTANT, plus minors): `booking` gained
+web's three-state sentinel (`BookingDoc | null | "loading"`) — without it,
+`BookingForm` mounts with `initial=null` before the private-subcollection
+`getDoc` resolves (the profile `onSnapshot` is cache-warm and reliably wins
+that race), and its very next save full-document-`set()`s all-null rates
+over whatever the musician had actually saved; the `getDoc`'s `.catch` now
+also resolves the sentinel (never leaves `"loading"` hanging after a failed
+read), and the render guard waits on `booking === "loading"` too. A
+render-time `lastProfileId` reset — mirroring PhotoUploader's `baseline`
+pattern (Task 13) and web's `bookingProfileId` sentinel (Task 11) — clears
+`profile`/`booking`/`tracks` the instant `profileId` changes: Expo Router's
+Tabs navigator keeps this screen mounted across a profile-context switch
+(ContextSwitcher only reassigns `activeContext`, it never remounts the
+screen), so without the reset, switching from musician profile A to
+musician profile B left A's data on screen — and save-able onto B — until
+each subscription's first snapshot for B arrived. Minors: both `onSnapshot`
+calls (the profile subscription and this screen's own tracks subscription)
+gained error callbacks — a profile read failure is treated as "gone" (same
+as web's page.tsx), a tracks read failure just logs; and the "View public
+page" link is now hidden by a `PUBLIC_PROFILE_HOST_READY` check while
+`PUBLIC_PROFILE_HOST` is still the `gatekeep.example` placeholder, instead
+of offering a dead link.
+
+Round 3 fixes (2 residuals in the booking path, found on re-review): (a)
+the render-time reset alone still left a sub-frame race — React runs effect
+CLEANUP at the passive-effect flush, which happens AFTER commit and paint,
+not synchronously during the render-time reset, so profile A's
+already-in-flight `onSnapshot`/`getDoc` callbacks could still resolve and
+call `setState` in the gap AFTER the reset ran (profileId changed to B) but
+BEFORE A's effect cleanup unsubscribed them — repopulating the just-reset
+state and mounting `BookingForm` under profile B seeded with A's rates. An
+`activeIdRef` (kept in sync with whichever profileId is CURRENTLY active,
+updated in the render-time reset block and correct from the first render
+via its `useRef` initializer) closes this: every effect captures `const
+forId = profileId` and every one of its `setState` calls checks
+`activeIdRef.current !== forId` first. (b) `booking` gained a FOURTH state,
+`"error"`, distinct from `null` — a `getDoc` that FAILED (offline, a
+transient read error) isn't "no doc exists" either, and collapsing it into
+`null` mounted `BookingForm` blank over rates that were still saved
+server-side the read simply didn't reach (same failure-vs-empty class as
+`PhotoUploader`'s `awaiting`/timeout state). The render swaps `BookingForm`
+for a "Couldn't load your rates — Retry" row while `booking === "error"`;
+Retry sets `booking` back to `"loading"` and bumps a `bookingRetry` counter
+in the booking effect's dependency array to re-run it:
+
 ```tsx
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ScrollView, View, Text, Pressable, Alert, Linking } from "react-native";
-import { doc, onSnapshot, getDoc } from "firebase/firestore";
+import { useRouter } from "expo-router";
+import { doc, onSnapshot, getDoc, collection, query, orderBy } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../src/portfolio/PortfolioForms";
 import { TrackManager } from "../../src/portfolio/TrackManager";
-import type { ProfileDoc, BookingDoc } from "@gatekeep/shared";
+import type { ProfileDoc, BookingDoc, TrackDoc } from "@gatekeep/shared";
+
+type TrackRow = TrackDoc & { id: string };
+
+// Placeholder host until a deployed web domain exists — swap this one
+// constant when it does; every public-page link on this screen reads it.
+const PUBLIC_PROFILE_HOST = "https://gatekeep.example";
+// Still the placeholder above — hide the "View public page" link entirely
+// rather than send an approved musician to a dead gatekeep.example URL.
+// Flips on its own once PUBLIC_PROFILE_HOST is updated to the real host.
+const PUBLIC_PROFILE_HOST_READY = !PUBLIC_PROFILE_HOST.includes("gatekeep.example");
+
+// Mirrors functions/src/profiles.ts's submitProfileForReview gate EXACTLY:
+// bio, >=1 genre, an avatar photo, AND >=1 track that's actually listenable
+// (status pending_review or approved) — see the server's
+// LISTENABLE_TRACK_STATUSES, which excludes "processing" because createTrack
+// writes the doc BEFORE the client finishes uploading bytes, so "processing"
+// can be an abandoned upload with nothing behind it. Keep this in sync with
+// web's Task 11 copy (apps/web/app/dashboard/portfolio/[profileId]/page.tsx)
+// — a lock that's looser on one platform than the other means musicians get
+// a different (and confusing) submit experience depending which app they
+// used.
+function missingForSubmit(profile: ProfileDoc, tracks: TrackRow[]): string[] {
+  const missing: string[] = [];
+  const pf = profile.portfolio;
+  if (!pf?.bio?.trim()) missing.push("a bio");
+  if (!pf?.genres?.length) missing.push("at least one genre");
+  if (!pf?.avatarPhotoPath) missing.push("a profile photo");
+  const hasListenableTrack = tracks.some((t) => t.status === "pending_review" || t.status === "approved");
+  if (!hasListenableTrack) {
+    missing.push(tracks.some((t) => t.status === "processing")
+      ? "a track that's finished processing (still transcoding — this can take a minute)"
+      : "at least one track");
+  }
+  return missing;
+}
 
 export default function Portfolio() {
   const { user } = useAuth();
-  const { activeContext } = useProfileContext();
+  const router = useRouter();
+  const { activeContext, switchTo } = useProfileContext();
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  const [booking, setBooking] = useState<BookingDoc | null>(null);
+  // Four states. "loading" is load-bearing, not just a nicety: BookingForm
+  // seeds its local rate inputs from `initial` on mount — if `initial` were
+  // `null` for the ordinary "getDoc hasn't resolved yet" case
+  // (indistinguishable from "no booking doc saved"), a musician who already
+  // has saved rates would see the form mount blank, and its very next save
+  // would full-document-set() all-null rates over the real ones. Silent data
+  // loss. Mirrors web's Task 11 page.tsx exactly. "error" is separate from
+  // `null` for the SAME reason, one level down: a getDoc that FAILED
+  // (offline, a transient read error) is not "no doc exists" either — same
+  // failure-vs-empty distinction as PhotoUploader's `awaiting`/timeout state
+  // and TrackQueueRow's clip-URL-failed state elsewhere in this codebase.
+  // Collapsing "error" into `null` would mount BookingForm blank over rates
+  // that are still there server-side the read simply didn't reach.
+  const [booking, setBooking] = useState<BookingDoc | null | "loading" | "error">("loading");
+  // Bumped by the "Retry" row's Retry button (see the booking === "error"
+  // render branch below) to force the booking effect below to re-run
+  // without also needing its own separate effect.
+  const [bookingRetry, setBookingRetry] = useState(0);
+  const [tracks, setTracks] = useState<TrackRow[]>([]);
+  const [submitBusy, setSubmitBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // Identity check for the effects below, closing a sub-frame race the
+  // render-time reset alone doesn't: React runs effect CLEANUP at the
+  // passive-effect flush, which happens AFTER commit and paint — not
+  // synchronously during the render-time reset. That leaves a real window
+  // where profile A's already-in-flight onSnapshot/getDoc callbacks can
+  // still resolve and call setState AFTER the reset below has already run
+  // (profileId changed to B) but BEFORE A's effect cleanup has unsubscribed
+  // them. Without this check, one of those late A-callbacks repopulates the
+  // just-reset state, and BookingForm ends up mounted under profile B seeded
+  // with A's rates — the same silent-data-loss shape as the missing
+  // sentinel above, just from a narrower window. `activeIdRef` is kept in
+  // sync with whichever profileId is CURRENTLY active — updated inside the
+  // render-time reset block below, and correct from the very first render
+  // via useRef's initializer here — so every effect callback can check
+  // "is my profileId still the active one" instead of trusting its own
+  // closure (which is fixed to whichever profileId it was created under).
+  const activeIdRef = useRef(profileId);
+
+  // Render-time reset, mirroring PhotoUploader's `baseline` pattern (Task
+  // 13) and web's `bookingProfileId` sentinel (Task 11): Expo Router's Tabs
+  // navigator keeps this screen mounted across a profile-context switch —
+  // ContextSwitcher only changes `activeContext`, it never unmounts this
+  // component — exactly like Next's App Router reusing the editor page
+  // across a profileId route-param change. Without this, switching from
+  // musician profile A to musician profile B leaves A's profile/booking/
+  // tracks state on screen (and editable, and save-able onto B) until each
+  // subscription's first snapshot for B lands. Adjusted synchronously during
+  // render (React's documented "adjust state while rendering" pattern —
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes)
+  // so React re-renders once more with the reset state before committing,
+  // instead of painting a stale frame first.
+  const [lastProfileId, setLastProfileId] = useState(profileId);
+  if (profileId !== lastProfileId) {
+    setLastProfileId(profileId);
+    activeIdRef.current = profileId;
+    setProfile(null);
+    setBooking("loading");
+    setTracks([]);
+  }
 
   useEffect(() => {
     if (!profileId) { setProfile(null); return; }
+    // Captured once per effect instance (one per profileId, since this
+    // effect is keyed on it) — the identity check below compares against
+    // whichever profileId is CURRENTLY active, not this closure's own,
+    // fixed-at-creation value.
+    const forId = profileId;
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, "profiles", profileId),
-      (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null));
+      (s) => {
+        if (activeIdRef.current !== forId) return;
+        setProfile(s.exists() ? (s.data() as ProfileDoc) : null);
+      },
+      // A read failure (offline, a rules edge case) is treated as "gone"
+      // rather than left stale — same as web's page.tsx.
+      () => {
+        if (activeIdRef.current !== forId) return;
+        setProfile(null);
+      });
+    let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
-      .then((s) => setBooking(s.exists() ? (s.data() as BookingDoc) : null)).catch(() => {});
-    return unsub;
+      .then((s) => {
+        if (cancelled || activeIdRef.current !== forId) return;
+        setBooking(s.exists() ? (s.data() as BookingDoc) : null);
+      })
+      .catch((e) => {
+        console.error("booking getDoc failed", e);
+        // MUST resolve the sentinel here too, not just on success — an
+        // unresolved "loading" left hanging after a failed read is exactly
+        // the state BookingForm's seed-from-initial bug above needs to stay
+        // safe from. "error", not `null`: see the state comment above.
+        if (cancelled || activeIdRef.current !== forId) return;
+        setBooking("error");
+      });
+    return () => { cancelled = true; unsub(); };
+  }, [profileId, bookingRetry]);
+
+  // Own subscription, separate from TrackManager's below: the submit-lock
+  // gate needs live track statuses at THIS level (to enable/disable the
+  // submit button and render the missing-items hint) independent of
+  // TrackManager's own list UI — catching a track's status leaving
+  // "processing" without polling.
+  useEffect(() => {
+    if (!profileId) { setTracks([]); return; }
+    const forId = profileId;
+    const { db } = getFirebase();
+    return onSnapshot(
+      query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
+      (s) => {
+        if (activeIdRef.current !== forId) return;
+        setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+      },
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("tracks onSnapshot failed", e);
+      });
   }, [profileId]);
 
-  if (!user || !profileId || !profile) {
+  if (!user || !profileId || !profile || booking === "loading") {
     return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>Switch to a musician profile to edit its portfolio.</Text></View>;
+      <Text>{!user || !profileId ? "Switch to a musician profile to edit its portfolio." : "Loading…"}</Text></View>;
   }
-  const resubmit = async () => {
-    try { await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId }); }
-    catch (e) { Alert.alert("Not yet", e instanceof Error ? e.message : "Could not submit."); }
+
+  const retryBooking = () => {
+    setBooking("loading");
+    setBookingRetry((n) => n + 1);
   };
+
+  const missing = missingForSubmit(profile, tracks);
+  const canSubmit = missing.length === 0;
+  const showSubmit = profile.status === "draft" || profile.status === "rejected";
+
+  const submit = async () => {
+    setSubmitBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+    } catch (e) {
+      // The server's failed-precondition message is user-ready — surface it
+      // verbatim. This is the backstop for a race the client gate's snapshot
+      // hasn't caught up to yet (e.g. a track flips out of pending_review
+      // between renders), not the primary UX (the button is disabled while
+      // `missing` is non-empty).
+      Alert.alert("Not yet", e instanceof Error ? e.message : "Could not submit.");
+    } finally {
+      setSubmitBusy(false);
+    }
+  };
+
+  const doDelete = async () => {
+    setDeleteBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      // Nothing here nulls activeContext itself — fall back to "fan" (the
+      // same switch ContextSwitcher's own "Me (fan)" row performs) so this
+      // screen doesn't keep pointing at a profile that no longer exists.
+      switchTo("fan");
+      router.replace("/(fan)");
+    } catch (e) {
+      Alert.alert("Could not delete", e instanceof Error ? e.message : "Try again.");
+      setDeleteBusy(false);
+    }
+  };
+  const deleteDraft = () => {
+    Alert.alert(
+      `Delete "${profile.name}"?`,
+      `This permanently deletes the profile, its tracks, and its photos, and releases the handle @${profile.handle}. This can't be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void doDelete() },
+      ],
+    );
+  };
+
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }}>
+    <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }} keyboardShouldPersistTaps="handled">
       <Text style={{ fontSize: 22, fontWeight: "700" }}>{profile.name}</Text>
       <Text>Status: {profile.status.replace("_", " ")}</Text>
-      {profile.status === "approved" && (
-        <Pressable onPress={() => Linking.openURL(`https://gatekeep.example/@${profile.handle}`)}>
+      {profile.status === "approved" && PUBLIC_PROFILE_HOST_READY && (
+        <Pressable onPress={() => void Linking.openURL(`${PUBLIC_PROFILE_HOST}/@${profile.handle}`)}>
           <Text style={{ textDecorationLine: "underline" }}>View public page</Text>
         </Pressable>
       )}
       {profile.status === "rejected" && (
         <View style={{ backgroundColor: "#fee2e2", borderRadius: 8, padding: 12, gap: 8 }}>
-          <Text><Text style={{ fontWeight: "700" }}>Changes requested: </Text>{profile.rejectionReason}</Text>
-          <Pressable onPress={resubmit} style={{ backgroundColor: "#111", padding: 10, borderRadius: 8 }}>
-            <Text style={{ color: "#fff", textAlign: "center" }}>Resubmit for review</Text></Pressable>
+          <Text>
+            <Text style={{ fontWeight: "700" }}>Changes requested: </Text>
+            {profile.rejectionReason ?? "(no reason provided)"}
+          </Text>
         </View>
       )}
       <View style={{ gap: 8 }}>
         <Text style={{ fontSize: 18, fontWeight: "700" }}>Photos</Text>
-        <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar" />
-        <PhotoUploader profileId={profileId} uid={user.uid} kind="cover" />
+        {/* currentPath is required, not optional: Task 13's PhotoUploader */}
+        {/* watches it (against its own `baseline`) to know when the photo */}
+        {/* pipeline has finished and drop its "Processing…" state. */}
+        <PhotoUploader profileId={profileId} uid={user.uid} kind="avatar"
+          currentPath={profile.portfolio?.avatarPhotoPath ?? null} />
+        <PhotoUploader profileId={profileId} uid={user.uid} kind="cover"
+          currentPath={profile.portfolio?.coverPhotoPath ?? null} />
       </View>
-      <BioGenresForm profileId={profileId} initial={profile.portfolio} />
-      <LinksForm profileId={profileId} initial={profile.portfolio} />
+      {/* key={profileId} on all three initial-seeded forms: Expo Router reuses */}
+      {/* this screen instance across a profile-context switch, and each form */}
+      {/* only seeds its local state from `initial` once, on mount — without */}
+      {/* the key forcing a remount, the PREVIOUS profile's bio/links/rates */}
+      {/* would leak onto the newly-selected profile. */}
+      <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
+      <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
-      <BookingForm profileId={profileId} initial={booking} />
-      {profile.status === "draft" && (
-        <Pressable onPress={resubmit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
-          <Text style={{ color: "#fff", textAlign: "center" }}>Submit for review</Text></Pressable>
+      {booking === "error" ? (
+        <View style={{ gap: 8 }}>
+          <Text style={{ fontSize: 18, fontWeight: "700" }}>Rates & preferences</Text>
+          {/* "error" is distinct from the ordinary null-means-"no doc yet"
+              case above on purpose — same failure-vs-empty distinction as
+              PhotoUploader's awaiting/timeout state and TrackQueueRow's
+              clip-URL-failed state. Rendering BookingForm here with
+              initial={null} would mount it blank over rates that are still
+              saved server-side; the read just didn't reach them. */}
+          <Text style={{ color: "#92400e" }}>Couldn&#39;t load your rates.</Text>
+          <Pressable onPress={retryBooking}
+            style={{ borderWidth: 1, borderColor: "#bbb", borderRadius: 8, padding: 10, alignSelf: "flex-start" }}>
+            <Text>Retry</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <BookingForm key={profileId} profileId={profileId} initial={booking} />
+      )}
+      {showSubmit && (
+        <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
+          <Pressable onPress={() => void submit()} disabled={!canSubmit || submitBusy}
+            style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: !canSubmit || submitBusy ? 0.5 : 1 }}>
+            <Text style={{ color: "#fff", textAlign: "center" }}>
+              {submitBusy ? "Submitting…" : profile.status === "rejected" ? "Resubmit for review" : "Submit for review"}
+            </Text>
+          </Pressable>
+          {!canSubmit && (
+            // Plain join, not Intl.ListFormat: unverified under Hermes's ICU
+            // data build — see Task 14's DO-NOT-COPY note (web's page uses
+            // Intl.ListFormat; this is the deliberately simpler mobile copy).
+            <Text style={{ color: "#92400e" }}>Add {missing.join(", ")} before submitting.</Text>
+          )}
+          <Pressable onPress={deleteDraft} disabled={deleteBusy}
+            style={{ borderWidth: 1, borderColor: "#fca5a5", borderRadius: 6, padding: 10, alignSelf: "flex-start" }}>
+            <Text style={{ color: "#dc2626" }}>{deleteBusy ? "Deleting…" : "Delete this profile"}</Text>
+          </Pressable>
+        </View>
       )}
     </ScrollView>
   );
 }
 ```
 
-(The public-page link's host is a placeholder until a web domain exists — point it at the deployed web app when that lands; keep the `gatekeep.example` constant in one place at the top of the file with a comment.)
-
 - [ ] **Step 2: Update `apps/mobile/app/join.tsx`**
 
-Musician joins stop auto-submitting. Replace the `submit` handler body: after `createProfileDraft`, for `type === "musician"` do **not** call `submitProfileForReview`; instead alert "Draft created — build your portfolio next" and `router.replace("/(musician)/portfolio")` (the ProfileContext picks up the new membership; instruct the user to switch context if needed). Curator joins keep the old create-then-submit behavior unchanged.
+Musician joins stop auto-submitting; curator joins keep the old
+create-then-submit behavior unchanged.
+
+Final code, post TWO rounds of quality-review fixes.
+
+Round 1 sanctioned deviation from the plan text this section originally
+gave: after `createProfileDraft`, the musician branch calls `switchTo`
+(from `useProfileContext`) with the newly created profile summary directly,
+rather than only alerting and leaving the `ProfileContext` membership
+listener to pick the new profile up passively — so the portfolio tab has
+an active profile and renders its edit forms on the very next screen,
+instead of showing its own "switch to a musician profile" placeholder
+until the musician manually switches context by hand. The submit button's
+label is also now conditional (`"Create my profile"` for musician vs.
+`"Submit for review"` for curator), since "Submit for review" stopped
+being true for the musician path the moment it stopped calling
+`submitProfileForReview`.
+
+Round 2 fix (IMPORTANT): a `busy` flag now guards `submit` against
+re-entry (a double-tap could otherwise mint two drafts), disables the
+Pressable and swaps its label to `"Creating…"` while in flight, and the
+catch block's `e: any` narrowed to `e instanceof Error`:
+
+```tsx
+import { useState } from "react";
+import { View, Text, TextInput, Pressable, Alert, ScrollView } from "react-native";
+import { httpsCallable } from "firebase/functions";
+import { useRouter } from "expo-router";
+import { getFirebase } from "../src/lib/firebase";
+import { useProfileContext } from "../src/shell/ProfileContext";
+import { validateProfileDraft, type ProfileType } from "@gatekeep/shared";
+
+const SUBTYPES: Record<ProfileType, { value: string; label: string }[]> = {
+  musician: [{ value: "solo", label: "Solo act" }, { value: "band", label: "Band" }],
+  curator: [{ value: "venue", label: "Venue" }, { value: "planner", label: "Event planner" },
+            { value: "individual_host", label: "Individual host" }],
+};
+
+export default function Join() {
+  const [type, setType] = useState<ProfileType>("musician");
+  const [subtype, setSubtype] = useState("solo");
+  const [name, setName] = useState("");
+  const [handle, setHandle] = useState("");
+  const [busy, setBusy] = useState(false);
+  const router = useRouter();
+  const { switchTo } = useProfileContext();
+
+  const submit = async () => {
+    if (busy) return; // guards a double-tap from minting two drafts
+    const input = { type, subtype, name, handle: handle.toLowerCase() };
+    const v = validateProfileDraft(input);
+    if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
+    setBusy(true);
+    try {
+      const { functions } = getFirebase();
+      const { data } = await httpsCallable<typeof input, { profileId: string }>(
+        functions, "createProfileDraft")(input);
+      if (type === "musician") {
+        // MUST FIX (Task 14): do NOT auto-submit a musician draft. Task 9's
+        // minimum-content gate (bio, >=1 genre, avatar, >=1 listenable
+        // track) means a brand-new draft can NEVER pass
+        // submitProfileForReview — every auto-submit here would always fail
+        // with failed-precondition. Route into the portfolio tab to collect
+        // that content instead, mirroring web's join/page.tsx createDraft ->
+        // router.push handoff. Curator joins (below) are unaffected — there's
+        // no gate for them — and keep the old create-then-submit behavior.
+        switchTo({ profileId: data.profileId, type: "musician", name: name.trim(), status: "draft" });
+        Alert.alert("Draft created", "Add a bio, photo, and a track next, then submit for review.");
+        router.replace("/(musician)/portfolio");
+        return;
+      }
+      await httpsCallable(functions, "submitProfileForReview")({ profileId: data.profileId });
+      Alert.alert("Submitted!", "Our team will review your profile. We'll notify you.");
+      router.back();
+    } catch (e) {
+      Alert.alert("Couldn't submit", e instanceof Error ? e.message : "Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 12 }} keyboardShouldPersistTaps="handled">
+      <Text style={{ fontSize: 24, fontWeight: "700" }}>Join GateKeep</Text>
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        {(["musician", "curator"] as const).map((t) => (
+          <Pressable key={t} onPress={() => { setType(t); setSubtype(SUBTYPES[t][0].value); }}
+            style={{ borderWidth: 1, padding: 10, borderRadius: 8, backgroundColor: type === t ? "#111" : "#fff" }}>
+            <Text style={{ color: type === t ? "#fff" : "#111" }}>{t}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+        {SUBTYPES[type].map((s) => (
+          <Pressable key={s.value} onPress={() => setSubtype(s.value)}
+            style={{ borderWidth: 1, padding: 10, borderRadius: 8, backgroundColor: subtype === s.value ? "#111" : "#fff" }}>
+            <Text style={{ color: subtype === s.value ? "#fff" : "#111" }}>{s.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <TextInput placeholder="Name (band, venue, or your stage name)" value={name} onChangeText={setName}
+        style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
+      <TextInput placeholder="Handle (yourname — lowercase, no spaces)" autoCapitalize="none"
+        value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
+      <Pressable onPress={() => void submit()} disabled={busy}
+        style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
+        {/* Musician: create-only now (see the MUST FIX comment above) —
+            "Submit for review" would be a lie until the portfolio tab's own
+            gated button actually does that. Curator: unchanged, still
+            submits immediately. */}
+        <Text style={{ color: "#fff", textAlign: "center" }}>
+          {busy ? "Creating…" : type === "musician" ? "Create my profile" : "Submit for review"}
+        </Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+```
 
 - [ ] **Step 3: Create `apps/mobile/app/artist/[handle].tsx` (hero-first native public view)**
+
+Final code, post TWO rounds of quality-review fixes.
+
+Round 1 sanctioned deviation from the sketch this section originally
+showed: track duration renders through a small shared `fmtDuration` helper
+(general `mm:ss`, matching `TrimUploader`'s own `fmt`) instead of the
+sketch's hardcoded `` `0:${...}` `` prefix — the sketch's version only ever
+read correctly because clips are capped at `MAX_CLIP_SECONDS` (30s), so it
+happened to never need a minutes digit; the helper is equivalent today but
+doesn't silently break if that cap ever changes.
+
+Round 2 fix: `playingId` (the "now playing" row highlight) now clears
+itself via a `useAudioPlayerStatus(player)` effect keyed on
+`status.didJustFinish`, for the one case `play()`'s own manual toggle-off
+branch doesn't cover — a clip that reaches its end unattended. Deliberately
+NOT keyed on a broader "`status.playing` went false" check: `replace()`
+(switching straight from one track to another while one is still playing)
+can report a transient `playing: false` while the new source loads, before
+`play()` resumes it, and a generic playing-went-false clear would race that
+reload and wrongly un-highlight the row for the track that's actually
+about to start:
 
 ```tsx
 import { useEffect, useState } from "react";
@@ -3272,42 +6874,67 @@ import { ScrollView, View, Text, Image, Pressable, Linking } from "react-native"
 import { useLocalSearchParams } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
-import { useAudioPlayer } from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { getFirebase } from "../../src/lib/firebase";
 import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
 
 type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 
+const fmtDuration = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
 function TrackRow({ t, playingId, onPlay }:
   { t: LoadedTrack; playingId: string | null; onPlay: (t: LoadedTrack) => void }) {
   return (
-    <Pressable onPress={() => onPlay(t)}
+    <Pressable onPress={() => onPlay(t)} accessibilityRole="button" accessibilityLabel={`Play ${t.title}`}
       style={{ flexDirection: "row", gap: 10, alignItems: "center", borderWidth: 1,
         borderColor: "#ddd", borderRadius: 8, padding: 12 }}>
       <Text>{playingId === t.id ? "❚❚" : "▶"}</Text>
       <Text style={{ flex: 1 }}>{t.title}</Text>
-      <Text style={{ color: "#888" }}>{t.durationSec ? `0:${String(Math.round(t.durationSec)).padStart(2, "0")}` : ""}</Text>
+      <Text style={{ color: "#888" }}>{t.durationSec ? fmtDuration(t.durationSec) : ""}</Text>
     </Pressable>
   );
 }
 
 export default function Artist() {
-  const { handle } = useLocalSearchParams<{ handle: string }>();
+  const { handle: rawHandle } = useLocalSearchParams<{ handle: string }>();
+  // Handles are stored lowercase (functions/src/profiles.ts); the route
+  // param can arrive in any case a user typed or shared a link with —
+  // normalize before every lookup, mirroring web's app/u/[handle]/page.tsx
+  // fix (a mismatched-case lookup there used to silently 404).
+  const handle = (rawHandle ?? "").toLowerCase();
   const [state, setState] = useState<"loading" | "notfound" | {
     profile: ProfileDoc; tracks: LoadedTrack[]; avatarUrl: string | null; coverUrl: string | null;
   }>("loading");
   const [playingId, setPlayingId] = useState<string | null>(null);
   const player = useAudioPlayer(null);
+  const status = useAudioPlayerStatus(player);
+
+  // Clears the "now playing" row highlight when a clip ends on its own.
+  // play()'s manual toggle-off branch below already clears playingId itself
+  // synchronously, so this only needs to cover the case that branch
+  // doesn't: reaching the end of the clip unattended. Deliberately keyed on
+  // `didJustFinish` alone, not a broader "status.playing went false" check —
+  // replace() (switching straight from one track to another while one is
+  // still playing, in the same branch below) can report a transient
+  // playing:false while the new source loads, before play() resumes it; a
+  // generic playing-went-false clear would race that reload and wrongly
+  // un-highlight the row for the track that's actually about to play.
+  // didJustFinish is the native "actually reached the end" signal and isn't
+  // subject to that reload blip.
+  useEffect(() => {
+    if (status.didJustFinish) setPlayingId(null);
+  }, [status.didJustFinish]);
 
   useEffect(() => {
     let cancelled = false;
+    setState("loading");
     (async () => {
       try {
         const { db, storage } = getFirebase();
         const h = await getDoc(doc(db, "handles", handle));
         if (!h.exists()) { if (!cancelled) setState("notfound"); return; }
         const profileId = h.data().profileId as string;
-        const p = await getDoc(doc(db, "profiles", profileId));
+        const p = await getDoc(doc(db, "profiles", profileId)); // rules deny unless approved/member/admin
         if (!p.exists() || (p.data() as ProfileDoc).type !== "musician") {
           if (!cancelled) setState("notfound"); return;
         }
@@ -3318,30 +6945,50 @@ export default function Artist() {
         };
         const trackSnap = await getDocs(query(collection(db, `profiles/${profileId}/tracks`),
           where("status", "==", "approved"), orderBy("order")));
-        const tracks = (await Promise.all(trackSnap.docs.map(async (t) => {
-          const d = t.data() as TrackDoc;
-          const u = await url(d.storagePath);
-          return u ? { id: t.id, title: d.title, durationSec: d.durationSec, url: u } : null;
-        }))).filter((x): x is LoadedTrack => x !== null);
-        if (!cancelled) setState({ profile, tracks,
-          avatarUrl: await url(profile.portfolio?.avatarPhotoPath),
-          coverUrl: await url(profile.portfolio?.coverPhotoPath) });
-      } catch { if (!cancelled) setState("notfound"); } // permission-denied = not approved
+        const [tracks, avatarUrl, coverUrl] = await Promise.all([
+          Promise.all(trackSnap.docs.map(async (t) => {
+            const d = t.data() as TrackDoc;
+            const u = await url(d.storagePath);
+            return u ? { id: t.id, title: d.title, durationSec: d.durationSec, url: u } : null;
+          })).then((rows) => rows.filter((x): x is LoadedTrack => x !== null)),
+          url(profile.portfolio?.avatarPhotoPath),
+          url(profile.portfolio?.coverPhotoPath),
+        ]);
+        if (!cancelled) setState({ profile, tracks, avatarUrl, coverUrl });
+      } catch (e) {
+        // permission-denied (a draft/pending/rejected profile's Firestore
+        // rules deny the read) means "not approved" — from the public's
+        // point of view that's a legitimate not-found, not a leak of
+        // whether a handle exists behind the scenes. Anything else (offline,
+        // a missing index, a real backend outage) still lands on the same
+        // "not found" screen here — mobile has no separate error route to
+        // send it to — but gets logged so a real outage doesn't vanish
+        // silently the way web's loadProfile explicitly distinguishes.
+        console.error("artist page load failed", handle, e);
+        if (!cancelled) setState("notfound");
+      }
     })();
     return () => { cancelled = true; };
   }, [handle]);
 
-  if (state === "loading") return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>Loading…</Text></View>;
-  if (state === "notfound") return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>No profile at @{handle}.</Text></View>;
+  if (state === "loading") {
+    return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>Loading…</Text></View>;
+  }
+  if (state === "notfound") {
+    return <View style={{ flex: 1, justifyContent: "center" }}><Text style={{ textAlign: "center" }}>No profile at @{handle}.</Text></View>;
+  }
 
   const { profile, tracks, avatarUrl, coverUrl } = state;
   const pf = profile.portfolio;
   const play = (t: LoadedTrack) => {
     if (playingId === t.id) { player.pause(); setPlayingId(null); return; }
+    // Single active player: replace() swaps whatever was loaded (including a
+    // still-playing previous track) with the new source before playing it.
     player.replace({ uri: t.url });
     player.play();
     setPlayingId(t.id);
   };
+
   return (
     <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
       {coverUrl && <Image source={{ uri: coverUrl }} style={{ width: "100%", height: 180 }} />}
@@ -3361,15 +7008,23 @@ export default function Artist() {
             {tracks.map((t) => <TrackRow key={t.id} t={t} playingId={playingId} onPlay={play} />)}
           </View>
         )}
-        {pf?.bio ? (<><Text style={{ fontSize: 18, fontWeight: "700" }}>About</Text>
-          <Text style={{ lineHeight: 21 }}>{pf.bio}</Text></>) : null}
+        {pf?.bio ? (
+          <>
+            <Text style={{ fontSize: 18, fontWeight: "700" }}>About</Text>
+            <Text style={{ lineHeight: 21 }}>{pf.bio}</Text>
+          </>
+        ) : null}
         {pf?.externalLinks && pf.externalLinks.length > 0 && (
           <View style={{ flexDirection: "row", gap: 14, flexWrap: "wrap" }}>
             {pf.externalLinks.map((l) => (
-              <Pressable key={l.url} onPress={() => void Linking.openURL(l.url)}>
+              <Pressable key={`${l.kind}:${l.url}`} onPress={() => void Linking.openURL(l.url)}>
                 <Text style={{ textDecorationLine: "underline" }}>{l.kind}</Text>
-              </Pressable>))}
+              </Pressable>
+            ))}
           </View>
+        )}
+        {tracks.length === 0 && !pf?.bio && (
+          <Text style={{ color: "#888" }}>This artist hasn&#39;t added content yet.</Text>
         )}
         {/* Shows: platform events only — section appears when sub-4/6 data exists. */}
       </View>
@@ -3396,6 +7051,18 @@ git commit -m "feat(mobile): portfolio editor tab, wizard flow, native artist pa
 
 **Files:** whatever the two pre-existing errors touch (foundation ruling: "Mobile lint has 2 pre-existing errors").
 
+**No ESLint config exists in `apps/mobile` yet.** `expo lint`'s first run
+scaffolds one (Expo's flat-config default, `eslint-config-expo`) rather than
+just running against a pre-existing setup — that's expected, not a sign
+something's broken; commit the generated config alongside whatever fixes
+this task makes. Note too that mobile has been running with the React
+Compiler enabled (`experiments.reactCompiler` in `app.json`) this entire
+sub-project with no lint net at all — every hook-dependency habit Tasks 13
+and 14 leaned on (the `useCallback`-wrapped `flagInvalid` in
+`TrimUploader`, `PhotoUploader`'s render-time state adjustment, etc.) has
+only been checked by hand and by `tsc`, not by
+`react-hooks/exhaustive-deps`, until this task's first lint run.
+
 - [ ] **Step 1:** Run `pnpm --filter @gatekeep/mobile lint`. Record every error.
 - [ ] **Step 2:** Fix each error at root cause (no eslint-disable unless the rule is genuinely wrong for the line, and then with a comment saying why). Re-run until: 0 errors. Warnings: fix those introduced by this sub-project; pre-existing warnings may stay.
 - [ ] **Step 3:** Also run `pnpm --filter @gatekeep/web lint` — must stay green.
@@ -3418,7 +7085,88 @@ git commit -m "fix(mobile): lint green — clears the 2 pre-existing errors"
 - Monorepo map: add `storage.rules`, `functions/src/{portfolio,tracks,media,storage}.ts`, `apps/web/app/join/`, `apps/web/app/dashboard/portfolio/`, `apps/mobile/src/portfolio/`, `apps/mobile/app/artist/`.
 - Key commands: note the storage emulator (port 9199) now starts with `pnpm emu`, and `emu:test`/`emu:rules` include it.
 - Environment: note `next typegen` for fresh clones (typecheck fails without it) and the corepack/pnpm Windows PATH workaround.
+- Environment variables table: add a row for `NEXT_PUBLIC_SITE_URL` (app: web; purpose: absolute
+  base URL for the public portfolio page's canonical link + OpenGraph `og:url`/images — see
+  `apps/web/app/layout.tsx`'s `metadataBase`; default when unset: falls back to Vercel's
+  `VERCEL_PROJECT_PRODUCTION_URL` if present, else `metadataBase` is omitted and those URLs
+  render relative instead of absolute — never a hardcoded localhost fallback).
 - Manual follow-ups: **replace** the "native App Check lands in sub-project 2" sentence — EAS production build + native App Check moved to a dedicated launch-prep track (per SP2 spec §1), same must-review list as the admin/internal deferred items. Add: create the production Storage bucket lifecycle rule (24h TTL on `staging/`) in the Firebase console/deploy config before launch — the emulator does not enforce lifecycle rules.
+- Manual follow-ups: the App Check enforcement checklist must cover Cloud Storage, not just Firestore + Functions — and Storage must NOT be flipped to enforce until native mobile App Check ships (mobile currently has no App Check attestation; enforcing early would lock the app out of its own uploads).
+- Manual follow-ups: abandoned `processing` tracks (created via `createTrack` but never uploaded, or stuck if the transcode trigger never fires) hold one of the 10 cap slots indefinitely until a member manually deletes them; consider a scheduled cleanup sweep (e.g. delete `processing` tracks older than 24h) in a later sub-project.
+- Manual follow-ups (public portfolio page, from Task 10 quality review):
+  - Store resolved Storage download URLs on the profile/track docs at write time (photo/media
+    pipeline) instead of calling `getDownloadURL` on every SSR render — removes the per-render
+    Storage round trips `loadProfile` does today (perf follow-up, not correctness).
+  - Split a public route group (`app/(public)/u/[handle]`) without `AuthProvider` in its layout —
+    the public portfolio page currently ships the full client-side auth bundle (~1.2MB JS) it
+    never uses.
+  - Add `sitemap.ts`/`robots.ts` once internal links to `/@handle` pages exist elsewhere in the
+    app (nothing links to them yet, so a sitemap would be premature).
+  - Wire server-side Sentry (`instrumentation.ts`) once DSNs exist — mirrors the existing
+    client-side `instrumentation-client.ts` no-op-until-configured pattern.
+- Manual follow-ups (web polish, from Task 11's quality review):
+  - Admin `TracksQueue` snapshot callback: a rejecting `Promise.all` (one failed profile
+    `getDoc`) silently drops the whole snapshot update — switch to `Promise.allSettled` with a
+    per-profile "(unknown)" fallback + `console.error` (from Task 12's re-review).
+  - `functions/test/tracks.test.ts` rv4: assert exactly ONE takedown notification exists
+    (`filter(...).length === 1`, not `.some()`) to pin first-reject single-notify against
+    regressions (from Task 12's re-review). Also: consider reordering reject's storage cleanup
+    before the notification await for faster time-to-public-removal on takedowns.
+  - Replace `window.alert`/`confirm`/`prompt` throughout the portfolio editor/wizard with a
+    shared feedback primitive (toast/modal component) — the native browser dialogs work but
+    block the main thread, can't be styled, and don't match the rest of the app's UI.
+  - `TrimUploader`/`PhotoUploader` uploads have no cancel button and no `beforeunload` guard —
+    a musician who navigates away or closes the tab mid-upload loses no data server-side (the
+    doc stays in "processing"/gets cleaned up per the failure-path fix), but gets no warning
+    that leaving will interrupt it.
+  - Accessibility pass across the editor/wizard: `aria-pressed` on the genre/gig-type/link-kind
+    toggle buttons (currently conveyed by color only), explicit `<label htmlFor>`/`id` pairings
+    or wrapping `<form>` elements instead of bare inputs, and a focus-visible audit.
+  - Save actions (`BioGenresForm`, `LinksForm`, `BookingForm`) have no success confirmation —
+    only failures alert; a save that succeeds gives no positive feedback beyond the button
+    returning to its idle label. Pair with the shared feedback primitive above.
+  - Stale `processing` tracks (created via `createTrack` but never uploaded, or abandoned
+    mid-upload before the client-side cleanup in `TrimUploader`'s catch block can run — e.g. the
+    tab closes mid-upload) still need a server-side reaper, not just the client-side best-effort
+    `deleteTrack` cleanup added in Task 11's fix pass. Same bucket as the staging-bucket 24h
+    lifecycle rule already tracked above as a launch blocker — both are "abandoned upload
+    cleanup" follow-ups and should probably ship together.
+  - `deleteProfile` (the "Delete this profile" button) is currently offered only for
+    `draft`/`rejected` profiles, matching `submitProfileForReview`'s allowed source statuses —
+    a musician cannot self-service-delete an `approved` or `pending_review` profile from the
+    editor. This is a conscious ruling: a live/under-review profile has curator-facing
+    consequences (broken links, an in-flight review) that a bare confirm-dialog delete shouldn't
+    short-circuit. **Pre-merge security-gate finding 3, closed:** this used to be enforced only
+    by the UI never rendering the button for those statuses — the callable itself deleted
+    whatever profile id a caller passed as long as they were one of its admins, so a co-admin
+    calling `deleteProfile` directly (bypassing the UI) could delete a LIVE `approved` profile
+    server-side and immediately free its handle for takeover. `functions/src/profiles.ts`'s
+    `deleteProfile` now enforces the same rule server-side (`failed-precondition` outside
+    draft/rejected), so this is a real invariant, not just a UI convention. Revisit the *product*
+    question (should musicians ever self-service-delete a live profile) if support requests show
+    a real gap — likely wants an admin-mediated or cool-down-gated path rather than the same
+    one-click confirm used for a never-published draft; either way any such path must call through
+    `reviewProfile`'s reject decision (or an equivalent admin-gated unpublish) first, not just
+    relax `deleteProfile`'s own gate.
+- Manual follow-ups (mobile, from Task 13's quality review):
+  - `TrimUploader`'s `upload()` has no native streaming yet — it reads the whole picked file
+    into memory via `fetch().blob()` before handing it to `uploadBytesResumable`, and the
+    Firebase JS SDK's chunked resumable upload roughly doubles peak memory while that blob is
+    in flight. Switch to `expo-file-system`'s `uploadAsync` (native streaming, no full-file
+    `Blob` materialized in JS) and then lift the mobile-only 25 MB cap
+    (`MOBILE_MAX_AUDIO_BYTES` in `TrimUploader.tsx`) back up toward the server's real 50 MB
+    limit once that lands.
+- Manual follow-ups (mobile, from Task 14's quality review):
+  - `ProfileContext`'s `switchTo` currently accepts any `ProfileSummary` the caller hands it —
+    `join.tsx` hand-builds one (`{ profileId, type: "musician", name, status: "draft" }`) right
+    after `createProfileDraft` so the portfolio tab has an active profile immediately, instead of
+    waiting on the `myProfiles` collection-group listener to notice the new membership. That
+    hand-built summary is never reconciled against `myProfiles` once the listener's own snapshot
+    for the same profile does arrive — today the two are identical at creation time, so this is
+    not a live bug, but it's a loaded gun for the next consumer of `switchTo`: `ProfileContext`
+    should reconcile `activeContext` against `myProfiles` by `profileId` (swap in the listener's
+    copy once it shows up, or at least warn on a mismatch) rather than trusting a caller-supplied
+    summary to stay accurate indefinitely.
 
 - [ ] **Step 2: Commit**
 
@@ -3442,7 +7190,15 @@ pnpm --filter @gatekeep/web build
 ```
 Expected: everything green. `next build` also exercises the SSR page + config redirects/rewrites.
 
-- [ ] **Step 2:** Manual E2E against emulators (spec §8): sign up → join wizard → bio/genres/avatar → upload track, pick window → submit blocked until minimums → submit → admin approves profile + track (hears clip) → public `/@handle` renders SSR with playing clip → admin rejects a second track → musician sees reason → delete + re-upload → deleteProfile cascades storage. On mobile: same loop through the portfolio tab + `/artist/<handle>`.
+- [ ] **Step 2:** Manual E2E against emulators (spec §8): sign up → join wizard → bio/genres/avatar → upload track, pick window → submit blocked until minimums → submit → admin approves profile + track (hears clip) → public `/@handle` renders SSR with playing clip → admin rejects a second track → musician sees reason → delete + re-upload → deleteProfile cascades storage. On mobile: same loop through the portfolio tab + `/artist/<handle>`. Include: click-to-play a real approved track's `TrackPlayer` button on `/@handle` in an actual browser (a headless/curl smoke test can confirm the audio URL and markup but can't verify playback starts/stops correctly).
+  On-device mobile checklist, added from Task 14's quality review (none of this is exercised by typecheck/emulator tests):
+  - **Rebuild the dev client FIRST, before anything else below** — Task 13's native modules (`expo-audio`, `expo-document-picker`, `@react-native-community/slider`, `expo-file-system`) now fail at APP LAUNCH, not just first use: `_layout.tsx`'s `setAudioModeAsync` call runs in a `useEffect` on every cold start, so a dev client built before Task 13 landed hits a missing-native-module error the moment the app opens, before you can even navigate to a screen that uses one of these packages.
+  - iOS: flip the ringer switch to silent, then preview a clip in `TrimUploader` and play an approved track on `/artist/<handle>` — both must still be audible (confirms `playsInSilentMode` actually took effect, not just that the call didn't throw).
+  - Background the app mid-upload (a track or photo upload in progress) and mid-playback (a clip playing on `/artist/<handle>`), then foreground it again — confirm the upload either completes or fails cleanly (no stuck "Processing…" with nothing behind it), and playback either continues or stops cleanly (no crash, no stuck "now playing" highlight with no audio).
+  - Leave the artist screen while a clip is playing: back-navigate (confirm audio stops) and navigate to a DIFFERENT screen that pushes on top (confirm whether audio keeps playing underneath — note whether that's the intended behavior or a gap, since this task never explicitly decided it).
+  - Android: pick an audio file via SAF from a cloud-backed provider (Google Drive/Files "recent" cloud entries, not local storage) — this is the path most likely to hit `TrimUploader`'s size-unknown branch (`picked.size === null`, resolved later from the fetched blob in `upload()`), which is rarely exercised by a local-file pick.
+  - On the Portfolio tab: with two musician profiles under one account, switch from profile A to profile B via `ContextSwitcher` while A's forms have unsaved edits — confirm B's bio/links/rates/tracks render (not A's stale data left over from the mounted screen instance), matching the Task 14 quality-review fix for the profile-switch render-time reset.
+  - Regression check for the same fix pass's CRITICAL booking-sentinel bug: open the Portfolio tab for a musician who already has SAVED rates (`BookingForm` should show them, not a blank form) — then save the rates form unchanged and confirm the stored rates are still there afterward (not overwritten with nulls).
 - [ ] **Step 3:** Process gates (foundation spec §"Process gates"): run the security review of the whole branch (custom opus security-reviewer per foundation ruling 7 if the `security-review` skill still trips on `origin/HEAD`), and an independent audit of **both** `firestore.rules` and `storage.rules`. Apply all fixes before merge.
 - [ ] **Step 4:** Merge via superpowers:finishing-a-development-branch.
 

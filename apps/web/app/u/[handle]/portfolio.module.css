@@ -1,0 +1,30 @@
+/* Hybrid layout: hero-first single column on mobile, EPK split on desktop.
+   Colors derive from the --foreground/--background tokens in globals.css so
+   the page follows light/dark scheme instead of hardcoding a light palette. */
+.page { max-width: 960px; margin: 0 auto; padding: 16px; }
+.cover { width: 100%; aspect-ratio: 16 / 6; object-fit: cover; border-radius: 12px;
+  background: color-mix(in srgb, var(--foreground) 12%, var(--background)); }
+.layout { display: grid; gap: 24px; grid-template-columns: 1fr; margin-top: 16px; }
+.identity { display: flex; flex-direction: column; gap: 8px; }
+.avatar { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; margin-top: -64px;
+  border: 4px solid var(--background);
+  background: color-mix(in srgb, var(--foreground) 10%, var(--background)); }
+/* opacity (not a fixed gray) so it tracks --foreground across schemes and
+   still clears WCAG AA (4.5:1) text contrast against --background in both. */
+.genres { color: var(--foreground); opacity: 0.72; }
+.section { margin-top: 24px; }
+.bio { white-space: pre-wrap; line-height: 1.5; }
+.links { display: flex; gap: 12px; flex-wrap: wrap; }
+.links a { text-decoration: underline; }
+.empty { color: var(--foreground); opacity: 0.72; margin-top: 24px; }
+@media (min-width: 900px) {
+  .layout { grid-template-columns: 300px 1fr; }
+  .identity { position: sticky; top: 24px; align-self: start; }
+  .avatar { margin-top: -48px; }
+}
+
+.tracks :global(.trackRow) { display: flex; gap: 12px; align-items: center; width: 100%;
+  padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--foreground) 20%, var(--background));
+  border-radius: 8px; margin-bottom: 6px; background: none; color: inherit; font: inherit;
+  font-size: 15px; cursor: pointer; text-align: left; }
+.tracks :global(.trackDur) { margin-left: auto; color: var(--foreground); opacity: 0.72; }

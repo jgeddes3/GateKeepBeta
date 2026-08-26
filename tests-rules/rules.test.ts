@@ -3,7 +3,9 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, collectionGroup, query, where } from "firebase/firestore";
+import {
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, collectionGroup, query, where, orderBy, documentId, deleteDoc,
+} from "firebase/firestore";
 
 let env: RulesTestEnvironment;
 
@@ -208,5 +210,128 @@ describe("invites and notifications", () => {
     await seed("users/alice/notifications/n1", { title: "Approved!", read: false });
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(updateDoc(doc(alice, "users/alice/notifications/n1"), { title: "Hacked!" }));
+  });
+});
+
+describe("tracks", () => {
+  const seedProfile = async (status: string) => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+  };
+  it("public reads approved tracks of approved profiles only", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    await seed("profiles/prof1/tracks/t2", { title: "Pending", status: "pending_review", order: 1 });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+    await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t2")));
+    await assertSucceeds(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
+    await assertFails(getDocs(collection(anon, "profiles/prof1/tracks"))); // unfiltered list
+  });
+  it("no public track reads on a non-approved profile; members read all their own", async () => {
+    await seedProfile("draft");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    await seed("profiles/prof1/tracks/t2", { title: "Rejected", status: "rejected", order: 1 });
+    const anon = env.unauthenticatedContext().firestore();
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+    // Even the production-shaped filtered+ordered list query must fail here —
+    // the profile itself is not approved, so no list shape helps.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/tracks/t2")));
+    await assertSucceeds(getDocs(collection(alice, "profiles/prof1/tracks")));
+  });
+  it("clients cannot write tracks; admin collection-group read works", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "x", status: "pending_review", order: 0 });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(setDoc(doc(alice, "profiles/prof1/tracks/hax"), { title: "h", status: "approved" }));
+    await assertFails(updateDoc(doc(alice, "profiles/prof1/tracks/t1"), { status: "approved" }));
+    // Admins get elevated read, never write — writes stay Cloud Functions only.
+    await assertFails(setDoc(doc(admin, "profiles/prof1/tracks/hax2"), { title: "h", status: "approved" }));
+    await assertSucceeds(getDocs(query(
+      collectionGroup(admin, "tracks"), where("status", "==", "pending_review"))));
+    const bob = env.authenticatedContext("bob").firestore();
+    await assertFails(getDocs(query(
+      collectionGroup(bob, "tracks"), where("status", "==", "pending_review"))));
+  });
+  it("'in'-status and documentId()-pinned list queries are DENIED on an approved profile that also has a pending track", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    await seed("profiles/prof1/tracks/t2", { title: "Pending", status: "pending_review", order: 1 });
+    const anon = env.unauthenticatedContext().firestore();
+    // An "in" filter covering both statuses would, if it worked, hand back
+    // the not-yet-public pending track alongside the approved one — rules
+    // evaluate the read clause per matched doc, so t2's status ("pending_review",
+    // not "approved") fails its own check and the whole query is denied.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "in", ["approved", "pending_review"]))));
+    // Pinning by documentId() doesn't route around the same per-doc check —
+    // a query naming both ids directly still fails for the same reason.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where(documentId(), "in", ["t1", "t2"]))));
+  });
+  it("fail-closed: a track surviving under a deleted parent profile doc is not publicly readable", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    // Simulate a partial/failed cascade delete: the profile doc is gone but
+    // one of its track docs was left behind. profileApproved()'s get() on a
+    // missing doc makes `.data.status` throw during rule evaluation — that
+    // must deny the read, not silently pass through.
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), "profiles/prof1"));
+    });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+  });
+  it("a profile member (not a platform admin) cannot run collectionGroup('tracks')", async () => {
+    // alice is prof1's own profile-admin (seedProfile's member doc), but that
+    // is unrelated to the platform-level isAdmin() the collection-group rule
+    // requires — membership in one profile must not grant a cross-profile
+    // collection-group read.
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "x", status: "pending_review", order: 0 });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDocs(query(collectionGroup(alice, "tracks"), where("status", "==", "pending_review"))));
+  });
+  it("membership does not leak across profiles", async () => {
+    await seedProfile("approved"); // prof1 / alice, as the existing helper does
+    await seed("profiles/prof2", { type: "musician", name: "B", handle: "b", status: "approved" });
+    await seed("profiles/prof2/tracks/p", { title: "SECRET", status: "pending_review", order: 0 });
+    await seed("profiles/prof2/tracks/pub", { title: "Public", status: "approved", order: 1 });
+    await seed("profiles/prof2/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDoc(doc(alice, "profiles/prof2/tracks/p")));
+    await assertFails(getDocs(collection(alice, "profiles/prof2/tracks")));
+    await assertFails(getDoc(doc(alice, "profiles/prof2/private/booking")));
+    // Positive control: alice is not a member of prof2, but prof2 is approved,
+    // so the public-approved path (not membership) is what allows this read.
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof2/tracks/pub")));
+  });
+});
+
+describe("private booking subdoc", () => {
+  it("members and admins read; strangers and anon cannot; nobody writes", async () => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    // A sibling doc under private/ — pins that the rule is scoped to the
+    // literal `booking` doc id, not a wildcard over all of private/.
+    await seed("profiles/prof1/private/secrets", { apiKey: "nope" });
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/booking")));
+    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(bob, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(anon, "profiles/prof1/private/booking")));
+    await assertFails(getDoc(doc(alice, "profiles/prof1/private/secrets")));
+    await assertFails(getDoc(doc(admin, "profiles/prof1/private/secrets")));
+    await assertFails(setDoc(doc(alice, "profiles/prof1/private/booking"), { rates: {} }));
+    await assertFails(setDoc(doc(admin, "profiles/prof1/private/booking"), { rates: {} }));
   });
 });

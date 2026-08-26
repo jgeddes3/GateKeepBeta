@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn } from "./helpers";
+import { signUpTestUser, callFn, makeAdminUser } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
@@ -20,13 +20,6 @@ const adb = adminFirestore(admin);
 // rather than mask a real failure.
 vi.setConfig({ testTimeout: 15_000 });
 
-async function makeAdminUser() {
-  const t = await signUpTestUser(`admin-${Date.now()}@test.com`);
-  await adminAuth(admin).setCustomUserClaims(t.uid, { admin: true });
-  await t.user.getIdToken(true); // refresh claims
-  return t;
-}
-
 async function pendingProfile(ownerEmailPrefix: string) {
   const owner = await signUpTestUser(`${ownerEmailPrefix}-${Date.now()}@test.com`);
   const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
@@ -40,7 +33,7 @@ async function pendingProfile(ownerEmailPrefix: string) {
 describe("reviewProfile", () => {
   it("admin approves; status flips; audit log written", async () => {
     const { profileId } = await pendingProfile("v1");
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("approved");
     const logs = await adb.collection("auditLogs")
@@ -50,7 +43,7 @@ describe("reviewProfile", () => {
   });
   it("rejection requires a reason and stores it", async () => {
     const { profileId } = await pendingProfile("v2");
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     await expect(callFn("reviewProfile", { profileId, decision: "rejected" }, adminUser.user))
       .rejects.toThrow(/reason/i);
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "No photos" }, adminUser.user);
@@ -60,7 +53,7 @@ describe("reviewProfile", () => {
   });
   it("rejects a rejection reason longer than 500 characters", async () => {
     const { profileId } = await pendingProfile("v2b");
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     const tooLong = "x".repeat(501);
     await expect(callFn("reviewProfile", { profileId, decision: "rejected", reason: tooLong }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
@@ -76,9 +69,34 @@ describe("reviewProfile", () => {
   });
   it("rejects re-reviewing a profile that is no longer pending_review", async () => {
     const { profileId } = await pendingProfile("v4");
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("approved");
+    await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+  // Spec §6: "admins can retroactively unpublish anything" — profiles didn't
+  // have this path before (only reviewTrack did); reject now also accepts an
+  // already-approved profile, flipping it to rejected so firestore.rules
+  // hides it (and all its tracks, via profileApproved()) from public reads.
+  it("retroactive unpublish: rejecting an approved profile flips it to rejected and records the prior status in the audit detail", async () => {
+    const { profileId } = await pendingProfile("v5");
+    const adminUser = await makeAdminUser("admin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("approved");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Impersonation report" }, adminUser.user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(p?.status).toBe("rejected");
+    expect(p?.rejectionReason).toBe("Impersonation report");
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", profileId).where("action", "==", "profile_rejected").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().detail).toBe("[was approved] Impersonation report");
+  });
+  it("approving an already-approved profile still fails failed-precondition (approve stays pending_review-only)", async () => {
+    const { profileId } = await pendingProfile("v6");
+    const adminUser = await makeAdminUser("admin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
@@ -86,7 +104,7 @@ describe("reviewProfile", () => {
 
 describe("grantAdmin", () => {
   it("admin grants claim to a Google-linked account + audit logged (custom claims merged, not replaced); non-admin denied", async () => {
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     const targetUid = `google-target-${Date.now()}`;
     const targetEmail = `t-${Date.now()}@test.com`;
     // The client SDK's createUserWithEmailAndPassword always yields a
@@ -113,7 +131,7 @@ describe("grantAdmin", () => {
   });
 
   it("rejects granting admin to a non-Google (password) account — spec §8's no-2FA compensating control", async () => {
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     const target = await signUpTestUser(`pw-${Date.now()}@test.com`);
     await expect(callFn("grantAdmin", { uid: target.uid }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -122,7 +140,7 @@ describe("grantAdmin", () => {
   });
 
   it("rejects a missing/empty uid with invalid-argument", async () => {
-    const adminUser = await makeAdminUser();
+    const adminUser = await makeAdminUser("admin");
     await expect(callFn("grantAdmin", { uid: "" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });

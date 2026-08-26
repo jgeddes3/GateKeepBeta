@@ -11,6 +11,7 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getFirestore, connectFirestoreEmulator, type Firestore } from "firebase/firestore";
 import { getFunctions, connectFunctionsEmulator, type Functions } from "firebase/functions";
+import { getStorage, connectStorageEmulator, type FirebaseStorage } from "firebase/storage";
 
 // Public web-app config from Firebase console → Project settings → Your apps.
 // These values are NOT secrets; security comes from rules + App Check.
@@ -26,7 +27,7 @@ const firebaseConfig = {
 import { Platform } from "react-native";
 const EMU_HOST = Platform.OS === "android" ? "10.0.2.2" : "localhost";
 
-let cached: { app: FirebaseApp; auth: Auth; db: Firestore; functions: Functions } | null = null;
+let cached: { app: FirebaseApp; auth: Auth; db: Firestore; functions: Functions; storage: FirebaseStorage } | null = null;
 
 export function getFirebase() {
   if (cached) return cached;
@@ -34,11 +35,13 @@ export function getFirebase() {
   const auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
   const db = getFirestore(app);
   const functions = getFunctions(app, "us-central1");
+  const storage = getStorage(app);
   if (__DEV__) {
     connectAuthEmulator(auth, `http://${EMU_HOST}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, EMU_HOST, 8080);
     connectFunctionsEmulator(functions, EMU_HOST, 5001);
+    connectStorageEmulator(storage, EMU_HOST, 9199);
   }
-  cached = { app, auth, db, functions };
+  cached = { app, auth, db, functions, storage };
   return cached;
 }

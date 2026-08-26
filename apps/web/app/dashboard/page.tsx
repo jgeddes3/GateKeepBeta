@@ -37,9 +37,16 @@ function ProfilesList({ uid }: { uid: string }) {
   }, [uid]);
   return (
     <>
-      {profiles.length === 0 && <p>None yet — join as a musician or curator from the mobile app, or right here once wizards land in the next phase.</p>}
+      {profiles.length === 0 && <p>None yet — <a href="/join">join as a musician</a>, or from the mobile app.</p>}
       <ul>{profiles.map((p) => (
-        <li key={p.profileId}>{p.name} — {p.type} — {p.status.replace("_", " ")}</li>
+        <li key={p.profileId}>
+          {p.name} — {p.type} — {p.status.replace("_", " ")}
+          {p.type === "musician" && (
+            <> · <a href={`/dashboard/portfolio/${p.profileId}`}>
+              {p.status === "draft" ? "finish setup" : p.status === "rejected" ? "revise & resubmit" : "edit portfolio"}
+            </a></>
+          )}
+        </li>
       ))}</ul>
     </>
   );

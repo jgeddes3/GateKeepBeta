@@ -3,7 +3,17 @@
     "fields": [
       { "fieldPath": "profileId", "order": "ASCENDING" },
       { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "tracks", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "order", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
-    "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] } ] }
+    "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
+  { "collectionGroup": "tracks", "fieldPath": "status",
+    "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },
+                 { "queryScope": "COLLECTION", "order": "DESCENDING" },
+                 { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" },
+                 { "queryScope": "COLLECTION_GROUP", "order": "DESCENDING" } ] } ] }

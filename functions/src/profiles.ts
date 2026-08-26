@@ -1,10 +1,20 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
-import { validateProfileDraft, type ProfileDraftInput, type ProfileDoc, type MemberDoc } from "@gatekeep/shared";
+import {
+  validateProfileDraft, isValidDocId, type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
+} from "@gatekeep/shared";
 import { writeAudit } from "./review.js";
+import { bucket, logDeleteFailure } from "./storage.js";
 
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
+
+// Distinct from tracks.ts's ACTIVE_TRACK_STATUSES (which is slot-occupancy —
+// "processing" counts against the 10-track cap). This gate cares about
+// actually-uploaded, listenable content: createTrack writes the doc BEFORE
+// the client uploads bytes, so a "processing" track can be an abandoned
+// upload with nothing behind it — that must not satisfy the gate.
+const LISTENABLE_TRACK_STATUSES = ["pending_review", "approved"] as const;
 
 function requireAuth(uid: string | undefined): string {
   if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
@@ -64,6 +74,9 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
       type: input.type, subtype: input.subtype as ProfileDoc["subtype"],
       name: input.name.trim(), handle: input.handle,
       status: "draft", rejectionReason: null, createdAt: now, updatedAt: now,
+      ...(input.type === "musician"
+        ? { portfolio: { bio: "", genres: [], externalLinks: [], avatarPhotoPath: null, coverPhotoPath: null } }
+        : {}),
     };
     const member: MemberDoc = { uid, role: "admin", label: "owner", joinedAt: now };
     tx.set(profileRef, profile);
@@ -83,6 +96,30 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
   if (status !== "draft" && status !== "rejected") {
     throw new HttpsError("failed-precondition", `Cannot submit a profile in status "${status}".`);
   }
+
+  // Spec §6 minimum content: reviewers approve a *portfolio* — there must be
+  // something to look at and listen to. Musicians only; curators are sub-3.
+  if (snap.data()?.type === "musician") {
+    const p = snap.data()?.portfolio as PortfolioData | undefined;
+    const missing: string[] = [];
+    if (!p?.bio?.trim()) missing.push("a bio");
+    if (!p?.genres?.length) missing.push("at least one genre");
+    if (!p?.avatarPhotoPath) missing.push("a profile photo");
+    // This read (and the status check above) is not transactional with the
+    // ref.update below — a deleteTrack racing this call could remove the
+    // one qualifying track between the query and the update. That leaves
+    // the profile pending_review with no listenable content, which
+    // self-heals: an admin rejects it as empty and the musician resubmits.
+    // Accepted rather than wrapping the whole gate in a transaction.
+    const tracksSnap = await ref.collection("tracks")
+      .where("status", "in", [...LISTENABLE_TRACK_STATUSES]).limit(1).get();
+    if (tracksSnap.empty) missing.push("at least one track");
+    if (missing.length > 0) {
+      const list = new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(missing);
+      throw new HttpsError("failed-precondition", `Add ${list} before submitting.`);
+    }
+  }
+
   await ref.update({ status: "pending_review", rejectionReason: null, updatedAt: Date.now() });
   return { ok: true };
 });
@@ -94,8 +131,9 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
 // to remediate handle-squatting drafts.
 export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
   const uid = requireAuth(req.auth?.uid);
+  requireVerifiedEmail(req);
   const { profileId } = req.data;
-  if (typeof profileId !== "string" || profileId.trim().length === 0) {
+  if (!isValidDocId(profileId)) {
     throw new HttpsError("invalid-argument", "A profile id is required.");
   }
   await requireProfileAdmin(profileId, uid);
@@ -103,11 +141,57 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const profileRef = db.doc(`profiles/${profileId}`);
   const snap = await profileRef.get();
   if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
+  // Finding 3: this used to be enforced client-side only — a co-admin could
+  // call deleteProfile directly on a LIVE approved profile and immediately
+  // free its handle for takeover. draft/rejected are the only statuses with
+  // nothing publicly live to lose; pending_review and approved profiles must
+  // go through reviewProfile's reject (which now supports retroactive
+  // unpublish of an approved profile too) before they're deletable.
+  const status = snap.data()?.status;
+  if (status !== "draft" && status !== "rejected") {
+    throw new HttpsError("failed-precondition",
+      "Approved or in-review profiles can't be deleted — contact support / unpublish first.");
+  }
   const handle = snap.data()?.handle as string | undefined;
   const name = snap.data()?.name as string | undefined;
 
   if (handle) await db.doc(`handles/${handle}`).delete();
-  await db.recursiveDelete(profileRef); // deletes the profile doc + its members subcollection
+  await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
+
+  // Storage cascade — best-effort. force: true is required: without it,
+  // deleteFiles aborts the ENTIRE prefix sweep on the first per-object
+  // error, silently abandoning every remaining object in that prefix; with
+  // it, deletion continues past individual failures and collects them
+  // instead. staging/audio/{uid}/... and staging/photos/{uid}/... are
+  // deliberately NOT swept here even though every {uid} is technically
+  // reachable — a members subcollection query, run before recursiveDelete
+  // removes it, would enumerate them — but the processUpload trigger always
+  // deletes its own staging object in a `finally` on every path (success,
+  // validation failure, or a crash-recovery retry), so a residual staging
+  // object means the trigger never fired at all, not that this cascade
+  // missed it. Those are backstopped by the Storage bucket's 24h lifecycle
+  // rule on staging/, which is a LAUNCH BLOCKER follow-up (not yet
+  // configured — tracked in the SP2 plan's manual follow-ups; Task 16 owes
+  // the README entry).
+  const cascadeTargets = [
+    `public/tracks/${profileId}/`,
+    `review/tracks/${profileId}/`,
+    `public/photos/${profileId}/`,
+  ];
+  const results = await Promise.allSettled(
+    cascadeTargets.map((prefix) => bucket().deleteFiles({ prefix, force: true })));
+  results.forEach((r, i) => {
+    if (r.status !== "rejected") return;
+    // force: true's rejection reason is an ARRAY of per-object errors
+    // (@google-cloud/storage collects them), not a single Error — log each
+    // one individually rather than dumping the array as one opaque entry.
+    // The non-array fallback is NOT dead code: a listing failure still
+    // rejects with a single Error even under force: true.
+    const errors = Array.isArray(r.reason) ? r.reason : [r.reason];
+    for (const e of errors) {
+      logDeleteFailure("deleteProfile", "storage cascade", cascadeTargets[i])(e);
+    }
+  });
 
   await writeAudit({ actorUid: uid, action: "profile_deleted", targetId: profileId, detail: name ?? "" });
   return { ok: true };

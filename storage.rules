@@ -1,0 +1,73 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
+    // Uses token.get(..., false) rather than firestore.rules' `token.admin == true`
+    // style deliberately: a missing claim resolves to `false` cleanly instead of
+    // throwing an EvaluationException that would otherwise spam the logs.
+    function isAdmin() { return request.auth != null && request.auth.token.get('admin', false) == true; }
+
+    // Serving path: only ever contains approved/instantly-publishable content
+    // (the transcode/photo pipelines are the only writers). World-readable.
+    // Segment-constrained (not a bare {allPaths=**} + get:if true) — a fully
+    // permissive recursive wildcard would also match a literal object name
+    // like "public/../review/tracks/p1/x.m4a" (GCS object names are flat
+    // strings; ".." is just a literal path segment, not filesystem
+    // traversal) and serve it under this world-readable rule even though it
+    // nominally lives under review/. Nothing in this codebase writes such a
+    // name today (reviewTrackPath/publicTrackPath in @gatekeep/shared always
+    // emit clean ids), but constraining `kind`/profileId/fileName to strict
+    // character classes closes the gap defense-in-depth, independent of that
+    // invariant holding forever.
+    match /public/{kind}/{profileId}/{fileName} {
+      allow get: if (kind == 'tracks' || kind == 'photos')
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && fileName.matches('[A-Za-z0-9_.-]{1,128}');
+      // Paths are resolved from Firestore docs, never by listing. Listing would
+      // enumerate every profileId (drafts included) — mirrors the /handles
+      // get/list split in firestore.rules.
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // Pending clips awaiting review — admins listen to exactly what would go live.
+    match /review/{allPaths=**} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Owner-only staging. Objects are consumed and deleted by the processUpload
+    // trigger; a 24h lifecycle rule (console/deploy config) reaps strays.
+    // Membership of {profileId} is NOT checkable here — the trigger verifies it
+    // before any content reaches a profile.
+    // customMetadata on staging objects is client-controlled and untrusted — the
+    // processUpload trigger derives uid/profileId from the OBJECT PATH only and
+    // must never read object.metadata.
+    match /staging/audio/{uid}/{profileId}/{trackId} {
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && trackId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
+        && request.resource.size <= 50 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
+    }
+    match /staging/photos/{uid}/{profileId}/{fileName} {
+      // fileName is deliberately extensionless: the path builder emits
+      // `${kind}-${nonce}` with no extension; nonces must stick to A-Za-z0-9 and hyphen.
+      allow create, update: if isOwner(uid)
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && request.resource.size > 0
+        && request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && fileName.matches('(avatar|cover)-[A-Za-z0-9-]{1,80}');
+      allow delete: if false; // the processUpload trigger owns staging cleanup
+      allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
+                               // fail by design — upload UIs must not read back staging.
+    }
+
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}

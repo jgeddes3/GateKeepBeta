@@ -1,12 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, signUpUnverifiedTestUser, callFn, wait } from "./helpers";
+import {
+  signUpTestUser, signUpUnverifiedTestUser, callFn, wait, uploadTestAudio, makeWav, waitForTrackStatus, makeAdminUser,
+} from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import type { ProfileDraftInput } from "@gatekeep/shared";
+import { getStorage as adminStorage } from "firebase-admin/storage";
+import type { ProfileDraftInput, CreateTrackInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
+// Admin SDK must target the storage emulator (mirrors helpers.ts) — needed
+// by the deleteProfile storage cascade tests below.
+process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
+const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
 
 // The draft-cap and deleteProfile tests below make several sequential
 // callable invocations per test; give them the same cold-start headroom
@@ -15,6 +22,13 @@ vi.setConfig({ testTimeout: 15_000 });
 
 const draft = (handle: string): ProfileDraftInput =>
   ({ type: "musician", subtype: "band", name: "The Midnight Owls", handle });
+
+// For submitProfileForReview tests whose subject is the status transition
+// itself (not the Task 9 musician minimum-content gate) — curators have no
+// portfolio gate, so this fixture keeps those tests focused on submit/resubmit
+// mechanics instead of needing to seed bio/genre/avatar/track content.
+const curatorDraft = (handle: string): ProfileDraftInput =>
+  ({ type: "curator", subtype: "venue", name: "The Rooftop", handle });
 
 describe("createProfileDraft", () => {
   it("creates draft profile, claims handle, adds creator as admin member", async () => {
@@ -87,13 +101,74 @@ describe("deleteProfile", () => {
     await callFn("deleteProfile", { profileId }, user);
     await expect(callFn("deleteAccount", {}, user)).resolves.toMatchObject({ ok: true });
   });
+
+  // Finding 3: deleteProfile used to be client-gated only — a co-admin could
+  // delete a LIVE approved profile server-side and immediately free the
+  // handle for takeover. The server must enforce the same draft/rejected-only
+  // gate the UI already assumes.
+  it("refuses to delete an approved profile with failed-precondition; the profile, handle, and members all survive", async () => {
+    const { user } = await signUpTestUser(`del5-${Date.now()}@test.com`);
+    const handle = `del5p_${Date.now()}`;
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(handle), user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("del5admin");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+    expect((await adb.doc(`handles/${handle}`).get()).exists).toBe(true);
+  });
+
+  it("refuses to delete a pending_review profile with failed-precondition", async () => {
+    const { user } = await signUpTestUser(`del6-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del6p_${Date.now()}`), user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+  });
+
+  it("still allows deleting a draft profile and a rejected profile", async () => {
+    const { user } = await signUpTestUser(`del7-${Date.now()}@test.com`);
+    const { profileId: draftId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del7d_${Date.now()}`), user);
+    await callFn("deleteProfile", { profileId: draftId }, user);
+    expect((await adb.doc(`profiles/${draftId}`).get()).exists).toBe(false);
+
+    const { profileId: rejId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del7r_${Date.now()}`), user);
+    await callFn("submitProfileForReview", { profileId: rejId }, user);
+    const adminUser = await makeAdminUser("del7admin");
+    await callFn("reviewProfile", { profileId: rejId, decision: "rejected", reason: "No thanks" }, adminUser.user);
+    await callFn("deleteProfile", { profileId: rejId }, user);
+    expect((await adb.doc(`profiles/${rejId}`).get()).exists).toBe(false);
+  });
+
+  it("rejects an unverified-email caller with failed-precondition", async () => {
+    const { user } = await signUpTestUser(`del8-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`del8_${Date.now()}`), user);
+    const { user: unverified } = await signUpUnverifiedTestUser(`del8u-${Date.now()}@test.com`);
+    // unverified isn't even a member here, but the email-verification guard
+    // must run (and fail) before that membership check is reached.
+    await expect(callFn("deleteProfile", { profileId }, unverified))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("rejects a malformed profile id with invalid-argument", async () => {
+    const { user } = await signUpTestUser(`del9-${Date.now()}@test.com`);
+    await expect(callFn("deleteProfile", { profileId: "../etc" }, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
 });
 
 describe("submitProfileForReview", () => {
   it("moves draft to pending_review; only member admins may submit", async () => {
     const { user } = await signUpTestUser(`m3-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
-      "createProfileDraft", draft(`sub_${Date.now()}`), user);
+      "createProfileDraft", curatorDraft(`sub_${Date.now()}`), user);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
     const { user: outsider } = await signUpTestUser(`m4-${Date.now()}@test.com`);
@@ -103,7 +178,7 @@ describe("submitProfileForReview", () => {
   it("rejects re-submitting a profile already in pending_review", async () => {
     const { user } = await signUpTestUser(`m5-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
-      "createProfileDraft", draft(`resub_${Date.now()}`), user);
+      "createProfileDraft", curatorDraft(`resub_${Date.now()}`), user);
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -125,4 +200,91 @@ describe("submitProfileForReview", () => {
     await expect(callFn("submitProfileForReview", { profileId }, member))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+});
+
+describe("submitProfileForReview minimum content (musicians)", () => {
+  it("refuses an empty musician draft, listing what's missing; passes once bio+genre+avatar+track exist", async () => {
+    const { user } = await signUpTestUser(`gate-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava", handle: `gate_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
+    // avatar via admin SDK shortcut (photo pipeline has its own tests)
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/track/i); // still no track
+
+    const wav = makeWav(12);
+    const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
+    await uploadTestAudio(uploadPath, wav, "audio/wav", user);
+    await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  }, 60_000);
+
+  it("lists all four missing items when nothing has been filled in", async () => {
+    const { user } = await signUpTestUser(`gatem-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Empty", handle: `gatem_${Date.now()}` }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/bio.*genre.*photo.*track/i);
+  });
+
+  it("a track stuck in 'processing' (upload never completed) does not satisfy the gate", async () => {
+    const { user } = await signUpTestUser(`gatep-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Stalled", handle: `gatep_${Date.now()}` }, user);
+    await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    // createTrack writes the doc (status: "processing") before any bytes are
+    // uploaded — abandon it here, exactly as a musician who never finishes
+    // the upload would. LISTENABLE_TRACK_STATUSES excludes "processing", so
+    // this must not satisfy the gate.
+    await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: 1000, contentType: "audio/wav" }, user);
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/track/i);
+  });
+
+  it("curator drafts submit without portfolio checks (unchanged from foundation)", async () => {
+    const { user } = await signUpTestUser(`gatec-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "The Room", handle: `gatec_${Date.now()}` }, user);
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  });
+});
+
+describe("deleteProfile storage cascade", () => {
+  it("deletes the profile's public/review storage objects along with the docs", async () => {
+    const { user } = await signUpTestUser(`delc-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava", handle: `delc_${Date.now()}` }, user);
+    // Seed storage objects directly — exercising the full pipeline is Task 7's job.
+    await abucket.file(`review/tracks/${profileId}/t1.m4a`).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await abucket.file(`public/tracks/${profileId}/t2.m4a`).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await abucket.file(`public/photos/${profileId}/avatar-x.jpg`).save(Buffer.from([1]), { contentType: "image/jpeg" });
+    await callFn("deleteProfile", { profileId }, user);
+    for (const p of [`review/tracks/${profileId}/t1.m4a`, `public/tracks/${profileId}/t2.m4a`,
+                     `public/photos/${profileId}/avatar-x.jpg`]) {
+      const [exists] = await abucket.file(p).exists();
+      expect(exists).toBe(false);
+    }
+  }, 60_000);
+
+  it("does not touch another profile's storage objects — negative control on the prefix sweep", async () => {
+    const { user } = await signUpTestUser(`delcn-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Ava2", handle: `delcn_${Date.now()}` }, user);
+    const { profileId: otherProfileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Bystander", handle: `delcn2_${Date.now()}` }, user);
+    const survivor = `public/tracks/${otherProfileId}/t9.m4a`;
+    await abucket.file(survivor).save(Buffer.from([1]), { contentType: "audio/mp4" });
+    await callFn("deleteProfile", { profileId }, user);
+    const [exists] = await abucket.file(survivor).exists();
+    expect(exists).toBe(true);
+  }, 60_000);
 });
