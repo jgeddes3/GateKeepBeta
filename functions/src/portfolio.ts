@@ -90,13 +90,23 @@ export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-centra
     visibility: input.visibility,
     updatedAt: Date.now(),
   };
-  // full-doc last-write-wins between members is accepted for v1; a delete
-  // racing this write can recreate an orphaned booking doc — accepted,
-  // mirrors account.ts's documented-race precedent
-  await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
-  // SP4: keep the curator-shopping projection (private/curatorBooking) and
-  // the public preferences mirror (profiles/{id}.publicBooking) in sync with
-  // every write — see bookingVisibility.ts for the read-tier logic.
-  await rebuildBookingProjections(input.profileId);
+  // full-doc last-write-wins between members is accepted for v1 — and, since
+  // rebuildBookingProjections(profileId, docData) folds this write into its
+  // own batch alongside both projections (SP4 quality-fix: atomic
+  // source+projection commit — see that function's comment), "last write
+  // wins" now applies to the whole triple at once: no window where the
+  // source has landed but curatorBooking/publicBooking still reflect an
+  // older write. A profile delete racing this call is a separate, still-
+  // accepted race (mirrors account.ts's documented-race precedent): if
+  // deleteProfile's recursiveDelete is mid-flight, this batch can still
+  // commit afterward and recreate an orphaned private/booking doc under a
+  // profile that's otherwise gone. That's distinct from — and narrower than
+  // — the resurrection risk in rebuildBookingProjections' missing-source
+  // clear branch (not reachable from here, since this call always passes
+  // `docData`): a caller that hits that branch (e.g. backfillBookingVisibility,
+  // or any future direct rebuild) while recursiveDelete is also running can
+  // recreate profiles/{id} from nothing, as an inert stub containing only
+  // `{publicBooking: null}`.
+  await rebuildBookingProjections(input.profileId, docData);
   return { ok: true };
 });

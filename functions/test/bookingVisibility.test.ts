@@ -121,6 +121,25 @@ describe("rebuildBookingProjections (direct)", () => {
     expect((await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).exists).toBe(false);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.publicBooking).toBeNull();
   });
+
+  it("a legacy source doc with no `visibility` key projects as fully curator-visible (never MORE exposed than post-backfill)", async () => {
+    const { profileId } = await makeMusicianProfile("rbp5");
+    // Bypasses updateBookingInfo (which always writes a complete
+    // `visibility` now) — the pre-Task-3 shape backfillBookingVisibility
+    // exists to converge, and the fallback rebuildBookingProjections must
+    // apply on every direct/administrative call in the meantime.
+    await adb.doc(`profiles/${profileId}/private/booking`).set({
+      rates: fullRates(), preferences: fullPreferences(), updatedAt: Date.now(),
+    });
+
+    await rebuildBookingProjections(profileId);
+
+    const projection = (await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).data();
+    expect(projection?.rates).toEqual(fullRates()); // nothing nulled — default is all-"curators"
+    expect(projection?.preferences).toEqual(fullPreferences());
+    const profile = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(profile?.publicBooking).toBeNull(); // default preferences visibility is "curators", never public
+  });
 });
 
 describe("backfillBookingVisibility", () => {
@@ -193,7 +212,7 @@ describe("backfillBookingVisibility", () => {
     const logs = await adb.collection("auditLogs")
       .where("action", "==", "booking_visibility_backfilled")
       .where("actorUid", "==", adminUser.uid).get();
-    expect(logs.docs.some((d) => d.data().detail === "2")).toBe(true);
+    expect(logs.docs.some((d) => d.data().detail === "2 converged, 0 failed")).toBe(true);
 
     // Idempotent — nothing left to converge.
     const { converged: converged2 } = await callFn<Record<string, never>, { converged: number }>(
