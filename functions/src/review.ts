@@ -115,8 +115,21 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     // needs this profile's just-flipped "rejected" status to be visible so
     // a member who belongs to no OTHER approved curator profile correctly
     // loses the marker (a member who does belong to another keeps it).
+    // Best-effort per member (allSettled, not all) — matches deleteProfile's
+    // cascade-cleanup style: one member's recompute failing (e.g. a
+    // transient Firestore error) must not fail the whole review decision,
+    // which has already committed. A re-trigger mechanism for a failed
+    // recompute is deliberately out of scope here — the next membership or
+    // approval-status event that touches that uid (another reviewProfile
+    // call, respondToInvite, removeMember) re-syncs it via its own
+    // touchpoint, so a stale marker is self-healing, not permanent.
     if (isCurator && decision === "rejected" && wasApproved) {
-      await Promise.all(memberUids.map((memberUid) => syncCuratorAccess(memberUid)));
+      const results = await Promise.allSettled(memberUids.map((memberUid) => syncCuratorAccess(memberUid)));
+      results.forEach((result, i) => {
+        if (result.status === "rejected") {
+          console.error("curatorAccess recompute failed", { profileId, memberUid: memberUids[i] }, result.reason);
+        }
+      });
     }
 
     await writeAudit({

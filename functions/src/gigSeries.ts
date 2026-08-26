@@ -202,6 +202,14 @@ export const updateSeries = onCall<UpdateSeriesInput>({ region: "us-central1" },
   // in application code — a second equality filter combined with the range
   // filter would need its own composite index, and per-series occurrence
   // counts are small (materialization caps at SERIES_MATERIALIZE_WEEKS).
+  // Did THIS call change the location (an address override or a
+  // visibility-only flip)? If so, every swept occurrence's private location
+  // needs to move too — its public `location` field is always kept in sync
+  // with the template above, but the exact address+geo lives in a separate
+  // `gigs/{id}/private/location` subdoc that the loop below wouldn't
+  // otherwise touch.
+  const locationChanged = input.location !== undefined;
+
   const futureSnap = await db.collection("gigs")
     .where("seriesId", "==", input.seriesId).where("startsAt", ">", now).get();
   for (const doc of futureSnap.docs) {
@@ -211,6 +219,14 @@ export const updateSeries = onCall<UpdateSeriesInput>({ region: "us-central1" },
       budget: template.budget, durationMinutes: template.durationMinutes, provisions: template.provisions,
       location: template.location, updatedAt: now,
     });
+    if (locationChanged) {
+      // A plain set, not update: pre-Task-7 there's no materializer yet, so
+      // an admin-SDK-seeded test occurrence may not have this subdoc at
+      // all — set() is the correct "make it match the template" semantics
+      // either way (create or overwrite), mirroring createGig's own
+      // private/location write.
+      batch.set(db.doc(`gigs/${doc.id}/private/location`), privateLocation);
+    }
   }
 
   await batch.commit();

@@ -204,6 +204,27 @@ describe("updateSeries", () => {
     expect(occ?.title).toBe("Propagated Title");
   });
 
+  it("propagates an address change to a future, non-detached occurrence's PUBLIC location AND its PRIVATE location subdoc", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("us2b", "venue");
+    const seriesId = await createSeries(profileId, owner.user);
+    const occId = await seedOccurrence(seriesId, profileId);
+    // Simulate Task 7's materializer having already written this
+    // occurrence's private location subdoc (mirrors createGig's own write) —
+    // the propagation sweep must overwrite it, not merely leave it stale.
+    await adb.doc(`gigs/${occId}/private/location`).set({
+      address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 },
+    });
+    const newAddress = "789 Elm St, Marfa, TX";
+    await callFn("updateSeries", { seriesId, ...seriesContent({ location: { address: newAddress } }) }, owner.user);
+    const expected = await stub.geocode(newAddress);
+    const occPub = (await adb.doc(`gigs/${occId}`).get()).data();
+    expect(occPub?.location.address).toBe(newAddress);
+    expect(occPub?.location.geo).toEqual({ lat: expected!.lat, lng: expected!.lng });
+    const occPriv = (await adb.doc(`gigs/${occId}/private/location`).get()).data();
+    expect(occPriv?.address).toBe(newAddress);
+    expect(occPriv?.geo).toEqual({ lat: expected!.lat, lng: expected!.lng });
+  });
+
   it("does NOT propagate to a DETACHED future occurrence", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("us3", "venue");
     const seriesId = await createSeries(profileId, owner.user);
