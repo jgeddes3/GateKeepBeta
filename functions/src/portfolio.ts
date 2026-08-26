@@ -5,6 +5,7 @@ import {
   type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount, type PortfolioData,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
+import { rebuildBookingProjections } from "./bookingVisibility.js";
 
 // Strips any extra/untrusted keys off a rate object and normalizes an
 // absent (undefined) rate the same as an explicit null. Without this, a
@@ -81,11 +82,21 @@ export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-centra
       bringsOwnPA: input.preferences.bringsOwnPA ?? null,
       availabilityPattern: input.preferences.availabilityPattern ?? null,
     },
+    // validateBookingUpdate (validateBookingVisibility) already confirmed
+    // this carries exactly the four legal keys with in-set values — the
+    // callable always writes a complete visibility going forward; legacy
+    // docs written before this field existed are converged by
+    // backfillBookingVisibility (Task 3).
+    visibility: input.visibility,
     updatedAt: Date.now(),
   };
   // full-doc last-write-wins between members is accepted for v1; a delete
   // racing this write can recreate an orphaned booking doc — accepted,
   // mirrors account.ts's documented-race precedent
   await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
+  // SP4: keep the curator-shopping projection (private/curatorBooking) and
+  // the public preferences mirror (profiles/{id}.publicBooking) in sync with
+  // every write — see bookingVisibility.ts for the read-tier logic.
+  await rebuildBookingProjections(input.profileId);
   return { ok: true };
 });

@@ -14,3 +14,4 @@ export { createGig, publishGig, updateGig, cancelGig, takedownGig } from "./gigs
 export { createSeries, updateSeries, pauseSeries, endSeries } from "./gigSeries.js";
 export { dailySweep } from "./scheduled.js";
 export { searchUsersByName, backfillDisplayNameLower, flagAccount } from "./adminTools.js";
+export { backfillBookingVisibility } from "./bookingVisibility.js";

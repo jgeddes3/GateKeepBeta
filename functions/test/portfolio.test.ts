@@ -57,12 +57,17 @@ describe("updatePortfolio", () => {
   });
 });
 
+const CURATORS_ONLY_VISIBILITY = {
+  perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
+} as const;
+
 describe("updateBookingInfo", () => {
   const booking = (profileId: string) => ({
     profileId,
     rates: { perHour: { amountCents: 20000, note: null }, perSong: { amountCents: 2500, note: "requests" }, perSet: null },
     preferences: { gigTypes: ["wedding", "bar_club"], travelRadiusKm: 80, actSize: "band",
       typicalSetMinutes: 45, bringsOwnPA: true, availabilityPattern: "weekends" },
+    visibility: CURATORS_ONLY_VISIBILITY,
   });
   it("member writes the private booking subdoc; stranger cannot", async () => {
     const { user } = await signUpTestUser(`bk1-${Date.now()}@test.com`);
@@ -83,6 +88,7 @@ describe("updateBookingInfo", () => {
       profileId,
       rates: {},
       preferences: { gigTypes: [] },
+      visibility: CURATORS_ONLY_VISIBILITY,
     }, user);
     const b = await adb.doc(`profiles/${profileId}/private/booking`).get();
     const data = b.data();
@@ -103,6 +109,19 @@ describe("updateBookingInfo", () => {
     const bad = booking(profileId);
     bad.rates.perHour = { amountCents: -5, note: null } as never;
     await expect(callFn("updateBookingInfo", bad, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+  it("rejects invalid visibility (missing key, extra key, or an out-of-set value)", async () => {
+    const { user } = await signUpTestUser(`bk6-${Date.now()}@test.com`);
+    const profileId = await makeMusicianProfile(user);
+    const b = booking(profileId);
+    const { preferences: _drop, ...missingKey } = CURATORS_ONLY_VISIBILITY as Record<string, unknown>;
+    await expect(callFn("updateBookingInfo", { ...b, visibility: missingKey }, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("updateBookingInfo", { ...b, visibility: { ...CURATORS_ONLY_VISIBILITY, extra: "x" } }, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    // "public" is not a legal RateVisibility (rates are never public — spec decision 4).
+    await expect(callFn("updateBookingInfo", { ...b, visibility: { ...CURATORS_ONLY_VISIBILITY, perHour: "public" } }, user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
 });
@@ -180,6 +199,7 @@ describe("strips untrusted extra keys (defense against reference-stored injectio
       profileId,
       rates: { perHour: { amountCents: 5000, note: null, junk: "X" } as never, perSong: null, perSet: null },
       preferences: { gigTypes: [] },
+      visibility: CURATORS_ONLY_VISIBILITY,
     }, user);
     const b = await adb.doc(`profiles/${profileId}/private/booking`).get();
     expect(b.data()?.rates.perHour).toEqual({ amountCents: 5000, note: null });
@@ -200,7 +220,7 @@ describe("unverified-email member is rejected", () => {
     await expect(callFn("updatePortfolio", { profileId, bio: "hi" }, memberUser))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
     await expect(callFn("updateBookingInfo", {
-      profileId, rates: {}, preferences: { gigTypes: [] },
+      profileId, rates: {}, preferences: { gigTypes: [] }, visibility: CURATORS_ONLY_VISIBILITY,
     }, memberUser)).rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 });
