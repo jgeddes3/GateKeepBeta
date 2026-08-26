@@ -515,6 +515,33 @@ describe("acceptBooking", () => {
     expect(musicianNotes.docs.some((d) => d.data().kind === "booking" && /confirmed/i.test(d.data().title))).toBe(true);
   });
 
+  it("perSong: expectedTotalCents is amount x songCount from the LAST countered songCount (not the first offer), deposit ceils", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab1sc");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab1sm");
+    const gigId = await createOpenGig(curatorProfileId, curator.user,
+      { budget: { minCents: 5_000, maxCents: 20_000, structure: "perSong" } });
+
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload({ amountCents: 800, expectedQuantity: 10 }) }, musician.user);
+    // Curator counters with a different songCount — this becomes the LAST
+    // thread entry and must be what's frozen, not the musician's original
+    // 10-song offer: 933c/song * 7 songs = 6531; deposit ceil(6531 * 35%) =
+    // ceil(2285.85) = 2286.
+    await callFn("counterBooking",
+      { bookingId, offer: offerPayload({ amountCents: 933, expectedQuantity: 7 }) }, curator.user);
+    // awaitingSide flipped to musician after the counter — musician accepts.
+
+    await callFn("acceptBooking", { bookingId }, musician.user);
+
+    const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(booking.status).toBe("confirmed");
+    expect(booking.acceptedTerms).toEqual({ amountCents: 933, expectedQuantity: 7, expectedTotalCents: 6531 });
+    expect(booking.deposit).toEqual({
+      amountCents: 2286, status: "unpaid", forfeitedTo: null,
+      policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
+    });
+  });
+
   it("enforces awaitingSide — the non-awaiting side cannot accept (failed-precondition), booking left open", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab2m");
@@ -595,36 +622,40 @@ describe("acceptBooking", () => {
     const { owner: rival, profileId: rivalProfileId } = await makeApprovedMusicianProfile("ab6r");
 
     const series = await seedSeries(curatorProfileId, "whole_run");
-    const gigId1 = await createOpenGig(curatorProfileId, curator.user);
-    const gigId2 = await createOpenGig(curatorProfileId, curator.user);
-    const gigId3 = await createOpenGig(curatorProfileId, curator.user);
-    await Promise.all([gigId1, gigId2, gigId3].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+    try {
+      const gigId1 = await createOpenGig(curatorProfileId, curator.user);
+      const gigId2 = await createOpenGig(curatorProfileId, curator.user);
+      const gigId3 = await createOpenGig(curatorProfileId, curator.user);
+      await Promise.all([gigId1, gigId2, gigId3].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
 
-    const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-      "applyToGig", { gigId: gigId1, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
-    const { bookingId: rivalBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-      "applyToGig", { gigId: gigId2, musicianProfileId: rivalProfileId, offer: offerPayload() }, rival.user);
-    expect((await adb.doc(`bookings/${winnerBookingId}`).get()).data()?.seriesId).toBe(series.id);
+      const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId1, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
+      const { bookingId: rivalBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId2, musicianProfileId: rivalProfileId, offer: offerPayload() }, rival.user);
+      expect((await adb.doc(`bookings/${winnerBookingId}`).get()).data()?.seriesId).toBe(series.id);
 
-    await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
+      await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
 
-    for (const gigId of [gigId1, gigId2, gigId3]) {
-      const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
-      expect(gig?.status).toBe("filled");
-      expect(gig?.bookingId).toBe(winnerBookingId);
-      expect(gig?.bookedMusicianProfileId).toBe(winnerProfileId);
+      for (const gigId of [gigId1, gigId2, gigId3]) {
+        const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
+        expect(gig?.status).toBe("filled");
+        expect(gig?.bookingId).toBe(winnerBookingId);
+        expect(gig?.bookedMusicianProfileId).toBe(winnerProfileId);
+      }
+
+      const seriesAfter = (await adb.doc(`gigSeries/${series.id}`).get()).data();
+      expect(seriesAfter?.activeBookingId).toBe(winnerBookingId);
+      expect(seriesAfter?.bookedMusicianProfileId).toBe(winnerProfileId);
+
+      const rivalAfter = (await adb.doc(`bookings/${rivalBookingId}`).get()).data() as BookingRequestDoc;
+      expect(rivalAfter.status).toBe("superseded");
+    } finally {
+      // Cleanup — never leave an "active" gigSeries fixture behind (the
+      // shared emulator's scheduled.test.ts sweep scans every active
+      // series). In a `finally` so an assertion failure above can't leak an
+      // active series into the shared emulator.
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
     }
-
-    const seriesAfter = (await adb.doc(`gigSeries/${series.id}`).get()).data();
-    expect(seriesAfter?.activeBookingId).toBe(winnerBookingId);
-    expect(seriesAfter?.bookedMusicianProfileId).toBe(winnerProfileId);
-
-    const rivalAfter = (await adb.doc(`bookings/${rivalBookingId}`).get()).data() as BookingRequestDoc;
-    expect(rivalAfter.status).toBe("superseded");
-
-    // Cleanup — never leave an "active" gigSeries fixture behind (the shared
-    // emulator's scheduled.test.ts sweep scans every active series).
-    await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
   });
 
   it("whole-run: fails with failed-precondition when the series is paused mid-thread, booking left open", async () => {

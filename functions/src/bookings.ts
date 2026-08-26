@@ -422,13 +422,20 @@ async function supersedeSiblingBooking(
   // expiry step is the backstop for anything a failed iteration misses.
   try {
     const rival = doc.data() as BookingRequestDoc;
-    // Re-check status: `doc` came from a plain (non-transactional) query
-    // snapshot taken just before this loop, and two of this callable's own
-    // sibling queries (per-occurrence gigId + seriesId) can both return the
-    // same booking — the caller dedupes via a `seen` id set, but a stale
-    // status here is still a defensive belt-and-suspenders check.
-    if (rival.status !== "open") return;
-    await doc.ref.update({ status: "superseded", resolvedAt: now, updatedAt: now });
+    // Optimistic precondition (a real one, not just a stale in-memory
+    // check): `doc` came from a plain, non-transactional query snapshot
+    // taken moments before this loop — a concurrent decline/withdraw/
+    // counter on this same booking (or, benignly, this callable's own two
+    // overlapping sibling queries returning the same doc — `seen` already
+    // dedupes that case) could have moved it off "open" by the time we get
+    // here. `lastUpdateTime` makes the write itself conditional on nothing
+    // having touched the doc since we read it; a lost race surfaces as a
+    // FAILED_PRECONDITION, which the catch below absorbs exactly like any
+    // other per-booking fan-out failure.
+    await doc.ref.update(
+      { status: "superseded", resolvedAt: now, updatedAt: now },
+      { lastUpdateTime: doc.updateTime },
+    );
 
     const rivalGigSnap = await db.doc(`gigs/${rival.gigId}`).get();
     const rivalGigTitle = (rivalGigSnap.data() as GigDoc | undefined)?.title;
@@ -511,11 +518,13 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
     }
 
     // ---- Freeze terms from the LAST thread entry — whatever the two sides
-    // most recently landed on, never the first offer. Whole-run: every
-    // occurrence shares the template duration, so the INITIATING gig's
-    // durationMinutes stands in for all of them here; sub-5 recomputes each
-    // occurrence's own total from `acceptedTerms.amountCents` at settlement
-    // time — this doc's acceptedTerms/deposit represent ONE occurrence. ----
+    // most recently landed on, never the first offer. Whole-run: this doc's
+    // acceptedTerms/deposit are computed from the INITIATING gig's
+    // durationMinutes alone and represent ONE occurrence — an occurrence
+    // that has since detached from the series template (updateGig) and
+    // carries its own edited duration is NOT reflected here; sub-5
+    // recomputes each occurrence's own total from `acceptedTerms.amountCents`
+    // at settlement time, using THAT occurrence's actual duration. ----
     const lastEntry = freshBooking.thread[freshBooking.thread.length - 1];
     const expectedTotalCents = computeExpectedTotalCents(freshBooking.structure, lastEntry.amountCents, {
       durationMinutes: gig.durationMinutes, songCount: lastEntry.expectedQuantity ?? undefined,
@@ -590,22 +599,33 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
 
   // Winners — both sides. booking.gigId/musicianProfileId/curatorProfileId
   // are immutable (see requireBookingSide), so the outer, pre-transaction
-  // `booking` is safe to use here, matching decline/withdrawBooking's own
-  // post-transaction notification convention.
-  const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
-  const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
-  const musicianName = await profileName(db, booking.musicianProfileId);
-  const curatorName = await profileName(db, booking.curatorProfileId);
-  await notifyProfileMembers(booking.curatorProfileId, {
-    kind: "booking",
-    title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
-    body: `${musicianName} is booked and confirmed.`,
-  });
-  await notifyProfileMembers(booking.musicianProfileId, {
-    kind: "booking",
-    title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
-    body: `You're booked and confirmed with ${curatorName}.`,
-  });
+  // `booking` is safe to use here. Unlike decline/withdrawBooking's
+  // equivalent (unwrapped) tail, this one is wrapped: the accept has
+  // already committed by this point (the transaction above returned), so a
+  // failure in this best-effort notification tail — a transient read/write
+  // error, nothing more — must never surface as an error to the caller. An
+  // apparent failure here would look like the accept itself failed and
+  // invite a confusing retry (which would then hit its own
+  // failed-precondition, since the booking is no longer "open") even though
+  // the gig is already correctly filled.
+  try {
+    const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
+    const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
+    const musicianName = await profileName(db, booking.musicianProfileId);
+    const curatorName = await profileName(db, booking.curatorProfileId);
+    await notifyProfileMembers(booking.curatorProfileId, {
+      kind: "booking",
+      title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
+      body: `${musicianName} is booked and confirmed.`,
+    });
+    await notifyProfileMembers(booking.musicianProfileId, {
+      kind: "booking",
+      title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
+      body: `You're booked and confirmed with ${curatorName}.`,
+    });
+  } catch (e) {
+    console.error(`acceptBooking: failed to notify winners for booking ${bookingId}`, e);
+  }
 
   return { ok: true };
 });
