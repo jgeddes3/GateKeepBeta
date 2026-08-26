@@ -35,17 +35,19 @@ function ProfilesList({ uid }: { uid: string }) {
     });
     return () => { cancelled = true; unsubscribe(); };
   }, [uid]);
+  const editHref = (p: ProfileSummary) =>
+    p.type === "musician" ? `/dashboard/portfolio/${p.profileId}` : `/dashboard/curator/${p.profileId}`;
+  const editLabel = (p: ProfileSummary) =>
+    p.status === "draft" ? "finish setup"
+      : p.status === "rejected" ? "revise & resubmit"
+      : p.type === "musician" ? "edit portfolio" : "edit profile";
   return (
     <>
-      {profiles.length === 0 && <p>None yet — <a href="/join">join as a musician</a>, or from the mobile app.</p>}
+      {profiles.length === 0 && <p>None yet — <a href="/join">create a profile</a> (musician or curator), or from the mobile app.</p>}
       <ul>{profiles.map((p) => (
         <li key={p.profileId}>
           {p.name} — {p.type} — {p.status.replace("_", " ")}
-          {p.type === "musician" && (
-            <> · <a href={`/dashboard/portfolio/${p.profileId}`}>
-              {p.status === "draft" ? "finish setup" : p.status === "rejected" ? "revise & resubmit" : "edit portfolio"}
-            </a></>
-          )}
+          {" · "}<a href={editHref(p)}>{editLabel(p)}</a>
         </li>
       ))}</ul>
     </>
@@ -114,9 +116,17 @@ export default function Dashboard() {
         <button onClick={deleteAccount} style={{ color: "#dc2626" }}>Delete account</button>
       </p>
       <h2>Your profiles</h2>
-      <ProfilesList key={user.uid} uid={user.uid} />
+      {/* Pre-existing bug fixed in passing (found live during this task's
+          browser walkthrough, not introduced by it — see git blame): both
+          keys were bare `user.uid`, and React key uniqueness is checked
+          across ALL of a parent's children, not just same-type siblings —
+          two elements sharing a key is exactly the "two children with the
+          same key" console error this threw. Prefixing per component keeps
+          each unique while still forcing the same identity-switch remount
+          on sign-out/sign-in this key was already here for. */}
+      <ProfilesList key={`profiles-${user.uid}`} uid={user.uid} />
       <h2>Notifications</h2>
-      <NotificationsList key={user.uid} uid={user.uid} />
+      <NotificationsList key={`notifications-${user.uid}`} uid={user.uid} />
     </main>
   );
 }

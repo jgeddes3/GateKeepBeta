@@ -5,7 +5,7 @@ import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
   GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind, type RateAmount,
+  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
 } from "@gatekeep/shared";
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
@@ -122,8 +122,15 @@ const VISUALLY_HIDDEN_INPUT: CSSProperties = {
   overflow: "hidden", whiteSpace: "nowrap", border: 0, opacity: 0,
 };
 
-export function PhotoUploader({ profileId, uid, kind, currentPath }:
-  { profileId: string; uid: string; kind: "avatar" | "cover"; currentPath: string | null }) {
+// Sub-project 3 widened `kind` to accept "gallery" (curator profiles) —
+// the upload/staging/awaiting-pipeline mechanics below are unchanged and
+// work identically for it: a caller managing a LIST rather than a single
+// slot (curator's photoPaths array) passes a `currentPath` that's really a
+// fingerprint of the list (e.g. its length) instead of one path, so the
+// exact same "baseline moved -> awaiting cleared" logic still detects
+// completion — see CuratorForms.tsx's GalleryPhotosSection.
+export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
+  { profileId: string; uid: string; kind: PhotoKind; currentPath: string | null; disabled?: boolean }) {
   const [busy, setBusy] = useState(false);
   // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
   // seconds after the storage upload lands — we don't know its eventual
@@ -176,12 +183,17 @@ export function PhotoUploader({ profileId, uid, kind, currentPath }:
     } finally { setBusy(false); }
   };
   const processing = awaiting;
+  const label = kind === "avatar" ? "profile photo" : kind === "cover" ? "cover photo" : "photo";
   return (
     <>
       <label style={{ display: "inline-block" }}>
-        {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${kind === "avatar" ? "profile photo" : "cover photo"}`}
-        {currentPath && !processing && <span style={{ color: "#16a34a" }}> ✓</span>}
-        <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing}
+        {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${label}`}
+        {/* The checkmark reads as "this slot is filled" — meaningful for
+            avatar/cover's single-slot model, misleading for gallery (where
+            currentPath is a length fingerprint, not a real path, and the
+            list already renders its own thumbnails). */}
+        {currentPath && !processing && kind !== "gallery" && <span style={{ color: "#16a34a" }}> ✓</span>}
+        <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing || disabled}
           onChange={(e) => {
             const f = e.target.files?.[0];
             e.target.value = ""; // allows re-picking the same file (e.g. after a failed upload)
