@@ -40,6 +40,18 @@
       { "fieldPath": "bookedMusicianProfileId", "order": "ASCENDING" },
       { "fieldPath": "startsAt", "order": "ASCENDING" }
     ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "bookedMusicianProfileId", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "bookedMusicianProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
   { "collectionGroup": "bookings", "queryScope": "COLLECTION",
     "fields": [
       { "fieldPath": "gigId", "order": "ASCENDING" },

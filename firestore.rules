@@ -110,8 +110,13 @@ service cloud.firestore {
         // refresh, while a lookup doc updates instantly), may read ANY
         // profile's projection. isAdmin() ordered before the exists() check
         // per the file's cost idiom (SP3 Task 14) — free for admins.
+        // signedIn() guard: request.auth.uid on an anon caller resolves to
+        // null, which throws an EvaluationException inside the exists()
+        // path-building rather than absorbing into `false` — the same
+        // anon-eval-error flood isAdmin() (line ~13) was deliberately
+        // engineered out of; guard it here too.
         allow read: if isAdmin() || isMember(profileId)
-          || exists(/databases/$(database)/documents/curatorAccess/$(request.auth.uid));
+          || (signedIn() && exists(/databases/$(database)/documents/curatorAccess/$(request.auth.uid)));
         allow write: if false; // Cloud Functions only
       }
 
@@ -129,7 +134,10 @@ service cloud.firestore {
       // Only callables write, and only approved curator profiles can post;
       // profile unpublish cascades close open gigs (review.ts), so a bare
       // status check is sufficient — no per-read profile get().
-      // List queries MUST filter status == 'open' (unfiltered lists fail).
+      // List queries MUST pin status to one provable value — 'open',
+      // 'filled', or 'closed' with bookedMusicianProfileId also constrained
+      // (see the SP4 note below) — an unfiltered or status-unconstrained
+      // list fails.
       // Member/admin disjuncts are also list-provable as written: a curator
       // dashboard query filtered by where('curatorProfileId','==',X) pins
       // that field to a query-wide constant, so isMember(X) evaluates once
@@ -179,6 +187,12 @@ service cloud.firestore {
       // BOTH a curator and a musician profile, so read access is either
       // side's membership. All mutation goes through callables (bookings.ts
       // / bookingLifecycle.ts), never a direct client write.
+      // NOT list-provable on a bare where('gigId','==',X): curatorProfileId
+      // is unconstrained by that filter alone, so isMember(resource.data.
+      // curatorProfileId) can't be evaluated as a single query-wide constant
+      // per doc — the (gigId,status) index below serves callables/Admin SDK
+      // only. A client "applicants for this gig" list must also pin
+      // curatorProfileId == <own profile> for the member disjunct to prove.
       allow read: if isMember(resource.data.curatorProfileId)
         || isMember(resource.data.musicianProfileId) || isAdmin();
       allow write: if false;
