@@ -4,7 +4,13 @@ service cloud.firestore {
 
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
-    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
+    // token.get(..., false) rather than `token.admin == true`: a missing
+    // claim (every non-admin caller) resolves to `false` cleanly instead of
+    // throwing an EvaluationException on the direct property access — only
+    // absorbed into `false` by CEL's `||` short-circuiting today, which
+    // silently floods the rules-evaluation logs for every non-admin read.
+    // Mirrors storage.rules' isAdmin() already.
+    function isAdmin() { return signedIn() && request.auth.token.get('admin', false) == true; }
     function isMember(profileId) {
       return signedIn()
         && exists(/databases/$(database)/documents/profiles/$(profileId)/members/$(request.auth.uid));

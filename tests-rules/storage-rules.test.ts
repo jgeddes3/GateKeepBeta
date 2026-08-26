@@ -111,4 +111,30 @@ describe("storage: public and review", () => {
     // The app's real read path — must survive any future tightening of the get/list split.
     await assertSucceeds(getDownloadURL(ref(anon, "public/tracks/p1/t2.m4a")));
   });
+  it("a public/../review/... traversal-shaped object name is denied, even though it starts with public/", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      // GCS object names are flat strings — ".." here is a literal segment,
+      // not filesystem traversal — but a fully-permissive
+      // `public/{allPaths=**}` + `get:if true` rule would still match this
+      // name since it starts with "public/". The segment-constrained rule
+      // must reject it: "kind" resolves to "..", which fails the
+      // tracks/photos allowlist.
+      await uploadBytes(ref(ctx.storage(), "public/../review/tracks/p1/secret.m4a"), bytes, meta("audio/mp4"));
+    });
+    const anon = env.unauthenticatedContext().storage();
+    const admin = env.authenticatedContext("root", { admin: true }).storage();
+    await assertFails(getBytes(ref(anon, "public/../review/tracks/p1/secret.m4a")));
+    await assertFails(getBytes(ref(admin, "public/../review/tracks/p1/secret.m4a")));
+  });
+  it("legit public track/photo serving shapes still resolve; list still denied", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), "public/tracks/p1/t3.m4a"), bytes, meta("audio/mp4"));
+      await uploadBytes(ref(ctx.storage(), "public/photos/p1/avatar-3fa85f64-5717-4562-b3fc-2c963f66afa6.jpg"),
+        bytes, meta("image/jpeg"));
+    });
+    const anon = env.unauthenticatedContext().storage();
+    await assertSucceeds(getBytes(ref(anon, "public/tracks/p1/t3.m4a")));
+    await assertSucceeds(getBytes(ref(anon, "public/photos/p1/avatar-3fa85f64-5717-4562-b3fc-2c963f66afa6.jpg")));
+    await assertFails(listAll(ref(anon, "public/tracks/p1")));
+  });
 });

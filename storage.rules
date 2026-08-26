@@ -9,8 +9,20 @@ service firebase.storage {
 
     // Serving path: only ever contains approved/instantly-publishable content
     // (the transcode/photo pipelines are the only writers). World-readable.
-    match /public/{allPaths=**} {
-      allow get: if true;
+    // Segment-constrained (not a bare {allPaths=**} + get:if true) — a fully
+    // permissive recursive wildcard would also match a literal object name
+    // like "public/../review/tracks/p1/x.m4a" (GCS object names are flat
+    // strings; ".." is just a literal path segment, not filesystem
+    // traversal) and serve it under this world-readable rule even though it
+    // nominally lives under review/. Nothing in this codebase writes such a
+    // name today (reviewTrackPath/publicTrackPath in @gatekeep/shared always
+    // emit clean ids), but constraining `kind`/profileId/fileName to strict
+    // character classes closes the gap defense-in-depth, independent of that
+    // invariant holding forever.
+    match /public/{kind}/{profileId}/{fileName} {
+      allow get: if (kind == 'tracks' || kind == 'photos')
+        && profileId.matches('[A-Za-z0-9_-]{1,64}')
+        && fileName.matches('[A-Za-z0-9_.-]{1,128}');
       // Paths are resolved from Firestore docs, never by listing. Listing would
       // enumerate every profileId (drafts included) — mirrors the /handles
       // get/list split in firestore.rules.

@@ -3,7 +3,9 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, collectionGroup, query, where, orderBy } from "firebase/firestore";
+import {
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, collectionGroup, query, where, orderBy, documentId, deleteDoc,
+} from "firebase/firestore";
 
 let env: RulesTestEnvironment;
 
@@ -255,6 +257,45 @@ describe("tracks", () => {
     const bob = env.authenticatedContext("bob").firestore();
     await assertFails(getDocs(query(
       collectionGroup(bob, "tracks"), where("status", "==", "pending_review"))));
+  });
+  it("'in'-status and documentId()-pinned list queries are DENIED on an approved profile that also has a pending track", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    await seed("profiles/prof1/tracks/t2", { title: "Pending", status: "pending_review", order: 1 });
+    const anon = env.unauthenticatedContext().firestore();
+    // An "in" filter covering both statuses would, if it worked, hand back
+    // the not-yet-public pending track alongside the approved one — rules
+    // evaluate the read clause per matched doc, so t2's status ("pending_review",
+    // not "approved") fails its own check and the whole query is denied.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where("status", "in", ["approved", "pending_review"]))));
+    // Pinning by documentId() doesn't route around the same per-doc check —
+    // a query naming both ids directly still fails for the same reason.
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/prof1/tracks"), where(documentId(), "in", ["t1", "t2"]))));
+  });
+  it("fail-closed: a track surviving under a deleted parent profile doc is not publicly readable", async () => {
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
+    // Simulate a partial/failed cascade delete: the profile doc is gone but
+    // one of its track docs was left behind. profileApproved()'s get() on a
+    // missing doc makes `.data.status` throw during rule evaluation — that
+    // must deny the read, not silently pass through.
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), "profiles/prof1"));
+    });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
+  });
+  it("a profile member (not a platform admin) cannot run collectionGroup('tracks')", async () => {
+    // alice is prof1's own profile-admin (seedProfile's member doc), but that
+    // is unrelated to the platform-level isAdmin() the collection-group rule
+    // requires — membership in one profile must not grant a cross-profile
+    // collection-group read.
+    await seedProfile("approved");
+    await seed("profiles/prof1/tracks/t1", { title: "x", status: "pending_review", order: 0 });
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(getDocs(query(collectionGroup(alice, "tracks"), where("status", "==", "pending_review"))));
   });
   it("membership does not leak across profiles", async () => {
     await seedProfile("approved"); // prof1 / alice, as the existing helper does
