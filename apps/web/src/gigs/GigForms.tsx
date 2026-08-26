@@ -1,7 +1,7 @@
 "use client";
 import type { CSSProperties } from "react";
 import {
-  GENRES, ACT_SIZES, SERIES_CADENCES,
+  GENRES, ACT_SIZES, SERIES_CADENCES, LAUNCH_TIMEZONE,
   type GigContentInput, type GigBudget, type GigDoc, type GigStatus, type SeriesStatus,
   type BudgetStructure, type ActSize, type SeriesCadence, type FillMode, type AddressVisibility, type GigRecurrence,
 } from "@gatekeep/shared";
@@ -42,6 +42,35 @@ export const chip = (active: boolean): CSSProperties => ({
 export const badge = (bg: string, fg = "#111"): CSSProperties => ({
   fontSize: 13, padding: "2px 8px", borderRadius: 10, background: bg, color: fg,
 });
+
+// A gig's `startsAt` is a bare epoch ms — rendering it with a bare
+// `toLocaleString()` shows whichever clock is doing the rendering (the
+// curator dashboard runs client-side, in the viewer's browser TZ; the public
+// page at u/[handle] runs server-side, in the server's TZ), so the SAME gig
+// can display two different wall times depending on which surface you're
+// looking at, and neither is guaranteed to be the venue's own TZ. Pinning
+// both to LAUNCH_TIMEZONE (a v1, single-metro-launch simplification — see
+// its definition in @gatekeep/shared) makes every surface agree, and
+// appending the zone's own short name (computed via Intl, so it tracks
+// LAUNCH_TIMEZONE automatically — including DST, e.g. EDT vs EST — rather
+// than a hardcoded "ET" that would go stale twice a year) makes that
+// explicit to whoever's reading it. dateStyle/timeStyle can't be combined
+// with timeZoneName in the same Intl call (throws), so the zone name is
+// computed via a second formatToParts() call and appended as text.
+export function formatGigDateTime(startsAtMs: number): string {
+  const date = new Date(startsAtMs);
+  const formatted = date.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: LAUNCH_TIMEZONE });
+  const tzName = new Intl.DateTimeFormat("en-US", { timeZone: LAUNCH_TIMEZONE, timeZoneName: "short" })
+    .formatToParts(date).find((p) => p.type === "timeZoneName")?.value;
+  return tzName ? `${formatted} ${tzName}` : formatted;
+}
+
+// cents -> a dollar string, showing cents only when they're non-zero — a
+// bare `.toFixed(0)` silently rounds e.g. $12.50 up to "$13", which is wrong
+// for a budget figure a musician is deciding whether to apply against.
+export function formatCents(cents: number): string {
+  return cents % 100 === 0 ? `$${(cents / 100).toFixed(0)}` : `$${(cents / 100).toFixed(2)}`;
+}
 
 // Payload shapes for the four callables — mirrors functions/src/gigs.ts's
 // CreateGigInput/UpdateGigInput and gigSeries.ts's CreateSeriesInput/

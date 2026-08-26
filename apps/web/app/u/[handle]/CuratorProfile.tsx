@@ -1,6 +1,6 @@
 import styles from "./portfolio.module.css";
 import type { CuratorLoaded, PublicGig } from "./page";
-import type { BudgetStructure, CuratorDetails, CuratorSubtype, GigPublicLocation } from "@gatekeep/shared";
+import { LAUNCH_TIMEZONE, type BudgetStructure, type CuratorDetails, type CuratorSubtype, type GigPublicLocation } from "@gatekeep/shared";
 
 // Sub-3's curator counterpart of MusicianProfile.tsx — same page.tsx SSR/ISR/
 // canonical/404 machinery, different content: no avatar/cover (curators have
@@ -23,7 +23,26 @@ const BUDGET_STRUCTURE_LABEL: Record<BudgetStructure, string> = {
   perHour: "per hour", perSong: "per song", perSet: "per set",
 };
 
-const fmtCents = (cents: number) => `$${(cents / 100).toFixed(0)}`;
+// Display-only duplicate of ../../../src/gigs/GigForms.tsx's formatCents:
+// same "$12.50 must not round to $13" fix, same import-boundary tradeoff as
+// BUDGET_STRUCTURE_LABEL above.
+const fmtCents = (cents: number) => (cents % 100 === 0 ? `$${(cents / 100).toFixed(0)}` : `$${(cents / 100).toFixed(2)}`);
+
+// Display-only duplicate of ../../../src/gigs/GigForms.tsx's
+// formatGigDateTime — see that file's comment for the full rationale
+// (pinning every gig-time display, public and dashboard alike, to one
+// LAUNCH_TIMEZONE so a curator and a fan see the same wall time, labeled
+// with the zone's own short name so it's never ambiguous). Duplicated here
+// rather than imported for the same "use client" import-boundary reason as
+// BUDGET_STRUCTURE_LABEL above — this page has no other client boundary to
+// spend on pulling in a client-only module.
+function formatGigDateTime(startsAtMs: number): string {
+  const date = new Date(startsAtMs);
+  const formatted = date.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: LAUNCH_TIMEZONE });
+  const tzName = new Intl.DateTimeFormat("en-US", { timeZone: LAUNCH_TIMEZONE, timeZoneName: "short" })
+    .formatToParts(date).find((p) => p.type === "timeZoneName")?.value;
+  return tzName ? `${formatted} ${tzName}` : formatted;
+}
 
 function mapUrl(location: CuratorDetails["location"]): string {
   const q = location.geo ? `${location.geo.lat},${location.geo.lng}` : (location.address ?? location.city);
@@ -46,7 +65,7 @@ function GigCard({ gig }: { gig: PublicGig }) {
     <li className={styles.gigCard}>
       <strong>{gig.title || "Untitled gig"}</strong>
       <p className={styles.gigMeta}>
-        {new Date(gig.startsAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+        {formatGigDateTime(gig.startsAt)}
         {" · "}{fmtCents(gig.budget.minCents)}–{fmtCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
       </p>
       {(gig.wants.genres.length > 0 || gig.wants.actSizes.length > 0) && (

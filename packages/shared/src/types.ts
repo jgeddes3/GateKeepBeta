@@ -234,3 +234,11 @@ export const MAX_ACTIVE_SERIES_PER_PROFILE = 10;
 export const MAX_PENDING_CURATOR_PROFILES = 1;
 export const RESUBMIT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export const SERIES_MATERIALIZE_WEEKS = 8;
+
+// V1 is a single-metro launch: gig display times (public curator page + the
+// curator dashboard's gigs/series lists) are pinned to ONE IANA zone rather
+// than each renderer's own clock (server TZ for SSR, browser TZ client-side)
+// so a curator and a fan looking at the same gig see the same wall time.
+// Set this to the launch metro's zone before launch (Task 14 adds the
+// README launch-checklist item to not forget this).
+export const LAUNCH_TIMEZONE = "America/New_York";

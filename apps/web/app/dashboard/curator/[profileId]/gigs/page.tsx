@@ -4,7 +4,9 @@ import { useRouter } from "next/navigation";
 import { doc, onSnapshot, collection, query, where } from "firebase/firestore";
 import { getFirebase } from "../../../../../src/lib/firebase";
 import { useAuth } from "../../../../../src/auth/AuthProvider";
-import { GIG_STATUS_LABEL, SERIES_STATUS_LABEL, BUDGET_STRUCTURE_LABEL, WEEKDAY_LABELS, badge } from "../../../../../src/gigs/GigForms";
+import {
+  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, BUDGET_STRUCTURE_LABEL, WEEKDAY_LABELS, badge, formatGigDateTime, formatCents,
+} from "../../../../../src/gigs/GigForms";
 import type { ProfileDoc, GigDoc, GigSeriesDoc } from "@gatekeep/shared";
 
 type GigRow = GigDoc & { id: string };
@@ -26,8 +28,8 @@ function GigListItem({ profileId, gig }: { profileId: string; gig: GigRow }) {
       <a href={`/dashboard/curator/${profileId}/gigs/${gig.id}`}><strong>{gig.title || "Untitled gig"}</strong></a>
       {" "}<span style={badge(STATUS_BG[gig.status], STATUS_FG[gig.status])}>{GIG_STATUS_LABEL[gig.status]}</span>
       <p style={{ margin: "4px 0 0", color: "#666", fontSize: 14 }}>
-        {new Date(gig.startsAt).toLocaleString()}
-        {" · $"}{(gig.budget.minCents / 100).toFixed(0)}–${(gig.budget.maxCents / 100).toFixed(0)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
+        {formatGigDateTime(gig.startsAt)}
+        {" · "}{formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
         {gig.seriesId && (
           <> · <a href={`/dashboard/curator/${profileId}/series/${gig.seriesId}`}>series</a>{gig.detachedFromTemplate ? " (detached)" : ""}</>
         )}

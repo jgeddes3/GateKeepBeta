@@ -8,7 +8,7 @@ import { useAuth } from "../../../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
   contentFrom, provisionsFrom, budgetFrom, recurrenceFrom, endDateInputToUtcMs, MAX_ADDRESS_LENGTH,
-  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, WEEKDAY_LABELS,
+  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, WEEKDAY_LABELS, formatGigDateTime,
   type ContentState, type ProvisionsState, type BudgetState, type RecurrenceState, type LocationValue,
   type UpdateSeriesPayload,
 } from "../../../../../../src/gigs/GigForms";
@@ -218,7 +218,7 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
         <ul style={{ margin: 0, paddingLeft: 0, listStyle: "none", display: "grid", gap: 6 }}>
           {occurrences.map((occ) => (
             <li key={occ.id} style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
-              <a href={`/dashboard/curator/${profileId}/gigs/${occ.id}`}><strong>{new Date(occ.startsAt).toLocaleString()}</strong></a>
+              <a href={`/dashboard/curator/${profileId}/gigs/${occ.id}`}><strong>{formatGigDateTime(occ.startsAt)}</strong></a>
               {" · "}{GIG_STATUS_LABEL[occ.status]}
               {occ.detachedFromTemplate && " · detached"}
             </li>
