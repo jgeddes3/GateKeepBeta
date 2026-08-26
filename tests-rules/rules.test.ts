@@ -24,6 +24,34 @@ const seed = async (path: string, data: object) => {
   });
 };
 
+// Sub-project 3: gigs/gigSeries doc-shape helpers (packages/shared's
+// GigDoc/GigSeriesDoc), defaulted to a plausible open, prof1-owned doc so
+// each test only needs to override the fields it's actually exercising.
+const seedGig = async (id: string, overrides: Record<string, unknown> = {}) => {
+  await seed(`gigs/${id}`, {
+    curatorProfileId: "prof1", seriesId: null, detachedFromTemplate: false,
+    title: "Friday night", description: "", wants: { genres: [], actSizes: [] },
+    budget: { minCents: 0, maxCents: 0, structure: "perHour" },
+    startsAt: 1000, durationMinutes: 60,
+    provisions: { hasPA: null, hasBackline: null, notes: null },
+    location: {
+      venueName: null, neighborhood: null, city: "Austin", geo: null,
+      addressVisibility: "neighborhood", address: null,
+    },
+    status: "open", createdAt: 1, updatedAt: 1,
+    ...overrides,
+  });
+};
+const seedSeries = async (id: string, overrides: Record<string, unknown> = {}) => {
+  await seed(`gigSeries/${id}`, {
+    curatorProfileId: "prof1",
+    recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+    fillMode: "per_occurrence", template: {},
+    status: "active", materializedThrough: 0, createdAt: 1, updatedAt: 1,
+    ...overrides,
+  });
+};
+
 describe("users", () => {
   it("owner reads and updates own doc; strangers cannot", async () => {
     await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
@@ -333,5 +361,185 @@ describe("private booking subdoc", () => {
     await assertFails(getDoc(doc(admin, "profiles/prof1/private/secrets")));
     await assertFails(setDoc(doc(alice, "profiles/prof1/private/booking"), { rates: {} }));
     await assertFails(setDoc(doc(admin, "profiles/prof1/private/booking"), { rates: {} }));
+  });
+  it("SP3 widening: a caller with a seeded curatorAccess marker reads ANY profile's booking; without the marker they cannot; member/admin paths are unchanged", async () => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
+    // carol is not a member of prof1, but she IS a member of >=1 *approved
+    // curator* profile elsewhere — represented here by a seeded curatorAccess
+    // marker. The live write path that keeps this marker in sync (curator
+    // approval / unpublish / membership-change cascade) lands in Task 4/6;
+    // this task only lands the rule, so the marker is seeded directly via
+    // withSecurityRulesDisabled to test the read boundary in isolation.
+    await seed("curatorAccess/carol", {});
+    const alice = env.authenticatedContext("alice").firestore();
+    const carol = env.authenticatedContext("carol").firestore();
+    const dave = env.authenticatedContext("dave").firestore(); // no marker, no membership
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/booking"))); // member, as before
+    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking"))); // admin, as before
+    await assertSucceeds(getDoc(doc(carol, "profiles/prof1/private/booking"))); // NEW: approved-curator-member widening
+    await assertFails(getDoc(doc(dave, "profiles/prof1/private/booking")));
+    await assertFails(setDoc(doc(carol, "profiles/prof1/private/booking"), { rates: {} })); // still no client writes
+  });
+});
+
+describe("gigs", () => {
+  it("anon reads an open gig; draft and taken_down are denied", async () => {
+    await seedGig("g-open", { status: "open" });
+    await seedGig("g-draft", { status: "draft" });
+    await seedGig("g-taken", { status: "taken_down" });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "gigs/g-open")));
+    await assertFails(getDoc(doc(anon, "gigs/g-draft")));
+    await assertFails(getDoc(doc(anon, "gigs/g-taken")));
+  });
+
+  it("clients cannot write gigs (callables only)", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(setDoc(doc(alice, "gigs/hax"), { curatorProfileId: "prof1", status: "open" }));
+  });
+
+  it("member reads own non-open gig by get; a stranger cannot; admin can", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedGig("g-draft2", { status: "draft" });
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "gigs/g-draft2")));
+    await assertFails(getDoc(doc(bob, "gigs/g-draft2")));
+    await assertSucceeds(getDoc(doc(admin, "gigs/g-draft2")));
+  });
+
+  describe("list provability", () => {
+    it("public status=='open' [+orderBy startsAt] list succeeds for anon; unfiltered and ordered-only lists fail", async () => {
+      await seedGig("g1", { status: "open", startsAt: 100 });
+      await seedGig("g2", { status: "draft", startsAt: 200 });
+      const anon = env.unauthenticatedContext().firestore();
+      const openSnap = await assertSucceeds(getDocs(query(
+        collection(anon, "gigs"), where("status", "==", "open"), orderBy("startsAt"))));
+      if (openSnap.empty) throw new Error("expected the open gig back from the filtered list");
+      // Unfiltered list: status is unconstrained by the query, so the
+      // status=='open' disjunct isn't provable across the whole result set.
+      await assertFails(getDocs(collection(anon, "gigs")));
+      // Ordered but not filtered: orderBy alone doesn't pin a field value.
+      await assertFails(getDocs(query(collection(anon, "gigs"), orderBy("startsAt"))));
+    });
+
+    it("public open-gigs list may add a curatorProfileId equality filter (a curator's public page's 'open gigs' section)", async () => {
+      await seedGig("g3", { status: "open", curatorProfileId: "prof1" });
+      const anon = env.unauthenticatedContext().firestore();
+      const snap = await assertSucceeds(getDocs(query(
+        collection(anon, "gigs"), where("status", "==", "open"), where("curatorProfileId", "==", "prof1"))));
+      if (snap.empty) throw new Error("expected g3 back");
+    });
+
+    it("curator dashboard: a member lists every status for their own curatorProfileId (no status filter); the identical query fails for a stranger", async () => {
+      await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+      await seedGig("g4", { status: "draft" });
+      await seedGig("g5", { status: "open" });
+      const alice = env.authenticatedContext("alice").firestore();
+      const bob = env.authenticatedContext("bob").firestore();
+      // curatorProfileId is pinned to 'prof1' by the query's equality filter,
+      // so isMember('prof1') is evaluated once as a query-wide constant —
+      // provable regardless of each doc's actual (unconstrained) status.
+      const dashSnap = await assertSucceeds(getDocs(
+        query(collection(alice, "gigs"), where("curatorProfileId", "==", "prof1"))));
+      if (dashSnap.size < 2) throw new Error("expected both the draft and open gig back for the member's dashboard query");
+      // Same query shape, but bob isn't a member of prof1: isMember('prof1')
+      // is a provable-but-false constant, and status is still unconstrained,
+      // so no disjunct is provable — the whole list is denied.
+      await assertFails(getDocs(query(collection(bob, "gigs"), where("curatorProfileId", "==", "prof1"))));
+    });
+
+    it("admin lists gigs with no filter at all; a non-admin's identical unfiltered list still fails", async () => {
+      await seedGig("g6", { status: "draft" });
+      const admin = env.authenticatedContext("root", { admin: true }).firestore();
+      const bob = env.authenticatedContext("bob").firestore();
+      const snap = await assertSucceeds(getDocs(collection(admin, "gigs")));
+      if (snap.empty) throw new Error("expected admin's unfiltered list to return the draft gig");
+      await assertFails(getDocs(collection(bob, "gigs")));
+    });
+  });
+});
+
+describe("gigs/private/location", () => {
+  it("member reads; stranger and anon cannot; admin can", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedGig("g-loc");
+    await seed("gigs/g-loc/private/location", { address: "123 Main St", geo: { lat: 1, lng: 2 } });
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(alice, "gigs/g-loc/private/location")));
+    await assertFails(getDoc(doc(bob, "gigs/g-loc/private/location")));
+    await assertFails(getDoc(doc(anon, "gigs/g-loc/private/location")));
+    await assertSucceeds(getDoc(doc(admin, "gigs/g-loc/private/location")));
+  });
+  it("clients cannot write gigs/private/location", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedGig("g-loc2");
+    const alice = env.authenticatedContext("alice").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(setDoc(doc(alice, "gigs/g-loc2/private/location"), { address: "hack" }));
+    await assertFails(setDoc(doc(admin, "gigs/g-loc2/private/location"), { address: "hack" }));
+  });
+});
+
+describe("gigSeries", () => {
+  it("stranger cannot read; member and admin can", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedSeries("s1");
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "gigSeries/s1")));
+    await assertFails(getDoc(doc(bob, "gigSeries/s1")));
+    await assertSucceeds(getDoc(doc(admin, "gigSeries/s1")));
+  });
+  it("clients cannot write gigSeries", async () => {
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertFails(setDoc(doc(alice, "gigSeries/hax"), { curatorProfileId: "prof1", status: "active" }));
+  });
+  it("list provability: a member lists series for their own curatorProfileId; a stranger's identical query fails; admin lists unfiltered", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedSeries("s2", { status: "active" });
+    await seedSeries("s3", { status: "paused" });
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    const dashSnap = await assertSucceeds(getDocs(
+      query(collection(alice, "gigSeries"), where("curatorProfileId", "==", "prof1"))));
+    if (dashSnap.size < 2) throw new Error("expected both series back for the member's dashboard query");
+    await assertFails(getDocs(query(collection(bob, "gigSeries"), where("curatorProfileId", "==", "prof1"))));
+    const adminSnap = await assertSucceeds(getDocs(collection(admin, "gigSeries")));
+    if (adminSnap.size < 2) throw new Error("expected admin's unfiltered list to return both series");
+  });
+});
+
+describe("adminNotes", () => {
+  it("admin reads; non-admin cannot; nobody writes", async () => {
+    await seed("adminNotes/prof1", { notes: [{ byUid: "root", at: 1, text: "watch this one" }] });
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    const alice = env.authenticatedContext("alice").firestore();
+    await assertSucceeds(getDoc(doc(admin, "adminNotes/prof1")));
+    await assertFails(getDoc(doc(alice, "adminNotes/prof1")));
+    await assertFails(setDoc(doc(admin, "adminNotes/prof1"), { notes: [] }));
+  });
+});
+
+describe("curatorAccess", () => {
+  it("owner reads own marker; a stranger cannot; admin can; nobody writes", async () => {
+    await seed("curatorAccess/alice", {});
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "curatorAccess/alice")));
+    await assertFails(getDoc(doc(bob, "curatorAccess/alice")));
+    await assertSucceeds(getDoc(doc(admin, "curatorAccess/alice")));
+    await assertFails(setDoc(doc(alice, "curatorAccess/alice"), {}));
+    await assertFails(setDoc(doc(admin, "curatorAccess/alice"), {}));
   });
 });

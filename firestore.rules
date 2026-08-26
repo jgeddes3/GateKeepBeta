@@ -18,6 +18,15 @@ service cloud.firestore {
     function profileApproved(profileId) {
       return get(/databases/$(database)/documents/profiles/$(profileId)).data.status == 'approved';
     }
+    // "This uid currently belongs to >=1 approved curator profile." A
+    // presence-only marker (contents never read) maintained by Cloud
+    // Functions on curator approval/unpublish and membership changes
+    // (Task 4's approval path + Task 6's cascade) — a custom claim can't be
+    // kept in sync with profile-approval state without a token refresh,
+    // while a lookup doc updates instantly.
+    function isApprovedCuratorMember() {
+      return signedIn() && exists(/databases/$(database)/documents/curatorAccess/$(request.auth.uid));
+    }
 
     match /users/{uid} {
       allow read: if isOwner(uid) || isAdmin();
@@ -89,11 +98,47 @@ service cloud.firestore {
 
       match /private/booking {
         // Rates/preferences: never public. Sub-project 3 widens this to
-        // members of approved curator profiles.
-        allow read: if isMember(profileId) || isAdmin();
+        // members of approved curator profiles, via the curatorAccess/{uid}
+        // marker (see isApprovedCuratorMember() above) rather than this
+        // profile's own membership — a curator shopping for acts needs to
+        // see ANY profile's rates, not just the ones they belong to.
+        allow read: if isMember(profileId) || isAdmin() || isApprovedCuratorMember();
         allow write: if false; // Cloud Functions only
       }
     }
+
+    // ---------- Sub-project 3: gigs, series, curator admin notes ----------
+    match /gigs/{gigId} {
+      // Only callables write, and only approved curator profiles can post;
+      // profile unpublish cascades close open gigs (review.ts), so a bare
+      // status check is sufficient — no per-read profile get().
+      // List queries MUST filter status == 'open' (unfiltered lists fail).
+      // Member/admin disjuncts are also list-provable as written: a curator
+      // dashboard query filtered by where('curatorProfileId','==',X) pins
+      // that field to a query-wide constant, so isMember(X) evaluates once
+      // (not per document) — if true, that disjunct alone proves the whole
+      // OR for every possible result, regardless of each doc's actual
+      // (unconstrained) status. isAdmin() never depends on resource.data,
+      // so it's provable for any query, filtered or not.
+      allow read: if resource.data.status == 'open'
+        || isMember(resource.data.curatorProfileId) || isAdmin();
+      allow write: if false;
+      match /private/location {
+        allow read: if isMember(get(/databases/$(database)/documents/gigs/$(gigId)).data.curatorProfileId)
+          || isAdmin();   // booked musician joins in sub-4
+        allow write: if false;
+      }
+    }
+    match /gigSeries/{seriesId} {
+      // Same list-provability shape as gigs above; series has no public
+      // disjunct (never publicly listed), so an unfiltered or stranger list
+      // always fails — only a curatorProfileId-filtered member query or an
+      // admin's (filtered or not) query is provable.
+      allow read: if isMember(resource.data.curatorProfileId) || isAdmin();
+      allow write: if false;
+    }
+    match /adminNotes/{uid} { allow read: if isAdmin(); allow write: if false; }
+    match /curatorAccess/{uid} { allow read: if isOwner(uid) || isAdmin(); allow write: if false; }
 
     // Recursive-wildcard match needed for collectionGroup('members') queries —
     // the nested /profiles/{profileId}/members/{memberUid} rule above does NOT

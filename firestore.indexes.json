@@ -8,6 +8,26 @@
     "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "order", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "seriesId", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigSeries", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
