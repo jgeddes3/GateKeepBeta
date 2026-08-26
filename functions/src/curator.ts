@@ -1,11 +1,12 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   validateLookingFor, isValidDocId,
   type CuratorDetails, type LookingFor, type CuratorSubtype,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireCuratorProfile } from "./guards.js";
 import { getGeocoder } from "./geocode.js";
+import { bucket, logDeleteFailure } from "./storage.js";
 
 type Amenities = CuratorDetails["amenities"];
 type CuratorLocationInput = { address: string | null; city: string };
@@ -143,3 +144,40 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>({ region: 
   await getFirestore().doc(`profiles/${input.profileId}`).update(updates);
   return { ok: true };
 });
+
+// Companion to media.ts's processPhoto "gallery" branch, which only ever
+// APPENDS (there's no client-driven overwrite for a gallery array the way
+// avatar/cover overwrite-and-delete-old is automatic). A member removes a
+// specific photo explicitly; this is the only path that ever deletes a
+// public/photos/{profileId}/gallery-... object once it lands.
+export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { profileId, path } = req.data;
+    if (!isValidDocId(profileId) || typeof path !== "string" || path.length < 1 || path.length > 300) {
+      throw new HttpsError("invalid-argument", "A profile id and photo path are required.");
+    }
+    // sequential is deliberate — parallelizing makes rejection order
+    // nondeterministic and would leak profile existence/type to non-members
+    // (mirrors updateCuratorProfile's identical rationale above).
+    await requireProfileMember(profileId, uid);
+    const snap = await requireCuratorProfile(profileId);
+    const photoPaths = (snap.data()?.curator as CuratorDetails | undefined)?.photoPaths ?? [];
+    if (!photoPaths.includes(path)) {
+      throw new HttpsError("not-found", "That photo isn't on this profile.");
+    }
+    // arrayRemove (not a read-filter-write of the array snapshot above) so a
+    // concurrent processPhoto append landing between the read and this write
+    // isn't clobbered — it removes every occurrence of `path` and no-ops if
+    // it's already gone, rather than overwriting the whole array with a
+    // possibly-stale copy.
+    await getFirestore().doc(`profiles/${profileId}`).update({
+      "curator.photoPaths": FieldValue.arrayRemove(path),
+      updatedAt: Date.now(),
+    });
+    // Best-effort storage delete — log and continue if the object is
+    // already gone (matches deleteProfile's cascade cleanup style).
+    await bucket().file(path).delete().catch(logDeleteFailure("removeCuratorPhoto", "gallery photo", path));
+    return { ok: true };
+  });

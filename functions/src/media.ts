@@ -1,5 +1,5 @@
 import { onObjectFinalized, type StorageEvent } from "firebase-functions/v2/storage";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -9,7 +9,9 @@ import { randomUUID } from "node:crypto";
 import ffmpegPathRaw from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 import sharp from "sharp";
-import { reviewTrackPath, publicPhotoPath, isValidDocId, MAX_CLIP_SECONDS } from "@gatekeep/shared";
+import {
+  reviewTrackPath, publicPhotoPath, isValidDocId, MAX_CLIP_SECONDS, MAX_CURATOR_PHOTOS,
+} from "@gatekeep/shared";
 import { STORAGE_BUCKET, bucket, logDeleteFailure } from "./storage.js";
 
 const run = promisify(execFile);
@@ -214,8 +216,10 @@ async function processAudio(objectName: string, generation: string | number): Pr
 
 // Mirrors storage.rules' staging/photos filename pattern — validated here
 // too (not just trusted from the rules) before it's used to pick a Firestore
-// field or an output path.
-const PHOTO_FILENAME_RE = /^(avatar|cover)-[A-Za-z0-9-]{1,80}$/;
+// field or an output path. "gallery" is the curator equivalent of
+// avatar/cover (see storagePaths.ts's PhotoKind and the kind/type gating
+// below).
+const PHOTO_FILENAME_RE = /^(avatar|cover|gallery)-[A-Za-z0-9-]{1,80}$/;
 
 async function processPhoto(objectName: string, generation: string | number): Promise<void> {
   // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
@@ -229,8 +233,9 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     await stagingFile.delete().catch(logDeleteFailure("processUpload", "malformed staging photo path", objectName));
     return;
   }
-  const kind = nameMatch[1] as "avatar" | "cover";
+  const kind = nameMatch[1] as "avatar" | "cover" | "gallery";
   const db = getFirestore();
+  const profileRef = db.doc(`profiles/${profileId}`);
 
   try {
     // Membership is derived from the OBJECT PATH's {uid}/{profileId}
@@ -242,6 +247,18 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     if (!member.exists) {
       return; // non-member or malformed: discard, no further processing
     }
+
+    // Each kind belongs to exactly one profile type's destination model:
+    // avatar/cover are the musician portfolio's two single-photo slots;
+    // gallery is the curator profile's append-only curator.photoPaths array.
+    // Neither model has a field for the other type's kind (CuratorDetails
+    // has no avatarPhotoPath/coverPhotoPath, PortfolioData has no
+    // photoPaths), so a mismatched kind/type pairing — forged, or a stale
+    // client pointed at the wrong profile type — is discarded the same way
+    // a non-member upload is above: nothing to write it into.
+    const profileType = (await profileRef.get()).data()?.type;
+    if ((kind === "avatar" || kind === "cover") && profileType !== "musician") return;
+    if (kind === "gallery" && profileType !== "curator") return;
 
     const [bytes] = await stagingFile.download();
     // Re-encode via sharp: strips EXIF (GPS!) and bounds dimensions.
@@ -270,9 +287,10 @@ async function processPhoto(objectName: string, generation: string | number): Pr
 
     // Avatars intentionally do NOT set withoutEnlargement — the 512x512
     // output is a contract the rest of the app relies on (fixed-size crop
-    // targets), so a tiny source still gets upscaled to fill it. Covers use
-    // withoutEnlargement since they're display-only and any size up to
-    // 1600x1600 is fine.
+    // targets), so a tiny source still gets upscaled to fill it. Covers and
+    // gallery photos both use withoutEnlargement since they're display-only
+    // and any size up to 1600x1600 is fine — a gallery photo is just a
+    // repeatable cover, sized identically.
     const pipeline = kind === "avatar"
       ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
       : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
@@ -280,7 +298,41 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     const destPath = publicPhotoPath(profileId, kind, randomUUID());
     await bucket().file(destPath).save(jpeg, { contentType: "image/jpeg" });
 
-    const profileRef = db.doc(`profiles/${profileId}`);
+    if (kind === "gallery") {
+      // Append-with-cap, transactional: unlike avatar/cover's single-slot
+      // overwrite (read-prev-then-write, an accepted narrow race elsewhere
+      // in this function), a gallery upload is ADDITIVE — concurrent
+      // uploads must not both read "11 photos" and both append past the
+      // MAX_CURATOR_PHOTOS cap. The transaction makes the length check and
+      // the append atomic.
+      const outcome = await db.runTransaction<"ok" | "cap" | "gone">(async (tx) => {
+        const snap = await tx.get(profileRef);
+        if (!snap.exists) return "gone";
+        const current = (snap.data()?.curator?.photoPaths as string[] | undefined) ?? [];
+        if (current.length >= MAX_CURATOR_PHOTOS) return "cap";
+        tx.update(profileRef, {
+          "curator.photoPaths": FieldValue.arrayUnion(destPath),
+          updatedAt: Date.now(),
+        });
+        return "ok";
+      });
+      if (outcome !== "ok") {
+        // "cap": resource-exhausted-equivalent — mirrors the disallowed-format
+        // branch above (console.error + discard, no client-visible error:
+        // this is an async trigger, not a callable). "gone": profile deleted
+        // mid-flight (deleteProfile's recursiveDelete racing this trigger),
+        // same as the avatar/cover orphan-cleanup case below — no live doc
+        // to append to any more.
+        if (outcome === "cap") {
+          console.error("processUpload: curator gallery photo rejected — MAX_CURATOR_PHOTOS reached", objectName);
+        }
+        await bucket().file(destPath).delete()
+          .catch(logDeleteFailure("processUpload",
+            outcome === "cap" ? "gallery cap reached" : "orphaned public gallery photo (profile gone)", destPath));
+      }
+      return;
+    }
+
     const field = kind === "avatar" ? "portfolio.avatarPhotoPath" : "portfolio.coverPhotoPath";
     const prev = (await profileRef.get()).data()?.portfolio?.[`${kind}PhotoPath`] as string | null | undefined;
     try {

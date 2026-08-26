@@ -2,11 +2,16 @@
 // functions write review/public paths, storage.rules mirrors these shapes.
 export const stagingAudioPath = (uid: string, profileId: string, trackId: string) =>
   `staging/audio/${uid}/${profileId}/${trackId}`;
-export const stagingPhotoPath = (uid: string, profileId: string, kind: "avatar" | "cover", nonce: string) =>
+// "gallery" is the curator equivalent of avatar/cover: musicians get two
+// named single-photo slots (portfolio.avatarPhotoPath/coverPhotoPath),
+// curators get one append-only array (curator.photoPaths) — see media.ts's
+// processPhoto for how the kind picks its destination.
+export type PhotoKind = "avatar" | "cover" | "gallery";
+export const stagingPhotoPath = (uid: string, profileId: string, kind: PhotoKind, nonce: string) =>
   `staging/photos/${uid}/${profileId}/${kind}-${nonce}`;
 export const reviewTrackPath = (profileId: string, trackId: string) =>
   `review/tracks/${profileId}/${trackId}.m4a`;
 export const publicTrackPath = (profileId: string, trackId: string) =>
   `public/tracks/${profileId}/${trackId}.m4a`;
-export const publicPhotoPath = (profileId: string, kind: "avatar" | "cover", nonce: string) =>
+export const publicPhotoPath = (profileId: string, kind: PhotoKind, nonce: string) =>
   `public/photos/${profileId}/${kind}-${nonce}.jpg`;

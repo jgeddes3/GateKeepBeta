@@ -2,11 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getStorage as adminStorage } from "firebase-admin/storage";
 import type { ProfileDraftInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
+process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
+const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app");
 vi.setConfig({ testTimeout: 15_000 });
 
 async function makeCuratorProfile(
@@ -159,5 +162,72 @@ describe("updateCuratorProfile", () => {
 
   it("rejects unauthenticated calls", async () => {
     await expect(callFn("updateCuratorProfile", { profileId: "x", about: "hi" })).rejects.toThrow();
+  });
+});
+
+describe("removeCuratorPhoto", () => {
+  it("member removes a photo: array entry and storage object both go; non-member is rejected", async () => {
+    const { user } = await signUpTestUser(`rp1-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user);
+    const path = `public/photos/${profileId}/gallery-${Date.now()}.jpg`;
+    await abucket.file(path).save(Buffer.from([1, 2, 3]), { contentType: "image/jpeg" });
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": [path] });
+
+    const { user: stranger } = await signUpTestUser(`rp1b-${Date.now()}@test.com`);
+    await expect(callFn("removeCuratorPhoto", { profileId, path }, stranger))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+
+    await callFn("removeCuratorPhoto", { profileId, path }, user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(p?.curator.photoPaths).toEqual([]);
+    const [exists] = await abucket.file(path).exists();
+    expect(exists).toBe(false);
+  });
+
+  it("removes only the named path, leaving other gallery entries untouched", async () => {
+    const { user } = await signUpTestUser(`rp2-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user);
+    const keep = `public/photos/${profileId}/gallery-keep.jpg`;
+    const drop = `public/photos/${profileId}/gallery-drop.jpg`;
+    await abucket.file(drop).save(Buffer.from([1]), { contentType: "image/jpeg" });
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": [keep, drop] });
+    await callFn("removeCuratorPhoto", { profileId, path: drop }, user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(p?.curator.photoPaths).toEqual([keep]);
+  });
+
+  it("rejects a path not currently on the profile with not-found", async () => {
+    const { user } = await signUpTestUser(`rp3-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user);
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": ["public/photos/x/gallery-a.jpg"] });
+    await expect(callFn("removeCuratorPhoto",
+      { profileId, path: "public/photos/x/gallery-not-there.jpg" }, user))
+      .rejects.toMatchObject({ code: "functions/not-found" });
+  });
+
+  it("rejects removal on a non-curator (musician) profile with failed-precondition", async () => {
+    const { user } = await signUpTestUser(`rp4-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", { type: "musician", subtype: "solo", name: "Musician", handle: `rp4m_${Date.now()}` }, user);
+    await expect(callFn("removeCuratorPhoto", { profileId, path: "public/photos/x/gallery-a.jpg" }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("succeeds (best-effort) even when the storage object is already gone", async () => {
+    const { user } = await signUpTestUser(`rp5-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user);
+    // No object actually written at this path — the array entry is
+    // orphaned (e.g. a prior manual bucket cleanup). Removal must still
+    // succeed and clear the array entry, not fail on the storage delete.
+    const path = `public/photos/${profileId}/gallery-already-gone.jpg`;
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": [path] });
+    await callFn("removeCuratorPhoto", { profileId, path }, user);
+    const p = (await adb.doc(`profiles/${profileId}`).get()).data();
+    expect(p?.curator.photoPaths).toEqual([]);
+  });
+
+  it("rejects unauthenticated calls", async () => {
+    await expect(callFn("removeCuratorPhoto", { profileId: "x", path: "public/photos/x/gallery-a.jpg" }))
+      .rejects.toThrow();
   });
 });

@@ -4,7 +4,7 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getStorage as adminStorage } from "firebase-admin/storage";
 import sharp from "sharp";
-import type { ProfileDraftInput, CreateTrackInput } from "@gatekeep/shared";
+import { MAX_CURATOR_PHOTOS, type ProfileDraftInput, type CreateTrackInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
@@ -17,6 +17,13 @@ async function makeMusician(prefix: string) {
   const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
   const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
     { type: "musician", subtype: "solo", name: "Ava", handle: `${prefix}_${Date.now()}` }, user);
+  return { user, uid, profileId };
+}
+
+async function makeCurator(prefix: string) {
+  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+    { type: "curator", subtype: "venue", name: "Test Room", handle: `${prefix}_${Date.now()}` }, user);
   return { user, uid, profileId };
 }
 
@@ -312,6 +319,109 @@ describe("processUpload: photos", () => {
     }
     expect(stagingGone).toBe(true);
     const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0);
+  });
+});
+
+describe("processUpload: curator gallery photos", () => {
+  const tinyJpeg = () => Uint8Array.from(atob(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
+    "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
+
+  async function waitForGalleryLength(profileId: string, length: number, timeoutMs = 30_000): Promise<string[]> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const paths = ((await adb.doc(`profiles/${profileId}`).get()).data()?.curator?.photoPaths
+        ?? []) as string[];
+      if (paths.length >= length) return paths;
+      if (Date.now() > deadline) {
+        throw new Error(`curator.photoPaths never reached length ${length} for ${profileId} (stuck at ${paths.length})`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  it("processes a gallery photo into public/photos and appends it to curator.photoPaths", async () => {
+    const { user, uid, profileId } = await makeCurator("g1");
+    const path = `staging/photos/${uid}/${profileId}/gallery-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    const paths = await waitForGalleryLength(profileId, 1);
+    expect(paths).toHaveLength(1);
+    expect(paths[0]).toMatch(new RegExp(`^public/photos/${profileId}/gallery-`));
+    const [exists] = await abucket.file(paths[0]).exists();
+    expect(exists).toBe(true);
+  });
+
+  it("a second gallery upload appends alongside the first — additive, not overwrite", async () => {
+    const { user, uid, profileId } = await makeCurator("g2");
+    await uploadTestAudio(`staging/photos/${uid}/${profileId}/gallery-${Date.now()}-a`, tinyJpeg(), "image/jpeg", user);
+    await waitForGalleryLength(profileId, 1);
+    await uploadTestAudio(`staging/photos/${uid}/${profileId}/gallery-${Date.now()}-b`, tinyJpeg(), "image/jpeg", user);
+    const paths = await waitForGalleryLength(profileId, 2);
+    expect(paths).toHaveLength(2);
+    expect(new Set(paths).size).toBe(2); // two distinct objects, both still present
+    for (const p of paths) {
+      const [exists] = await abucket.file(p).exists();
+      expect(exists).toBe(true);
+    }
+  });
+
+  it("rejects a gallery upload aimed at a musician profile — no destination field for it", async () => {
+    const { user, uid, profileId } = await makeMusician("g3");
+    const path = `staging/photos/${uid}/${profileId}/gallery-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true); // finally still cleans up staging
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull();
+    expect(p.data()?.portfolio?.coverPhotoPath ?? null).toBeNull();
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0); // nothing written to public/
+  });
+
+  it("rejects an avatar upload aimed at a curator profile — curators have no single-slot photo fields", async () => {
+    const { user, uid, profileId } = await makeCurator("g4");
+    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true);
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.curator?.photoPaths ?? []).toHaveLength(0);
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0);
+  });
+
+  it("caps the gallery at MAX_CURATOR_PHOTOS entries — an upload past the cap is discarded, not appended", async () => {
+    const { user, uid, profileId } = await makeCurator("g5");
+    expect(MAX_CURATOR_PHOTOS).toBe(12);
+    const seeded = Array.from({ length: MAX_CURATOR_PHOTOS }, (_, i) => `public/photos/${profileId}/gallery-seed-${i}`);
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": seeded });
+    const path = `staging/photos/${uid}/${profileId}/gallery-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true); // finally still cleans up staging
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.curator?.photoPaths).toEqual(seeded); // unchanged — still exactly the 12 seeded entries
+    // The rejected upload's own processed object (a real GCS write, unlike
+    // the fake seeded Firestore-only entries above) must have been cleaned
+    // up rather than left as an orphan.
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/gallery-` });
     expect(files).toHaveLength(0);
   });
 });

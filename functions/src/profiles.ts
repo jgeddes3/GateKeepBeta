@@ -103,7 +103,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
   // Anti-spam: resubmitting too soon after a rejection is blocked regardless
   // of profile type — reviewProfile stamps lastRejectedAt on every reject
   // (routine "revise and resubmit" and retroactive-unpublish alike).
-  const lastRejectedAt = data?.lastRejectedAt as number | undefined;
+  const lastRejectedAt = data?.lastRejectedAt;
   if (lastRejectedAt !== undefined && Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS) {
     throw new HttpsError("failed-precondition", "You can resubmit 24 hours after a rejection.");
   }

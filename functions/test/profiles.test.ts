@@ -6,7 +6,7 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getStorage as adminStorage } from "firebase-admin/storage";
-import type { ProfileDraftInput, CreateTrackInput } from "@gatekeep/shared";
+import { RESUBMIT_COOLDOWN_MS, type ProfileDraftInput, type CreateTrackInput } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 // Admin SDK must target the storage emulator (mirrors helpers.ts) — needed
@@ -384,6 +384,69 @@ describe("submitProfileForReview anti-spam", () => {
     expect(typeof p?.lastRejectedAt).toBe("number");
     expect(p?.lastRejectedAt).toBeGreaterThanOrEqual(before);
   });
+
+  it("cooldown boundary: just under RESUBMIT_COOLDOWN_MS elapsed is still blocked, just at/over it is allowed", async () => {
+    const { user } = await signUpTestUser(`cbound-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Boundary Room", handle: `cbound_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, profileId);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("cboundadmin");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Not yet" }, adminUser.user);
+
+    // The check is `Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS`,
+    // evaluated server-side at call time — not at the moment this test sets
+    // lastRejectedAt via the admin SDK. A literal "-1ms / -0ms" boundary
+    // isn't reliably testable across that gap: the RPC round-trip between
+    // the write below and the callable actually running always costs a few
+    // ms, which would silently push a naive "-1ms" case past the threshold
+    // (observed while developing this test — it flaked green). A 300ms
+    // margin is tight enough to still be testing the boundary (worlds
+    // tighter than the existing +1h/+25h test above) while comfortably
+    // absorbing local-emulator round-trip jitter in either direction.
+    const BOUNDARY_MARGIN_MS = 300;
+
+    // Just under the cooldown: elapsed at call time is (COOLDOWN - margin) +
+    // network jitter, which stays < COOLDOWN as long as that jitter is
+    // under the margin — still blocked.
+    await adb.doc(`profiles/${profileId}`).update({
+      lastRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS - BOUNDARY_MARGIN_MS),
+    });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // Just at/over the cooldown: elapsed at call time is (COOLDOWN + margin)
+    // + network jitter, which is always >= COOLDOWN regardless of jitter —
+    // allowed.
+    await adb.doc(`profiles/${profileId}`).update({
+      lastRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS + BOUNDARY_MARGIN_MS),
+    });
+    await callFn("submitProfileForReview", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
+  });
+
+  it("the resubmit cooldown is a shared code path — it also blocks a musician's resubmission", async () => {
+    const { user } = await signUpTestUser(`mcool-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Cooldown Act", handle: `mcool_${Date.now()}` }, user);
+    await callFn("updatePortfolio", { profileId, bio: "x", genres: ["soul"] }, user);
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    const wav = makeWav(12);
+    const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
+      "createTrack", { profileId, title: "Demo", startSec: 0, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
+    await uploadTestAudio(uploadPath, wav, "audio/wav", user);
+    await waitForTrackStatus(adb, `profiles/${profileId}/tracks/${trackId}`, ["pending_review"]);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("mcooladmin");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Needs work" }, adminUser.user);
+
+    // Musician submissions never went through a curator-only code path, so
+    // this proves the cooldown check itself (not just the curator gate) is
+    // type-agnostic, matching reviewProfile stamping lastRejectedAt for any type.
+    await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 60 * 60 * 1000 });
+    await expect(callFn("submitProfileForReview", { profileId }, user))
+      .rejects.toThrow(/24 hours/i);
+  }, 60_000);
 });
 
 describe("deleteProfile storage cascade", () => {

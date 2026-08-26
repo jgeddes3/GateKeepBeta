@@ -23,6 +23,10 @@ export interface ProfileDoc {
   updatedAt: number;
   portfolio?: PortfolioData; // musicians only; seeded empty by createProfileDraft
   curator?: CuratorDetails;  // curators only; seeded by createProfileDraft
+  // Anti-spam (Task 4): stamped by reviewProfile on every reject, of any
+  // profile type; submitProfileForReview reads it to enforce a
+  // RESUBMIT_COOLDOWN_MS resubmit cooldown. Absent until the first reject.
+  lastRejectedAt?: number;
 }
 
 export interface MemberDoc {
@@ -171,8 +175,11 @@ export interface CuratorDetails {
   // venues: full street address (public). planners/hosts: city only.
   location: { address: string | null; city: string; neighborhood: string | null;
               geo: { lat: number; lng: number } | null };
-  photoPaths: string[];          // public/photos/... (SP2 photo pipeline)
+  photoPaths: string[];          // public/photos/... "gallery" kind (SP2 photo pipeline, widened in Task 4b)
 }
+// Curator gallery cap — enforced by media.ts's processPhoto trigger when
+// appending a newly processed "gallery" photo to curator.photoPaths.
+export const MAX_CURATOR_PHOTOS = 12;
 // lives on ProfileDoc as `curator?: CuratorDetails` (curators only; seeded by createProfileDraft)
 
 export interface GigBudget { minCents: number; maxCents: number; structure: BudgetStructure; }
