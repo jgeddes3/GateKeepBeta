@@ -7,7 +7,7 @@ import { getFirebase } from "../../../../../../src/lib/firebase";
 import { useAuth } from "../../../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
-  emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, MAX_ADDRESS_LENGTH,
+  emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, endDateInputToUtcMs, MAX_ADDRESS_LENGTH,
   type LocationValue, type CreateGigPayload, type CreateSeriesPayload,
 } from "../../../../../../src/gigs/GigForms";
 import {
@@ -99,7 +99,7 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
         const [hourStr, minuteStr] = recurrence.time.split(":");
         const recurrenceInput = {
           weekday: recurrence.weekday, hour: Number(hourStr), minute: Number(minuteStr),
-          cadence: recurrence.cadence, endDate: recurrence.endDate ? new Date(recurrence.endDate).getTime() : null,
+          cadence: recurrence.cadence, endDate: endDateInputToUtcMs(recurrence.endDate),
         };
         const rv = validateRecurrence(recurrenceInput, Date.now());
         if (!rv.ok) { setError(rv.reason); setBusy(false); return; }

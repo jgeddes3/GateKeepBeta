@@ -194,6 +194,13 @@ export function LocationFields({ isVenue, addressRequired, currentLabel, value, 
   );
 }
 
+// The materializer (functions/src/scheduled.ts's anchorFor) interprets
+// weekday/hour/minute — and, per the fix below, endDate — in UTC (a
+// documented v1 launch-checklist gap, not a bug: true per-curator-timezone
+// support is deferred). Neither <input type="time"> nor <input type="date">
+// hints at that on their own, so this caveat is the only place a curator
+// finds out before picking a time that reads correctly on this form but
+// lands an hour (or more) off from what they meant in their own timezone.
 export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; onChange: (v: RecurrenceState) => void }) {
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -208,6 +215,9 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
         </select></label>
       <label>End date (optional): <input type="date" value={value.endDate}
         onChange={(e) => onChange({ ...value, endDate: e.target.value })} /></label>
+      <p style={{ color: "#92400e", fontSize: 12, margin: 0 }}>
+        Times are in UTC for now — local-timezone support is coming. The end date above is also treated as UTC midnight.
+      </p>
       <label>Fill mode:{" "}
         <select value={value.fillMode} onChange={(e) => onChange({ ...value, fillMode: e.target.value as FillMode })}>
           <option value="per_occurrence">{FILL_MODE_LABEL.per_occurrence}</option>
@@ -215,4 +225,20 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
         </select></label>
     </div>
   );
+}
+
+// Explicit UTC parse for the <input type="date"> value ("YYYY-MM-DD"),
+// rather than relying on `new Date(value).getTime()` — which HAPPENS to
+// land on UTC midnight for a bare date string, but only because of an
+// easy-to-miss quirk of the ES date-string grammar (a date-only form parses
+// as UTC; the SAME string with a time suffix — like what datetime-local
+// produces — parses as LOCAL). Spelling out the UTC math here, the same way
+// functions/src/scheduled.ts's anchorFor does with Date.UTC(...), keeps the
+// endDate consistent with the recurrence's weekday/hour/minute (also
+// UTC-interpreted) by construction rather than by that easy-to-miss quirk.
+export function endDateInputToUtcMs(value: string): number | null {
+  if (!value) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return null;
+  return Date.UTC(year, month - 1, day);
 }

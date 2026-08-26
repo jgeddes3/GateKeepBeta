@@ -7,7 +7,7 @@ import { getFirebase } from "../../../../../../src/lib/firebase";
 import { useAuth } from "../../../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
-  contentFrom, provisionsFrom, budgetFrom, recurrenceFrom, MAX_ADDRESS_LENGTH,
+  contentFrom, provisionsFrom, budgetFrom, recurrenceFrom, endDateInputToUtcMs, MAX_ADDRESS_LENGTH,
   GIG_STATUS_LABEL, SERIES_STATUS_LABEL, WEEKDAY_LABELS,
   type ContentState, type ProvisionsState, type BudgetState, type RecurrenceState, type LocationValue,
   type UpdateSeriesPayload,
@@ -57,7 +57,7 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
     const [hourStr, minuteStr] = recurrence.time.split(":");
     const recurrenceInput = {
       weekday: recurrence.weekday, hour: Number(hourStr), minute: Number(minuteStr),
-      cadence: recurrence.cadence, endDate: recurrence.endDate ? new Date(recurrence.endDate).getTime() : null,
+      cadence: recurrence.cadence, endDate: endDateInputToUtcMs(recurrence.endDate),
     };
     const rv = validateRecurrence(recurrenceInput, Date.now());
     if (!rv.ok) { setError(rv.reason); return; }

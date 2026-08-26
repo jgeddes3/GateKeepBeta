@@ -463,6 +463,32 @@ describe("gigs", () => {
       await assertFails(getDocs(query(collection(bob, "gigs"), where("curatorProfileId", "==", "prof1"))));
     });
 
+    it("series detail: a member lists occurrences by curatorProfileId+seriesId (no status filter); seriesId alone (no curatorProfileId) fails even for the member", async () => {
+      // Pins the exact query shape apps/web/app/dashboard/curator/[profileId]/series/[seriesId]/page.tsx
+      // issues for its occurrences list — two plain equality filters, sorted
+      // client-side (no orderBy, so no composite index needed beyond the
+      // existing single-field ones).
+      await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+      await seedGig("g7", { status: "open", seriesId: "s1" });
+      await seedGig("g8", { status: "draft", seriesId: "s1" });
+      const alice = env.authenticatedContext("alice").firestore();
+      const bob = env.authenticatedContext("bob").firestore();
+      const occSnap = await assertSucceeds(getDocs(query(
+        collection(alice, "gigs"), where("curatorProfileId", "==", "prof1"), where("seriesId", "==", "s1"))));
+      if (occSnap.size < 2) throw new Error("expected both series occurrences back for the member's detail-page query");
+      // Same query shape, but bob isn't a member of prof1: same reasoning as
+      // the curator-dashboard test above — isMember('prof1') is a
+      // provable-but-false constant, so the list is denied.
+      await assertFails(getDocs(query(
+        collection(bob, "gigs"), where("curatorProfileId", "==", "prof1"), where("seriesId", "==", "s1"))));
+      // seriesId alone, even for the actual member: curatorProfileId is
+      // UNCONSTRAINED by this query, so isMember(resource.data.curatorProfileId)
+      // can't be evaluated as a single query-wide constant — the gigs read
+      // rule has no seriesId-based disjunct to fall back on either, so this
+      // fails even though every matching doc happens to belong to prof1.
+      await assertFails(getDocs(query(collection(alice, "gigs"), where("seriesId", "==", "s1"))));
+    });
+
     it("admin lists gigs with no filter at all; a non-admin's identical unfiltered list still fails", async () => {
       await seedGig("g6", { status: "draft" });
       const admin = env.authenticatedContext("root", { admin: true }).firestore();

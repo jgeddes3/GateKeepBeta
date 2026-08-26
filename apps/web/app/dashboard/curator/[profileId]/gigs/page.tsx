@@ -10,15 +10,21 @@ import type { ProfileDoc, GigDoc, GigSeriesDoc } from "@gatekeep/shared";
 type GigRow = GigDoc & { id: string };
 type SeriesRow = GigSeriesDoc & { id: string };
 
+// taken_down is a MODERATION action (admin-issued, Task 12) — it must not
+// read as just another flavor of the curator's own routine cancellation, so
+// it gets its own amber/orange pair distinct from cancelled's red, even
+// though this task's UI has no takedown action of its own (a gig can still
+// arrive here already taken_down).
 const STATUS_BG: Record<GigDoc["status"], string> = {
-  draft: "#fef9c3", open: "#dcfce7", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fee2e2",
+  draft: "#fef9c3", open: "#dcfce7", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
 };
+const STATUS_FG: Partial<Record<GigDoc["status"], string>> = { taken_down: "#9a3412" };
 
 function GigListItem({ profileId, gig }: { profileId: string; gig: GigRow }) {
   return (
     <li style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
       <a href={`/dashboard/curator/${profileId}/gigs/${gig.id}`}><strong>{gig.title || "Untitled gig"}</strong></a>
-      {" "}<span style={badge(STATUS_BG[gig.status])}>{GIG_STATUS_LABEL[gig.status]}</span>
+      {" "}<span style={badge(STATUS_BG[gig.status], STATUS_FG[gig.status])}>{GIG_STATUS_LABEL[gig.status]}</span>
       <p style={{ margin: "4px 0 0", color: "#666", fontSize: 14 }}>
         {new Date(gig.startsAt).toLocaleString()}
         {" · $"}{(gig.budget.minCents / 100).toFixed(0)}–${(gig.budget.maxCents / 100).toFixed(0)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
