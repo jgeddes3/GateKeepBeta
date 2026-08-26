@@ -113,6 +113,9 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1", s
     // Task 7's daily sweep materializes the first batch of occurrences on
     // its next run — createSeries deliberately writes no occurrence docs.
     status: "active", materializedThrough: 0, createdAt: now, updatedAt: now,
+    // SP4 whole-run booking (Task 5) is the sole writer of these — no run is
+    // booked yet at series creation.
+    activeBookingId: null, bookedMusicianProfileId: null,
   };
   await seriesRef.set(series);
   return { seriesId: seriesRef.id };

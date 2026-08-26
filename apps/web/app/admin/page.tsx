@@ -380,7 +380,7 @@ const NON_VENUE_SUBTYPES = new Set<CuratorSubtype>(["planner", "individual_host"
 // exports, so duplicating a 5-entry Record here is simpler than widening
 // that page's own export surface for one reuse.
 const GIG_STATUS_BG: Record<GigDoc["status"], string> = {
-  draft: "#fef9c3", open: "#dcfce7", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
+  draft: "#fef9c3", open: "#dcfce7", filled: "#dbeafe", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
 };
 const GIG_STATUS_FG: Partial<Record<GigDoc["status"], string>> = { taken_down: "#9a3412" };
 

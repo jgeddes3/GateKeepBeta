@@ -22,7 +22,7 @@ import {
 export const MAX_ADDRESS_LENGTH = 300;
 
 export const GIG_STATUS_LABEL: Record<GigStatus, string> = {
-  draft: "Draft", open: "Open", closed: "Closed", cancelled: "Cancelled", taken_down: "Taken down",
+  draft: "Draft", open: "Open", filled: "Filled", closed: "Closed", cancelled: "Cancelled", taken_down: "Taken down",
 };
 export const SERIES_STATUS_LABEL: Record<SeriesStatus, string> = {
   active: "Active", paused: "Paused", ended: "Ended",

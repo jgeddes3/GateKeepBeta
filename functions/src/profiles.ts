@@ -101,6 +101,9 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
       type: input.type, subtype: input.subtype as ProfileDoc["subtype"],
       name: input.name.trim(), handle: input.handle,
       status: "draft", rejectionReason: null, createdAt: now, updatedAt: now,
+      // SP4: rebuildBookingProjections is the sole writer post-creation —
+      // no booking prefs are public yet for a brand-new draft.
+      publicBooking: null,
       ...(input.type === "musician"
         ? { portfolio: { bio: "", genres: [], externalLinks: [], avatarPhotoPath: null, coverPhotoPath: null } }
         : input.type === "curator"

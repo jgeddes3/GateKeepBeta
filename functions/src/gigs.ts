@@ -162,6 +162,7 @@ export const createGig = onCall<CreateGigInput>({ region: "us-central1", secrets
     },
     location,
     status: "draft", createdAt: now, updatedAt: now,
+    bookingId: null, bookedMusicianProfileId: null,
   };
 
   const batch = db.batch();

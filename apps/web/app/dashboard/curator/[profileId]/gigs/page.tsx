@@ -18,7 +18,7 @@ type SeriesRow = GigSeriesDoc & { id: string };
 // though this task's UI has no takedown action of its own (a gig can still
 // arrive here already taken_down).
 const STATUS_BG: Record<GigDoc["status"], string> = {
-  draft: "#fef9c3", open: "#dcfce7", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
+  draft: "#fef9c3", open: "#dcfce7", filled: "#dbeafe", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
 };
 const STATUS_FG: Partial<Record<GigDoc["status"], string>> = { taken_down: "#9a3412" };
 

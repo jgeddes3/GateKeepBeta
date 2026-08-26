@@ -40,7 +40,7 @@ import {
 export const MAX_ADDRESS_LENGTH = 300;
 
 export const GIG_STATUS_LABEL: Record<GigStatus, string> = {
-  draft: "Draft", open: "Open", closed: "Closed", cancelled: "Cancelled", taken_down: "Taken down",
+  draft: "Draft", open: "Open", filled: "Filled", closed: "Closed", cancelled: "Cancelled", taken_down: "Taken down",
 };
 export const SERIES_STATUS_LABEL: Record<SeriesStatus, string> = {
   active: "Active", paused: "Paused", ended: "Ended",
@@ -57,7 +57,7 @@ export const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thur
 // pair from cancelled's red so it doesn't read as just another flavor of the
 // curator's own routine cancellation, matching web's badge distinction.
 export const STATUS_BG: Record<GigStatus, string> = {
-  draft: "#fef9c3", open: "#dcfce7", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
+  draft: "#fef9c3", open: "#dcfce7", filled: "#dbeafe", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
 };
 export const STATUS_FG: Partial<Record<GigStatus, string>> = { taken_down: "#9a3412" };
 

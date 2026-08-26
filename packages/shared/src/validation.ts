@@ -2,9 +2,11 @@ import type { ProfileDraftInput } from "./types.js";
 import {
   GENRES, GIG_TYPES, AUDIO_CONTENT_TYPES, MAX_AUDIO_UPLOAD_BYTES,
   ACT_SIZES, AVAILABILITY_PATTERNS, SERIES_CADENCES,
+  MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_NOTE_LENGTH, DEPOSIT_PERCENT,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
   type LookingFor, type GigDoc, type GigBudget, type GigSeriesDoc, type BudgetStructure,
+  type BookingVisibility, type RateVisibility, type PrefsVisibility,
 } from "./types.js";
 
 export const RESERVED_HANDLES = [
@@ -343,4 +345,76 @@ export function validateRecurrence(input: GigRecurrence, now: number): Result {
     }
   }
   return { ok: true };
+}
+
+// ---------- Sub-project 4: booking flow ----------
+
+// Pure — no Date.now() in shared code (mirrors validateRecurrence's `now`
+// injection rationale). `structure` decides which of durationMinutes/
+// songCount applies; the other is ignored.
+export function computeExpectedTotalCents(
+  structure: BudgetStructure,
+  amountCents: number,
+  opts: { durationMinutes?: number; songCount?: number },
+): number {
+  if (structure === "perSet") return amountCents;
+  if (structure === "perHour") return Math.ceil(amountCents * (opts.durationMinutes ?? 0) / 60);
+  return amountCents * (opts.songCount ?? 0);
+}
+
+export function computeDepositCents(expectedTotalCents: number): number {
+  return Math.ceil(expectedTotalCents * DEPOSIT_PERCENT / 100);
+}
+
+// Note: returns an error string (or null when valid) rather than this file's
+// usual {ok,reason} Result — matches the exact signature later tasks
+// (applyToGig/offerGig/counterBooking) are written against.
+export function validateOfferInput(
+  structure: BudgetStructure,
+  input: { amountCents: unknown; expectedQuantity: unknown; note: unknown },
+): string | null {
+  // Untrusted onCall payload — same defensive-runtime rationale as
+  // validateHandle: the declared param shape only binds trusted callers.
+  if (typeof input !== "object" || input === null) return "Invalid offer.";
+  if (typeof input.amountCents !== "number" || !Number.isInteger(input.amountCents)
+      || input.amountCents <= 0 || input.amountCents > MAX_OFFER_AMOUNT_CENTS) {
+    return `Amount must be a whole number of cents, more than 0 and at most ${MAX_OFFER_AMOUNT_CENTS}.`;
+  }
+  if (input.note != null && (typeof input.note !== "string" || input.note.length > MAX_OFFER_NOTE_LENGTH)) {
+    return `Note must be at most ${MAX_OFFER_NOTE_LENGTH} characters.`;
+  }
+  if (structure === "perSong") {
+    if (typeof input.expectedQuantity !== "number" || !Number.isInteger(input.expectedQuantity)
+        || input.expectedQuantity < 1 || input.expectedQuantity > 500) {
+      return "Song count must be a whole number between 1 and 500.";
+    }
+  } else if (input.expectedQuantity != null) {
+    // perHour/perSet: the server derives (perHour) or ignores (perSet) this
+    // field — a caller-supplied value here is a malformed request, not
+    // silently dropped, so a musician/curator never wonders why their
+    // submitted quantity vanished.
+    return "Song count does not apply to this rate structure.";
+  }
+  return null;
+}
+
+const RATE_VISIBILITIES: readonly RateVisibility[] = ["curators", "private"];
+const PREFS_VISIBILITIES: readonly PrefsVisibility[] = ["public", "curators"];
+const BOOKING_VISIBILITY_KEYS = ["perHour", "perSong", "perSet", "preferences"] as const;
+
+export function validateBookingVisibility(v: unknown): v is BookingVisibility {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  // Exact key set: every expected key present (hasOwnProperty, not `in` —
+  // same prototype-chain rationale as validateLink's LINK_HOSTS lookup) AND
+  // no extras, checked via a length match against the own-key count.
+  if (Object.keys(v).length !== BOOKING_VISIBILITY_KEYS.length) return false;
+  for (const key of BOOKING_VISIBILITY_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(v, key)) return false;
+  }
+  const o = v as Record<string, unknown>;
+  if (!RATE_VISIBILITIES.includes(o.perHour as RateVisibility)) return false;
+  if (!RATE_VISIBILITIES.includes(o.perSong as RateVisibility)) return false;
+  if (!RATE_VISIBILITIES.includes(o.perSet as RateVisibility)) return false;
+  if (!PREFS_VISIBILITIES.includes(o.preferences as PrefsVisibility)) return false;
+  return true;
 }

@@ -40,6 +40,11 @@ export interface ProfileDoc {
   // FIRST ever submission (draft -> pending_review) deliberately does not
   // count as a resubmit.
   resubmitCount?: number;
+  // SP4: mirrors profiles/{id}/private/booking's `preferences` iff that
+  // doc's `visibility.preferences == "public"` — rebuildBookingProjections
+  // is the sole writer; NEVER rates (rates are never public, spec decision
+  // 4). null while unset or while visibility keeps preferences private.
+  publicBooking: BookingPreferences | null;
 }
 
 export interface MemberDoc {
@@ -63,7 +68,8 @@ export interface InviteDoc {
 export interface AuditLogDoc {
   actorUid: string;
   action: "profile_approved" | "profile_rejected" | "admin_granted" | "profile_deleted"
-    | "track_approved" | "track_rejected" | "gig_taken_down" | "account_flagged";
+    | "track_approved" | "track_rejected" | "gig_taken_down" | "account_flagged"
+    | "reliability_mark_removed" | "booking_visibility_backfilled";
   targetId: string;          // profileId or uid
   detail: string;
   at: number;
@@ -72,7 +78,7 @@ export interface AuditLogDoc {
 export interface NotificationDoc {
   title: string;
   body: string;
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation";
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking";
   read: boolean;
   createdAt: number;
 }
@@ -133,7 +139,15 @@ export interface BookingPreferences {
   availabilityPattern: AvailabilityPattern | null;
 }
 // profiles/{profileId}/private/booking — members + admins only (sub-3 widens to curators)
-export interface BookingDoc { rates: BookingRates; preferences: BookingPreferences; updatedAt: number; }
+export interface BookingDoc {
+  rates: BookingRates; preferences: BookingPreferences; updatedAt: number;
+  // SP4: per-field read tiers. Optional (not `visibility:`) so pre-SP4
+  // docs/fixtures stay type-valid — updateBookingInfo always writes a
+  // complete one going forward, and Task 3's backfill converges legacy docs;
+  // consumers must treat an absent value the same as the backfill default
+  // (all rates "curators", preferences "curators").
+  visibility?: BookingVisibility;
+}
 
 export interface PortfolioUpdateInput {
   profileId: string;
@@ -141,7 +155,9 @@ export interface PortfolioUpdateInput {
   genres?: string[];
   externalLinks?: ExternalLink[];
 }
-export interface BookingUpdateInput { profileId: string; rates: BookingRates; preferences: BookingPreferences; }
+export interface BookingUpdateInput {
+  profileId: string; rates: BookingRates; preferences: BookingPreferences; visibility: BookingVisibility;
+}
 export interface CreateTrackInput {
   profileId: string; title: string; startSec: number; sizeBytes: number; contentType: string;
 }
@@ -167,7 +183,7 @@ export const AUDIO_CONTENT_TYPES = [
 
 // ---------- Sub-project 3: curator profiles & gig postings ----------
 
-export const GIG_STATUSES = ["draft", "open", "closed", "cancelled", "taken_down"] as const;
+export const GIG_STATUSES = ["draft", "open", "filled", "closed", "cancelled", "taken_down"] as const;
 export type GigStatus = (typeof GIG_STATUSES)[number];
 export const SERIES_STATUSES = ["active", "paused", "ended"] as const;
 export type SeriesStatus = (typeof SERIES_STATUSES)[number];
@@ -226,6 +242,14 @@ export interface GigDoc {
   provisions: { hasPA: boolean | null; hasBackline: boolean | null; notes: string | null };
   location: GigPublicLocation;
   status: GigStatus; createdAt: number; updatedAt: number;
+  // SP4: public queryable booking linkage — stamped atomically with
+  // status:"filled" by acceptBooking (and by the materializer for a
+  // whole-run occurrence born already-filled); cleared back to null
+  // whenever the gig reopens (cancellation/moderation unwind). Public
+  // (not private) so the Shows section and gigs/{id}/private/location's
+  // booked-musician reveal rule can both read it — it names the booked act
+  // only, no terms.
+  bookingId: string | null; bookedMusicianProfileId: string | null;
 }
 // gigs/{id}/private/location:
 export interface GigPrivateLocation {
@@ -240,7 +264,9 @@ export interface GigPrivateLocation {
 export interface GigSeriesDoc {
   curatorProfileId: string;
   recurrence: { weekday: number; hour: number; minute: number; cadence: SeriesCadence; endDate: number | null };
-  fillMode: FillMode; template: Omit<GigDoc, "curatorProfileId"|"seriesId"|"detachedFromTemplate"|"status"|"startsAt"|"createdAt"|"updatedAt">;
+  fillMode: FillMode; template: Omit<GigDoc,
+    "curatorProfileId"|"seriesId"|"detachedFromTemplate"|"status"|"startsAt"|"createdAt"|"updatedAt"
+    |"bookingId"|"bookedMusicianProfileId">;
   // The exact address+geo backing template.location (which is the public,
   // possibly-coarsened shape) — mirrors gigs/{id}/private/location, but
   // inline rather than a subcollection: unlike gigs, a gigSeries doc is
@@ -250,6 +276,11 @@ export interface GigSeriesDoc {
   // it creates without re-geocoding.
   templatePrivateLocation: GigPrivateLocation;
   status: SeriesStatus; materializedThrough: number; createdAt: number; updatedAt: number;
+  // SP4: set when a whole-run booking is accepted (acceptBooking) — mirrors
+  // GigDoc's per-occurrence linkage at the series level so the materializer
+  // can birth future occurrences already "filled". Both null otherwise;
+  // cleared by cancellation/moderation unwind alongside the occurrences'.
+  activeBookingId: string | null; bookedMusicianProfileId: string | null;
 }
 export interface AdminNoteDoc { notes: { byUid: string; at: number; text: string }[]; }
 
@@ -266,3 +297,67 @@ export const SERIES_MATERIALIZE_WEEKS = 8;
 // Set this to the launch metro's zone before launch (Task 14 adds the
 // README launch-checklist item to not forget this).
 export const LAUNCH_TIMEZONE = "America/New_York";
+
+// ---------- Sub-project 4: booking flow ----------
+
+export const BOOKING_STATUSES = ["open", "confirmed", "completed", "declined", "withdrawn",
+  "superseded", "expired", "cancelled_by_curator", "cancelled_by_musician"] as const;
+export type BookingStatus = (typeof BOOKING_STATUSES)[number];
+export type BookingSide = "musician" | "curator";
+
+export interface OfferEntry {
+  by: BookingSide; amountCents: number;
+  expectedQuantity: number | null;  // perSong: song count (required int >=1); perHour: hours derived from gig duration (server-set); perSet: null
+  note: string | null; at: number;
+}
+export interface AcceptedTerms { amountCents: number; expectedQuantity: number | null; expectedTotalCents: number; }
+export interface BookingDeposit {
+  amountCents: number; status: "unpaid";               // sub-5 adds "held" | "refunded" | "forfeited"
+  forfeitedTo: "musician" | null;                       // set by cancellation outcome; money moves in sub-5
+  policy: { percent: number; curatorForfeitHours: number; musicianMarkHours: number }; // snapshot, never re-read from constants
+}
+export interface BookingCancellation {
+  by: BookingSide; reason: string; at: number; hoursBeforeStart: number;
+  outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
+}
+// Named BookingRequestDoc (not BookingDoc) because SP2's BookingDoc (the
+// rates+prefs subdoc at profiles/{id}/private/booking, above) already owns
+// the obvious name — use BookingRequestDoc everywhere for this top-level doc.
+export interface BookingRequestDoc {
+  gigId: string; seriesId: string | null;               // seriesId set <=> whole-run booking
+  curatorProfileId: string; musicianProfileId: string;
+  initiatedBy: BookingSide; structure: BudgetStructure; // copied from gig budget, immutable
+  thread: OfferEntry[]; awaitingSide: BookingSide;
+  status: BookingStatus;
+  acceptedTerms: AcceptedTerms | null; deposit: BookingDeposit | null;
+  cancellation: BookingCancellation | null;
+  createdAt: number; updatedAt: number; confirmedAt: number | null; resolvedAt: number | null;
+}
+
+// visibility + projections + reliability
+export type RateVisibility = "curators" | "private";    // rates are NEVER public (spec decision 4)
+export type PrefsVisibility = "public" | "curators";
+export interface BookingVisibility {
+  perHour: RateVisibility; perSong: RateVisibility; perSet: RateVisibility; preferences: PrefsVisibility;
+}
+export interface ReliabilitySummary { noShowCount: number; completedCount: number; }
+export interface CuratorBookingDoc {                     // profiles/{id}/private/curatorBooking
+  rates: BookingRates;                                   // structures marked "private" are null here even if set in the source
+  preferences: BookingPreferences; reliability: ReliabilitySummary; updatedAt: number;
+}
+export interface ReliabilityMark {
+  bookingId: string; gigId: string; kind: "late_cancel" | "reported_no_show";
+  at: number; reportedByProfileId: string | null; removedByAdmin: boolean;
+}
+export interface ReliabilityDoc { marks: ReliabilityMark[]; completedCount: number; updatedAt: number; } // profiles/{id}/private/reliability
+
+export const MAX_BOOKING_THREAD_ENTRIES = 50;
+export const MAX_OFFER_NOTE_LENGTH = 280;
+export const MAX_CANCEL_REASON_LENGTH = 500;
+export const MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE = 25;
+export const MAX_OFFER_AMOUNT_CENTS = 10_000_000;       // $100k
+export const DEPOSIT_PERCENT = 35;
+export const CURATOR_FORFEIT_WINDOW_HOURS = 72;
+export const MUSICIAN_MARK_WINDOW_HOURS = 24;
+export const MAX_RELIABILITY_MARKS = 200;
+export const NO_SHOW_REPORT_WINDOW_DAYS = 14;

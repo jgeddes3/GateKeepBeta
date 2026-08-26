@@ -3,13 +3,20 @@ import {
   validateHandle, validateProfileDraft, RESERVED_HANDLES,
   validatePortfolioUpdate, validateBookingUpdate, validateTrackCreate,
   validateLookingFor, validateGigContent, validateBudget, validateRecurrence,
+  computeExpectedTotalCents, computeDepositCents, validateOfferInput, validateBookingVisibility,
   GENRES, GIG_TYPES, MAX_TRACKS, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES,
   ACT_SIZES, AVAILABILITY_PATTERNS, TRACK_STATUSES,
   GIG_STATUSES, SERIES_STATUSES, SERIES_CADENCES, FILL_MODES,
   MAX_OPEN_GIGS_PER_PROFILE, MAX_ACTIVE_SERIES_PER_PROFILE, MAX_PENDING_CURATOR_PROFILES,
   RESUBMIT_COOLDOWN_MS, SERIES_MATERIALIZE_WEEKS,
+  BOOKING_STATUSES, MAX_BOOKING_THREAD_ENTRIES, MAX_OFFER_NOTE_LENGTH, MAX_CANCEL_REASON_LENGTH,
+  MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_OFFER_AMOUNT_CENTS, DEPOSIT_PERCENT,
+  CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_RELIABILITY_MARKS,
+  NO_SHOW_REPORT_WINDOW_DAYS,
 } from "../src/index";
-import type { ProfileDraftInput, LookingFor, GigWants, ProfileDoc, CuratorDetails } from "../src/index";
+import type {
+  ProfileDraftInput, LookingFor, GigWants, ProfileDoc, CuratorDetails, BookingVisibility,
+} from "../src/index";
 
 describe("validateHandle", () => {
   it("accepts lowercase letters, digits, underscores, 3-30 chars", () => {
@@ -129,18 +136,26 @@ describe("validatePortfolioUpdate", () => {
 });
 
 describe("validateBookingUpdate", () => {
+  // SP4: BookingUpdateInput now carries a required `visibility` — this
+  // literal is the backfill default (all rates + preferences "curators",
+  // i.e. pre-SP4 exposure), reused everywhere below that needs a legal one.
+  const okVisibility: BookingVisibility = {
+    perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
+  };
   const ok = {
     profileId: "p1",
     rates: { perHour: { amountCents: 15000, note: null }, perSong: null, perSet: { amountCents: 60000, note: "3 x 45min" } },
     preferences: { gigTypes: [GIG_TYPES[0]], travelRadiusKm: 50, actSize: "band" as const,
       typicalSetMinutes: 45, bringsOwnPA: true, availabilityPattern: "weekends" as const },
+    visibility: okVisibility,
   };
   it("accepts a valid update", () => { expect(validateBookingUpdate(ok).ok).toBe(true); });
   it("accepts all-null rates and empty preferences (musician may fill in later)", () => {
     expect(validateBookingUpdate({ profileId: "p1",
       rates: { perHour: null, perSong: null, perSet: null },
       preferences: { gigTypes: [], travelRadiusKm: null, actSize: null,
-        typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null } }).ok).toBe(true);
+        typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null },
+      visibility: okVisibility }).ok).toBe(true);
   });
   it("rejects non-integer, zero, negative, or absurd amounts", () => {
     for (const amountCents of [0, -5, 12.5, 100_000_001]) {
@@ -161,7 +176,9 @@ describe("validateBookingUpdate", () => {
     }).ok).toBe(false);
   });
   it("treats an omitted rate (undefined, not present in the payload) the same as explicit null", () => {
-    expect(validateBookingUpdate({ profileId: "p1", rates: {} as never, preferences: ok.preferences }).ok).toBe(true);
+    expect(validateBookingUpdate({
+      profileId: "p1", rates: {} as never, preferences: ok.preferences, visibility: okVisibility,
+    }).ok).toBe(true);
   });
   it("treats an omitted rate note (undefined) the same as explicit null", () => {
     expect(validateBookingUpdate({
@@ -177,6 +194,7 @@ describe("validateBookingUpdate", () => {
       profileId: "p1",
       rates: { perHour: null, perSong: null, perSet: null },
       preferences: { gigTypes: [] } as never,
+      visibility: okVisibility,
     }).ok).toBe(true);
   });
 });
@@ -243,6 +261,7 @@ describe("never throws on hostile payloads (defensive runtime guards)", () => {
         profileId: "p1",
         rates: [] as never,
         preferences: { gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null, bringsOwnPA: null, availabilityPattern: null },
+        visibility: { perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators" },
       }),
     },
     {
@@ -251,6 +270,7 @@ describe("never throws on hostile payloads (defensive runtime guards)", () => {
         profileId: "p1",
         rates: { perHour: null, perSong: null, perSet: null },
         preferences: null as never,
+        visibility: { perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators" },
       }),
     },
     {
@@ -504,7 +524,7 @@ describe("ProfileDoc.curator", () => {
     };
     const profile: ProfileDoc = {
       type: "curator", subtype: "venue", name: "The Alberta Room", handle: "the_alberta_room",
-      status: "draft", rejectionReason: null, createdAt: 0, updatedAt: 0, curator,
+      status: "draft", rejectionReason: null, createdAt: 0, updatedAt: 0, curator, publicBooking: null,
     };
     expect(profile.curator?.about).toBe("A neighborhood listening room.");
   });
@@ -512,7 +532,7 @@ describe("ProfileDoc.curator", () => {
 
 describe("sub-3 gig/curator constants", () => {
   it("derives the runtime allowlist arrays that back the new status/cadence/fill-mode unions", () => {
-    expect(GIG_STATUSES).toEqual(["draft", "open", "closed", "cancelled", "taken_down"]);
+    expect(GIG_STATUSES).toEqual(["draft", "open", "filled", "closed", "cancelled", "taken_down"]);
     expect(SERIES_STATUSES).toEqual(["active", "paused", "ended"]);
     expect(SERIES_CADENCES).toEqual(["weekly", "biweekly", "monthly"]);
     expect(FILL_MODES).toEqual(["per_occurrence", "whole_run"]);
@@ -556,4 +576,145 @@ describe("never throws on hostile payloads — sub-3 validators", () => {
       expect(result?.ok).toBe(false);
     });
   }
+});
+
+// ---------- Sub-project 4: booking flow ----------
+
+describe("computeExpectedTotalCents", () => {
+  it("perHour: ceils amountCents * durationMinutes / 60 (90min at a rate yielding 13500)", () => {
+    expect(computeExpectedTotalCents("perHour", 9000, { durationMinutes: 90 })).toBe(13500);
+  });
+  it("perSong: amountCents * songCount (12 songs at 800/song)", () => {
+    expect(computeExpectedTotalCents("perSong", 800, { songCount: 12 })).toBe(9600);
+  });
+  it("perSet: returns amountCents unchanged, ignoring opts", () => {
+    expect(computeExpectedTotalCents("perSet", 50000, {})).toBe(50000);
+    expect(computeExpectedTotalCents("perSet", 50000, { durationMinutes: 90, songCount: 12 })).toBe(50000);
+  });
+  it("treats a missing durationMinutes/songCount as 0, not NaN or a throw", () => {
+    expect(computeExpectedTotalCents("perHour", 9000, {})).toBe(0);
+    expect(computeExpectedTotalCents("perSong", 800, {})).toBe(0);
+  });
+  it("perHour rounds a fractional cents-per-minute result UP (ceil, never down)", () => {
+    // 1000 * 7 / 60 = 116.66... -> ceil to 117
+    expect(computeExpectedTotalCents("perHour", 1000, { durationMinutes: 7 })).toBe(117);
+  });
+});
+
+describe("computeDepositCents", () => {
+  it("ceils 35% of the expected total (13500 -> 4725)", () => {
+    expect(computeDepositCents(13500)).toBe(4725);
+  });
+  it("rounds up on odd cents (101 -> 35.35 -> 36)", () => {
+    expect(computeDepositCents(101)).toBe(36);
+  });
+  it("returns 0 for a 0 expected total", () => {
+    expect(computeDepositCents(0)).toBe(0);
+  });
+});
+
+describe("validateOfferInput", () => {
+  const perHourOk = { amountCents: 6000, expectedQuantity: null, note: null };
+  const perSongOk = { amountCents: 800, expectedQuantity: 12, note: null };
+  const perSetOk = { amountCents: 50000, expectedQuantity: null, note: null };
+  it("accepts a valid offer for each structure", () => {
+    expect(validateOfferInput("perHour", perHourOk)).toBeNull();
+    expect(validateOfferInput("perSong", perSongOk)).toBeNull();
+    expect(validateOfferInput("perSet", perSetOk)).toBeNull();
+  });
+  it("accepts an omitted (undefined) expectedQuantity/note the same as explicit null on perHour/perSet", () => {
+    expect(validateOfferInput("perHour", { amountCents: 6000 } as never)).toBeNull();
+    expect(validateOfferInput("perSet", { amountCents: 6000 } as never)).toBeNull();
+  });
+  it("rejects non-integer, zero, negative, and absurd amountCents", () => {
+    for (const amountCents of [0, -5, 12.5, "100" as never]) {
+      expect(validateOfferInput("perSet", { ...perSetOk, amountCents })).not.toBeNull();
+    }
+  });
+  it("accepts amountCents at exactly MAX_OFFER_AMOUNT_CENTS and rejects one cent over", () => {
+    expect(validateOfferInput("perSet", { ...perSetOk, amountCents: MAX_OFFER_AMOUNT_CENTS })).toBeNull();
+    expect(validateOfferInput("perSet", { ...perSetOk, amountCents: MAX_OFFER_AMOUNT_CENTS + 1 })).not.toBeNull();
+  });
+  it("accepts a note at exactly MAX_OFFER_NOTE_LENGTH chars and rejects one over (281)", () => {
+    expect(validateOfferInput("perSet", { ...perSetOk, note: "x".repeat(MAX_OFFER_NOTE_LENGTH) })).toBeNull();
+    expect(validateOfferInput("perSet", { ...perSetOk, note: "x".repeat(281) })).not.toBeNull();
+  });
+  it("rejects a non-string note", () => {
+    expect(validateOfferInput("perSet", { ...perSetOk, note: 42 as never })).not.toBeNull();
+  });
+  it("perSong requires an integer expectedQuantity 1-500", () => {
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 1 })).toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 500 })).toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 0 })).not.toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 501 })).not.toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 1.5 })).not.toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: "12" as never })).not.toBeNull();
+  });
+  it("perSong rejects a missing (undefined) or null expectedQuantity — it's required", () => {
+    expect(validateOfferInput("perSong", { amountCents: 800, note: null } as never)).not.toBeNull();
+    expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: null })).not.toBeNull();
+  });
+  it("perSet rejects a non-null expectedQuantity (server ignores this field for perSet)", () => {
+    expect(validateOfferInput("perSet", { ...perSetOk, expectedQuantity: 3 })).not.toBeNull();
+  });
+  it("perHour rejects a non-null expectedQuantity (server derives this field for perHour)", () => {
+    expect(validateOfferInput("perHour", { ...perHourOk, expectedQuantity: 3 })).not.toBeNull();
+  });
+  it("rejects malformed types at runtime (untrusted onCall payload shapes)", () => {
+    expect(validateOfferInput("perSet", null as never)).not.toBeNull();
+    expect(validateOfferInput("perSet", [] as never)).not.toBeNull();
+    expect(validateOfferInput("perSet", "not an object" as never)).not.toBeNull();
+  });
+});
+
+describe("validateBookingVisibility", () => {
+  const ok: BookingVisibility = { perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators" };
+  it("accepts every legal combination of rate/preferences visibility", () => {
+    expect(validateBookingVisibility(ok)).toBe(true);
+    expect(validateBookingVisibility({ perHour: "private", perSong: "private", perSet: "private", preferences: "curators" })).toBe(true);
+    expect(validateBookingVisibility({ perHour: "curators", perSong: "private", perSet: "curators", preferences: "public" })).toBe(true);
+    expect(validateBookingVisibility({ perHour: "private", perSong: "curators", perSet: "private", preferences: "public" })).toBe(true);
+  });
+  it("rejects a missing key", () => {
+    const { preferences: _preferences, ...missingPreferences } = ok;
+    expect(validateBookingVisibility(missingPreferences)).toBe(false);
+  });
+  it("rejects an extra key even when the four required keys are all valid", () => {
+    expect(validateBookingVisibility({ ...ok, extra: "x" })).toBe(false);
+  });
+  it('rejects "public" on a rate field (rates are never public — spec decision 4)', () => {
+    expect(validateBookingVisibility({ ...ok, perHour: "public" })).toBe(false);
+  });
+  it('rejects "private" on preferences (not a legal PrefsVisibility value)', () => {
+    expect(validateBookingVisibility({ ...ok, preferences: "private" })).toBe(false);
+  });
+  it("rejects an unknown/garbage value on any field", () => {
+    expect(validateBookingVisibility({ ...ok, perSong: "constructor" })).toBe(false);
+  });
+  it("rejects malformed types at runtime (untrusted onCall payload shapes)", () => {
+    expect(validateBookingVisibility(null)).toBe(false);
+    expect(validateBookingVisibility(undefined)).toBe(false);
+    expect(validateBookingVisibility([])).toBe(false);
+    expect(validateBookingVisibility("curators")).toBe(false);
+    expect(validateBookingVisibility(42)).toBe(false);
+  });
+});
+
+describe("sub-4 booking constants", () => {
+  it("derives the runtime allowlist array backing the BookingStatus union", () => {
+    expect(BOOKING_STATUSES).toEqual(["open", "confirmed", "completed", "declined", "withdrawn",
+      "superseded", "expired", "cancelled_by_curator", "cancelled_by_musician"]);
+  });
+  it("locks the product caps from the spec", () => {
+    expect(MAX_BOOKING_THREAD_ENTRIES).toBe(50);
+    expect(MAX_OFFER_NOTE_LENGTH).toBe(280);
+    expect(MAX_CANCEL_REASON_LENGTH).toBe(500);
+    expect(MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE).toBe(25);
+    expect(MAX_OFFER_AMOUNT_CENTS).toBe(10_000_000);
+    expect(DEPOSIT_PERCENT).toBe(35);
+    expect(CURATOR_FORFEIT_WINDOW_HOURS).toBe(72);
+    expect(MUSICIAN_MARK_WINDOW_HOURS).toBe(24);
+    expect(MAX_RELIABILITY_MARKS).toBe(200);
+    expect(NO_SHOW_REPORT_WINDOW_DAYS).toBe(14);
+  });
 });

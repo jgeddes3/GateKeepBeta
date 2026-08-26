@@ -291,6 +291,9 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
             provisions: series.template.provisions, location: series.template.location,
             status: "open", createdAt: now, updatedAt: now,
+            // SP4 lands whole-run-aware births (Task 8) — until then every
+            // materialized occurrence starts unbooked, same as createGig.
+            bookingId: null, bookedMusicianProfileId: null,
           };
           await writer.set(gigRef, gig);
           // Mirrors createGig's own write and updateSeries' propagation sweep —
