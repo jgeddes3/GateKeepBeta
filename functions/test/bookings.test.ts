@@ -560,28 +560,33 @@ describe("acceptBooking", () => {
     expect(after.deposit).toBeNull();
   });
 
-  it("supersede: two rival open bookings on the same gig -> loser superseded + notified, winner confirmed", async () => {
+  it("supersede: two rival open bookings on the same gig -> BOTH superseded + notified, winner confirmed", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab5c");
     const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab5w");
-    const { owner: loser, profileId: loserProfileId } = await makeApprovedMusicianProfile("ab5l");
+    const { owner: loser1, profileId: loser1ProfileId } = await makeApprovedMusicianProfile("ab5l1");
+    const { owner: loser2, profileId: loser2ProfileId } = await makeApprovedMusicianProfile("ab5l2");
     const gigId = await createOpenGig(curatorProfileId, curator.user);
 
     const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
-    const { bookingId: loserBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-      "applyToGig", { gigId, musicianProfileId: loserProfileId, offer: offerPayload() }, loser.user);
+    const { bookingId: loser1BookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: loser1ProfileId, offer: offerPayload() }, loser1.user);
+    const { bookingId: loser2BookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: loser2ProfileId, offer: offerPayload() }, loser2.user);
 
     await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
 
     const winnerAfter = (await adb.doc(`bookings/${winnerBookingId}`).get()).data() as BookingRequestDoc;
     expect(winnerAfter.status).toBe("confirmed");
 
-    const loserAfter = (await adb.doc(`bookings/${loserBookingId}`).get()).data() as BookingRequestDoc;
-    expect(loserAfter.status).toBe("superseded");
-    expect(loserAfter.resolvedAt).not.toBeNull();
+    for (const [loserBookingId, loser] of [[loser1BookingId, loser1], [loser2BookingId, loser2]] as const) {
+      const loserAfter = (await adb.doc(`bookings/${loserBookingId}`).get()).data() as BookingRequestDoc;
+      expect(loserAfter.status).toBe("superseded");
+      expect(loserAfter.resolvedAt).not.toBeNull();
 
-    const loserNotes = await pollNotifications(loser.uid);
-    expect(loserNotes.docs.some((d) => d.data().kind === "booking" && /no longer available/i.test(d.data().title))).toBe(true);
+      const loserNotes = await pollNotifications(loser.uid);
+      expect(loserNotes.docs.some((d) => d.data().kind === "booking" && /no longer available/i.test(d.data().title))).toBe(true);
+    }
   });
 
   it("whole-run: fills every currently-open occurrence, stamps the series, supersedes a rival booking on a DIFFERENT occurrence", async () => {
