@@ -219,6 +219,8 @@ All five: full guard ordering per Global Constraints; every id `isValidDocId`.
 
 **Steps:** failing tests — accept happy path (gig filled + linkage, terms frozen from last counter not first offer, deposit math incl. ceil, awaitingSide enforcement, confirmedAt); race: gig flipped `closed` before accept → `failed-precondition`, booking untouched; supersede: two rival open bookings → both `superseded` + notified, winner `confirmed`; whole-run: 3 seeded open occurrences all filled + series stamped, rival booking on a DIFFERENT occurrence of the run superseded; whole-run ✗ when series paused mid-thread → RED → implement → GREEN → commit.
 
+**As-built (quality hardening):** zero-`expectedTotalCents` tripwire (failed-precondition before any write); supersede uses a REAL optimistic precondition (`update(..., { lastUpdateTime: doc.updateTime })`, per-booking catch absorbs lost races and skips the notification); acceptBooking's post-commit winner-notification tail is try/catch-isolated so `{ ok: true }` is reliable once the txn commits (decline/withdraw deliberately keep the codebase-wide convention); a perSong accept test pins amount×songCount + deposit ceil (6531/2286); extra index `gigs (seriesId, status)` for the in-txn occurrence query; bookings.test.ts testTimeout 20s (function-count dispatch overhead, bookingVisibility precedent).
+
 ---
 
 ### Task 6: Cancellation, no-show reporting, reliability
