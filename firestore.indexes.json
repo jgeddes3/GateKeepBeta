@@ -34,6 +34,33 @@
     "fields": [
       { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
       { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "gigs", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "bookedMusicianProfileId", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "gigId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "musicianProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "updatedAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "updatedAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "seriesId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
