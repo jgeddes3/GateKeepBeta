@@ -63,4 +63,15 @@ describe("deleteAccount", () => {
     expect((await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get()).exists).toBe(false);
     expect((await adb.doc(`profiles/${profileId}/members/${co.uid}`).get()).exists).toBe(true);
   });
+
+  it("S5: clears the curatorAccess marker (and any pending retry doc) as the first phase of deletion", async () => {
+    const fan = await signUpTestUser(`d5-${Date.now()}@test.com`);
+    // Seeded directly — this test's subject is deleteAccount's own cleanup,
+    // not how the marker/retry doc ordinarily gets there.
+    await adb.doc(`curatorAccess/${fan.uid}`).set({});
+    await adb.doc(`curatorAccessRetries/${fan.uid}`).set({ createdAt: Date.now() });
+    await callFn("deleteAccount", {}, fan.user);
+    expect((await adb.doc(`curatorAccess/${fan.uid}`).get()).exists).toBe(false);
+    expect((await adb.doc(`curatorAccessRetries/${fan.uid}`).get()).exists).toBe(false);
+  });
 });

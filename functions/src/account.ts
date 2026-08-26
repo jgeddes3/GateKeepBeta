@@ -32,13 +32,31 @@ export const deleteAccount = onCall({ region: "us-central1" }, async (req) => {
       `You are the only admin of: ${soleAdminOf.join(", ")}. Transfer admin or delete those profiles first.`);
   }
 
-  // Remove memberships, then the user doc tree, then the auth account. Each
-  // phase is independently retry-idempotent (re-deleting an already-deleted
+  // Remove the curatorAccess marker (+ any pending retry doc), then
+  // memberships, then the user doc tree, then the auth account. Each phase
+  // is independently retry-idempotent (re-deleting an already-deleted
   // membership/doc, or re-deleting an already-deleted auth user, is a no-op
   // or a clean not-found) — so on partial failure we don't attempt a
   // compensating rollback. Instead we log which phase failed for diagnosis
   // and tell the client it's safe to call deleteAccount again, rather than
   // surfacing a raw internal error or silently leaving things half-deleted.
+  //
+  // S5: curatorAccess/{uid} is deleted FIRST, before memberships — once this
+  // account is gone, the marker must never keep granting
+  // isApprovedCuratorMember() access to a uid the Auth user for no longer
+  // exists (deleteUser below can't be undone if a later phase fails, but a
+  // stale-but-harmless leftover membership doc is a smaller residual risk
+  // than a stale-but-ACTIVE-privilege marker surviving the account it
+  // describes).
+  try {
+    await Promise.all([
+      db.doc(`curatorAccess/${uid}`).delete(),
+      db.doc(`curatorAccessRetries/${uid}`).delete(),
+    ]);
+  } catch (e) {
+    console.error("deleteAccount phase failed", { uid, phase: "curatorAccess" }, e);
+    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+  }
   try {
     await Promise.all(memberships.docs.map((m) => m.ref.delete()));
   } catch (e) {
