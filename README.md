@@ -65,11 +65,16 @@ Apps own UI and only ever read Firestore directly or call callables.
   global `PageProps`/`LayoutProps` types Next.js 16 needs; `apps/web` typecheck fails without it,
   and `pnpm install` does not run it for you.
 - **Java (JRE/JDK) 11+ on `PATH`**, required by the Firebase Emulator Suite (Firestore emulator
-  is a JVM process). This repo's dev machine relies on a JRE at
-  `C:\Users\LeoArkos\.jre\jdk-21.0.12.1+1-jre\bin` being prepended to `PATH` — any Java 11+
-  install on `PATH` works. Example (bash), used before every emulator command below:
+  is a JVM process). Any Java 11+ install on `PATH` works; a portable Temurin JRE prepended
+  per-command is the pattern used on the project's dev machines (past examples:
+  `~\.jre\jdk-21…` and `~\.jdks\jdk-21…`). Example, used before every emulator command below:
   ```bash
-  export PATH="/c/Users/LeoArkos/.jre/jdk-21.0.12.1+1-jre/bin:$PATH"
+  # bash
+  export PATH="$HOME/.jdks/jdk-21.0.12+8-jre/bin:$PATH"
+  ```
+  ```powershell
+  # PowerShell
+  $env:PATH = "$env:USERPROFILE\.jdks\jdk-21.0.12+8-jre\bin;$env:PATH"
   ```
 - **Xcode** (iOS) / **Android Studio** (Android) only if building native mobile targets locally;
   not required for web dev or emulator-only work.
