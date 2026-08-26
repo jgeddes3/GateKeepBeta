@@ -12,12 +12,42 @@ import type { ProfileDoc, AuditLogDoc, UserDoc, TrackDoc } from "@gatekeep/share
 
 type Row<T> = T & { id: string };
 
+// Resolves one public/photos/... path to a displayable thumbnail URL — same
+// three-state (null while resolving / "error" / resolved url) pattern as
+// TrackQueueRow's review-clip resolution below, reused here so reviewers can
+// actually see the avatar/cover they're approving (finding 2: the checklist
+// below told admins to "check submitted details for impersonation" without
+// ever showing them those details).
+function PhotoThumb({ path, alt }: { path: string | null | undefined; alt: string }) {
+  const [url, setUrl] = useState<string | null | "error">(null);
+  useEffect(() => {
+    if (!path) return;
+    let cancelled = false;
+    void getDownloadURL(storageRef(getFirebase().storage, path))
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch((e) => {
+        console.error("PhotoThumb: getDownloadURL failed", path, e);
+        if (!cancelled) setUrl("error");
+      });
+    return () => { cancelled = true; };
+  }, [path]);
+  if (!path) return null;
+  if (url === "error") return <p style={{ color: "#b00020", fontSize: 12, margin: 0 }}>{alt} unavailable</p>;
+  if (!url) return <p style={{ color: "#888", fontSize: 12, margin: 0 }}>{alt} loading…</p>;
+  return <img src={url} alt={alt} style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 4, border: "1px solid #ccc" }} />;
+}
+
 // Owns the Approve/Reject actions (and their in-flight/error state) for
 // exactly one queue row. A per-row component — rather than a shared
 // in-flight-ids array on Queue — keeps the busy flag local state instead of
 // a setState update derived from an effect, matching the keyed-component
 // reset pattern used elsewhere in this app (dashboard's ProfilesList,
 // AdminGate's ClaimCheck).
+//
+// Finding 2: reviewers were approving bio/photos/genres/links sight-unseen —
+// the checklist below said "check submitted details for impersonation" but
+// nothing on this row showed those details. Musician portfolios only;
+// curator profiles have no `portfolio` field to show.
 function QueueRow({ p }: { p: Row<ProfileDoc> }) {
   const [busy, setBusy] = useState(false);
   const review = async (decision: "approved" | "rejected") => {
@@ -34,10 +64,40 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
       setBusy(false);
     }
   };
+  const pf = p.type === "musician" ? p.portfolio : undefined;
+  // Same https-only display filter as the public /u/[handle] page and the
+  // mobile artist screen — belt-and-suspenders even though
+  // validatePortfolioUpdate already enforces this at write time.
+  const links = (pf?.externalLinks ?? []).filter((l) => l.url.startsWith("https://"));
   return (
     <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
       <strong>{p.name}</strong> @{p.handle} — {p.type} ({p.subtype})
-      <div>
+      {pf && (
+        <div style={{ marginTop: 8, display: "flex", gap: 12 }}>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <PhotoThumb path={pf.avatarPhotoPath} alt="Avatar" />
+            <PhotoThumb path={pf.coverPhotoPath} alt="Cover" />
+          </div>
+          <div style={{ fontSize: 14, minWidth: 0 }}>
+            {pf.genres.length > 0 && <p style={{ margin: "0 0 4px" }}>{pf.genres.join(" · ")}</p>}
+            {pf.bio && <p style={{ margin: "0 0 4px", whiteSpace: "pre-wrap" }}>{pf.bio}</p>}
+            {links.length > 0 && (
+              <p style={{ margin: 0 }}>
+                {links.map((l) => (
+                  <a key={`${l.kind}:${l.url}`} href={l.url} target="_blank" rel="noopener noreferrer nofollow"
+                    style={{ marginRight: 8 }}>
+                    {l.kind}
+                  </a>
+                ))}
+              </p>
+            )}
+            {!pf.bio && pf.genres.length === 0 && links.length === 0 && !pf.avatarPhotoPath && !pf.coverPhotoPath && (
+              <p style={{ margin: 0, color: "#888" }}>No portfolio content submitted.</p>
+            )}
+          </div>
+        </div>
+      )}
+      <div style={{ marginTop: 8 }}>
         <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
         <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
       </div>
@@ -215,6 +275,8 @@ function TakedownsPanel() {
   const [handle, setHandle] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<Row<ProfileDoc> | null>(null);
+  const [profileBusy, setProfileBusy] = useState(false);
   const [tracks, setTracks] = useState<Row<TrackDoc>[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   // Track ids whose most recent removal attempt committed the reject
@@ -241,6 +303,7 @@ function TakedownsPanel() {
     // slow one) never leaves a stale profile's tracks on screen under a new
     // handle in the input.
     setProfileId(null);
+    setProfile(null);
     setTracks([]);
     setIncompleteIds(new Set());
     try {
@@ -249,17 +312,45 @@ function TakedownsPanel() {
       if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
       if (!handleDoc.exists()) { window.alert("No profile with that handle."); return; }
       const pid = (handleDoc.data() as { profileId: string }).profileId;
-      const snap = await getDocs(query(
-        collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order")));
+      const [profileDoc, tracksSnap] = await Promise.all([
+        getDoc(doc(db, "profiles", pid)),
+        getDocs(query(
+          collection(db, `profiles/${pid}/tracks`), where("status", "==", "approved"), orderBy("order"))),
+      ]);
       if (mySeq !== lookupSeq.current) return; // superseded by a newer lookup
       setProfileId(pid);
-      setTracks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+      setProfile(profileDoc.exists() ? { id: profileDoc.id, ...(profileDoc.data() as ProfileDoc) } : null);
+      setTracks(tracksSnap.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
     } catch (e) {
       if (mySeq === lookupSeq.current) {
         window.alert(e instanceof Error ? e.message : "Could not look up that handle — try again.");
       }
     } finally {
       if (mySeq === lookupSeq.current) setLookupBusy(false);
+    }
+  };
+
+  // Retroactive profile unpublish (spec §6, item C): reviewProfile's reject
+  // decision now also accepts an already-approved profile — flipping it to
+  // rejected hides the profile AND all its tracks from public reads via
+  // firestore.rules' profileApproved() gate, without needing to take down
+  // each track individually first.
+  const unpublishProfile = async () => {
+    if (!profileId) return;
+    const reason = window.prompt(
+      "Unpublish reason (shown to the profile's admins) — this removes the profile, and everything on it, from public immediately:",
+    ) ?? "";
+    if (!reason) return;
+    if (reason.length > 500) { window.alert("Reason must be 500 characters or fewer."); return; }
+    setProfileBusy(true);
+    try {
+      await httpsCallable(getFirebase().functions, "reviewProfile")(
+        { profileId, decision: "rejected", reason });
+      setProfile((p) => (p ? { ...p, status: "rejected", rejectionReason: reason } : p));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not unpublish the profile — try again.");
+    } finally {
+      setProfileBusy(false);
     }
   };
 
@@ -299,7 +390,7 @@ function TakedownsPanel() {
   return (
     <section>
       <h2>Takedowns</h2>
-      <p>Retroactively remove a live track from an approved profile (spec §6).</p>
+      <p>Retroactively remove a live profile or track (spec §6).</p>
       <input
         placeholder="@handle"
         value={handle}
@@ -307,6 +398,20 @@ function TakedownsPanel() {
         onKeyDown={(e) => { if (e.key === "Enter" && !lookupBusy) void lookup(); }}
       />{" "}
       <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
+      {profile && (
+        <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 8, background: "#fafafa" }}>
+          <strong>{profile.name}</strong> @{profile.handle} — {profile.status.replace("_", " ")}
+          {profile.status === "approved" ? (
+            <div>
+              <button disabled={profileBusy} onClick={unpublishProfile}>
+                {profileBusy ? "Unpublishing…" : "Unpublish profile…"}
+              </button>
+            </div>
+          ) : (
+            <p style={{ color: "#888", margin: "4px 0 0" }}>Not currently live — nothing to unpublish.</p>
+          )}
+        </div>
+      )}
       {tracks.map((t) => (
         <div key={t.id} style={{ border: "1px solid #ddd", padding: 12, marginTop: 8 }}>
           <strong>{t.title}</strong> · {t.durationSec ?? "?"}s

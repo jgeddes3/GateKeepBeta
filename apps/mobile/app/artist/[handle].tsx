@@ -131,6 +131,13 @@ export default function Artist() {
 
   const { profile, tracks, avatarUrl, coverUrl } = state;
   const pf = profile.portfolio;
+  // Finding 8: validatePortfolioUpdate already requires https:// at save
+  // time, but a link saved before that validation existed (or one on an
+  // already-approved profile) could still carry a non-https scheme —
+  // Android's Linking.openURL will happily dispatch those (tel:, intent:,
+  // custom app schemes...) with no interstitial warning. Filter before
+  // rendering, matching web's app/u/[handle]/page.tsx.
+  const links = (pf?.externalLinks ?? []).filter((l) => l.url.startsWith("https://"));
   const play = (t: LoadedTrack) => {
     if (playingId === t.id) { player.pause(); setPlayingId(null); return; }
     // Single active player: replace() swaps whatever was loaded (including a
@@ -165,9 +172,9 @@ export default function Artist() {
             <Text style={{ lineHeight: 21 }}>{pf.bio}</Text>
           </>
         ) : null}
-        {pf?.externalLinks && pf.externalLinks.length > 0 && (
+        {links.length > 0 && (
           <View style={{ flexDirection: "row", gap: 14, flexWrap: "wrap" }}>
-            {pf.externalLinks.map((l) => (
+            {links.map((l) => (
               <Pressable key={`${l.kind}:${l.url}`} onPress={() => void Linking.openURL(l.url)}>
                 <Text style={{ textDecorationLine: "underline" }}>{l.kind}</Text>
               </Pressable>

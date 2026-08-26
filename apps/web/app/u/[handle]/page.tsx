@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import type { ProfileDoc, TrackDoc } from "@gatekeep/shared";
+import { validateHandle, type ProfileDoc, type TrackDoc } from "@gatekeep/shared";
 import { TrackPlayer } from "./TrackPlayer";
 import styles from "./portfolio.module.css";
 
@@ -48,6 +48,16 @@ async function storageUrl(path: string | null | undefined): Promise<string | nul
 // cache means the Firestore/Storage reads only actually happen once.
 const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
   const handle = rawHandle.toLowerCase(); // handles are stored lowercase
+  // Finding 5: an unvalidated handle segment (e.g. "/@a/b", "/@..") used to
+  // reach doc(db, "handles", handle) directly — Firestore's doc() throws on
+  // a value containing "/", which propagated as an uncaught 500 instead of
+  // a normal 404, and — since throws bypass the `return null` path below —
+  // never got cached by ISR either, so every hit on a malformed handle paid
+  // a fresh Firestore round-trip AND rendered as a 500. validateHandle is
+  // already the source of truth for what a well-formed handle looks like
+  // (createProfileDraft enforces the same shape server-side); reject
+  // anything that doesn't match before it ever reaches doc().
+  if (!validateHandle(handle).ok) return null;
   try {
     const { db } = getServerFirebase();
     const h = await getDoc(doc(db, "handles", handle));
