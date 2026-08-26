@@ -3,7 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import {
   validateGigContent, validateBudget, isValidDocId,
   MAX_OPEN_GIGS_PER_PROFILE,
-  type GigContentInput, type GigBudget, type GigDoc, type GigPrivateLocation,
+  type GigContentInput, type GigBudget, type GigDoc, type GigPrivateLocation, type GigPublicLocation,
   type AddressVisibility, type CuratorSubtype, type CuratorDetails,
 } from "@gatekeep/shared";
 import {
@@ -17,7 +17,7 @@ type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
 
 const MAX_ADDRESS_LENGTH = 300;
-const GEOCODE_FAILURE_MESSAGE = "Could not locate that — check spelling and try again.";
+export const GEOCODE_FAILURE_MESSAGE = "Could not locate that — check spelling and try again.";
 
 // A gig's location input is always optional — createGig falls back to the
 // curator's own profile address for venues (or requires it outright for
@@ -42,7 +42,7 @@ export interface UpdateGigInput extends GigContentInput {
   location?: GigLocationInput;
 }
 
-function validateLocationInput(loc: unknown): Result {
+export function validateLocationInput(loc: unknown): Result {
   if (loc === undefined) return { ok: true };
   if (typeof loc !== "object" || loc === null || Array.isArray(loc)) return fail("Invalid location.");
   const l = loc as GigLocationInput;
@@ -75,6 +75,51 @@ function validateGigInput(input: CreateGigInput | UpdateGigInput): Result {
   return validateLocationInput(input.location);
 }
 
+// Location resolution shared by createGig and createSeries (a series'
+// template stores the exact same resolved public/private split a one-off
+// gig does — Task 7's materializer copies it onto each occurrence without
+// re-geocoding). Not reused by updateGig/updateSeries: an update additionally
+// supports a "visibility-only, reuse the already-exact private address"
+// branch that doesn't fit this always-(re)geocode shape.
+export async function resolveGigLocation(
+  isVenue: boolean,
+  venueName: string,
+  curatorLocation: CuratorDetails["location"] | undefined,
+  locationInput: GigLocationInput | undefined,
+): Promise<{ location: GigPublicLocation; privateLocation: GigPrivateLocation }> {
+  const overrideAddress = typeof locationInput?.address === "string" ? locationInput.address.trim() : "";
+  let resolvedAddress: string;
+  if (overrideAddress.length > 0) {
+    resolvedAddress = overrideAddress;
+  } else if (isVenue) {
+    // Approved venue profiles always have an address (submitProfileForReview's
+    // gate requires one) — this is a defensive backstop, not a normal path.
+    if (!curatorLocation?.address) {
+      throw new HttpsError("failed-precondition", "This venue profile has no address set yet.");
+    }
+    resolvedAddress = curatorLocation.address;
+  } else {
+    throw new HttpsError("invalid-argument", "An address is required for this gig.");
+  }
+
+  const defaultVisibility: AddressVisibility = isVenue ? "public" : "neighborhood";
+  const visibility = locationInput?.addressVisibility ?? defaultVisibility;
+
+  const result = await getGeocoder().geocode(resolvedAddress);
+  if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
+
+  const publicGeo = visibility === "public" ? { lat: result.lat, lng: result.lng } : coarsen(result);
+  const location: GigPublicLocation = {
+    venueName: isVenue ? venueName : null, neighborhood: result.neighborhood, city: result.city,
+    geo: publicGeo, addressVisibility: visibility,
+    address: visibility === "public" ? resolvedAddress : null,
+  };
+  const privateLocation: GigPrivateLocation = {
+    address: resolvedAddress, geo: { lat: result.lat, lng: result.lng },
+  };
+  return { location, privateLocation };
+}
+
 export const createGig = onCall<CreateGigInput>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
@@ -93,29 +138,8 @@ export const createGig = onCall<CreateGigInput>({ region: "us-central1" }, async
   const isVenue = subtype === "venue";
   const curatorLocation = profile.curator?.location as CuratorDetails["location"] | undefined;
 
-  const overrideAddress = typeof input.location?.address === "string" ? input.location.address.trim() : "";
-  let resolvedAddress: string;
-  if (overrideAddress.length > 0) {
-    resolvedAddress = overrideAddress;
-  } else if (isVenue) {
-    // Approved venue profiles always have an address (submitProfileForReview's
-    // gate requires one) — this is a defensive backstop, not a normal path.
-    if (!curatorLocation?.address) {
-      throw new HttpsError("failed-precondition", "This venue profile has no address set yet.");
-    }
-    resolvedAddress = curatorLocation.address;
-  } else {
-    throw new HttpsError("invalid-argument", "An address is required for this gig.");
-  }
-
-  const defaultVisibility: AddressVisibility = isVenue ? "public" : "neighborhood";
-  const visibility = input.location?.addressVisibility ?? defaultVisibility;
-
-  const result = await getGeocoder().geocode(resolvedAddress);
-  if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
-
-  const publicGeo = visibility === "public" ? { lat: result.lat, lng: result.lng } : coarsen(result);
-  const venueName = isVenue ? (profile.name as string) : null;
+  const { location, privateLocation } = await resolveGigLocation(
+    isVenue, profile.name as string, curatorLocation, input.location);
 
   const now = Date.now();
   const db = getFirestore();
@@ -130,15 +154,8 @@ export const createGig = onCall<CreateGigInput>({ region: "us-central1" }, async
       hasPA: input.provisions.hasPA ?? null, hasBackline: input.provisions.hasBackline ?? null,
       notes: input.provisions.notes ?? null,
     },
-    location: {
-      venueName, neighborhood: result.neighborhood, city: result.city,
-      geo: publicGeo, addressVisibility: visibility,
-      address: visibility === "public" ? resolvedAddress : null,
-    },
+    location,
     status: "draft", createdAt: now, updatedAt: now,
-  };
-  const privateLocation: GigPrivateLocation = {
-    address: resolvedAddress, geo: { lat: result.lat, lng: result.lng },
   };
 
   const batch = db.batch();

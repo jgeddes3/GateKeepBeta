@@ -3,6 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import type { AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
+import { syncCuratorAccess } from "./curator.js";
 
 export function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
@@ -27,7 +28,8 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     if (decision === "rejected" && reason!.trim().length > 500) {
       throw new HttpsError("invalid-argument", "Rejection reason must be 500 characters or fewer.");
     }
-    const ref = getFirestore().doc(`profiles/${profileId}`);
+    const db = getFirestore();
+    const ref = db.doc(`profiles/${profileId}`);
     const snap = await ref.get();
     if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
     const priorStatus = snap.data()?.status;
@@ -55,25 +57,87 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       throw new HttpsError("failed-precondition", "Profile is not pending review or approved.");
     }
     const wasApproved = priorStatus === "approved";
-    await ref.update({
+    const isCurator = snap.data()?.type === "curator";
+    const now = Date.now();
+
+    const batch = db.batch();
+    batch.update(ref, {
       status: decision,
       rejectionReason: decision === "rejected" ? reason!.trim() : null,
-      updatedAt: Date.now(),
+      updatedAt: now,
       // Anti-spam (Task 4): submitProfileForReview reads this to enforce a
       // 24h resubmit cooldown after a rejection. Only stamped on reject —
       // omitted (not cleared) on approve, so an earlier reject's timestamp
       // stays put through a later approve.
-      ...(decision === "rejected" ? { lastRejectedAt: Date.now() } : {}),
+      ...(decision === "rejected" ? { lastRejectedAt: now } : {}),
     });
+
+    // curatorAccess/{uid} + takedown cascade (Task 6) — curator profiles
+    // only; musicians have no gigs/series and no curatorAccess implication.
+    let memberUids: string[] = [];
+    let closedGigs = 0;
+    let pausedSeries = 0;
+    if (isCurator) {
+      const membersSnap = await db.collection(`profiles/${profileId}/members`).get();
+      memberUids = membersSnap.docs.map((d) => d.id);
+
+      if (decision === "approved") {
+        // Fast path: approval can only GAIN a member access, never lose it —
+        // a direct set is correct without the full recompute (contrast the
+        // reject-from-approved branch below, which must NOT blindly delete:
+        // a member may hold access via another approved curator profile).
+        for (const memberUid of memberUids) batch.set(db.doc(`curatorAccess/${memberUid}`), {});
+      } else if (decision === "rejected" && wasApproved) {
+        // Cascade: this approved curator profile is going dark — close its
+        // open gigs, pause its active series (same series-pause precedent
+        // as gigs.ts's takedownGig), batched with the status flip, before
+        // the notification below (SP2 retroactive-unpublish ordering: the
+        // content stops being live before anyone is told).
+        const openGigsSnap = await db.collection("gigs")
+          .where("curatorProfileId", "==", profileId).where("status", "==", "open").get();
+        for (const doc of openGigsSnap.docs) {
+          batch.update(doc.ref, { status: "closed", updatedAt: now });
+          closedGigs++;
+        }
+        const activeSeriesSnap = await db.collection("gigSeries")
+          .where("curatorProfileId", "==", profileId).where("status", "==", "active").get();
+        for (const doc of activeSeriesSnap.docs) {
+          batch.update(doc.ref, { status: "paused", updatedAt: now });
+          pausedSeries++;
+        }
+      }
+    }
+
+    await batch.commit();
+
+    // curatorAccess recompute for reject-from-approved runs AFTER the batch
+    // commits: syncCuratorAccess re-reads each member's profiles live, and
+    // needs this profile's just-flipped "rejected" status to be visible so
+    // a member who belongs to no OTHER approved curator profile correctly
+    // loses the marker (a member who does belong to another keeps it).
+    if (isCurator && decision === "rejected" && wasApproved) {
+      await Promise.all(memberUids.map((memberUid) => syncCuratorAccess(memberUid)));
+    }
+
     await writeAudit({
       actorUid,
       action: decision === "approved" ? "profile_approved" : "profile_rejected",
       targetId: profileId,
       // Mirrors reviewTrack's retroactive-takedown detail shape: recording
       // the prior status distinguishes a takedown of a live profile from a
-      // routine first-time reject from pending_review.
+      // routine first-time reject from pending_review. The cascade counts
+      // are appended only when the cascade above actually affected
+      // something — a curator profile with no live gigs/series at reject
+      // time (the common case for a same-day approve-then-reject, e.g. the
+      // pre-Task-6 "retroactive unpublish" contract) gets the plain
+      // pre-Task-6 detail string, not noisy "(closed 0 gigs, paused 0
+      // series)" text.
       detail: decision === "rejected"
-        ? (wasApproved ? `[was approved] ${reason!.trim()}` : reason!.trim())
+        ? (wasApproved
+            ? `[was approved] ${reason!.trim()}${
+                isCurator && (closedGigs > 0 || pausedSeries > 0)
+                  ? ` (closed ${closedGigs} gigs, paused ${pausedSeries} series)` : ""}`
+            : reason!.trim())
         : snap.data()?.name ?? "",
     });
     const profileName = snap.data()?.name ?? "Your profile";

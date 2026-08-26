@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, signUpUnverifiedTestUser, callFn, fetchPendingInviteId } from "./helpers";
+import {
+  signUpTestUser, signUpUnverifiedTestUser, callFn, fetchPendingInviteId, makeAdminUser, seedCuratorGateContent,
+} from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import type { ProfileDraftInput, MemberRole, InviteDoc } from "@gatekeep/shared";
@@ -19,6 +21,21 @@ async function bandWithOwner(prefix: string) {
     "createProfileDraft",
     { type: "musician", subtype: "band", name: "Band", handle: `${prefix}_${Date.now()}` },
     owner.user);
+  return { owner, profileId };
+}
+
+// Approved curator profile fixture, for the curatorAccess touchpoint tests
+// below — mirrors gigs.test.ts's/gigSeries.test.ts's identical helper.
+async function approvedVenueWithOwner(prefix: string) {
+  const owner = await signUpTestUser(`${prefix}-own-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+    "createProfileDraft",
+    { type: "curator", subtype: "venue", name: "Venue", handle: `${prefix}_${Date.now()}` },
+    owner.user);
+  await seedCuratorGateContent(adb, profileId);
+  await callFn("submitProfileForReview", { profileId }, owner.user);
+  const admin = await makeAdminUser(`${prefix}a`);
+  await callFn("reviewProfile", { profileId, decision: "approved" }, admin.user);
   return { owner, profileId };
 }
 
@@ -262,5 +279,69 @@ describe("removal and admin transfer", () => {
     ]);
     expect(coDoc.data()?.role).toBe("admin");
     expect(ownerDoc.data()?.role).toBe("admin");
+  });
+});
+
+describe("curatorAccess touchpoints", () => {
+  it("respondToInvite accept on an APPROVED curator profile sets a curatorAccess marker for the accepting uid", async () => {
+    const { owner, profileId } = await approvedVenueWithOwner("mca1");
+    const email = `mca1-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true);
+  });
+
+  it("respondToInvite accept on a MUSICIAN profile sets no curatorAccess marker (negative control)", async () => {
+    const { owner, profileId } = await bandWithOwner("mca2");
+    const email = `mca2-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+  });
+
+  it("removeMember from an APPROVED curator profile recomputes and clears the marker for a uid with no other approved curator membership", async () => {
+    const { owner, profileId } = await approvedVenueWithOwner("mca3");
+    const email = `mca3-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true);
+
+    await callFn("removeMember", { profileId, uid: invitee.uid }, owner.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+  });
+
+  it("removeMember from an APPROVED curator profile PRESERVES the marker when the uid belongs to another approved curator profile too", async () => {
+    const { owner, profileId } = await approvedVenueWithOwner("mca4");
+    const { owner: otherOwner, profileId: otherProfileId } = await approvedVenueWithOwner("mca4b");
+    const email = `mca4-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    await callFn("inviteMember", { profileId: otherProfileId, email, role: "member", label: "manager" }, otherOwner.user);
+    const otherInviteId = await fetchPendingInviteId(adb, otherProfileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId: otherInviteId, accept: true }, invitee.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true);
+
+    await callFn("removeMember", { profileId, uid: invitee.uid }, owner.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true); // still on otherProfileId
+  });
+
+  it("removeMember from a MUSICIAN profile does not touch curatorAccess (negative control)", async () => {
+    const { owner, profileId } = await bandWithOwner("mca5");
+    const email = `mca5-inv-${Date.now()}@test.com`;
+    const member = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, member.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, member.user);
+    await callFn("removeMember", { profileId, uid: member.uid }, owner.user);
+    expect((await adb.doc(`curatorAccess/${member.uid}`).get()).exists).toBe(false);
   });
 });

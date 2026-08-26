@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent } from "./helpers";
+import {
+  signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent, fetchPendingInviteId,
+} from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
-import type { ProfileDraftInput } from "@gatekeep/shared";
+import type { ProfileDraftInput, GigDoc, GigSeriesDoc } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_AUTH_EMULATOR_HOST = "localhost:9099";
@@ -103,6 +105,160 @@ describe("reviewProfile", () => {
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+});
+
+const SEED_LOCATION = {
+  venueName: "Rooftop 21", neighborhood: "Downtown", city: "Austin",
+  geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: "123 Main St, Austin, TX",
+};
+
+async function seedOpenGig(curatorProfileId: string, overrides: Partial<GigDoc> = {}): Promise<string> {
+  const ref = adb.collection("gigs").doc();
+  const now = Date.now();
+  const doc: GigDoc = {
+    curatorProfileId, seriesId: null, detachedFromTemplate: false,
+    title: "Seeded gig", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+    budget: { minCents: 1000, maxCents: 2000, structure: "perHour" },
+    startsAt: now + 7 * 24 * 3600 * 1000, durationMinutes: 60,
+    provisions: { hasPA: null, hasBackline: null, notes: null },
+    location: SEED_LOCATION as GigDoc["location"],
+    status: "open", createdAt: now, updatedAt: now,
+    ...overrides,
+  };
+  await ref.set(doc);
+  return ref.id;
+}
+
+async function seedSeries(curatorProfileId: string, overrides: Partial<GigSeriesDoc> = {}): Promise<string> {
+  const ref = adb.collection("gigSeries").doc();
+  const now = Date.now();
+  const doc: GigSeriesDoc = {
+    curatorProfileId,
+    recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+    fillMode: "per_occurrence",
+    template: {
+      title: "Seeded series", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 1000, maxCents: 2000, structure: "perHour" }, durationMinutes: 60,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: SEED_LOCATION as GigDoc["location"],
+    },
+    templatePrivateLocation: { address: SEED_LOCATION.address, geo: SEED_LOCATION.geo },
+    status: "active", materializedThrough: 0, createdAt: now, updatedAt: now,
+    ...overrides,
+  };
+  await ref.set(doc);
+  return ref.id;
+}
+
+describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
+  it("approving a curator profile sets a curatorAccess marker for every member, including one who joined before approval", async () => {
+    const { owner, profileId } = await pendingProfile("ca1");
+    // Note: pendingProfile already submitted for review — invite/accept a
+    // colleague onto the still-pending profile before it's approved, so the
+    // approve path's "every member" claim is actually exercised against more
+    // than just the owner.
+    const email = `ca1-colleague-${Date.now()}@test.com`;
+    const colleague = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, colleague.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, colleague.user);
+    expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(false); // not yet — profile isn't approved
+
+    const adminUser = await makeAdminUser("ca1a");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+
+    expect((await adb.doc(`curatorAccess/${owner.uid}`).get()).exists).toBe(true);
+    expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(true);
+  });
+
+  it("approving a MUSICIAN profile creates no curatorAccess marker (negative control)", async () => {
+    const owner = await signUpTestUser(`ca2-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Solo Act", handle: `ca2_${Date.now()}` },
+      owner.user);
+    await callFn("updatePortfolio", { profileId, bio: "x", genres: ["soul"] }, owner.user);
+    await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
+    // Musicians' submit gate requires a listenable track too; this test's
+    // subject is curatorAccess, not the gate — admin-approve directly is not
+    // possible (approve requires pending_review), so seed status straight to
+    // pending_review via the admin SDK rather than clearing the track gate.
+    await adb.doc(`profiles/${profileId}`).update({ status: "pending_review" });
+    const adminUser = await makeAdminUser("ca2a");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    expect((await adb.doc(`curatorAccess/${owner.uid}`).get()).exists).toBe(false);
+  });
+
+  it("cascade: reject-from-approved on a curator profile closes its open gigs, pauses its active series, and recomputes curatorAccess for every member (audit detail carries the counts)", async () => {
+    const { owner, profileId } = await pendingProfile("ca3");
+    const email = `ca3-colleague-${Date.now()}@test.com`;
+    const colleague = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, colleague.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, colleague.user);
+    const adminUser = await makeAdminUser("ca3a");
+    await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
+    expect((await adb.doc(`curatorAccess/${owner.uid}`).get()).exists).toBe(true);
+    expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(true);
+
+    // The colleague ALSO belongs to a second, independently-approved curator
+    // profile — their marker must survive profile A's rejection.
+    const otherOwner = await signUpTestUser(`ca3-otherowner-${Date.now()}@test.com`);
+    const { profileId: otherProfileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Other Venue", handle: `ca3other_${Date.now()}` },
+      otherOwner.user);
+    await seedCuratorGateContent(adb, otherProfileId);
+    const otherEmail = colleague.user.email!;
+    await callFn("inviteMember", { profileId: otherProfileId, email: otherEmail, role: "member", label: "manager" }, otherOwner.user);
+    const otherInviteId = await fetchPendingInviteId(adb, otherProfileId, colleague.uid);
+    await callFn("respondToInvite", { inviteId: otherInviteId, accept: true }, colleague.user);
+    await callFn("submitProfileForReview", { profileId: otherProfileId }, otherOwner.user);
+    const otherAdmin = await makeAdminUser("ca3b");
+    await callFn("reviewProfile", { profileId: otherProfileId, decision: "approved" }, otherAdmin.user);
+
+    // Seed live content on profile A: two open gigs, one draft gig (must NOT
+    // be touched/counted), one active series, one already-paused series
+    // (must stay paused, not double-counted).
+    const openGig1 = await seedOpenGig(profileId);
+    const openGig2 = await seedOpenGig(profileId);
+    const draftGig = await seedOpenGig(profileId, { status: "draft" });
+    const activeSeries = await seedSeries(profileId);
+    const pausedSeries = await seedSeries(profileId, { status: "paused" });
+
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Policy violation." }, adminUser.user);
+
+    expect((await adb.doc(`gigs/${openGig1}`).get()).data()?.status).toBe("closed");
+    expect((await adb.doc(`gigs/${openGig2}`).get()).data()?.status).toBe("closed");
+    expect((await adb.doc(`gigs/${draftGig}`).get()).data()?.status).toBe("draft"); // untouched
+    expect((await adb.doc(`gigSeries/${activeSeries}`).get()).data()?.status).toBe("paused");
+    expect((await adb.doc(`gigSeries/${pausedSeries}`).get()).data()?.status).toBe("paused"); // still paused
+
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", profileId).where("action", "==", "profile_rejected").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().detail).toBe("[was approved] Policy violation. (closed 2 gigs, paused 1 series)");
+
+    // curatorAccess recompute: the owner belongs to no OTHER approved curator
+    // profile — marker gone. The colleague still belongs to otherProfileId —
+    // marker survives.
+    expect((await adb.doc(`curatorAccess/${owner.uid}`).get()).exists).toBe(false);
+    expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(true);
+  });
+
+  it("rejecting an approved MUSICIAN profile appends no gig/series cascade counts to the audit detail (existing behavior untouched)", async () => {
+    const owner = await signUpTestUser(`ca4-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft",
+      { type: "musician", subtype: "solo", name: "Solo Act", handle: `ca4_${Date.now()}` },
+      owner.user);
+    await adb.doc(`profiles/${profileId}`).update({ status: "approved" });
+    const adminUser = await makeAdminUser("ca4a");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Reported content." }, adminUser.user);
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", profileId).where("action", "==", "profile_rejected").get();
+    expect(logs.docs[0].data().detail).toBe("[was approved] Reported content.");
   });
 });
 

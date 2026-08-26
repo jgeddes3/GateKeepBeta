@@ -199,9 +199,12 @@ describe("removeCuratorPhoto", () => {
   it("rejects a path not currently on the profile with not-found", async () => {
     const { user } = await signUpTestUser(`rp3-${Date.now()}@test.com`);
     const profileId = await makeCuratorProfile(user);
-    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": ["public/photos/x/gallery-a.jpg"] });
+    await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": [`public/photos/${profileId}/gallery-a.jpg`] });
+    // Path prefix-matches this profile's own gallery segment (Task 6's
+    // defense-in-depth assertion) but isn't in the array — must still reach
+    // the not-found branch, not get short-circuited earlier.
     await expect(callFn("removeCuratorPhoto",
-      { profileId, path: "public/photos/x/gallery-not-there.jpg" }, user))
+      { profileId, path: `public/photos/${profileId}/gallery-not-there.jpg` }, user))
       .rejects.toMatchObject({ code: "functions/not-found" });
   });
 
@@ -209,7 +212,7 @@ describe("removeCuratorPhoto", () => {
     const { user } = await signUpTestUser(`rp4-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", { type: "musician", subtype: "solo", name: "Musician", handle: `rp4m_${Date.now()}` }, user);
-    await expect(callFn("removeCuratorPhoto", { profileId, path: "public/photos/x/gallery-a.jpg" }, user))
+    await expect(callFn("removeCuratorPhoto", { profileId, path: `public/photos/${profileId}/gallery-a.jpg` }, user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
@@ -229,5 +232,22 @@ describe("removeCuratorPhoto", () => {
   it("rejects unauthenticated calls", async () => {
     await expect(callFn("removeCuratorPhoto", { profileId: "x", path: "public/photos/x/gallery-a.jpg" }))
       .rejects.toThrow();
+  });
+
+  it("rejects a path outside this profile's own gallery prefix with invalid-argument, checked before membership (defense-in-depth)", async () => {
+    const { user } = await signUpTestUser(`rp6-${Date.now()}@test.com`);
+    const profileId = await makeCuratorProfile(user);
+    // `user` genuinely IS a member of `profileId` in both calls below — if
+    // the path-prefix assertion did not run before the membership check
+    // (or didn't exist at all), these would instead fall through to the
+    // not-found branch (photo not on this profile's array), not
+    // invalid-argument. Asserting invalid-argument here proves the
+    // shape/prefix validation runs first, per the ordering convention.
+    await expect(callFn("removeCuratorPhoto",
+      { profileId, path: `public/photos/some-other-profile/gallery-a.jpg` }, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("removeCuratorPhoto",
+      { profileId, path: `public/photos/${profileId}/avatar-a.jpg` }, user)) // wrong kind, not "gallery-"
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
 });

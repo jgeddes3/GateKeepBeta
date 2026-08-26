@@ -204,6 +204,14 @@ export interface GigSeriesDoc {
   curatorProfileId: string;
   recurrence: { weekday: number; hour: number; minute: number; cadence: SeriesCadence; endDate: number | null };
   fillMode: FillMode; template: Omit<GigDoc, "curatorProfileId"|"seriesId"|"detachedFromTemplate"|"status"|"startsAt"|"createdAt"|"updatedAt">;
+  // The exact address+geo backing template.location (which is the public,
+  // possibly-coarsened shape) — mirrors gigs/{id}/private/location, but
+  // inline rather than a subcollection: unlike gigs, a gigSeries doc is
+  // NEVER publicly readable (firestore.rules gates it member/admin-only
+  // with no "open" disjunct), so there's no doc-level exposure to split
+  // against. Task 7's materializer copies both halves onto each occurrence
+  // it creates without re-geocoding.
+  templatePrivateLocation: GigPrivateLocation;
   status: SeriesStatus; materializedThrough: number; createdAt: number; updatedAt: number;
 }
 export interface AdminNoteDoc { notes: { byUid: string; at: number; text: string }[]; }

@@ -158,6 +158,15 @@ export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
     if (!isValidDocId(profileId) || typeof path !== "string" || path.length < 1 || path.length > 300) {
       throw new HttpsError("invalid-argument", "A profile id and photo path are required.");
     }
+    // Defense-in-depth path-prefix assertion: storage.rules already confines
+    // uploads under this exact prefix, so this is currently unreachable via
+    // any legitimate write path — but validating shape before authz (the
+    // ordering convention) means a malformed/foreign path is rejected before
+    // ever touching the membership check below, rather than relying solely
+    // on the array-membership lookup to no-op on it.
+    if (!path.startsWith(`public/photos/${profileId}/gallery-`)) {
+      throw new HttpsError("invalid-argument", "Invalid photo path.");
+    }
     // sequential is deliberate — parallelizing makes rejection order
     // nondeterministic and would leak profile existence/type to non-members
     // (mirrors updateCuratorProfile's identical rationale above).
@@ -181,3 +190,37 @@ export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
     await bucket().file(path).delete().catch(logDeleteFailure("removeCuratorPhoto", "gallery photo", path));
     return { ok: true };
   });
+
+// curatorAccess/{uid} maintenance (Task 6). The marker answers one question
+// — "does this uid currently belong to >=1 APPROVED curator profile?" — for
+// firestore.rules' isApprovedCuratorMember() (see its comment there for why
+// this can't live on a custom claim: profile-approval status changes can't
+// force a token refresh). This is the RECOMPUTE path: a collection-group
+// scan of every `members` doc for this uid, resolved against each matching
+// profile's live type+status, so it stays correct when a uid belongs to
+// more than one curator profile (losing access to one must not clear a
+// marker still earned via another). Call sites that KNOW the answer can
+// only go one direction (e.g. reviewProfile's approve, respondToInvite's
+// accept — membership/approval can only be newly GAINING access at that
+// instant) use a direct `.set({})` fast path instead; every call site where
+// access could have been LOST (reviewProfile's reject-from-approved,
+// removeMember) must use this recompute.
+export async function syncCuratorAccess(uid: string): Promise<void> {
+  const db = getFirestore();
+  const memberDocs = await db.collectionGroup("members").where("uid", "==", uid).get();
+  const profileIds = memberDocs.docs
+    .map((d) => d.ref.parent.parent?.id)
+    .filter((id): id is string => !!id);
+  let hasApprovedCurator = false;
+  for (const profileId of profileIds) {
+    const p = await db.doc(`profiles/${profileId}`).get();
+    const data = p.data();
+    if (data?.type === "curator" && data?.status === "approved") { hasApprovedCurator = true; break; }
+  }
+  const ref = db.doc(`curatorAccess/${uid}`);
+  // Presence-only marker — contents never read (firestore.rules'
+  // isApprovedCuratorMember() only checks exists()) — so an empty object is
+  // the whole payload.
+  if (hasApprovedCurator) await ref.set({});
+  else await ref.delete();
+}

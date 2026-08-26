@@ -3,6 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { requireProfileAdmin } from "./profiles.js";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
+import { syncCuratorAccess } from "./curator.js";
 import type { InviteDoc, MemberDoc, MemberRole } from "@gatekeep/shared";
 
 const MAX_PENDING_INVITES_PER_PROFILE = 20;
@@ -97,6 +98,14 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
         tx.set(memberRef, member);
         tx.update(ref, { status: "accepted" });
       });
+      // curatorAccess/{uid} fast path (Task 6): accepting onto an already-
+      // APPROVED curator profile can only GAIN access, never lose it — a
+      // direct set is correct here (contrast removeMember below, which must
+      // recompute since it can only ever LOSE access).
+      const profileData = profileSnap.data();
+      if (profileData?.type === "curator" && profileData?.status === "approved") {
+        await db.doc(`curatorAccess/${uid}`).set({});
+      }
     } else {
       await ref.update({ status: "declined" });
     }
@@ -146,6 +155,15 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
       }
       tx.delete(memberRef);
     });
+    // curatorAccess/{uid} maintenance (Task 6): removing a member from an
+    // approved curator profile may have been their only path to curator
+    // access — recompute (not a blind delete), since they might belong to
+    // another approved curator profile too.
+    const profileSnap = await db.doc(`profiles/${profileId}`).get();
+    const profileData = profileSnap.data();
+    if (profileData?.type === "curator" && profileData?.status === "approved") {
+      await syncCuratorAccess(uid);
+    }
     return { ok: true };
   });
 

@@ -11,3 +11,4 @@ export { updateCuratorProfile, removeCuratorPhoto } from "./curator.js";
 export { createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack } from "./tracks.js";
 export { processUpload } from "./media.js";
 export { createGig, publishGig, updateGig, cancelGig, takedownGig } from "./gigs.js";
+export { createSeries, updateSeries, pauseSeries, endSeries } from "./gigSeries.js";
