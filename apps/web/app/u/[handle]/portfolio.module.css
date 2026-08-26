@@ -28,3 +28,15 @@
   border-radius: 8px; margin-bottom: 6px; background: none; color: inherit; font: inherit;
   font-size: 15px; cursor: pointer; text-align: left; }
 .tracks :global(.trackDur) { margin-left: auto; color: var(--foreground); opacity: 0.72; }
+
+/* ---------- Sub-3: curator page additions ---------- */
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.galleryPhoto { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px;
+  background: color-mix(in srgb, var(--foreground) 12%, var(--background)); }
+.amenities { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+.amenities dt { color: var(--foreground); opacity: 0.72; }
+.amenities dd { margin: 0; }
+.gigList { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.gigCard { border: 1px solid color-mix(in srgb, var(--foreground) 20%, var(--background));
+  border-radius: 8px; padding: 12px; }
+.gigMeta { margin: 4px 0 0; color: var(--foreground); opacity: 0.72; font-size: 14px; }

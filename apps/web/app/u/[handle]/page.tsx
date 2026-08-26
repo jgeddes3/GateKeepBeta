@@ -4,9 +4,9 @@ import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import { validateHandle, type ProfileDoc, type TrackDoc } from "@gatekeep/shared";
-import { TrackPlayer } from "./TrackPlayer";
-import styles from "./portfolio.module.css";
+import { validateHandle, type ProfileDoc, type TrackDoc, type GigDoc } from "@gatekeep/shared";
+import { MusicianProfile } from "./MusicianProfile";
+import { CuratorProfile } from "./CuratorProfile";
 
 // Takedowns/approvals need to propagate within about a minute, and this page
 // can't be gated behind App Check (it's plain SSR, no client attestation) —
@@ -25,11 +25,21 @@ export function generateStaticParams() {
   return [];
 }
 
-type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
-type Loaded = {
+export type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
+export type PublicGig = GigDoc & { id: string };
+
+export type MusicianLoaded = {
+  kind: "musician";
   profile: ProfileDoc; tracks: LoadedTrack[];
   avatarUrl: string | null; coverUrl: string | null;
 };
+export type CuratorLoaded = {
+  kind: "curator";
+  profile: ProfileDoc;
+  photoUrls: string[];
+  openGigs: PublicGig[];
+};
+type Loaded = MusicianLoaded | CuratorLoaded;
 
 async function storageUrl(path: string | null | undefined): Promise<string | null> {
   if (!path) return null;
@@ -37,10 +47,51 @@ async function storageUrl(path: string | null | undefined): Promise<string | nul
   catch (e) {
     // Swallowed to null on purpose (a missing/racing object shouldn't 500 the
     // whole page), but a Storage-wide outage would otherwise silently empty
-    // every avatar/cover/track URL with no signal anywhere — log it.
+    // every avatar/cover/track/gallery URL with no signal anywhere — log it.
     console.warn("storageUrl failed", path, e);
     return null;
   }
+}
+
+async function loadMusician(profileId: string, profile: ProfileDoc): Promise<MusicianLoaded> {
+  const { db } = getServerFirebase();
+  const trackSnap = await getDocs(query(
+    collection(db, `profiles/${profileId}/tracks`),
+    where("status", "==", "approved"), orderBy("order")));
+  const [tracks, avatarUrl, coverUrl] = await Promise.all([
+    Promise.all(trackSnap.docs.map(async (t) => {
+      const d = t.data() as TrackDoc;
+      const url = await storageUrl(d.storagePath);
+      return url ? { id: t.id, title: d.title, durationSec: d.durationSec, url } : null;
+    })).then((rows) => rows.filter((t): t is LoadedTrack => t !== null)),
+    storageUrl(profile.portfolio?.avatarPhotoPath),
+    storageUrl(profile.portfolio?.coverPhotoPath),
+  ]);
+  return { kind: "musician", profile, tracks, avatarUrl, coverUrl };
+}
+
+async function loadCurator(profileId: string, profile: ProfileDoc): Promise<CuratorLoaded> {
+  const { db } = getServerFirebase();
+  const photoPaths = profile.curator?.photoPaths ?? [];
+  // Anonymous, rules-governed read (same client SDK as everything else on
+  // this page) — firestore.rules' gigs read rule proves this exact shape
+  // (status=='open' AND curatorProfileId=='X') for a stranger without a
+  // membership/admin disjunct: see tests-rules/rules.test.ts's "public
+  // open-gigs list may add a curatorProfileId equality filter (a curator's
+  // public page's 'open gigs' section)" test. orderBy(startsAt) adds no
+  // further rules exposure (rules only ever see per-document field values,
+  // never result ordering) — it only changes which composite index the
+  // query needs at the datastore layer (see firestore.indexes.json).
+  const [gigsSnap, photoUrls] = await Promise.all([
+    getDocs(query(
+      collection(db, "gigs"),
+      where("curatorProfileId", "==", profileId),
+      where("status", "==", "open"),
+      orderBy("startsAt"))),
+    Promise.all(photoPaths.map((p) => storageUrl(p))).then((urls) => urls.filter((u): u is string => u !== null)),
+  ]);
+  const openGigs = gigsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
+  return { kind: "curator", profile, photoUrls, openGigs };
 }
 
 // cache() dedupes this per-request across generateMetadata and the page body —
@@ -66,20 +117,13 @@ const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
     const p = await getDoc(doc(db, "profiles", profileId)); // rules deny unless approved
     if (!p.exists()) return null;
     const profile = p.data() as ProfileDoc;
-    if (profile.type !== "musician") return null; // curator pages are sub-3
-    const trackSnap = await getDocs(query(
-      collection(db, `profiles/${profileId}/tracks`),
-      where("status", "==", "approved"), orderBy("order")));
-    const [tracks, avatarUrl, coverUrl] = await Promise.all([
-      Promise.all(trackSnap.docs.map(async (t) => {
-        const d = t.data() as TrackDoc;
-        const url = await storageUrl(d.storagePath);
-        return url ? { id: t.id, title: d.title, durationSec: d.durationSec, url } : null;
-      })).then((rows) => rows.filter((t): t is LoadedTrack => t !== null)),
-      storageUrl(profile.portfolio?.avatarPhotoPath),
-      storageUrl(profile.portfolio?.coverPhotoPath),
-    ]);
-    return { profile, tracks, avatarUrl, coverUrl };
+    // Sub-3 widens this route to curators, branching on profile.type — both
+    // types share the exact same handle-lookup/approval-gate machinery
+    // above (profiles/{id}'s read rule is status=='approved' regardless of
+    // type), only the content loaded below differs.
+    if (profile.type === "musician") return await loadMusician(profileId, profile);
+    if (profile.type === "curator") return await loadCurator(profileId, profile);
+    return null;
   } catch (e) {
     // Duck-typed, not `e instanceof FirestoreError`: FirebaseError's own
     // constructor runs `Object.setPrototypeOf(this, FirebaseError.prototype)`
@@ -113,10 +157,21 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
   // rendering the page (e.g. a metadata-only route consumer).
   if (!data) return { robots: { index: false } };
   const { profile } = data;
-  const pf = profile.portfolio;
-  const description = pf?.bio?.slice(0, 160)
-    || [`${profile.name} on GateKeep`, pf?.genres?.length ? pf.genres.join(", ") : null]
-      .filter(Boolean).join(" — ");
+  let description: string;
+  let imageUrl: string | null;
+  if (data.kind === "musician") {
+    const pf = profile.portfolio;
+    description = pf?.bio?.slice(0, 160)
+      || [`${profile.name} on GateKeep`, pf?.genres?.length ? pf.genres.join(", ") : null]
+        .filter(Boolean).join(" — ");
+    imageUrl = data.coverUrl;
+  } else {
+    const c = profile.curator;
+    description = c?.about?.slice(0, 160)
+      || [`${profile.name} on GateKeep`, c?.lookingFor?.genres?.length ? c.lookingFor.genres.join(", ") : null]
+        .filter(Boolean).join(" — ");
+    imageUrl = data.photoUrls[0] ?? null;
+  }
   return {
     title: `${profile.name} (@${profile.handle}) · GateKeep`,
     description,
@@ -126,7 +181,7 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
       description,
       url: `/@${profile.handle}`,
       type: "profile",
-      ...(data.coverUrl ? { images: [data.coverUrl] } : {}),
+      ...(imageUrl ? { images: [imageUrl] } : {}),
     },
   };
 }
@@ -135,48 +190,5 @@ export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
   const { handle } = await props.params;
   const data = await loadProfile(handle);
   if (!data) notFound();
-  const { profile, tracks, avatarUrl, coverUrl } = data;
-  const pf = profile.portfolio;
-  const links = (pf?.externalLinks ?? []).filter((l) => l.url.startsWith("https://"));
-  return (
-    <main className={styles.page}>
-      {coverUrl
-        ? <img className={styles.cover} src={coverUrl} alt="" />
-        : <div className={styles.cover} aria-hidden />}
-      <div className={styles.layout}>
-        <aside className={styles.identity}>
-          {avatarUrl && <img className={styles.avatar} src={avatarUrl} alt={`${profile.name} photo`} />}
-          <h1>{profile.name}</h1>
-          <p>@{profile.handle}</p>
-          {pf?.genres && pf.genres.length > 0 && <p className={styles.genres}>{pf.genres.join(" · ")}</p>}
-          {links.length > 0 && (
-            <div className={styles.links}>
-              {links.map((l) => (
-                <a key={`${l.kind}:${l.url}`} href={l.url} rel="noopener noreferrer nofollow" target="_blank">{l.kind}</a>
-              ))}
-            </div>
-          )}
-        </aside>
-        <div>
-          {tracks.length > 0 && (
-            <section className={`${styles.section} ${styles.tracks}`}>
-              <h2>Listen</h2>
-              {tracks.map((t) => <TrackPlayer key={t.id} title={t.title} url={t.url} durationSec={t.durationSec} />)}
-            </section>
-          )}
-          {pf?.bio && (
-            <section className={styles.section}>
-              <h2>About</h2>
-              <p className={styles.bio}>{pf.bio}</p>
-            </section>
-          )}
-          {tracks.length === 0 && !pf?.bio && (
-            <p className={styles.empty}>This artist hasn&apos;t added content yet.</p>
-          )}
-          {/* Shows: platform events only (spec §2). The events collection ships in
-              sub-projects 4/6 — this section stays hidden until it has data. */}
-        </div>
-      </div>
-    </main>
-  );
+  return data.kind === "musician" ? <MusicianProfile data={data} /> : <CuratorProfile data={data} />;
 }
