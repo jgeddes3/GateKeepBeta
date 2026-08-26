@@ -187,20 +187,22 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <button disabled={busy} onClick={() => review("approved")}>Approve</button>{" "}
         <button disabled={busy} onClick={() => review("rejected")}>Reject…</button>
-        <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
+        <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}
+          title="Only takes effect when you click Reject — checking this has no effect on Approve.">
           <input
             type="checkbox"
             disabled={busy}
             checked={flagChecked}
             onChange={(e) => setFlagChecked(e.target.checked)}
           />
-          also flag this account
+          also flag this account (Reject only)
         </label>
         {flagChecked && (
           <input
             placeholder="flag note (shown only to admins)"
             value={flagNote}
             disabled={busy}
+            maxLength={500}
             onChange={(e) => setFlagNote(e.target.value)}
             style={{ fontSize: 13, flex: "1 1 220px", minWidth: 160 }}
           />

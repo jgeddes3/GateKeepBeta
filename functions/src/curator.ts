@@ -2,6 +2,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   validateLookingFor, isValidDocId,
+  MAX_ABOUT_LENGTH, MAX_ADDRESS_LENGTH, MAX_CITY_LENGTH, MAX_AMENITY_NOTES_LENGTH, MAX_CAPACITY,
   type CuratorDetails, type LookingFor, type CuratorSubtype,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireCuratorProfile } from "./guards.js";
@@ -23,11 +24,10 @@ export interface CuratorProfileUpdateInput {
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
 
-const MAX_ABOUT_LENGTH = 2000;
-const MAX_ADDRESS_LENGTH = 300;
-const MAX_CITY_LENGTH = 120;
-const MAX_AMENITY_NOTES_LENGTH = 500;
-const MAX_CAPACITY = 100_000;
+// MAX_ABOUT_LENGTH / MAX_ADDRESS_LENGTH / MAX_CITY_LENGTH /
+// MAX_AMENITY_NOTES_LENGTH / MAX_CAPACITY now live in @gatekeep/shared so
+// client forms (web + mobile) validate against the exact same numbers
+// instead of re-declared copies that could drift from this server gate.
 const INDOOR_OUTDOOR_VALUES = ["indoor", "outdoor", "both"] as const;
 
 // Field-shape/type/range validation only. The venue-vs-non-venue address

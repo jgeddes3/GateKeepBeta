@@ -6,6 +6,7 @@ import { getFirebase } from "../lib/firebase";
 import { PhotoUploader } from "../portfolio/PortfolioForms";
 import {
   GENRES, ACT_SIZES, MAX_CURATOR_PHOTOS, validateLookingFor,
+  MAX_ABOUT_LENGTH, MAX_ADDRESS_LENGTH, MAX_CITY_LENGTH, MAX_AMENITY_NOTES_LENGTH, MAX_CAPACITY,
   type LookingFor, type ActSize, type CuratorDetails, type CuratorSubtype,
 } from "@gatekeep/shared";
 
@@ -21,11 +22,6 @@ const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
   catch (e) { window.alert(e instanceof Error ? e.message : "Save failed — try again."); return false; }
 };
-
-// Mirrors functions/src/curator.ts's MAX_ABOUT_LENGTH — that constant isn't
-// exported to shared, so this is a UX-only soft cap (maxLength attribute);
-// the server remains the actual gate.
-const MAX_ABOUT_LENGTH = 2000;
 
 export function AboutForm({ profileId, initial }: { profileId: string; initial: string | undefined }) {
   const [about, setAbout] = useState(initial ?? "");
@@ -45,13 +41,6 @@ export function AboutForm({ profileId, initial }: { profileId: string; initial: 
     </section>
   );
 }
-
-// Mirrors functions/src/curator.ts's MAX_CITY_LENGTH / MAX_ADDRESS_LENGTH —
-// neither is exported to shared, so these are UX-only soft caps; the server
-// remains authoritative (including the venue-only address rule below, which
-// this form never even offers non-venues a field to violate).
-const MAX_CITY_LENGTH = 120;
-const MAX_ADDRESS_LENGTH = 300;
 
 export function LocationForm({ profileId, subtype, initial }:
   { profileId: string; subtype: CuratorSubtype; initial: CuratorDetails["location"] | undefined }) {
@@ -157,13 +146,11 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
   );
 }
 
-// Mirrors functions/src/curator.ts's INDOOR_OUTDOOR_VALUES / MAX_CAPACITY /
-// MAX_AMENITY_NOTES_LENGTH — none exported to shared (curator.ts keeps them
-// module-private), so these are local UX mirrors; the server remains
-// authoritative.
+// Mirrors functions/src/curator.ts's INDOOR_OUTDOOR_VALUES — an enum, not a
+// soft-cap constant, so it stays a local UX mirror; the server remains
+// authoritative. MAX_CAPACITY / MAX_AMENITY_NOTES_LENGTH come from shared
+// (see import above).
 const INDOOR_OUTDOOR_VALUES = ["indoor", "outdoor", "both"] as const;
-const MAX_CAPACITY = 100_000;
-const MAX_AMENITY_NOTES_LENGTH = 500;
 type IndoorOutdoor = (typeof INDOOR_OUTDOOR_VALUES)[number];
 type Tri = boolean | null;
 

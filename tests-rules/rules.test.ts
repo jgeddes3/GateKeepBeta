@@ -411,6 +411,15 @@ describe("gigs", () => {
     await assertFails(setDoc(doc(alice, "gigs/hax"), { curatorProfileId: "prof1", status: "open" }));
   });
 
+  it("an authed stranger (not a profile member) is denied a taken_down gig; admin can still read it", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedGig("g-taken2", { status: "taken_down" });
+    const bob = env.authenticatedContext("bob").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertFails(getDoc(doc(bob, "gigs/g-taken2")));
+    await assertSucceeds(getDoc(doc(admin, "gigs/g-taken2")));
+  });
+
   it("member reads own non-open gig by get; a stranger cannot; admin can", async () => {
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
     await seedGig("g-draft2", { status: "draft" });
@@ -552,6 +561,12 @@ describe("gigSeries", () => {
     await assertFails(getDocs(query(collection(bob, "gigSeries"), where("curatorProfileId", "==", "prof1"))));
     const adminSnap = await assertSucceeds(getDocs(collection(admin, "gigSeries")));
     if (adminSnap.size < 2) throw new Error("expected admin's unfiltered list to return both series");
+  });
+  it("stranger's UNFILTERED gigSeries list fails (no public disjunct exists at all, unlike gigs' status=='open')", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seedSeries("s4");
+    const bob = env.authenticatedContext("bob").firestore();
+    await assertFails(getDocs(collection(bob, "gigSeries")));
   });
 });
 

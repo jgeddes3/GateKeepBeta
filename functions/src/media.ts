@@ -270,31 +270,48 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     // warnings. limitInputPixels bounds decompression-bomb-style inputs.
     const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
 
-    // Format allowlist: sharp/libvips happily decodes SVG (an XML format with
-    // real parser/XXE-class attack surface), GIF, TIFF, and HEIF too — none
-    // of that is gated by the staging upload's declared contentType, which
-    // storage.rules only checks against the client-set Content-Type header,
-    // not the actual bytes (trivially spoofable — upload arbitrary bytes
-    // with `contentType: "image/jpeg"`). Probe the real decoded format
-    // before running attacker-controlled bytes through the full
-    // resize/encode pipeline below, and refuse anything outside the three
-    // formats this app actually intends to accept.
-    const { format } = await sharp(bytes, sharpOpts).metadata();
-    if (!["jpeg", "png", "webp"].includes(format ?? "")) {
-      console.error("processUpload: rejected disallowed photo format", objectName, format);
+    // The whole decode/resize/encode step is wrapped in its own try/catch:
+    // genuinely corrupt/undecodable bytes (not just an allowlist mismatch —
+    // sharp can't even read metadata off them) throw from .metadata() or
+    // .toBuffer() rather than returning a recognizable format string. Pre-
+    // existing SP2 bug (found live in Task 9's walkthrough): that throw used
+    // to propagate unhandled out of the trigger instead of being discarded
+    // the same way every other rejection path in this function is (log +
+    // return, staging cleanup left to the shared `finally` below) — there's
+    // no per-photo "failed" status doc to write (unlike processAudio's
+    // tracks), so silent discard-with-log IS this pipeline's existing
+    // failure style.
+    let jpeg: Buffer;
+    try {
+      // Format allowlist: sharp/libvips happily decodes SVG (an XML format
+      // with real parser/XXE-class attack surface), GIF, TIFF, and HEIF too —
+      // none of that is gated by the staging upload's declared contentType,
+      // which storage.rules only checks against the client-set Content-Type
+      // header, not the actual bytes (trivially spoofable — upload arbitrary
+      // bytes with `contentType: "image/jpeg"`). Probe the real decoded
+      // format before running attacker-controlled bytes through the full
+      // resize/encode pipeline below, and refuse anything outside the three
+      // formats this app actually intends to accept.
+      const { format } = await sharp(bytes, sharpOpts).metadata();
+      if (!["jpeg", "png", "webp"].includes(format ?? "")) {
+        console.error("processUpload: rejected disallowed photo format", objectName, format);
+        return; // finally below still deletes the staging object
+      }
+
+      // Avatars intentionally do NOT set withoutEnlargement — the 512x512
+      // output is a contract the rest of the app relies on (fixed-size crop
+      // targets), so a tiny source still gets upscaled to fill it. Covers and
+      // gallery photos both use withoutEnlargement since they're display-only
+      // and any size up to 1600x1600 is fine — a gallery photo is just a
+      // repeatable cover, sized identically.
+      const pipeline = kind === "avatar"
+        ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
+        : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
+      jpeg = await pipeline.jpeg({ quality: 82 }).toBuffer();
+    } catch (err) {
+      console.error("processUpload: corrupt/undecodable photo upload", objectName, err);
       return; // finally below still deletes the staging object
     }
-
-    // Avatars intentionally do NOT set withoutEnlargement — the 512x512
-    // output is a contract the rest of the app relies on (fixed-size crop
-    // targets), so a tiny source still gets upscaled to fill it. Covers and
-    // gallery photos both use withoutEnlargement since they're display-only
-    // and any size up to 1600x1600 is fine — a gallery photo is just a
-    // repeatable cover, sized identically.
-    const pipeline = kind === "avatar"
-      ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
-      : sharp(bytes, sharpOpts).rotate().resize(1600, 1600, { fit: "inside", withoutEnlargement: true });
-    const jpeg = await pipeline.jpeg({ quality: 82 }).toBuffer();
     const destPath = publicPhotoPath(profileId, kind, randomUUID());
     await bucket().file(destPath).save(jpeg, { contentType: "image/jpeg" });
 

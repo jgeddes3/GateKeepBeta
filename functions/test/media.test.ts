@@ -277,6 +277,29 @@ describe("processUpload: photos", () => {
     const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
     expect(files).toHaveLength(0); // nothing written to public/
   });
+  it("handles a corrupt/undecodable photo upload without throwing — staging still cleaned up, nothing written to public/, portfolio untouched", async () => {
+    const { user, uid, profileId } = await makeMusician("ph7b");
+    // Unlike the disallowed-format GIF above (which sharp decodes just
+    // fine — the rejection is this app's OWN allowlist), this buffer isn't a
+    // real image at all: sharp's .metadata() throws trying to read it. Task
+    // 14 hardening for a pre-existing SP2 bug (found live in Task 9's
+    // walkthrough) where that throw used to escape processPhoto unhandled
+    // instead of being discarded like every other rejection path here.
+    const garbage = Buffer.from("not an image — just garbage bytes".repeat(20));
+    const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
+    await uploadTestAudio(path, garbage, "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true); // finally still cleans up staging — trigger never throws
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull(); // profile doc untouched
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0); // nothing written to public/
+  });
   it("still accepts valid PNG and WebP avatars (the allowlist, not just JPEG)", async () => {
     const { user, uid, profileId } = await makeMusician("ph8");
     const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 5, b: 6 } } })

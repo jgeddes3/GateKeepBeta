@@ -193,6 +193,15 @@ export interface CuratorDetails {
 // Curator gallery cap — enforced by media.ts's processPhoto trigger when
 // appending a newly processed "gallery" photo to curator.photoPaths.
 export const MAX_CURATOR_PHOTOS = 12;
+// Curator content soft caps — server-enforced in functions/src/curator.ts's
+// updateCuratorProfile validation; exported here so client forms (web +
+// mobile) consume the same numbers as maxLength/UX-only soft caps instead of
+// re-declaring their own copies that could drift from the server gate.
+export const MAX_ABOUT_LENGTH = 2000;
+export const MAX_ADDRESS_LENGTH = 300;
+export const MAX_CITY_LENGTH = 120;
+export const MAX_AMENITY_NOTES_LENGTH = 500;
+export const MAX_CAPACITY = 100_000;
 // lives on ProfileDoc as `curator?: CuratorDetails` (curators only; seeded by createProfileDraft)
 
 export interface GigBudget { minCents: number; maxCents: number; structure: BudgetStructure; }
