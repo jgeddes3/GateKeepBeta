@@ -14,13 +14,39 @@ import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.
 //    out-of-order delivery (each re-reads current state, never assumes).
 // Handlers are REGISTERED here but implemented across tasks:
 //  - account.updated        -> Task 4 (cached gate flags)
-//  - payment_intent.succeeded -> Task 10 (payPastDue completion)
+//  - payment_intent.succeeded -> dispatched by metadata.purpose (see
+//    paymentIntentSucceededHandlers below): "deposit" -> Task 6 (accept saga
+//    completion), "settlement" -> Task 10, "paydue" -> Task 11
 //  - payout.paid/payout.failed -> Task 13
 //  - transfer.reversed      -> Task 12 (ledger only)
 // Unknown/unhandled types: record the event doc, 200 OK (Stripe requires 2xx
 // or it retries forever).
 export type WebhookHandler = (object: Record<string, unknown>, eventId: string) => Promise<void>;
 export const webhookHandlers: Record<string, WebhookHandler> = {};
+
+// payment_intent.succeeded is the ONE event type several unrelated SP5 sagas
+// all listen for (Task 6's accept deposit, Task 10's settlement, Task 11's
+// payPastDue) — they're told apart by the intent's own
+// `metadata.purpose`, which every SP5 charge stamps. A single registry keyed
+// by purpose keeps those additive: each task registers its own purpose
+// instead of overwriting a shared `webhookHandlers["payment_intent.succeeded"]`
+// (last import wins, silently). Registered by purpose in the task that owns
+// it — "deposit" in bookings.ts.
+export const paymentIntentSucceededHandlers: Record<string, WebhookHandler> = {};
+
+webhookHandlers["payment_intent.succeeded"] = async (object, eventId) => {
+  const purpose = (object.metadata as Record<string, string> | undefined)?.purpose;
+  const handler = purpose ? paymentIntentSucceededHandlers[purpose] : undefined;
+  if (!handler) {
+    // Not an error: Stripe sends this event for every intent we create, and
+    // some (e.g. an on-session intent whose callable already finalized it)
+    // have no out-of-band work to do. Logged, not thrown — throwing would
+    // leave the event unprocessed and Stripe retrying it forever.
+    console.info(`payment_intent.succeeded: no handler for purpose ${JSON.stringify(purpose ?? null)} (event ${eventId})`);
+    return;
+  }
+  await handler(object, eventId);
+};
 
 // Test-only handlers, registered ONLY inside the Functions emulator
 // (FUNCTIONS_EMULATOR is set by the emulator's own runtime — never true in a

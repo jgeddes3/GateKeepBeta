@@ -1,12 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
-import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import type { ProfileDraftInput, StripeProfileDoc } from "@gatekeep/shared";
+import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
+import {
+  CURATOR_FEE_PCT, DEPOSIT_PERCENT,
+  type BookingRequestDoc, type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
+} from "@gatekeep/shared";
 import type { RefreshPaymentMethodInput } from "../src/payments.js";
 import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
-  BOOKING_NOT_CONFIRMABLE_MESSAGE,
+  BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
 } from "../src/paymentsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -14,10 +17,13 @@ const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gate
 const adb = adminFirestore(admin);
 const WEBHOOK_URL = "http://localhost:5001/gatekeep-dev-jg/us-central1/stripeWebhook";
 
-// 20s, matching bookings.test.ts's precedent for booking-adjacent suites that
-// chain several callables (createProfileDraft, submitProfileForReview,
-// reviewProfile...) before reaching an assertion.
-vi.setConfig({ testTimeout: 20_000 });
+// 30s — was 20s (bookings.test.ts's precedent for booking-adjacent suites
+// that chain several callables before reaching an assertion). Task 6's accept
+// saga tests chain the longest sequences in this file: two approved profiles,
+// makeMoneyReady, up to three createGig/publishGig pairs, applyToGig, and an
+// acceptBooking that now runs two transactions plus a Stripe round trip —
+// matching bookings.test.ts's own 30s for the same reason.
+vi.setConfig({ testTimeout: 30_000 });
 
 async function makeApprovedCuratorProfile(emailPrefix: string) {
   const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
@@ -426,5 +432,323 @@ describe("Task 5 money gates", () => {
 
     await expect(callFn("acceptBooking", { bookingId }, musician.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: BOOKING_NOT_CONFIRMABLE_MESSAGE });
+  });
+});
+
+// ---------- Task 6: accept saga (staged payment docs + batch deposit charge) ----------
+
+// Mirrors bookings.test.ts's identical fixture — including its "never leave
+// an active series behind in the shared emulator" contract (every caller
+// below flips it to "ended" in a finally).
+function seedSeries(curatorProfileId: string) {
+  const ref = adb.collection("gigSeries").doc();
+  return ref.set({
+    curatorProfileId, fillMode: "whole_run", status: "active",
+    recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+    template: {
+      title: "Friday Night Jazz", description: "A cozy weekly set.",
+      wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 10_000, maxCents: 20_000, structure: "perHour" },
+      durationMinutes: 90,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: {
+        venueName: "The Green Room", neighborhood: "Downtown", city: "Austin",
+        geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: "123 Main St, Austin, TX",
+      },
+    },
+    templatePrivateLocation: { address: "123 Main St, Austin, TX", geo: { lat: 30.27, lng: -97.74 } },
+    materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+    activeBookingId: null, bookedMusicianProfileId: null,
+  }).then(() => ref);
+}
+
+async function getBooking(bookingId: string): Promise<BookingRequestDoc> {
+  return (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+}
+
+async function getPaymentDocs(bookingId: string): Promise<PaymentDoc[]> {
+  const snap = await adb.collection(`bookings/${bookingId}/payments`).get();
+  return snap.docs.map((d) => d.data() as PaymentDoc);
+}
+
+// FakeStripe's created PaymentIntent object — the server-side amount actually
+// charged, which no callable input can influence.
+async function getFakeIntent(intentId: string): Promise<Record<string, unknown> | undefined> {
+  return (await adb.doc(`stripeFake/state/objects/${intentId}`).get()).data();
+}
+
+// Scoped charge knobs (as-built contract #6): ALWAYS list this test's OWN
+// customerId rather than flipping the global declineCharges flag — the
+// emulator's stripeFake/config doc is shared with every other suite running
+// against it, and a global knob would decline their charges too.
+async function setChargeKnob(
+  knob: "declineCustomerIds" | "pendingCustomerIds", customerId: string, on: boolean,
+): Promise<void> {
+  await adb.doc("stripeFake/config").set(
+    { [knob]: on ? FieldValue.arrayUnion(customerId) : FieldValue.arrayRemove(customerId) },
+    { merge: true });
+}
+
+async function curatorCustomerId(profileId: string): Promise<string> {
+  const sp = await getStripeDoc(profileId);
+  if (!sp?.customerId) throw new Error(`no customerId cached for curator profile ${profileId}`);
+  return sp.customerId;
+}
+
+describe("Task 6 accept saga", () => {
+  it("single perHour gig ($150/hr x 90min): stages one payment doc, charges the batch once, marks it held", async () => {
+    const curator = await makeApprovedCuratorProfile("t6hpc");
+    const musician = await makeApprovedMusicianProfile("t6hpm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    await callFn("acceptBooking", { bookingId }, curator.owner.user);
+
+    // 15000c/hr x 1.5h => base 22500; slice ceil(22500 * 35%) = 7875;
+    // curator fee share ceil(7875 * 11%) = ceil(866.25) = 867.
+    const snap = await adb.collection(`bookings/${bookingId}/payments`).get();
+    expect(snap.size).toBe(1);
+    expect(snap.docs[0].id).toBe(gigId);
+    const p = snap.docs[0].data() as PaymentDoc;
+    expect(p.bookingId).toBe(bookingId);
+    expect(p.gigId).toBe(gigId);
+    expect(p.curatorProfileId).toBe(curator.profileId);
+    expect(p.musicianProfileId).toBe(musician.profileId);
+    expect(p.selfDeal).toBe(false);
+    expect(typeof p.occurrenceStartsAt).toBe("number");
+    expect(p.baseCents).toBe(22500);
+    expect(p.deposit.sliceCents).toBe(7875);
+    expect(p.deposit.feeShareCents).toBe(867);
+    expect(p.deposit.status).toBe("held");
+    expect(p.deposit.intentId).toBeTruthy();
+    expect(p.deposit.chargeId).toBeTruthy();   // later transfers pass it as sourceChargeId
+    expect(typeof p.deposit.chargedAt).toBe("number");
+    expect(p.deposit.resolvedAt).toBeNull();
+    expect(p.deposit.forfeitTransferId).toBeNull();
+    expect(p.settlement.status).toBe("not_due");
+    expect(p.settlement.attempts).toBe(0);
+    expect(p.settlement.delinquentAt).toBeNull();
+    expect(p.transfer).toEqual({ status: "none", id: null, amountCents: null, transferredAt: null });
+
+    const booking = await getBooking(bookingId);
+    expect(booking.status).toBe("confirmed");
+    expect(booking.deposit?.status).toBe("held");
+    expect(booking.deposit?.amountCents).toBe(7875);
+    expect(booking.deposit?.policy.percent).toBe(DEPOSIT_PERCENT);
+    expect(booking.feePolicy?.curatorFeePct).toBe(CURATOR_FEE_PCT);
+    expect(booking.paymentSummary?.heldCents).toBe(7875);
+    expect(booking.paymentSummary?.paidCents).toBe(8742);
+    expect(booking.paymentSummary?.state).toBe("current");
+    expect(booking.depositChargePending).toBe(false);
+    expect(booking.depositChargeIntentId).toBeNull();
+    expect(booking.depositChargeAttempt).toBe(1);
+
+    // The server-computed amount: slice + fee share, never anything a client
+    // could influence.
+    const intent = await getFakeIntent(p.deposit.intentId!);
+    expect(intent?.amountCents).toBe(8742);
+    expect(intent?.meta).toEqual({ bookingId, purpose: "deposit" });
+
+    const ledger = await adb.doc(`ledger/deposit_charged:${p.deposit.intentId}`).get();
+    expect(ledger.exists).toBe(true);
+    expect(ledger.data()?.amountCents).toBe(8742);
+    expect(ledger.data()?.bookingId).toBe(bookingId);
+    expect(ledger.data()?.profileId).toBe(curator.profileId);
+  });
+
+  it("whole-run: one payment doc per future occurrence, each priced from ITS OWN duration, and ONE intent for the sum", async () => {
+    const curator = await makeApprovedCuratorProfile("t6wrc");
+    const musician = await makeApprovedMusicianProfile("t6wrm");
+    await makeMoneyReady(curator, musician);
+    const series = await seedSeries(curator.profileId);
+    try {
+      // Deliberately three DIFFERENT durations — a whole-run deposit must be
+      // priced per occurrence, never by multiplying the initiating gig's.
+      const gig60 = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 60 });
+      const gig90 = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+      const gig120 = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 120 });
+      await Promise.all([gig60, gig90, gig120].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gig90, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+      expect((await getBooking(bookingId)).seriesId).toBe(series.id);
+
+      await callFn("acceptBooking", { bookingId }, curator.owner.user);
+
+      const snap = await adb.collection(`bookings/${bookingId}/payments`).get();
+      expect(snap.size).toBe(3);
+      const byGig = new Map(snap.docs.map((d) => [d.id, d.data() as PaymentDoc]));
+      // 15000c/hr: 1h => 15000 (slice 5250, fee ceil(577.5) = 578);
+      //            1.5h => 22500 (slice 7875, fee 867);
+      //            2h => 30000 (slice 10500, fee 1155).
+      expect(byGig.get(gig60)?.baseCents).toBe(15000);
+      expect(byGig.get(gig60)?.deposit).toMatchObject({ sliceCents: 5250, feeShareCents: 578, status: "held" });
+      expect(byGig.get(gig90)?.baseCents).toBe(22500);
+      expect(byGig.get(gig90)?.deposit).toMatchObject({ sliceCents: 7875, feeShareCents: 867, status: "held" });
+      expect(byGig.get(gig120)?.baseCents).toBe(30000);
+      expect(byGig.get(gig120)?.deposit).toMatchObject({ sliceCents: 10500, feeShareCents: 1155, status: "held" });
+
+      // ONE batch charge, shared by all three docs.
+      const intentIds = new Set(snap.docs.map((d) => (d.data() as PaymentDoc).deposit.intentId));
+      expect(intentIds.size).toBe(1);
+      const intentId = [...intentIds][0]!;
+      expect(await getFakeIntent(intentId).then((i) => i?.amountCents)).toBe(5828 + 8742 + 11655);
+
+      const booking = await getBooking(bookingId);
+      expect(booking.status).toBe("confirmed");
+      expect(booking.paymentSummary?.heldCents).toBe(5250 + 7875 + 10500);
+      // The run-level deposit still summarizes ONE occurrence (the initiating
+      // gig's) — the per-occurrence docs above are the money truth.
+      expect(booking.deposit?.amountCents).toBe(7875);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
+
+  it("declined card: accept fails cleanly with nothing staged, and a retry afterwards succeeds on a fresh attempt key", async () => {
+    const curator = await makeApprovedCuratorProfile("t6dcc");
+    const musician = await makeApprovedMusicianProfile("t6dcm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    const customerId = await curatorCustomerId(curator.profileId);
+
+    await setChargeKnob("declineCustomerIds", customerId, true);
+    try {
+      await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+        .rejects.toMatchObject({ code: "functions/failed-precondition", message: CARD_DECLINED_MESSAGE });
+
+      const declined = await getBooking(bookingId);
+      expect(declined.status).toBe("open");
+      expect(declined.acceptedTerms).toBeNull();
+      expect(declined.depositChargePending).toBe(false);
+      expect(declined.depositChargeAttempt).toBe(1);
+      expect(await getPaymentDocs(bookingId)).toHaveLength(0);
+      expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("open");
+    } finally {
+      await setChargeKnob("declineCustomerIds", customerId, false);
+    }
+
+    // The critical retry-after-decline: both real Stripe and the fake CACHE a
+    // decline under its idempotency key, so this can only work because
+    // transaction A bumped depositChargeAttempt (1 -> 2) and the charge key
+    // moved with it.
+    await callFn("acceptBooking", { bookingId }, curator.owner.user);
+
+    const confirmed = await getBooking(bookingId);
+    expect(confirmed.status).toBe("confirmed");
+    expect(confirmed.depositChargeAttempt).toBe(2);
+    expect(confirmed.depositChargePending).toBe(false);
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("held");
+    expect(p.deposit.intentId).toBeTruthy();
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+  });
+
+  it("pending charge: accept reports processing and stays staged; payment_intent.succeeded finalizes it, and replays are no-ops", async () => {
+    const curator = await makeApprovedCuratorProfile("t6pnc");
+    const musician = await makeApprovedMusicianProfile("t6pnm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    const customerId = await curatorCustomerId(curator.profileId);
+
+    await setChargeKnob("pendingCustomerIds", customerId, true);
+    try {
+      await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+        .rejects.toMatchObject({ code: "functions/failed-precondition", message: DEPOSIT_PROCESSING_MESSAGE });
+    } finally {
+      await setChargeKnob("pendingCustomerIds", customerId, false);
+    }
+
+    // Unlike a decline, a pending intent leaves the saga STAGED — the money
+    // may still land, so nothing is unwound and nothing may be re-charged.
+    const pending = await getBooking(bookingId);
+    expect(pending.status).toBe("open");
+    expect(pending.depositChargePending).toBe(true);
+    const intentId = pending.depositChargeIntentId!;
+    expect(intentId).toBeTruthy();
+    const [stagedDoc] = await getPaymentDocs(bookingId);
+    expect(stagedDoc.deposit.status).toBe("unpaid");
+    expect(stagedDoc.deposit.intentId).toBeNull();
+
+    // A second accept while that intent is outstanding must NOT charge again
+    // (the pending intent can still succeed — that would be a double charge).
+    await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: DEPOSIT_PROCESSING_MESSAGE });
+
+    const evt = fakeEvent("payment_intent.succeeded", { id: intentId, metadata: { bookingId, purpose: "deposit" } });
+    expect((await postWebhook(evt)).status).toBe(200);
+
+    const confirmed = await getBooking(bookingId);
+    expect(confirmed.status).toBe("confirmed");
+    expect(confirmed.depositChargePending).toBe(false);
+    expect(confirmed.depositChargeIntentId).toBeNull();
+    expect(confirmed.deposit?.status).toBe("held");
+    expect(confirmed.paymentSummary?.heldCents).toBe(7875);
+    const [heldDoc] = await getPaymentDocs(bookingId);
+    expect(heldDoc.deposit.status).toBe("held");
+    expect(heldDoc.deposit.intentId).toBe(intentId);
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+
+    // Same event id: the webhook's claim machine dedupes it outright.
+    expect((await postWebhook(evt)).text).toBe("duplicate");
+    // A FRESH event id carrying the same intent still reaches the handler —
+    // which must no-op, because the booking is no longer open-and-pending.
+    const replay = fakeEvent("payment_intent.succeeded", { id: intentId, metadata: { bookingId, purpose: "deposit" } });
+    expect((await postWebhook(replay)).status).toBe(200);
+    const afterReplay = await getBooking(bookingId);
+    expect(afterReplay.status).toBe("confirmed");
+    expect(afterReplay.confirmedAt).toBe(confirmed.confirmedAt);
+    expect((await getPaymentDocs(bookingId))[0].deposit.chargedAt).toBe(heldDoc.deposit.chargedAt);
+  });
+
+  it("perSong: baseCents is amount x songCount, regardless of the gig's duration", async () => {
+    const curator = await makeApprovedCuratorProfile("t6psc");
+    const musician = await makeApprovedMusicianProfile("t6psm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user, {
+      durationMinutes: 120, budget: { minCents: 5_000, maxCents: 20_000, structure: "perSong" },
+    });
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig",
+      { gigId, musicianProfileId: musician.profileId, offer: offerPayload({ amountCents: 800, expectedQuantity: 10 }) },
+      musician.owner.user);
+
+    await callFn("acceptBooking", { bookingId }, curator.owner.user);
+
+    // 800c/song x 10 songs = 8000 (the 120-minute duration is irrelevant);
+    // slice ceil(8000 * 35%) = 2800; fee ceil(2800 * 11%) = 308.
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.baseCents).toBe(8000);
+    expect(p.deposit.sliceCents).toBe(2800);
+    expect(p.deposit.feeShareCents).toBe(308);
+    expect(p.deposit.status).toBe("held");
+    expect(await getFakeIntent(p.deposit.intentId!).then((i) => i?.amountCents)).toBe(3108);
+  });
+
+  it("SP4's sibling supersede still fires after the saga: a rival open booking on the same gig is superseded", async () => {
+    const curator = await makeApprovedCuratorProfile("t6ssc");
+    const winner = await makeApprovedMusicianProfile("t6ssw");
+    const rival = await makeApprovedMusicianProfile("t6ssr");
+    await makeMoneyReady(curator, winner);
+    await makeMoneyReady(curator, rival);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+
+    const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: winner.profileId, offer: offerPayload() }, winner.owner.user);
+    const { bookingId: rivalBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: rival.profileId, offer: offerPayload() }, rival.owner.user);
+
+    await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.owner.user);
+
+    expect((await getBooking(winnerBookingId)).status).toBe("confirmed");
+    expect((await getBooking(rivalBookingId)).status).toBe("superseded");
+    // The loser is superseded, never charged — no payment docs of its own.
+    expect(await getPaymentDocs(rivalBookingId)).toHaveLength(0);
   });
 });

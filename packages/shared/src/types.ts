@@ -391,6 +391,23 @@ export interface BookingRequestDoc {
   // SP5: accept-saga crash marker — true between the staging transaction and
   // the post-charge commit; the hourly payments sweep reconciles stuck ones.
   depositChargePending?: boolean;
+  // SP5 Task 6: how many deposit-charge ATTEMPTS this booking has staged.
+  // Load-bearing for money safety, not diagnostics: both real Stripe and
+  // FakeStripe cache a DECLINE under its idempotency key, so a retry after a
+  // decline must use a DIFFERENT key or it just replays the decline forever.
+  // The accept saga's charge key is `{bookingId}:accept:deposit:{attempt}`;
+  // staging transaction A increments this counter, and crash-reconciliation
+  // (Task 9) reuses the PERSISTED value so its replay hits the same key (and
+  // therefore Stripe's original intent) rather than charging twice.
+  depositChargeAttempt?: number;
+  // SP5 Task 6: pending-charge recovery marker. Set when chargeOffSession
+  // left the PaymentIntent `processing` (StripePaymentPendingError) — a
+  // same-key retry is impossible (the cached `processing` outcome replays
+  // forever), so the intent id is persisted here, the staged payment docs
+  // and depositChargePending are LEFT in place, and the
+  // payment_intent.succeeded webhook finalizes the accept out-of-band.
+  // Cleared on commit and on any unstage.
+  depositChargeIntentId?: string | null;
 }
 
 // visibility + projections + reliability
@@ -459,6 +476,15 @@ export interface DepositState {
   sliceCents: number;                    // ceil(the booking's deposit.policy.percent% of baseCents) — the accepted booking's frozen snapshot, never a live constant
   feeShareCents: number;                 // ceil(sliceCents * curatorFeePct / 100)
   intentId: string | null;               // shared for the accept batch; per-birth otherwise
+  // The Stripe CHARGE behind `intentId` (a PaymentIntent's latest_charge),
+  // captured at charge time. Transfers backed by a fresh charge must pass it
+  // as `sourceChargeId` (Task 8's forfeit transfer) so the transfer draws on
+  // that charge's own funds instead of the platform's aggregate available
+  // balance — otherwise a not-yet-settled charge yields balance_insufficient
+  // in live mode. Stays null when the charge id isn't known (a deposit
+  // finalized out-of-band by the payment_intent.succeeded webhook, whose
+  // event payload need not carry latest_charge).
+  chargeId: string | null;
   status: DepositStatus;
   chargedAt: number | null; resolvedAt: number | null;
   forfeitTransferId: string | null;

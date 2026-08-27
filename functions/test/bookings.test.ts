@@ -526,8 +526,11 @@ describe("acceptBooking", () => {
     expect(booking.status).toBe("confirmed");
     expect(typeof booking.confirmedAt).toBe("number");
     expect(booking.acceptedTerms).toEqual({ amountCents: 10001, expectedQuantity: 1.5, expectedTotalCents: 15002 });
+    // SP5 Task 6: the run-level deposit is still SP4's one-occurrence
+    // summary, but its status now reflects the real deposit charge the
+    // accept saga landed — "held", not the pre-money "unpaid".
     expect(booking.deposit).toEqual({
-      amountCents: 5251, status: "unpaid", forfeitedTo: null,
+      amountCents: 5251, status: "held", forfeitedTo: null,
       policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
     });
     // F5: no membership overlap between the two profiles here — selfDeal
@@ -570,8 +573,9 @@ describe("acceptBooking", () => {
     const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(booking.status).toBe("confirmed");
     expect(booking.acceptedTerms).toEqual({ amountCents: 933, expectedQuantity: 7, expectedTotalCents: 6531 });
+    // "held" for the same reason as the perHour case above (SP5 Task 6).
     expect(booking.deposit).toEqual({
-      amountCents: 2286, status: "unpaid", forfeitedTo: null,
+      amountCents: 2286, status: "held", forfeitedTo: null,
       policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
     });
   });
