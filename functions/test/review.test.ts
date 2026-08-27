@@ -5,7 +5,7 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
-import type { ProfileDraftInput, GigDoc, GigSeriesDoc } from "@gatekeep/shared";
+import type { ProfileDraftInput, GigDoc, GigSeriesDoc, BookingRequestDoc } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_AUTH_EMULATOR_HOST = "localhost:9099";
@@ -20,7 +20,11 @@ const adb = adminFirestore(admin);
 // completes (function execution logged at 20-100ms), the wall-clock cost is
 // emulator cold start, not a hang — so raise the default 5s test timeout
 // rather than mask a real failure.
-vi.setConfig({ testTimeout: 15_000 });
+// 20s (not this file's prior 15s) — the SP4 (Task 7) reject-from-approved
+// booking-cascade tests below chain a real applyToGig -> acceptBooking pair
+// on top of the profile setup, matching bookingLifecycle.test.ts's own
+// precedent for this same family of chain-heavy booking tests.
+vi.setConfig({ testTimeout: 20_000 });
 
 async function pendingProfile(ownerEmailPrefix: string) {
   const owner = await signUpTestUser(`${ownerEmailPrefix}-${Date.now()}@test.com`);
@@ -182,6 +186,33 @@ async function seedSeries(curatorProfileId: string, overrides: Partial<GigSeries
   return ref.id;
 }
 
+// SP4 (Task 7) fixture — an approved musician profile with genuine
+// portfolio-gate content, mirroring bookings.test.ts/bookingLifecycle.test.ts's
+// identical helper. This file's own subject is the review/reject cascade,
+// not booking negotiation mechanics.
+async function makeApprovedMusicianProfile(emailPrefix: string) {
+  const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+    "createProfileDraft",
+    { type: "musician", subtype: "solo", name: "The Act", handle: `${emailPrefix}_${Date.now()}_${Math.floor(Math.random() * 1e6)}` },
+    owner.user);
+  await adb.doc(`profiles/${profileId}`).update({
+    "portfolio.bio": "A great live act.",
+    "portfolio.genres": ["rock"],
+    "portfolio.avatarPhotoPath": "public/photos/seed/avatar-seed.jpg",
+  });
+  await adb.doc(`profiles/${profileId}/tracks/seed-track`).set({
+    title: "Demo", status: "approved", uploaderUid: owner.uid,
+    startSec: 0, durationSec: 20, storagePath: "public/tracks/seed/demo.m4a",
+    rejectionReason: null, failureReason: null, order: 0,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  await callFn("submitProfileForReview", { profileId }, owner.user);
+  const admin = await makeAdminUser(`${emailPrefix}a`);
+  await callFn("reviewProfile", { profileId, decision: "approved" }, admin.user);
+  return { owner, profileId };
+}
+
 describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
   it("approving a curator profile sets a curatorAccess marker for every member, including one who joined before approval", async () => {
     const { owner, profileId } = await pendingProfile("ca1");
@@ -290,6 +321,50 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     const logs = await adb.collection("auditLogs")
       .where("targetId", "==", profileId).where("action", "==", "profile_rejected").get();
     expect(logs.docs[0].data().detail).toBe("[was approved] Reported content.");
+  });
+
+  // SP4 (Task 7)
+  it("reject-from-approved on a MUSICIAN profile with a confirmed booking: the booking expires (no cancellation record/forfeit/mark, deposit untouched)", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await pendingProfile("rfm1");
+    const curatorAdmin = await makeAdminUser("rfm1a");
+    await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfm1m");
+    const gigId = await seedOpenGig(curatorProfileId);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curator.user);
+    const depositBefore = (await adb.doc(`bookings/${bookingId}`).get()).data()?.deposit;
+
+    await callFn("reviewProfile",
+      { profileId: musicianProfileId, decision: "rejected", reason: "Policy violation." }, curatorAdmin.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+    expect(after.cancellation).toBeNull();
+    expect(after.deposit).toEqual(depositBefore);
+
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+    expect(reliability).toBeUndefined(); // moderation — no mark
+  });
+
+  // SP4 (Task 7)
+  it("reject-from-approved on a CURATOR profile with a confirmed booking: the booking expires too (a filled gig isn't reached by the existing open-gigs-only cascade above)", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await pendingProfile("rfc1");
+    const curatorAdmin = await makeAdminUser("rfc1a");
+    await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfc1m");
+    const gigId = await seedOpenGig(curatorProfileId);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curator.user);
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+
+    await callFn("reviewProfile",
+      { profileId: curatorProfileId, decision: "rejected", reason: "Policy violation." }, curatorAdmin.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+    expect(after.cancellation).toBeNull();
   });
 });
 

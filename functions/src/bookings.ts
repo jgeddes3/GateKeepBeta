@@ -512,6 +512,16 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
       if (!series || series.status !== "active") {
         throw new HttpsError("failed-precondition", GIG_UNAVAILABLE_MESSAGE);
       }
+      // Task 7 carry-forward (a) — the rebooking door: a cancelOccurrence-
+      // reopened date on a still-active whole_run series can otherwise
+      // accept a FRESH whole-run applyToGig/offerGig even while the series
+      // is already linked to another confirmed run booking (applyToGig's
+      // whole-run detection only checks fillMode+status, never
+      // activeBookingId). Refuse here — a series names at most one confirmed
+      // run booking at a time.
+      if (series.activeBookingId != null && series.activeBookingId !== bookingId) {
+        throw new HttpsError("failed-precondition", "This series is already booked.");
+      }
       const occurrenceSnap = await tx.get(
         db.collection("gigs").where("seriesId", "==", freshBooking.seriesId).where("status", "==", "open"));
       occurrenceDocs = occurrenceSnap.docs;

@@ -683,6 +683,49 @@ describe("acceptBooking", () => {
     // status:"active" series, so no further cleanup is needed.
   });
 
+  // SP4 (Task 7) carry-forward (a) — the rebooking door.
+  it("whole-run: refuses to accept a SECOND whole-run booking on a series whose activeBookingId already names a different confirmed booking", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab9c");
+    const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab9w");
+    const { owner: rival, profileId: rivalProfileId } = await makeApprovedMusicianProfile("ab9r");
+
+    const series = await seedSeries(curatorProfileId, "whole_run");
+    try {
+      const gigId1 = await createOpenGig(curatorProfileId, curator.user);
+      const gigId2 = await createOpenGig(curatorProfileId, curator.user);
+      await Promise.all([gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+
+      const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId1, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
+      await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
+      expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(winnerBookingId);
+
+      // A FRESH occurrence appears on the already-booked run (simulating a
+      // cancelOccurrence-reopened date, or — as here — a newly materialized
+      // one) — still "open", still whole_run+active, so a rival can apply
+      // and have their own booking targeted at the whole run too.
+      const gigId3 = await createOpenGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${gigId3}`).update({ seriesId: series.id });
+      const { bookingId: rivalBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId3, musicianProfileId: rivalProfileId, offer: offerPayload() }, rival.user);
+      expect((await adb.doc(`bookings/${rivalBookingId}`).get()).data()?.seriesId).toBe(series.id);
+
+      await expect(callFn("acceptBooking", { bookingId: rivalBookingId }, curator.user)).rejects.toMatchObject({
+        code: "functions/failed-precondition",
+        message: expect.stringMatching(/already booked/i),
+      });
+
+      // Untouched — the refusal must not have disturbed either booking or
+      // the series' existing linkage.
+      const rivalAfter = (await adb.doc(`bookings/${rivalBookingId}`).get()).data();
+      expect(rivalAfter?.status).toBe("open");
+      const seriesAfter = (await adb.doc(`gigSeries/${series.id}`).get()).data();
+      expect(seriesAfter?.activeBookingId).toBe(winnerBookingId);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
+
   it("tripwire: rejects a zero expectedTotalCents (a durationMinutes:0 perHour gig) with failed-precondition, never a silent $0 deposit", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab8c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab8m");

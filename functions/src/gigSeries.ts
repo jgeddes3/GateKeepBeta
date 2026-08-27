@@ -5,7 +5,7 @@ import {
   MAX_ACTIVE_SERIES_PER_PROFILE, FILL_MODES,
   type GigContentInput, type GigBudget, type GigRecurrence, type FillMode,
   type GigSeriesDoc, type GigPublicLocation, type GigStatus,
-  type CuratorSubtype, type CuratorDetails,
+  type CuratorSubtype, type CuratorDetails, type BookingRequestDoc,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
@@ -14,6 +14,7 @@ import {
   resolveGigLocation, validateLocationInput, GEOCODE_FAILURE_MESSAGE, type GigLocationInput,
 } from "./gigs.js";
 import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
+import { executeCancellation } from "./bookingLifecycle.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -281,6 +282,24 @@ export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1" 
     throw new HttpsError("failed-precondition", `Cannot pause a series in status "${series.status}".`);
   }
 
+  // SP4 (Task 7, spec §4): a booked run is CURATOR-side cancelled before the
+  // pause itself — same window/outcome/mark math as any other curator
+  // cancelBooking call, via the extracted executeCancellation core
+  // (bookingLifecycle.ts), with a synthetic reason since there's no human
+  // "why" beyond the pause action itself. executeCancellation's own
+  // transaction reopens the run's future filled occurrences to "open" (via
+  // reopenSeriesOccurrences) and clears the series' activeBookingId —
+  // pausing leaves them exactly there; nothing further to do to them here
+  // (pause has never cancelled occurrences outright — only endSeries, below,
+  // does that).
+  if (series.activeBookingId) {
+    const bookingSnap = await db.doc(`bookings/${series.activeBookingId}`).get();
+    const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+    if (booking?.status === "confirmed") {
+      await executeCancellation(series.activeBookingId, booking, "curator", "Series paused by curator", Date.now());
+    }
+  }
+
   await seriesRef.update({ status: "paused", updatedAt: Date.now() });
   return { ok: true };
 });
@@ -299,6 +318,19 @@ export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1" },
   await requireProfileMember(series.curatorProfileId, uid);
   if (series.status === "ended") {
     throw new HttpsError("failed-precondition", "Series has already ended.");
+  }
+
+  // SP4 (Task 7): same curator-side run cancellation as pauseSeries above —
+  // run FIRST, so the occurrences it reopens (filled -> open) fall straight
+  // into this function's existing future open|draft sweep below, exactly
+  // like any other open date does when a series ends. No separate branch
+  // needed for a booked run's remaining dates.
+  if (series.activeBookingId) {
+    const bookingSnap = await db.doc(`bookings/${series.activeBookingId}`).get();
+    const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+    if (booking?.status === "confirmed") {
+      await executeCancellation(series.activeBookingId, booking, "curator", "Series ended by curator", Date.now());
+    }
   }
 
   const now = Date.now();

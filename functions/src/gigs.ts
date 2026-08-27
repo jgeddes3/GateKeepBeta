@@ -12,6 +12,7 @@ import {
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
 import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
+import { unwindBookingsForModeration } from "./bookingLifecycle.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -329,11 +330,33 @@ export const cancelGig = onCall<{ gigId: string }>({ region: "us-central1" }, as
   if (!gigSnap.exists) throw new HttpsError("not-found", "Gig not found.");
   const gig = gigSnap.data() as GigDoc;
   await requireProfileMember(gig.curatorProfileId, uid);
+  // SP4: a filled gig has a confirmed booking behind it — cancelGig is a
+  // plain status flip with no cancellation-window/deposit/reliability
+  // consequences, none of which are appropriate once a real booking exists.
+  // cancelBooking is the correct callable for that case (it runs the
+  // curator-forfeit-window/musician-mark math and notifies the musician with
+  // the real outcome) — refuse here with a pointer to it, rather than
+  // silently reducing a booked act's gig to "cancelled" with no recorded
+  // consequence at all.
+  if (gig.status === "filled") {
+    throw new HttpsError("failed-precondition", "This gig is filled — cancel the booking instead.");
+  }
   if (gig.status !== "draft" && gig.status !== "open") {
     throw new HttpsError("failed-precondition", `Cannot cancel a gig in status "${gig.status}".`);
   }
 
+  const wasOpen = gig.status === "open";
   await gigRef.update({ status: "cancelled", updatedAt: Date.now() });
+  // SP4: a still-"open" gig may have pending (open) booking requests on it
+  // (applyToGig/offerGig) — those must not be left dangling once the gig
+  // itself is gone. A "draft" gig can never have any (applyToGig/offerGig
+  // both require gig.status=="open"), so this is skipped for that branch.
+  if (wasOpen) {
+    await unwindBookingsForModeration({
+      gigIds: [gigId],
+      notifyBody: `The gig${gig.title ? ` "${gig.title}"` : ""} was cancelled.`,
+    });
+  }
   return { ok: true };
 });
 
@@ -368,6 +391,10 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
   batch.update(gigRef, { status: "taken_down", updatedAt: now });
 
   let siblingsAffected = 0;
+  // Task 7: unwind's gigIds scope — every occurrence THIS call actually
+  // takes down (just this one for scope "occurrence"; this one plus every
+  // taken-down sibling for scope "series").
+  const affectedGigIds = [gigId];
   if (scope === "series") {
     const seriesRef = db.doc(`gigSeries/${gig.seriesId}`);
     batch.update(seriesRef, { status: "paused", updatedAt: now });
@@ -387,9 +414,19 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
       if (doc.id === gigId) continue; // this occurrence is already handled above
       batch.update(doc.ref, { status: "taken_down", updatedAt: now });
       siblingsAffected++;
+      affectedGigIds.push(doc.id);
     }
   }
   await batch.commit();
+
+  // Task 7: unwind every booking sitting on the taken-down gig(s) — occurrence
+  // scope only ever touches this one gig; series scope also covers a
+  // whole-run booking via seriesId (its own `gigId` field names just one
+  // occurrence, which may not even be among the ones just swept above — e.g.
+  // a whole-run booking's initiating gig can be a PAST occurrence no longer
+  // "open", so it would never appear in siblingsSnap).
+  await unwindBookingsForModeration(
+    scope === "series" ? { gigIds: affectedGigIds, seriesId: gig.seriesId! } : { gigIds: affectedGigIds });
 
   await writeAudit({
     actorUid, action: "gig_taken_down", targetId: gigId,

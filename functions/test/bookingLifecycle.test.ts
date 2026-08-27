@@ -336,7 +336,7 @@ describe("recomputeReliability / cancelBooking", () => {
       }
     });
 
-    it("whole-run cancel with no future filled occurrence left: failed-precondition (report instead)", async () => {
+    it("whole-run cancel with no future filled occurrence left, but the booking's last occurrence is in the PAST: keeps 'already started' advice", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wrpastc");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wrpastm");
       const series = await seedSeries(curatorProfileId);
@@ -348,8 +348,46 @@ describe("recomputeReliability / cancelBooking", () => {
         await callFn("acceptBooking", { bookingId }, curator.user);
         await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 }); // now in the past
 
-        await expect(callFn("cancelBooking", { bookingId, reason: "Too late." }, curator.user))
-          .rejects.toMatchObject({ code: "functions/failed-precondition" });
+        // The gig still names this booking (bookingId untouched, only its
+        // startsAt moved) — the run genuinely already started, so
+        // "already started — report instead" is truthful advice here.
+        await expect(callFn("cancelBooking", { bookingId, reason: "Too late." }, curator.user)).rejects.toMatchObject({
+          code: "functions/failed-precondition",
+          message: expect.stringMatching(/already started/i),
+        });
+      } finally {
+        await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+      }
+    });
+
+    // SP4 (Task 7) carry-forward (b) — the zombie-run message.
+    it("whole-run cancel with no future filled occurrence left AND no date currently linked to this booking (cancelled per-occurrence): truthful 'nothing to cancel' message, NOT 'already started'", async () => {
+      const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wrzombiec");
+      const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wrzombiem");
+      const series = await seedSeries(curatorProfileId);
+      try {
+        const gigId = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 50 * 3_600_000 });
+        await adb.doc(`gigs/${gigId}`).update({ seriesId: series.id });
+        const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+          "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+        await callFn("acceptBooking", { bookingId }, curator.user);
+
+        // Cancel the run's only date PER-OCCURRENCE — the run survives
+        // (booking stays "confirmed"), but cancelOccurrence clears the gig's
+        // own bookingId on reopen, so no gig anywhere still names this
+        // booking's id, and none of its own occurrences remain future+filled.
+        await callFn("cancelOccurrence", { bookingId, gigId, reason: "Scheduling conflict." }, curator.user);
+        expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
+        expect((await adb.doc(`gigs/${gigId}`).get()).data()?.bookingId).toBeNull();
+
+        await expect(callFn("cancelBooking", { bookingId, reason: "Trying to cancel anyway." }, curator.user))
+          .rejects.toMatchObject({
+            code: "functions/failed-precondition",
+            message: expect.stringMatching(/no upcoming booked dates remain/i),
+          });
+
+        // Untouched — the refusal must not have changed the booking's status.
+        expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
       } finally {
         await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
       }

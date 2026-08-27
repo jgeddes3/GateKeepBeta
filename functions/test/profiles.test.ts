@@ -6,7 +6,9 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getStorage as adminStorage } from "firebase-admin/storage";
-import { RESUBMIT_COOLDOWN_MS, type ProfileDraftInput, type CreateTrackInput } from "@gatekeep/shared";
+import {
+  RESUBMIT_COOLDOWN_MS, type ProfileDraftInput, type CreateTrackInput, type GigDoc, type BookingRequestDoc,
+} from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 // Admin SDK must target the storage emulator (mirrors helpers.ts) — needed
@@ -18,8 +20,11 @@ const abucket = adminStorage(admin).bucket("gatekeep-dev-jg.firebasestorage.app"
 
 // The draft-cap and deleteProfile tests below make several sequential
 // callable invocations per test; give them the same cold-start headroom
-// used elsewhere in this suite (see members.test.ts / review.test.ts).
-vi.setConfig({ testTimeout: 15_000 });
+// used elsewhere in this suite (see members.test.ts / review.test.ts). The
+// SP4 (Task 7) booking-cascade test further down chains a real
+// applyToGig -> acceptBooking pair on top of that, matching
+// bookingLifecycle.test.ts's own 20s precedent for this family of tests.
+vi.setConfig({ testTimeout: 20_000 });
 
 const draft = (handle: string): ProfileDraftInput =>
   ({ type: "musician", subtype: "band", name: "The Midnight Owls", handle });
@@ -30,6 +35,55 @@ const draft = (handle: string): ProfileDraftInput =>
 // stay focused on submit/resubmit/delete mechanics.
 const curatorDraft = (handle: string): ProfileDraftInput =>
   ({ type: "curator", subtype: "venue", name: "The Rooftop", handle });
+
+// SP4 (Task 7) fixture — an approved musician profile with genuine
+// portfolio-gate content, mirroring bookings.test.ts/bookingLifecycle.test.ts's
+// identical helper. This file's own subject is profile deletion mechanics,
+// not booking negotiation.
+async function makeApprovedMusicianProfile(emailPrefix: string) {
+  const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+    "createProfileDraft",
+    { type: "musician", subtype: "solo", name: "The Act", handle: `${emailPrefix}_${Date.now()}_${Math.floor(Math.random() * 1e6)}` },
+    owner.user);
+  await adb.doc(`profiles/${profileId}`).update({
+    "portfolio.bio": "A great live act.",
+    "portfolio.genres": ["rock"],
+    "portfolio.avatarPhotoPath": "public/photos/seed/avatar-seed.jpg",
+  });
+  await adb.doc(`profiles/${profileId}/tracks/seed-track`).set({
+    title: "Demo", status: "approved", uploaderUid: owner.uid,
+    startSec: 0, durationSec: 20, storagePath: "public/tracks/seed/demo.m4a",
+    rejectionReason: null, failureReason: null, order: 0,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  await callFn("submitProfileForReview", { profileId }, owner.user);
+  const admin = await makeAdminUser(`${emailPrefix}a`);
+  await callFn("reviewProfile", { profileId, decision: "approved" }, admin.user);
+  return { owner, profileId };
+}
+
+// SP4 (Task 7) fixture — a directly-seeded "open" gig, mirroring
+// review.test.ts's identical seedOpenGig helper.
+async function seedOpenGig(curatorProfileId: string): Promise<string> {
+  const ref = adb.collection("gigs").doc();
+  const now = Date.now();
+  const doc: GigDoc = {
+    curatorProfileId, seriesId: null, detachedFromTemplate: false,
+    title: "Seeded gig", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+    budget: { minCents: 1000, maxCents: 2000, structure: "perHour" },
+    startsAt: now + 7 * 24 * 3600 * 1000, durationMinutes: 60,
+    provisions: { hasPA: null, hasBackline: null, notes: null },
+    location: {
+      venueName: "The Rooftop", neighborhood: "Downtown", city: "Austin",
+      geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: "123 Main St, Austin, TX",
+    },
+    status: "open", createdAt: now, updatedAt: now,
+    bookingId: null, bookedMusicianProfileId: null,
+  };
+  await ref.set(doc);
+  return ref.id;
+}
 
 describe("createProfileDraft", () => {
   it("creates draft profile, claims handle, adds creator as admin member", async () => {
@@ -241,6 +295,41 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     await adb.doc(`curatorAccess/${uid}`).set({});
     await callFn("deleteProfile", { profileId }, user);
     expect((await adb.doc(`curatorAccess/${uid}`).get()).exists).toBe(false);
+  });
+
+  // SP4 (Task 7)
+  it("unwinds a confirmed booking naming this profile — the booking survives as an 'expired' top-level record referencing the now-deleted profile id", async () => {
+    const { user: curatorUser } = await signUpTestUser(`s6d-${Date.now()}@test.com`);
+    const { profileId: curatorProfileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`s6d_${Date.now()}`), curatorUser);
+    await seedCuratorGateContent(adb, curatorProfileId);
+    await callFn("submitProfileForReview", { profileId: curatorProfileId }, curatorUser);
+    const adminUser = await makeAdminUser("s6dadmin");
+    await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, adminUser.user);
+
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("s6dm");
+    const gigId = await seedOpenGig(curatorProfileId);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curatorUser);
+    expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
+
+    // Flip straight to "rejected" via the admin SDK (bypassing reviewProfile's
+    // OWN reject-from-approved cascade entirely) so this test isolates
+    // deleteProfile's OWN unwind cascade — not a booking already unwound by
+    // an earlier step of the normal review-then-delete flow. This also
+    // satisfies deleteProfile's own draft/rejected-only gate.
+    await adb.doc(`profiles/${curatorProfileId}`).update({ status: "rejected" });
+
+    await callFn("deleteProfile", { profileId: curatorProfileId }, curatorUser);
+
+    expect((await adb.doc(`profiles/${curatorProfileId}`).get()).exists).toBe(false);
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+    expect(after.cancellation).toBeNull();
+    // Top-level `bookings` doc is untouched by profileRef's recursiveDelete —
+    // it survives, still naming the now-deleted curatorProfileId.
+    expect(after.curatorProfileId).toBe(curatorProfileId);
   });
 });
 

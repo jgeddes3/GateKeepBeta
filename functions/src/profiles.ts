@@ -10,6 +10,7 @@ import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { writeAudit } from "./review.js";
 import { bucket, logDeleteFailure } from "./storage.js";
 import { syncCuratorAccess } from "./curator.js";
+import { unwindBookingsForModeration } from "./bookingLifecycle.js";
 
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
@@ -287,6 +288,15 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
     await deleteGigsForProfile(db, profileId);
     await deleteSeriesForProfile(db, profileId);
   }
+
+  // SP4 (Task 7): unwind every booking naming this profile as either side —
+  // musician or curator. Deliberately runs before recursiveDelete (mirrors
+  // the gig/series cascade's own ordering just above), though it would work
+  // equally well after: `bookings` is a top-level collection, not a
+  // subcollection of this profile, so recursiveDelete never reaches it
+  // either way. These bookings deliberately SURVIVE as "expired" top-level
+  // records that now reference a dead profile id — sub-5 must tolerate that.
+  await unwindBookingsForModeration({ profileId });
 
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
 

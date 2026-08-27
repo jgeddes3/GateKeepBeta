@@ -4,6 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import { isValidDocId, type AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
 import { syncCuratorAccess } from "./curator.js";
+import { unwindBookingsForModeration } from "./bookingLifecycle.js";
 
 export function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
@@ -128,6 +129,14 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     }
 
     await batch.commit();
+
+    // SP4 (Task 7): unwind every booking naming this profile as EITHER side
+    // — added regardless of isCurator (a musician profile's own confirmed
+    // bookings need this exactly as much as a curator's do; the isCurator
+    // branch above only ever touched gigs/series, never bookings).
+    if (decision === "rejected" && wasApproved) {
+      await unwindBookingsForModeration({ profileId });
+    }
 
     // curatorAccess recompute for reject-from-approved runs AFTER the batch
     // commits: syncCuratorAccess re-reads each member's profiles live, and

@@ -15,6 +15,15 @@ import { notifyProfileMembers } from "./notifications.js";
 // window is pointed at the same remedy (reportNoShow) either way.
 const ALREADY_STARTED_MESSAGE = "This booking has already started — report a no-show instead.";
 
+// Task 7 carry-forward (b): a whole-run booking whose future-filled
+// occurrence set is empty is NOT always "already started" — its dates may
+// instead have been cancelled one-by-one via cancelOccurrence, or re-filled
+// by a LATER booking of the same series (see executeCancellation's own
+// comment on how these two cases are told apart from a genuine past-start).
+// This is the truthful alternative for that case.
+const NO_UPCOMING_DATES_MESSAGE =
+  "No upcoming booked dates remain on this booking — nothing to cancel.";
+
 type CancelOutcome = "deposit_forfeited" | "deposit_refunded";
 
 function validateCancelReason(reason: unknown): string {
@@ -197,31 +206,26 @@ function cancellationCopy(
 
 interface CancelBookingInput { bookingId: string; reason: string; }
 
-export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" }, async (req) => {
-  const uid = requireAuthUid(req);
-  requireVerifiedEmail(req);
-  const { bookingId, reason } = req.data ?? ({} as CancelBookingInput);
-  if (!isValidDocId(bookingId)) throw new HttpsError("invalid-argument", "A booking id is required.");
+// Extracted core of cancelBooking (Task 7) — shared with pauseSeries/
+// endSeries's own curator-side run-cancellation call (gigSeries.ts), which
+// supplies a synthetic reason ("Series paused/ended by curator") and
+// side:"curator" directly rather than resolving it from a caller's
+// membership (there's no ambiguity to resolve there — the series action IS
+// the curator side acting). `booking` is the OUTER (pre-transaction) read of
+// the doc, used only for its IMMUTABLE fields (gigId/seriesId/
+// musicianProfileId/curatorProfileId are all fixed at booking-creation time);
+// the transaction below re-reads bookingRef fresh for everything mutable.
+// Every check/side-effect here is exactly what cancelBooking's callable used
+// to run inline — behavior must not drift (Task 6's cancelBooking tests are
+// the regression harness for this refactor).
+export async function executeCancellation(
+  bookingId: string, booking: BookingRequestDoc, side: BookingSide, reason: string, now: number,
+): Promise<{ outcome: CancelOutcome; markApplied: boolean }> {
   const trimmedReason = validateCancelReason(reason);
-
   const db = getFirestore();
   const bookingRef = db.doc(`bookings/${bookingId}`);
-  const bookingSnap = await bookingRef.get();
-  if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
-  const booking = bookingSnap.data() as BookingRequestDoc;
-
-  // Membership doesn't depend on mutable booking state — safe to resolve
-  // once, outside the transaction (mirrors requireBookingSide's rationale
-  // in bookings.ts).
-  const callerSide = await resolveBookingSideStrict(booking, uid);
-
-  // Captured once, before the transaction — every check below (the window
-  // math, the record we persist) reads this SAME instant, so a `now` no
-  // longer current by commit time (a transaction retry, or a slow commit)
-  // can never disagree with what actually gets written. A boundary case may
-  // therefore favor the canceller by a few seconds — accepted.
-  const now = Date.now();
   const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
+
   // Status check, the "next affected occurrence" read (a query for
   // whole-run, a direct doc read for single), the reliability doc (needed
   // up front in case a mark ends up applying — see the write phase below),
@@ -262,7 +266,26 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
       // reopened below (see getFutureFilledOccurrences/
       // reopenSeriesOccurrences).
       occurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, bookingId, now);
-      if (occurrenceDocs.length === 0) throw new HttpsError("failed-precondition", ALREADY_STARTED_MESSAGE);
+      if (occurrenceDocs.length === 0) {
+        // Task 7 carry-forward (b): distinguish "the run genuinely already
+        // started" from "there's nothing left of THIS booking's run to
+        // cancel" (its dates were cancelled per-occurrence via
+        // cancelOccurrence, or re-filled by a later booking of the same
+        // series — either way, the gig's own bookingId field no longer
+        // names this booking, so getFutureFilledOccurrences' bookingId
+        // filter above can never find it). The booking's own LAST
+        // still-linked occurrence (any status, via the (bookingId,startsAt)
+        // index) is the only truthful signal left: if it's in the past, the
+        // run genuinely already started — "report instead" is correct
+        // advice; if there's no such occurrence at all, "already started"
+        // would be a lie — there's simply nothing left of this booking's
+        // run to act on.
+        const lastLinkedSnap = await tx.get(
+          db.collection("gigs").where("bookingId", "==", bookingId).orderBy("startsAt", "desc").limit(1));
+        const lastLinked = lastLinkedSnap.docs[0]?.data() as GigDoc | undefined;
+        throw new HttpsError("failed-precondition",
+          lastLinked && lastLinked.startsAt <= now ? ALREADY_STARTED_MESSAGE : NO_UPCOMING_DATES_MESSAGE);
+      }
       nextGigId = occurrenceDocs[0].id;
       nextStartsAt = occurrenceDocs[0].data().startsAt as number;
     } else {
@@ -286,11 +309,11 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
     // "deposit.forfeitedTo" dot-path key below only applies on the curator/
     // forfeit branch, so this can't be a single object literal.
     const bookingUpdate: { [key: string]: unknown } = {
-      status: callerSide === "curator" ? "cancelled_by_curator" : "cancelled_by_musician",
+      status: side === "curator" ? "cancelled_by_curator" : "cancelled_by_musician",
       resolvedAt: now, updatedAt: now,
     };
 
-    if (callerSide === "curator") {
+    if (side === "curator") {
       // STRICTLY less-than — exactly CURATOR_FORFEIT_WINDOW_HOURS refunds.
       outcome = hoursBeforeStart < CURATOR_FORFEIT_WINDOW_HOURS ? "deposit_forfeited" : "deposit_refunded";
       if (outcome === "deposit_forfeited") bookingUpdate["deposit.forfeitedTo"] = "musician";
@@ -301,7 +324,7 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
     }
 
     bookingUpdate.cancellation = {
-      by: callerSide, reason: trimmedReason, at: now, hoursBeforeStart, outcome, markApplied,
+      by: side, reason: trimmedReason, at: now, hoursBeforeStart, outcome, markApplied,
     };
 
     // ---- WRITES ----
@@ -338,13 +361,45 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
     const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
     const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
     const { curatorBody, musicianBody } =
-      cancellationCopy(callerSide, result.outcome, result.markApplied, "booking", gigTitle);
+      cancellationCopy(side, result.outcome, result.markApplied, "booking", gigTitle);
     await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", title: "Booking cancelled", body: curatorBody });
     await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", title: "Booking cancelled", body: musicianBody });
   } catch (e) {
-    console.error(`cancelBooking: failed to notify for booking ${bookingId}`, e);
+    console.error(`executeCancellation: failed to notify for booking ${bookingId}`, e);
   }
 
+  return result;
+}
+
+export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" }, async (req) => {
+  const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
+  const { bookingId, reason } = req.data ?? ({} as CancelBookingInput);
+  if (!isValidDocId(bookingId)) throw new HttpsError("invalid-argument", "A booking id is required.");
+  // Validated here too, ahead of the membership/authz read below — preserves
+  // the codebase's input-validation-before-authz ordering convention.
+  // executeCancellation independently re-validates+trims the same value for
+  // its OWN (non-cancelBooking) callers, so this call is deliberately
+  // redundant rather than load-bearing here.
+  validateCancelReason(reason);
+
+  const db = getFirestore();
+  const bookingRef = db.doc(`bookings/${bookingId}`);
+  const bookingSnap = await bookingRef.get();
+  if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+  const booking = bookingSnap.data() as BookingRequestDoc;
+
+  // Membership doesn't depend on mutable booking state — safe to resolve
+  // once, outside the transaction (mirrors requireBookingSide's rationale
+  // in bookings.ts).
+  const callerSide = await resolveBookingSideStrict(booking, uid);
+
+  // Captured once — see executeCancellation's own identical rationale (a
+  // `now` no longer current by commit time can never disagree with what
+  // actually gets written). A boundary case may therefore favor the
+  // canceller by a few seconds — accepted.
+  const now = Date.now();
+  await executeCancellation(bookingId, booking, callerSide, reason, now);
   return { ok: true };
 });
 
@@ -672,3 +727,106 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
 
   return { ok: true };
 });
+
+// ---------- Task 7: series/lifecycle collisions + cascades ----------
+
+export interface UnwindModerationOpts {
+  gigIds?: string[];
+  seriesId?: string;
+  profileId?: string;
+  // Notification body sent to the musician side of each affected booking —
+  // defaults to the generic moderation copy below, which deliberately never
+  // echoes the moderation reason (see this function's own comment). cancelGig
+  // — a curator's own DIRECT action on their own still-open gig, not
+  // moderation — overrides this with honest "the gig was cancelled" wording.
+  notifyBody?: string;
+}
+
+const DEFAULT_UNWIND_NOTIFY_BODY = "This gig is no longer available.";
+
+// Shared unwind for every "the gig/series/profile underneath this booking is
+// going away, and it's nobody's fault" collision — takedownGig (occurrence +
+// series scope), cancelGig (a still-open gig only — a filled one goes
+// through cancelBooking instead), and reviewProfile's reject-from-approved +
+// deleteProfile's cascade (either profile side). pauseSeries/endSeries do
+// NOT call this — a booked run being cancelled by the series pausing/ending
+// is a real CURATOR-side cancellation (forfeiture/mark consequences apply),
+// so it goes through executeCancellation above instead.
+//
+// Distinct from cancelBooking/cancelOccurrence/reportNoShow: those are a
+// PARTY acting on their own booking, with a side-dependent outcome (curator
+// forfeits, musician gets marked). This is an ADMIN/SYSTEM action taking the
+// gig/series/profile out from under the booking — no party did anything
+// wrong, so: no cancellation record, no forfeiture, no reliability mark.
+// `open` bookings simply expire (nobody was ever confirmed); `confirmed`
+// bookings ALSO simply expire — sub-5 reads status:"expired" + a non-null
+// `deposit` as "refund the deposit", no separate write needed here.
+//
+// Reopens NOTHING: every caller here is ALSO taking the affected gig(s) down
+// (closed/cancelled/taken_down) or removing the profile from the world in
+// its OWN write — there is nothing live left for a reopened gig to serve.
+//
+// Per-booking failure isolation (try/catch, log, continue) — mirrors
+// acceptBooking's supersedeSiblingBooking idiom in bookings.ts: one poisoned
+// booking must never abort the unwind of every other affected one.
+//
+// Bounded, index-backed queries only — reuses the (gigId,status),
+// (seriesId,status), (musicianProfileId,status,updatedAt) and
+// (curatorProfileId,status,updatedAt) composite indexes already in
+// firestore.indexes.json; no new index needed.
+export async function unwindBookingsForModeration(opts: UnwindModerationOpts): Promise<void> {
+  const db = getFirestore();
+  const now = Date.now();
+  const notifyBody = opts.notifyBody ?? DEFAULT_UNWIND_NOTIFY_BODY;
+
+  // A booking can be reachable via more than one requested scope at once
+  // (e.g. a series-scoped takedown whose whole-run booking is ALSO caught by
+  // one of the taken-down occurrence gigIds) — de-dupe by booking id before
+  // processing so it's never touched twice.
+  const candidates = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+  const UNWIND_STATUSES = ["open", "confirmed"] as const;
+
+  async function collect(field: "gigId" | "seriesId" | "musicianProfileId" | "curatorProfileId", value: string) {
+    for (const status of UNWIND_STATUSES) {
+      const snap = await db.collection("bookings").where(field, "==", value).where("status", "==", status).get();
+      for (const doc of snap.docs) candidates.set(doc.id, doc);
+    }
+  }
+
+  for (const gigId of opts.gigIds ?? []) await collect("gigId", gigId);
+  if (opts.seriesId) await collect("seriesId", opts.seriesId);
+  if (opts.profileId) {
+    await collect("musicianProfileId", opts.profileId);
+    await collect("curatorProfileId", opts.profileId);
+  }
+
+  for (const doc of candidates.values()) {
+    try {
+      const booking = doc.data() as BookingRequestDoc;
+      const batch = db.batch();
+      batch.update(doc.ref, { status: "expired", resolvedAt: now, updatedAt: now });
+
+      // Clear series linkage ONLY when the series still names THIS booking
+      // as its active one — mirrors reopenSeriesOccurrences' ownership-gated
+      // clear in cancelBooking/reportNoShow (a later, still-active booking
+      // of the same series must not have its own linkage clobbered by an
+      // older booking's unwind). No occurrence reopen here — see this
+      // function's own top comment.
+      if (booking.seriesId) {
+        const seriesSnap = await db.doc(`gigSeries/${booking.seriesId}`).get();
+        const series = seriesSnap.data() as GigSeriesDoc | undefined;
+        if (series?.activeBookingId === doc.id) {
+          batch.update(seriesSnap.ref, { activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now });
+        }
+      }
+
+      await batch.commit();
+
+      await notifyProfileMembers(booking.musicianProfileId, {
+        kind: "booking", title: "Booking no longer available", body: notifyBody,
+      });
+    } catch (e) {
+      console.error(`unwindBookingsForModeration: failed to unwind booking ${doc.id}`, e);
+    }
+  }
+}

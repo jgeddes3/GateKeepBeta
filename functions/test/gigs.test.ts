@@ -1,15 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder, coarsen } from "../src/geocode.js";
-import { MAX_OPEN_GIGS_PER_PROFILE, type ProfileDraftInput, type GigDoc } from "@gatekeep/shared";
+import { MAX_OPEN_GIGS_PER_PROFILE, type ProfileDraftInput, type GigDoc, type BookingRequestDoc } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
 const stub = new StubGeocoder();
-vi.setConfig({ testTimeout: 15_000 });
+// 20s (not this file's prior 15s) — the SP4 (Task 7) cancelGig/takedownGig
+// booking-collision tests below chain 8+ callables (createProfileDraft x2,
+// submitProfileForReview x2, reviewProfile x2, createGig, publishGig,
+// applyToGig, acceptBooking, then the callable under test) before their
+// first assertion, matching bookingLifecycle.test.ts/bookings.test.ts's own
+// precedent for this same family of chain-heavy tests.
+vi.setConfig({ testTimeout: 20_000 });
 
 const SEED_ADDRESS = "123 Main St, Austin, TX"; // matches helpers.ts's seedCuratorGateContent
 
@@ -50,6 +56,48 @@ async function createDraftGig(
   const { gigId } = await callFn<Record<string, unknown>, { gigId: string }>(
     "createGig", { profileId, ...gigContent(overrides) }, user);
   return gigId;
+}
+
+// SP4 (Task 7) fixtures — an approved musician profile + a real booking
+// chain, mirroring bookings.test.ts/bookingLifecycle.test.ts's identical
+// helpers. This file's own subject is gig/series lifecycle collisions, not
+// booking negotiation mechanics, so these stay minimal (single-offer accept
+// only).
+async function makeApprovedMusicianProfile(emailPrefix: string) {
+  const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+    "createProfileDraft",
+    { type: "musician", subtype: "solo", name: "The Act", handle: `${emailPrefix}_${Date.now()}_${Math.floor(Math.random() * 1e6)}` },
+    owner.user);
+  await adb.doc(`profiles/${profileId}`).update({
+    "portfolio.bio": "A great live act.",
+    "portfolio.genres": ["rock"],
+    "portfolio.avatarPhotoPath": "public/photos/seed/avatar-seed.jpg",
+  });
+  await adb.doc(`profiles/${profileId}/tracks/seed-track`).set({
+    title: "Demo", status: "approved", uploaderUid: owner.uid,
+    startSec: 0, durationSec: 20, storagePath: "public/tracks/seed/demo.m4a",
+    rejectionReason: null, failureReason: null, order: 0,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  await callFn("submitProfileForReview", { profileId }, owner.user);
+  const admin = await makeAdminUser(`${emailPrefix}a`);
+  await callFn("reviewProfile", { profileId, decision: "approved" }, admin.user);
+  return { owner, profileId };
+}
+
+function offerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { amountCents: 15000, note: "Looking forward to it!", ...overrides };
+}
+
+async function pollNotifications(uid: string) {
+  const deadline = Date.now() + 10_000;
+  let notes = await adb.collection(`users/${uid}/notifications`).get();
+  while (notes.empty && Date.now() < deadline) {
+    await wait(250);
+    notes = await adb.collection(`users/${uid}/notifications`).get();
+  }
+  return notes;
 }
 
 describe("createGig", () => {
@@ -366,6 +414,50 @@ describe("cancelGig", () => {
     await expect(callFn("cancelGig", { gigId }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+
+  // SP4 (Task 7)
+  it("rejects cancelling a FILLED gig with a distinct 'cancel the booking instead' message — cancelGig never touches a real booking", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cn5", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cn5m");
+    const gigId = await createDraftGig(curatorProfileId, curator.user);
+    await callFn("publishGig", { gigId }, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curator.user);
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+
+    await expect(callFn("cancelGig", { gigId }, curator.user)).rejects.toMatchObject({
+      code: "functions/failed-precondition",
+      message: expect.stringMatching(/cancel the booking instead/i),
+    });
+
+    // Untouched — the refusal must not have flipped either doc.
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+    expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
+  });
+
+  // SP4 (Task 7)
+  it("cancelling a still-open gig expires its open booking requests (application), notifying the applicant", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cn6", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cn6m");
+    const gigId = await createDraftGig(curatorProfileId, curator.user);
+    await callFn("publishGig", { gigId }, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+
+    await callFn("cancelGig", { gigId }, curator.user);
+
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("cancelled");
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+    expect(typeof after.resolvedAt).toBe("number");
+    // Moderation/system unwind — no cancellation record, no forfeiture, no mark.
+    expect(after.cancellation).toBeNull();
+
+    const musicianNotes = await pollNotifications(musician.uid);
+    expect(musicianNotes.docs.some((d) =>
+      d.data().kind === "booking" && /cancelled/i.test(d.data().body as string))).toBe(true);
+  });
 });
 
 describe("takedownGig", () => {
@@ -465,5 +557,87 @@ describe("takedownGig", () => {
     const admin = await makeAdminUser("td7a");
     await expect(callFn("takedownGig", { gigId, scope: "bogus", reason: "x" }, admin.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+
+  // SP4 (Task 7)
+  it("occurrence scope with a confirmed booking: the booking expires (no cancellation record/forfeit/mark), deposit untouched, musician notified", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td8", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td8m");
+    const gigId = await createDraftGig(curatorProfileId, curator.user);
+    await callFn("publishGig", { gigId }, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curator.user);
+    const depositBefore = (await adb.doc(`bookings/${bookingId}`).get()).data()?.deposit;
+
+    const admin = await makeAdminUser("td8a");
+    await callFn("takedownGig", { gigId, scope: "occurrence", reason: "Reported as unsafe venue." }, admin.user);
+
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("taken_down");
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+    expect(typeof after.resolvedAt).toBe("number");
+    expect(after.cancellation).toBeNull(); // moderation — nobody's fault, no forfeit/mark record
+    expect(after.deposit).toEqual(depositBefore); // untouched — sub-5 reads expired+deposit as refund
+
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+    expect(reliability).toBeUndefined(); // no mark ever applied
+
+    const musicianNotes = await pollNotifications(musician.uid);
+    expect(musicianNotes.docs.some((d) =>
+      d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
+  });
+
+  // SP4 (Task 7)
+  it("series scope with a confirmed whole-run booking: the run booking expires and the series' activeBookingId linkage clears", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td9", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td9m");
+    const seriesRef = adb.collection("gigSeries").doc();
+    await seriesRef.set({
+      curatorProfileId, fillMode: "whole_run", status: "active",
+      recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+      template: {
+        title: "Friday Night Jazz", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+        budget: { minCents: 10_000, maxCents: 20_000, structure: "perHour" }, durationMinutes: 90,
+        provisions: { hasPA: null, hasBackline: null, notes: null },
+        location: {
+          venueName: "The Green Room", neighborhood: "Downtown", city: "Austin",
+          geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: SEED_ADDRESS,
+        },
+      },
+      templatePrivateLocation: { address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 } },
+      materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+      activeBookingId: null, bookedMusicianProfileId: null,
+    });
+
+    try {
+      const rootId = await createDraftGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${rootId}`).update({ seriesId: seriesRef.id });
+      await callFn("publishGig", { gigId: rootId }, curator.user);
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: rootId, musicianProfileId, offer: offerPayload() }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+      expect((await seriesRef.get()).data()?.activeBookingId).toBe(bookingId);
+
+      const admin = await makeAdminUser("td9a");
+      await callFn("takedownGig", { gigId: rootId, scope: "series", reason: "Repeated noise complaints." }, admin.user);
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(after.status).toBe("expired");
+      expect(after.cancellation).toBeNull();
+
+      const seriesAfter = (await seriesRef.get()).data();
+      expect(seriesAfter?.activeBookingId).toBeNull();
+      expect(seriesAfter?.bookedMusicianProfileId).toBeNull();
+      expect(seriesAfter?.status).toBe("paused");
+    } finally {
+      // Never leave an active series behind for the shared emulator's
+      // dailySweep scan (mirrors gigSeries.test.ts/bookings.test.ts's
+      // identical rationale) — takedownGig's own series-scope cascade
+      // already pauses it, but guard defensively in case an assertion
+      // above throws first.
+      await seriesRef.update({ status: "ended" });
+    }
   });
 });
