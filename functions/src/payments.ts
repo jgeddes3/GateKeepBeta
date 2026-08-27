@@ -100,7 +100,10 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
     requireVerifiedEmail(req);
     const { profileId, setupIntentId } = req.data ?? ({} as RefreshPaymentMethodInput);
     if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
-    if (setupIntentId !== undefined && !STRIPE_ID_RE.test(setupIntentId)) {
+    // Review round 2, #3: RegExp.test coerces a non-string to a string first
+    // (e.g. `123` -> "123" would otherwise sail through) — check the type
+    // explicitly rather than leaning on the coercion.
+    if (setupIntentId !== undefined && (typeof setupIntentId !== "string" || !STRIPE_ID_RE.test(setupIntentId))) {
       throw new HttpsError("invalid-argument", "Invalid setup intent id.");
     }
     await requireProfileMember(profileId, uid);
@@ -108,8 +111,9 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
     const sp = await getStripeProfileDoc(profileId);
     if (!sp?.customerId) throw new HttpsError("failed-precondition", "No payment account yet — save a card first.");
     const stripe = getStripe();
-    let pm: { id: string; brand: string; last4: string } | null;
+
     if (setupIntentId) {
+      let pm: { id: string; brand: string; last4: string } | null;
       try {
         pm = await stripe.getSetupIntentPaymentMethod(setupIntentId, sp.customerId);
       } catch (e) {
@@ -118,10 +122,23 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
         }
         throw e;
       }
-    } else {
-      pm = await stripe.getDefaultPaymentMethod(sp.customerId);
+      // Review round 2, #2: a null resolution here is NOT authoritative "no
+      // card on file" — it only means THIS SetupIntent didn't pan out
+      // (unknown id, nothing attached). Wiping the cache would erase a
+      // perfectly good card that was already on file. Refuse instead and
+      // leave the cached fields untouched — only the unconditional write on
+      // the no-setupIntentId branch below is authoritative.
+      if (!pm) throw new HttpsError("failed-precondition", "We couldn't find that card — try saving it again.");
+      await stripe.setDefaultPaymentMethod(sp.customerId, pm.id);
+      await db.doc(`profiles/${profileId}/private/stripe`).set(
+        { defaultPaymentMethodId: pm.id, cardBrand: pm.brand, cardLast4: pm.last4, updatedAt: Date.now() }, { merge: true });
+      return { hasCard: true, cardBrand: pm.brand, cardLast4: pm.last4 };
     }
-    if (pm) await stripe.setDefaultPaymentMethod(sp.customerId, pm.id);
+
+    // Authoritative branch: reads the customer's actual current default —
+    // null here IS truthful "no card on file", so it's fine (and correct)
+    // for this write to clear the cache.
+    const pm = await stripe.getDefaultPaymentMethod(sp.customerId);
     await db.doc(`profiles/${profileId}/private/stripe`).set({
       defaultPaymentMethodId: pm?.id ?? null, cardBrand: pm?.brand ?? null, cardLast4: pm?.last4 ?? null,
       updatedAt: Date.now(),
@@ -250,7 +267,13 @@ webhookHandlers["account.updated"] = async (object) => {
   // Review round 1 (M4): validate BEFORE building a doc path from
   // attacker/Stripe-controlled metadata — event payloads are only signature-
   // verified, not shape-validated, so metadata.profileId is untrusted input.
-  if (!isValidDocId(profileId)) return;
+  if (!isValidDocId(profileId)) {
+    // Review round 2 (log nit): this is corrupt metadata on an account
+    // Stripe itself sent us — more log-worthy than the ordinary accountId
+    // mismatch case below (that one's often just a stale/replayed event).
+    console.warn(`account.updated webhook: metadata.profileId is not a valid doc id — accountId=${accountId}, profileId=${JSON.stringify(profileId)}`);
+    return;
+  }
   const sp = await getStripeProfileDoc(profileId);
   if (sp?.accountId !== accountId) {
     // Review round 1 (M3): a mismatch here means either a stale/replayed

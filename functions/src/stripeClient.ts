@@ -600,7 +600,19 @@ export class RealStripe implements StripeLike {
     await this.s.customers.update(customerId, { invoice_settings: { default_payment_method: paymentMethodId } });
   }
   async getSetupIntentPaymentMethod(setupIntentId: string, expectedCustomerId: string) {
-    const si = await this.s.setupIntents.retrieve(setupIntentId, { expand: ["payment_method"] });
+    let si: Stripe.SetupIntent;
+    try {
+      si = await this.s.setupIntents.retrieve(setupIntentId, { expand: ["payment_method"] });
+    } catch (e) {
+      // resource_missing (or a bare 404) means this SetupIntent id doesn't
+      // exist — matches the interface contract (null, not a throw) and the
+      // fake's identical "unknown id -> null" behavior. Review round 2, #1.
+      if (e instanceof Stripe.errors.StripeInvalidRequestError
+        && (e.code === "resource_missing" || e.statusCode === 404)) {
+        return null;
+      }
+      throw e;
+    }
     const customerId = typeof si.customer === "string" ? si.customer : (si.customer?.id ?? null);
     if (customerId !== expectedCustomerId) {
       throw new StripeSetupIntentMismatchError(setupIntentId, expectedCustomerId, customerId);

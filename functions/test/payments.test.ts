@@ -274,4 +274,27 @@ describe("refreshPaymentMethod", () => {
       "refreshPaymentMethod", { profileId: b.profileId, setupIntentId }, b.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+
+  it("an unknown setupIntentId (fake resolves to null) fails with failed-precondition and leaves the cached card untouched (review round 2, #2)", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("rpmsiunk");
+    await callFn("createSetupIntent", { profileId }, owner.user);
+    const before = await getStripeDoc(profileId);
+    expect(before?.defaultPaymentMethodId).toBe("pm_fake_4242");
+
+    await expect(callFn<RefreshPaymentMethodInput, unknown>(
+      "refreshPaymentMethod", { profileId, setupIntentId: `seti_fake_bogus_${Date.now()}` }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = await getStripeDoc(profileId);
+    expect(after?.defaultPaymentMethodId).toBe(before?.defaultPaymentMethodId);
+    expect(after?.cardBrand).toBe(before?.cardBrand);
+    expect(after?.cardLast4).toBe(before?.cardLast4);
+  });
+
+  it("a non-string setupIntentId is rejected with invalid-argument — RegExp.test would otherwise coerce it (review round 2, #3)", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("rpmsitype");
+    await expect(callFn<{ profileId: string; setupIntentId: number }, unknown>(
+      "refreshPaymentMethod", { profileId, setupIntentId: 123 }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
 });
