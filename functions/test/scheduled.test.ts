@@ -722,6 +722,85 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
       await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
     }
   });
+
+  it("Task 8 ruling: a future TAKEN_DOWN linked date does not delay completion — resolves 'completed' immediately once a PAST FILLED linked date exists, without waiting for the taken-down date's fictional end", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const { bookingId } = await seedBooking({
+      gigId: "pending", seriesId: "pending", curatorProfileId, musicianProfileId, status: "confirmed",
+    });
+    const { seriesId } = await seedSeries({
+      createdAt: now, updatedAt: now, curatorProfileId, status: "active",
+      materializedThrough: now + 1000 * DAY_MS,
+      activeBookingId: bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+    await adb.doc(`bookings/${bookingId}`).update({ seriesId });
+    const pastFilledGigId = await seedOccurrence(seriesId, curatorProfileId, {
+      status: "filled", startsAt: now - 3 * 3600_000, durationMinutes: 60,
+      bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+    await adb.doc(`bookings/${bookingId}`).update({ gigId: pastFilledGigId });
+    // takedownGig's occurrence scope leaves bookingId/bookedMusicianProfileId
+    // set on a "taken_down" gig belonging to a still-confirmed whole-run
+    // booking (see gigs.ts) — this future date will NEVER happen, but stays
+    // linked. Without the status:"filled" query filter, this would be picked
+    // as the "last linked occurrence" and delay resolution until its
+    // fictional end time, then wrongly award "completed".
+    await seedOccurrence(seriesId, curatorProfileId, {
+      status: "taken_down", startsAt: now + 5 * 3600_000, durationMinutes: 60,
+      bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+
+    try {
+      await runDailySweep(now); // the taken-down date's fictional end (now+6h) hasn't happened yet
+
+      const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(booking.status).toBe("completed");
+      expect(booking.resolvedAt).toBe(now);
+      const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+      expect(series.activeBookingId).toBeNull();
+      expect(series.bookedMusicianProfileId).toBeNull();
+      const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+      expect(reliability?.completedCount).toBe(1);
+    } finally {
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
+  });
+
+  it("Task 8 ruling variant: a future TAKEN_DOWN linked date with NO past FILLED linked date resolves 'expired', not 'completed' — completedCount stays 0", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const { bookingId } = await seedBooking({
+      gigId: "never-performed", seriesId: "pending", curatorProfileId, musicianProfileId, status: "confirmed",
+    });
+    const { seriesId } = await seedSeries({
+      createdAt: now, updatedAt: now, curatorProfileId, status: "active",
+      materializedThrough: now + 1000 * DAY_MS,
+      activeBookingId: bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+    await adb.doc(`bookings/${bookingId}`).update({ seriesId });
+    await seedOccurrence(seriesId, curatorProfileId, {
+      status: "taken_down", startsAt: now + 5 * 3600_000, durationMinutes: 60,
+      bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+
+    try {
+      await runDailySweep(now);
+
+      const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(booking.status).toBe("expired");
+      expect(booking.resolvedAt).toBe(now);
+      const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+      expect(series.activeBookingId).toBeNull();
+      expect(series.bookedMusicianProfileId).toBeNull();
+      const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+      expect(reliability?.completedCount ?? 0).toBe(0);
+    } finally {
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
+  });
 });
 
 describe("runDailySweep — SP4 Task 8: run-aware materializer (step 1 change)", () => {

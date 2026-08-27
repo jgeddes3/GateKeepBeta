@@ -539,21 +539,32 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // 7) Booking completion sweep (SP4 Task 8): resolves every "confirmed"
   // booking whose committed work is actually done. Booking-scoped occurrence
   // linkage — "linked" means gigs where bookingId == this booking's own id
-  // (the (bookingId,startsAt) index — mirrors bookingLifecycle.ts's
+  // (the (bookingId,status,startsAt) index — mirrors bookingLifecycle.ts's
   // getFutureFilledOccurrences/reportNoShow rationale for the same booking-
-  // scoping). A linked gig is always status:"filled" by this codebase's own
-  // invariant (bookingId is set/cleared in lockstep with status:"filled"
-  // everywhere a gig's linkage changes), so the most-recently-dated linked
-  // gig is exactly the run's (or single gig's) own last date.
+  // scoping). The query below ALSO filters status=="filled" — linkage does
+  // NOT imply status:"filled": takedownGig's occurrence scope deliberately
+  // leaves bookingId/bookedMusicianProfileId set on a gig it flips to
+  // "taken_down" when that gig belongs to a still-CONFIRMED whole-run
+  // booking (see gigs.ts's takedownGig — the run survives, only that one
+  // date is pulled), so a linked gig can be "taken_down". Without the status
+  // filter, a future taken-down-but-still-linked date would be picked as the
+  // "last linked occurrence", delaying this booking's resolution until that
+  // NEVER-TO-HAPPEN date's fictional end time, then wrongly awarding
+  // "completed" (+completedCount, a curator-facing reliability metric) for a
+  // performance that never occurred. Filtering to "filled" makes the query
+  // see only dates that remained genuinely booked, so the most-recently-
+  // dated MATCH is exactly the run's (or single gig's) own last performed
+  // (or still-pending) date.
   //
-  // Single-gig and whole-run bookings share ONE rule: find the linked gig
-  // with the latest startsAt.
-  //  - none found: the booking was confirmed but every occurrence it ever
-  //    filled has since been individually reopened (cancelOccurrence) before
-  //    any of them happened — nothing was ever performed. Whole-run only
-  //    (a single-gig booking has no cancelOccurrence path, so this can't
-  //    happen to one) — resolves to "expired" (the AMENDMENT's zombie
-  //    resolver, no-past-linked-occurrence branch).
+  // Single-gig and whole-run bookings share ONE rule: find the FILLED linked
+  // gig with the latest startsAt.
+  //  - none found: either every occurrence this booking ever filled has
+  //    since been individually reopened (cancelOccurrence) or taken down
+  //    before it happened — nothing was ever performed. Whole-run only (a
+  //    single-gig booking has no cancelOccurrence path, and takedownGig's
+  //    occurrence-scope skip doesn't apply to it either — see the unwind
+  //    note above — so this can't happen to one) — resolves to "expired"
+  //    (the AMENDMENT's zombie resolver, no-past-linked-occurrence branch).
   //  - found, but it hasn't ENDED yet (startsAt + durationMinutes > now):
   //    still ongoing — for a whole-run booking this also covers "series
   //    still active, more dates queued": step 1 above always births the next
@@ -565,15 +576,15 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   //    plan's "Normal" completion path (single-gig; or a whole-run booking
   //    whose schedule genuinely ran its course) and the AMENDMENT's zombie
   //    resolver "completed" branch (whole-run whose remaining dates were all
-  //    individually cancelled, or whose series paused/ended and
+  //    individually cancelled/taken down, or whose series paused/ended and
   //    cancelActiveRunBookingTolerant — gigSeries.ts — found nothing left to
-  //    cancel) — both collapse to the identical "last linked occurrence
-  //    already ended" check, so one code path serves both without the two
-  //    framings ever disagreeing on the outcome.
+  //    cancel) — both collapse to the identical "last FILLED linked
+  //    occurrence already ended" check, so one code path serves both without
+  //    the two framings ever disagreeing on the outcome.
   //
-  // Do NOT complete a confirmed booking whose future linked occurrences
-  // still exist and whose last occurrence hasn't ended — see the "found, not
-  // yet ended" bullet above.
+  // Do NOT complete a confirmed booking whose future FILLED linked
+  // occurrences still exist and whose last one hasn't ended — see the
+  // "found, not yet ended" bullet above.
   //
   // Whole-run resolutions (either branch) ALSO clear the series'
   // activeBookingId/bookedMusicianProfileId — ownership-gated (only when the
@@ -598,7 +609,8 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         const isWholeRun = booking.seriesId != null;
 
         const lastLinkedSnap = await db.collection("gigs")
-          .where("bookingId", "==", bookingId).orderBy("startsAt", "desc").limit(1).get();
+          .where("bookingId", "==", bookingId).where("status", "==", "filled")
+          .orderBy("startsAt", "desc").limit(1).get();
         const lastLinked = lastLinkedSnap.docs[0]?.data() as GigDoc | undefined;
 
         let outcome: "completed" | "expired" | null = null;
