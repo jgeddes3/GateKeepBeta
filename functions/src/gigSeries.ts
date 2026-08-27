@@ -14,7 +14,7 @@ import {
   resolveGigLocation, validateLocationInput, GEOCODE_FAILURE_MESSAGE, type GigLocationInput,
 } from "./gigs.js";
 import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
-import { executeCancellation } from "./bookingLifecycle.js";
+import { executeCancellation, ALREADY_STARTED_MESSAGE, NO_UPCOMING_DATES_MESSAGE } from "./bookingLifecycle.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -266,6 +266,42 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   return { ok: true };
 });
 
+// Task 7 fix: shared by pauseSeries/endSeries below — attempts a
+// curator-side cancellation of the series' active run booking (if any, and
+// still "confirmed") via executeCancellation, but TOLERATES exactly the
+// "no cancellable dates left" family of failures it can throw
+// (ALREADY_STARTED_MESSAGE / NO_UPCOMING_DATES_MESSAGE — a zombie run: every
+// future date was already cancelled per-occurrence, or the run's last date
+// already started). Matched via the exact exported message constants, never
+// an ad-hoc substring check, so this can never accidentally swallow some
+// OTHER failed-precondition it doesn't actually understand.
+//
+// The pause/end action itself must never be blocked by this zombie state —
+// the curator's intent (pause/end the series) has nothing to do with
+// whether this particular booking still has a cancellable date. Leaving the
+// booking "confirmed" with a now-stale series.activeBookingId is safe
+// interim state, not a bug: the materializer only births FILLED occurrences
+// for a still-ACTIVE series (a paused/ended one births nothing), the
+// rebooking-door guard in acceptBooking still correctly refuses a fresh
+// accept against this series' activeBookingId, and Task 8's daily sweep
+// resolves the booking (to "completed") within a day regardless. Any OTHER
+// error (not-found, a genuine transient failure, ...) still propagates —
+// this must never silently swallow a failure it doesn't recognize.
+async function cancelActiveRunBookingTolerant(
+  db: FirebaseFirestore.Firestore, activeBookingId: string, reason: string, now: number,
+): Promise<void> {
+  const bookingSnap = await db.doc(`bookings/${activeBookingId}`).get();
+  const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+  if (booking?.status !== "confirmed") return;
+  try {
+    await executeCancellation(activeBookingId, booking, "curator", reason, now);
+  } catch (e) {
+    const isNoCancellableDates = e instanceof HttpsError && e.code === "failed-precondition"
+      && (e.message === ALREADY_STARTED_MESSAGE || e.message === NO_UPCOMING_DATES_MESSAGE);
+    if (!isNoCancellableDates) throw e;
+  }
+}
+
 export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
@@ -291,13 +327,10 @@ export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1" 
   // reopenSeriesOccurrences) and clears the series' activeBookingId —
   // pausing leaves them exactly there; nothing further to do to them here
   // (pause has never cancelled occurrences outright — only endSeries, below,
-  // does that).
+  // does that). Tolerates a zombie (no-cancellable-dates) booking — see
+  // cancelActiveRunBookingTolerant's own comment.
   if (series.activeBookingId) {
-    const bookingSnap = await db.doc(`bookings/${series.activeBookingId}`).get();
-    const booking = bookingSnap.data() as BookingRequestDoc | undefined;
-    if (booking?.status === "confirmed") {
-      await executeCancellation(series.activeBookingId, booking, "curator", "Series paused by curator", Date.now());
-    }
+    await cancelActiveRunBookingTolerant(db, series.activeBookingId, "Series paused by curator", Date.now());
   }
 
   await seriesRef.update({ status: "paused", updatedAt: Date.now() });
@@ -324,13 +357,11 @@ export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1" },
   // run FIRST, so the occurrences it reopens (filled -> open) fall straight
   // into this function's existing future open|draft sweep below, exactly
   // like any other open date does when a series ends. No separate branch
-  // needed for a booked run's remaining dates.
+  // needed for a booked run's remaining dates. Tolerates a zombie
+  // (no-cancellable-dates) booking — see cancelActiveRunBookingTolerant's
+  // own comment.
   if (series.activeBookingId) {
-    const bookingSnap = await db.doc(`bookings/${series.activeBookingId}`).get();
-    const booking = bookingSnap.data() as BookingRequestDoc | undefined;
-    if (booking?.status === "confirmed") {
-      await executeCancellation(series.activeBookingId, booking, "curator", "Series ended by curator", Date.now());
-    }
+    await cancelActiveRunBookingTolerant(db, series.activeBookingId, "Series ended by curator", Date.now());
   }
 
   const now = Date.now();

@@ -460,6 +460,29 @@ describe("cancelGig", () => {
   });
 });
 
+// SP4 (Task 7 quality-review fixes) — shared whole_run series fixture for
+// the booked-run collision tests below (mirrors gigSeries.test.ts/
+// bookingLifecycle.test.ts's own seedSeries helpers).
+function seedWholeRunSeries(curatorProfileId: string) {
+  const ref = adb.collection("gigSeries").doc();
+  return ref.set({
+    curatorProfileId, fillMode: "whole_run", status: "active",
+    recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+    template: {
+      title: "Friday Night Jazz", description: "", wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 10_000, maxCents: 20_000, structure: "perHour" }, durationMinutes: 90,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: {
+        venueName: "The Green Room", neighborhood: "Downtown", city: "Austin",
+        geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: SEED_ADDRESS,
+      },
+    },
+    templatePrivateLocation: { address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 } },
+    materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+    activeBookingId: null, bookedMusicianProfileId: null,
+  }).then(() => ref);
+}
+
 describe("takedownGig", () => {
   it("rejects non-admin callers with permission-denied", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("td1", "venue");
@@ -638,6 +661,111 @@ describe("takedownGig", () => {
       // already pauses it, but guard defensively in case an assertion
       // above throws first.
       await seriesRef.update({ status: "ended" });
+    }
+  });
+
+  // SP4 (Task 7 quality review, CRITICAL #1)
+  it("series scope also sweeps FILLED siblings, not just open ones — a booked run's other occurrences all get taken down too", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td10", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td10m");
+    const series = await seedWholeRunSeries(curatorProfileId);
+    try {
+      const rootId = await createDraftGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${rootId}`).update({ seriesId: series.id });
+      await callFn("publishGig", { gigId: rootId }, curator.user);
+      const siblingId = await createDraftGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${siblingId}`).update({ seriesId: series.id });
+      await callFn("publishGig", { gigId: siblingId }, curator.user);
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: rootId, musicianProfileId, offer: offerPayload() }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+      // Sanity: the whole-run accept filled BOTH occurrences.
+      expect((await adb.doc(`gigs/${rootId}`).get()).data()?.status).toBe("filled");
+      expect((await adb.doc(`gigs/${siblingId}`).get()).data()?.status).toBe("filled");
+
+      const admin = await makeAdminUser("td10a");
+      await callFn("takedownGig", { gigId: rootId, scope: "series", reason: "Repeated noise complaints." }, admin.user);
+
+      const [rootAfter, siblingAfter] = await Promise.all(
+        [rootId, siblingId].map((id) => adb.doc(`gigs/${id}`).get()));
+      expect(rootAfter.data()?.status).toBe("taken_down");
+      // Was FILLED, not "open" — the P11 gap this fix closes.
+      expect(siblingAfter.data()?.status).toBe("taken_down");
+      // "taken_down" satisfies none of the gigs read rule's public-visibility
+      // disjuncts (open / filled / closed-with-linkage) — neither occurrence
+      // remains publicly readable.
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(after.status).toBe("expired");
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
+
+  // SP4 (Task 7 quality review, CRITICAL #2)
+  it("occurrence scope on a confirmed whole-run booking's initiating gig: the run survives (booking stays confirmed), the musician is notified about just that ONE date", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td11", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td11m");
+    const series = await seedWholeRunSeries(curatorProfileId);
+    try {
+      const rootId = await createDraftGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${rootId}`).update({ seriesId: series.id });
+      await callFn("publishGig", { gigId: rootId }, curator.user);
+      const siblingId = await createDraftGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${siblingId}`).update({ seriesId: series.id });
+      await callFn("publishGig", { gigId: siblingId }, curator.user);
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: rootId, musicianProfileId, offer: offerPayload() }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+
+      const admin = await makeAdminUser("td11a");
+      await callFn("takedownGig",
+        { gigId: rootId, scope: "occurrence", reason: "Complaint about this specific date." }, admin.user);
+
+      expect((await adb.doc(`gigs/${rootId}`).get()).data()?.status).toBe("taken_down");
+      // The run's OTHER date is untouched — occurrence scope, not series.
+      expect((await adb.doc(`gigs/${siblingId}`).get()).data()?.status).toBe("filled");
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(after.status).toBe("confirmed"); // the run survives — unwind skipped it
+      expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(bookingId);
+
+      const musicianNotes = await pollNotifications(musician.uid);
+      expect(musicianNotes.docs.some((d) =>
+        d.data().kind === "booking" && /one date/i.test(d.data().title as string)
+        && !/Complaint about this specific date/.test(d.data().body as string))).toBe(true); // no reason leak
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
+
+  // SP4 (Task 7 quality review, CRITICAL #2)
+  it("occurrence scope on a gig with an OPEN whole-run application (never accepted): the application still expires normally", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td12", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td12m");
+    const series = await seedWholeRunSeries(curatorProfileId);
+    try {
+      const gigId = await createDraftGig(curatorProfileId, curator.user);
+      await adb.doc(`gigs/${gigId}`).update({ seriesId: series.id });
+      await callFn("publishGig", { gigId }, curator.user);
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+      // Sanity: this application targets the whole run (not yet accepted).
+      expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.seriesId).toBe(series.id);
+
+      const admin = await makeAdminUser("td12a");
+      await callFn("takedownGig", { gigId, scope: "occurrence", reason: "Reported listing." }, admin.user);
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      // An open (never-confirmed) run application is genuinely dead once its
+      // only gig is taken down — it expires normally, unlike a CONFIRMED
+      // run booking (the test above).
+      expect(after.status).toBe("expired");
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
     }
   });
 });

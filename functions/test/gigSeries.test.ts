@@ -405,6 +405,43 @@ describe("pauseSeries", () => {
       await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
     }
   });
+
+  // SP4 (Task 7 quality review, IMPORTANT #3)
+  it("zombie tolerance: once every future date was cancelled per-occurrence (no cancellable date left), pauseSeries still succeeds — the booking + linkage are left untouched for Task 8's sweep", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps5", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps5m");
+    const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
+    try {
+      const gigId = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 50 * 3_600_000 });
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+      expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
+
+      // Cancel the run's only date PER-OCCURRENCE — the run survives
+      // (booking stays "confirmed"), but no date remains future+filled
+      // under this booking, and cancelOccurrence never touches the
+      // series' own activeBookingId linkage.
+      await callFn("cancelOccurrence", { bookingId, gigId, reason: "Scheduling conflict." }, curator.user);
+      expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
+
+      // pauseSeries must NOT throw despite the now-zombie booking.
+      await callFn("pauseSeries", { seriesId }, curator.user);
+
+      const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
+      expect(seriesAfter?.status).toBe("paused");
+      // Left untouched — executeCancellation's no-cancellable-dates failure
+      // was tolerated, not a successful cancellation.
+      expect(seriesAfter?.activeBookingId).toBe(bookingId);
+
+      const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data();
+      expect(bookingAfter?.status).toBe("confirmed");
+      expect(bookingAfter?.cancellation).toBeNull();
+    } finally {
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
+  });
 });
 
 describe("endSeries", () => {

@@ -12,16 +12,21 @@ import { notifyProfileMembers } from "./notifications.js";
 
 // Same "already started" message for both the whole-booking and
 // single-occurrence cancel paths — a caller who missed the cancellation
-// window is pointed at the same remedy (reportNoShow) either way.
-const ALREADY_STARTED_MESSAGE = "This booking has already started — report a no-show instead.";
+// window is pointed at the same remedy (reportNoShow) either way. Exported
+// (Task 7 fix) so a caller that needs to distinguish executeCancellation's
+// "no cancellable dates left" family of failures from any other can match
+// on the exact constant — see gigSeries.ts's pauseSeries/endSeries, which
+// must tolerate exactly this family without ad-hoc substring matching.
+export const ALREADY_STARTED_MESSAGE = "This booking has already started — report a no-show instead.";
 
 // Task 7 carry-forward (b): a whole-run booking whose future-filled
 // occurrence set is empty is NOT always "already started" — its dates may
 // instead have been cancelled one-by-one via cancelOccurrence, or re-filled
 // by a LATER booking of the same series (see executeCancellation's own
 // comment on how these two cases are told apart from a genuine past-start).
-// This is the truthful alternative for that case.
-const NO_UPCOMING_DATES_MESSAGE =
+// This is the truthful alternative for that case. Exported for the same
+// reason as ALREADY_STARTED_MESSAGE above.
+export const NO_UPCOMING_DATES_MESSAGE =
   "No upcoming booked dates remain on this booking — nothing to cancel.";
 
 type CancelOutcome = "deposit_forfeited" | "deposit_refunded";
@@ -789,7 +794,24 @@ export async function unwindBookingsForModeration(opts: UnwindModerationOpts): P
   async function collect(field: "gigId" | "seriesId" | "musicianProfileId" | "curatorProfileId", value: string) {
     for (const status of UNWIND_STATUSES) {
       const snap = await db.collection("bookings").where(field, "==", value).where("status", "==", status).get();
-      for (const doc of snap.docs) candidates.set(doc.id, doc);
+      for (const doc of snap.docs) {
+        // Task 7 fix: a gigId-scoped candidate (cancelGig; takedownGig's
+        // occurrence scope) never expires a still-CONFIRMED whole-run
+        // booking just because its initiating gig was the one cancelled/
+        // taken down — the run's OTHER occurrences would be left dangling,
+        // still filled, still linked to a booking this call just killed.
+        // Series scope (or a profileId cascade) is the correct tool for
+        // removing a booked run outright, and reaches this SAME booking via
+        // its own seriesId/profileId collect() call below, which carries no
+        // such exemption. An OPEN run APPLICATION, by contrast, still
+        // expires here — nobody is confirmed yet, so there's nothing to
+        // protect (the application is genuinely dead).
+        if (field === "gigId") {
+          const data = doc.data() as BookingRequestDoc;
+          if (data.seriesId != null && data.status === "confirmed") continue;
+        }
+        candidates.set(doc.id, doc);
+      }
     }
   }
 
@@ -803,24 +825,38 @@ export async function unwindBookingsForModeration(opts: UnwindModerationOpts): P
   for (const doc of candidates.values()) {
     try {
       const booking = doc.data() as BookingRequestDoc;
-      const batch = db.batch();
-      batch.update(doc.ref, { status: "expired", resolvedAt: now, updatedAt: now });
+      // Booking expiry — unconditional, the core effect of this call.
+      await doc.ref.update({ status: "expired", resolvedAt: now, updatedAt: now });
 
-      // Clear series linkage ONLY when the series still names THIS booking
-      // as its active one — mirrors reopenSeriesOccurrences' ownership-gated
-      // clear in cancelBooking/reportNoShow (a later, still-active booking
-      // of the same series must not have its own linkage clobbered by an
-      // older booking's unwind). No occurrence reopen here — see this
-      // function's own top comment.
+      // Series-linkage clear — best-effort and DELIBERATELY separate from
+      // the booking-expiry write above: it clears ONLY when the series
+      // still names THIS booking as its active one (mirrors
+      // reopenSeriesOccurrences' ownership-gated clear in cancelBooking/
+      // reportNoShow — a later, still-active booking of the same series
+      // must not have its own linkage clobbered by an older booking's
+      // unwind), and carries its own real optimistic precondition
+      // (`lastUpdateTime`, the supersedeSiblingBooking idiom in bookings.ts)
+      // so a lost race on the series doc (a CONCURRENT unwind/accept
+      // touching the same series between this read and this write) can
+      // never undo the booking expiry that already committed above. A
+      // missed clear here is safe interim state, not a correctness bug —
+      // same "stale activeBookingId, sweep resolves it" reasoning as
+      // gigSeries.ts's pauseSeries/endSeries zombie-run tolerance. No
+      // occurrence reopen here regardless — see this function's own top
+      // comment.
       if (booking.seriesId) {
         const seriesSnap = await db.doc(`gigSeries/${booking.seriesId}`).get();
         const series = seriesSnap.data() as GigSeriesDoc | undefined;
         if (series?.activeBookingId === doc.id) {
-          batch.update(seriesSnap.ref, { activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now });
+          try {
+            await seriesSnap.ref.update(
+              { activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now },
+              { lastUpdateTime: seriesSnap.updateTime });
+          } catch (e) {
+            console.error(`unwindBookingsForModeration: failed to clear series linkage for booking ${doc.id}`, e);
+          }
         }
       }
-
-      await batch.commit();
 
       await notifyProfileMembers(booking.musicianProfileId, {
         kind: "booking", title: "Booking no longer available", body: notifyBody,

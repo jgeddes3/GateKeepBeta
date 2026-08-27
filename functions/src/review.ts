@@ -142,6 +142,15 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
         // regardless of whether it runs before or after this gig-side
         // write, since it re-reads the series fresh and only acts if the
         // series still names the just-expired booking.)
+        // Minor fix (Task 7 quality review): unbounded (no .limit()) —
+        // accepted at v1 scale, same as the openGigsSnap query just above;
+        // a single profile's live "filled" occurrence count is bounded by
+        // its own MAX_OPEN_GIGS_PER_PROFILE-shaped usage in practice, and
+        // this batch (openGigsSnap + filledGigsSnap + activeSeriesSnap
+        // combined) must stay under Firestore's 500-write-per-batch ceiling
+        // regardless — a curator with enough simultaneously-live content to
+        // approach that ceiling is itself a v2 pagination problem, not a
+        // v1 one.
         const filledGigsSnap = await db.collection("gigs")
           .where("curatorProfileId", "==", profileId).where("status", "==", "filled").get();
         for (const doc of filledGigsSnap.docs) {

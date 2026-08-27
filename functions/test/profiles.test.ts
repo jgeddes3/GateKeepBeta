@@ -85,6 +85,18 @@ async function seedOpenGig(curatorProfileId: string): Promise<string> {
   return ref.id;
 }
 
+// SP4 (Task 7 quality-review fix) — mirrors review.test.ts/
+// bookingLifecycle.test.ts's identical pollNotifications helper.
+async function pollNotifications(uid: string) {
+  const deadline = Date.now() + 10_000;
+  let notes = await adb.collection(`users/${uid}/notifications`).get();
+  while (notes.empty && Date.now() < deadline) {
+    await wait(250);
+    notes = await adb.collection(`users/${uid}/notifications`).get();
+  }
+  return notes;
+}
+
 describe("createProfileDraft", () => {
   it("creates draft profile, claims handle, adds creator as admin member", async () => {
     const { user, uid } = await signUpTestUser(`m1-${Date.now()}@test.com`);
@@ -330,6 +342,11 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     // Top-level `bookings` doc is untouched by profileRef's recursiveDelete —
     // it survives, still naming the now-deleted curatorProfileId.
     expect(after.curatorProfileId).toBe(curatorProfileId);
+
+    // Minor fix (Task 7 quality review): the musician side is notified.
+    const musicianNotes = await pollNotifications(musician.uid);
+    expect(musicianNotes.docs.some((d) =>
+      d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
   });
 });
 

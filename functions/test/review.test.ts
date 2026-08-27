@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent, fetchPendingInviteId,
+  signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent, fetchPendingInviteId, wait,
 } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
@@ -213,6 +213,18 @@ async function makeApprovedMusicianProfile(emailPrefix: string) {
   return { owner, profileId };
 }
 
+// SP4 (Task 7 quality-review fix) — mirrors bookingLifecycle.test.ts/
+// bookings.test.ts/gigs.test.ts's identical pollNotifications helper.
+async function pollNotifications(uid: string) {
+  const deadline = Date.now() + 10_000;
+  let notes = await adb.collection(`users/${uid}/notifications`).get();
+  while (notes.empty && Date.now() < deadline) {
+    await wait(250);
+    notes = await adb.collection(`users/${uid}/notifications`).get();
+  }
+  return notes;
+}
+
 describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
   it("approving a curator profile sets a curatorAccess marker for every member, including one who joined before approval", async () => {
     const { owner, profileId } = await pendingProfile("ca1");
@@ -345,6 +357,14 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
 
     const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
     expect(reliability).toBeUndefined(); // moderation — no mark
+
+    // Minor fix (Task 7 quality review): the musician side is notified —
+    // note this profile IS the one just rejected, so this is in addition
+    // to (not instead of) reviewProfile's own separate profile_review
+    // notification.
+    const musicianNotes = await pollNotifications(musician.uid);
+    expect(musicianNotes.docs.some((d) =>
+      d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
   });
 
   // SP4 (Task 7 amendment): a whole-run booking fills BOTH a past and a
@@ -391,6 +411,11 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
       expect(seriesAfter?.status).toBe("paused");
       expect(seriesAfter?.activeBookingId).toBeNull();
       expect(seriesAfter?.bookedMusicianProfileId).toBeNull();
+
+      // Minor fix (Task 7 quality review): the musician side is notified.
+      const musicianNotes = await pollNotifications(musician.uid);
+      expect(musicianNotes.docs.some((d) =>
+        d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
     } finally {
       // Never leave an active series behind for the shared emulator's daily
       // sweep scan — the reject cascade above already pauses it on the

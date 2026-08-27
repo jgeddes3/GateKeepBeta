@@ -4,7 +4,7 @@ import {
   validateGigContent, validateBudget, isValidDocId,
   MAX_OPEN_GIGS_PER_PROFILE,
   type GigContentInput, type GigBudget, type GigDoc, type GigPrivateLocation, type GigPublicLocation,
-  type AddressVisibility, type CuratorSubtype, type CuratorDetails,
+  type AddressVisibility, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
@@ -398,43 +398,80 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
   if (scope === "series") {
     const seriesRef = db.doc(`gigSeries/${gig.seriesId}`);
     batch.update(seriesRef, { status: "paused", updatedAt: now });
-    // P11: sweeps status=="open" siblings only, by design — as of this
-    // wave the materializer (scheduled.ts) only ever creates occurrences
-    // directly into "open", so every currently-live occurrence of a series
-    // is reachable this way. This narrows automatically if a future gig
-    // status is introduced (e.g. sub-4's "filled"/booked state) that is
-    // ALSO publicly/live-reachable without being "open" — revisit this
-    // filter then, or a series takedown will silently leave such
-    // occurrences up.
-    const siblingsSnap = await db.collection("gigs")
-      .where("seriesId", "==", gig.seriesId)
-      .where("status", "==", "open")
-      .get();
-    for (const doc of siblingsSnap.docs) {
-      if (doc.id === gigId) continue; // this occurrence is already handled above
-      batch.update(doc.ref, { status: "taken_down", updatedAt: now });
-      siblingsAffected++;
-      affectedGigIds.push(doc.id);
+    // P11 (RESOLVED — Task 7 fix): originally swept status=="open" siblings
+    // only, on the (then-true) assumption that "open" was the sole
+    // publicly/live-reachable non-taken_down status a series occurrence
+    // could carry. SP4 broke that assumption by adding "filled" (a booked
+    // occurrence) as a SECOND publicly-readable status (the gigs read rule
+    // allows status=='filled' unconditionally) — an "open"-only sweep left
+    // a booked run's other occurrences sitting "filled" forever: still
+    // publicly readable, still linked to a booking this call's unwind call
+    // below is about to expire. Both statuses are swept now; a future
+    // publicly-reachable gig status would need the same treatment.
+    for (const status of ["open", "filled"] as const) {
+      const siblingsSnap = await db.collection("gigs")
+        .where("seriesId", "==", gig.seriesId)
+        .where("status", "==", status)
+        .get();
+      for (const doc of siblingsSnap.docs) {
+        if (doc.id === gigId) continue; // this occurrence is already handled above
+        batch.update(doc.ref, { status: "taken_down", updatedAt: now });
+        siblingsAffected++;
+        affectedGigIds.push(doc.id);
+      }
     }
   }
   await batch.commit();
+
+  // Minor fix (Task 7 quality review): the audit entry is written BEFORE
+  // the unwind fan-out below — a throw during unwindBookingsForModeration's
+  // own collect phase (a transient Firestore error on one of its queries)
+  // must never cost this already-committed takedown its moderation audit
+  // trail.
+  await writeAudit({
+    actorUid, action: "gig_taken_down", targetId: gigId,
+    detail: `[${scope}] ${trimmedReason}`,
+  });
 
   // Task 7: unwind every booking sitting on the taken-down gig(s) — occurrence
   // scope only ever touches this one gig; series scope also covers a
   // whole-run booking via seriesId (its own `gigId` field names just one
   // occurrence, which may not even be among the ones just swept above — e.g.
   // a whole-run booking's initiating gig can be a PAST occurrence no longer
-  // "open", so it would never appear in siblingsSnap).
+  // "open"/"filled" by the time it started, so it would never appear in
+  // siblingsSnap). unwindBookingsForModeration's own gigId-scoped collect
+  // deliberately SKIPS a still-CONFIRMED whole-run booking it finds that
+  // way (see its own comment) — an occurrence-scope takedown must not
+  // silently kill an entire booked run just because ONE of its dates was
+  // taken down; series scope (below, when scope=="series") is the admin's
+  // tool for removing a booked run outright.
   await unwindBookingsForModeration(
     scope === "series" ? { gigIds: affectedGigIds, seriesId: gig.seriesId! } : { gigIds: affectedGigIds });
 
-  await writeAudit({
-    actorUid, action: "gig_taken_down", targetId: gigId,
-    detail: `[${scope}] ${trimmedReason}`,
-  });
+  // Task 7 fix: occurrence scope on a gig that was FILLED by a still-
+  // CONFIRMED whole-run booking is exactly the case unwindBookingsForModeration
+  // just skipped (see its comment above) — the run survives untouched, but
+  // the musician whose ONE date just vanished still deserves to be told.
+  // Distinct, run-scoped copy (not unwind's generic "Booking no longer
+  // available") — and no moderation-reason leak, same contract as
+  // unwindBookingsForModeration's own notify.
+  if (scope === "occurrence" && gig.status === "filled" && gig.bookingId) {
+    const runBookingSnap = await db.doc(`bookings/${gig.bookingId}`).get();
+    const runBooking = runBookingSnap.data() as BookingRequestDoc | undefined;
+    if (runBooking && runBooking.status === "confirmed" && runBooking.seriesId != null) {
+      try {
+        await notifyProfileMembers(runBooking.musicianProfileId, {
+          kind: "booking", title: "One date of your booking is no longer available",
+          body: `"${gig.title}" is no longer available. The rest of your booking is unaffected.`,
+        });
+      } catch (e) {
+        console.error(`takedownGig: failed to notify run musician for gig ${gigId}`, e);
+      }
+    }
+  }
 
   const scopeNote = scope === "series"
-    ? ` This series' other open dates (${siblingsAffected}) were also taken down, and the series was paused.`
+    ? ` This series' other dates (${siblingsAffected}) were also taken down, and the series was paused.`
     : "";
   await notifyProfileMembers(gig.curatorProfileId, {
     kind: "gig_moderation",
