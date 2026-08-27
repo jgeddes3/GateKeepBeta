@@ -16,7 +16,7 @@ import {
 // callable) below — it is an exported helper precisely because Task 9's sweep
 // and the webhook call it out of band, and those callers' contract (null vs
 // throw, what it does and doesn't write) needs its own coverage.
-import { commitAcceptAfterCharge } from "../src/bookings.js";
+import { commitAcceptAfterCharge, abortAcceptAfterFailedCommit } from "../src/bookings.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -505,6 +505,27 @@ async function curatorCustomerId(profileId: string): Promise<string> {
 }
 
 describe("Task 6 accept saga", () => {
+  // Drives a real accept to the PENDING state — the only way to obtain a
+  // genuinely staged booking (transaction A's payment docs + the saga marker
+  // + a real intent) without it going on to commit. Returns the intent id the
+  // booking is now waiting on.
+  async function stageViaPendingCharge(
+    curator: { owner: { user: import("firebase/auth").User }; profileId: string },
+    bookingId: string,
+  ): Promise<string> {
+    const customerId = await curatorCustomerId(curator.profileId);
+    await setChargeKnob("pendingCustomerIds", customerId, true);
+    try {
+      await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+        .rejects.toMatchObject({ message: DEPOSIT_PROCESSING_MESSAGE });
+    } finally {
+      await setChargeKnob("pendingCustomerIds", customerId, false);
+    }
+    const intentId = (await getBooking(bookingId)).depositChargeIntentId;
+    if (!intentId) throw new Error(`stageViaPendingCharge: no pending intent recorded on ${bookingId}`);
+    return intentId;
+  }
+
   it("single perHour gig ($150/hr x 90min): stages one payment doc, charges the batch once, marks it held", async () => {
     const curator = await makeApprovedCuratorProfile("t6hpc");
     const musician = await makeApprovedMusicianProfile("t6hpm");
@@ -690,7 +711,11 @@ describe("Task 6 accept saga", () => {
     await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: DEPOSIT_PROCESSING_MESSAGE });
 
-    const evt = fakeEvent("payment_intent.succeeded", { id: intentId, metadata: { bookingId, purpose: "deposit" } });
+    // amount_received mirrors a real Stripe payload, so the handler's charge
+    // accounting takes its PRODUCTION path (Stripe's own word on the money)
+    // rather than the summed-staged-docs fallback kept for payloads without it.
+    const evt = fakeEvent("payment_intent.succeeded",
+      { id: intentId, amount: 8742, amount_received: 8742, metadata: { bookingId, purpose: "deposit" } });
     expect((await postWebhook(evt)).status).toBe(200);
 
     const confirmed = await getBooking(bookingId);
@@ -708,7 +733,8 @@ describe("Task 6 accept saga", () => {
     expect((await postWebhook(evt)).text).toBe("duplicate");
     // A FRESH event id carrying the same intent still reaches the handler —
     // which must no-op, because the booking is no longer open-and-pending.
-    const replay = fakeEvent("payment_intent.succeeded", { id: intentId, metadata: { bookingId, purpose: "deposit" } });
+    const replay = fakeEvent("payment_intent.succeeded",
+      { id: intentId, amount: 8742, amount_received: 8742, metadata: { bookingId, purpose: "deposit" } });
     expect((await postWebhook(replay)).status).toBe(200);
     const afterReplay = await getBooking(bookingId);
     expect(afterReplay.status).toBe("confirmed");
@@ -859,18 +885,7 @@ describe("Task 6 accept saga", () => {
     const gigId = await createOpenGig(curator.profileId, curator.owner.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
-    const customerId = await curatorCustomerId(curator.profileId);
-
-    // A genuinely staged booking: the pending knob leaves transaction A's
-    // staging and the saga marker in place without committing anything.
-    await setChargeKnob("pendingCustomerIds", customerId, true);
-    try {
-      await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
-        .rejects.toMatchObject({ message: DEPOSIT_PROCESSING_MESSAGE });
-    } finally {
-      await setChargeKnob("pendingCustomerIds", customerId, false);
-    }
-    const intentId = (await getBooking(bookingId)).depositChargeIntentId!;
+    const intentId = await stageViaPendingCharge(curator, bookingId);
 
     // A leftover from a failed unstage: an unpaid doc for a gig that is not
     // an occurrence of this booking at all.
@@ -914,6 +929,130 @@ describe("Task 6 accept saga", () => {
     // Contract point 3: B commits, and does nothing else — no summary
     // recompute, no ledger row, no fan-out. Those are the caller's.
     expect(confirmed.paymentSummary).toBeUndefined();
+  });
+
+  it("abort after a charge: the deposit is refunded in full, the ledger records it, and the staging is undone", async () => {
+    const curator = await makeApprovedCuratorProfile("t6abtc");
+    const musician = await makeApprovedMusicianProfile("t6abtm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    const intentId = await stageViaPendingCharge(curator, bookingId);
+    const staged = (await getPaymentDocs(bookingId))[0];
+
+    // Exactly what acceptBooking runs when transaction B refuses to commit
+    // after the money moved — the routine is exported so this path (and Task
+    // 9's reconciliation) can drive it directly rather than re-implementing it.
+    const { refunded } = await abortAcceptAfterFailedCommit({
+      bookingId, intentId, attempt: 1, amountCents: 8742,
+      occurrences: [{ gigId, startsAt: staged.occurrenceStartsAt, durationMinutes: 90 }],
+      curatorProfileId: curator.profileId,
+    });
+    expect(refunded).toBe(true);
+
+    // The money is back — the full charge, not a slice of it.
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(8742);
+    const ledger = await adb.collection("ledger").where("bookingId", "==", bookingId).get();
+    const refundRow = ledger.docs.map((d) => d.data()).find((r) => r.kind === "refund");
+    expect(refundRow?.amountCents).toBe(8742);
+    expect(refundRow?.profileId).toBe(curator.profileId);
+    expect(refundRow?.detail).toBe("accept abort — booking no longer confirmable");
+
+    // ...and the staging is gone, so the booking is a clean `open` again.
+    expect(await getPaymentDocs(bookingId)).toHaveLength(0);
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargePending).toBe(false);
+    expect(after.depositChargeIntentId).toBeNull();
+    expect(after.depositChargeAttempt).toBe(1);   // never reset — a retry must mint a NEW key
+  });
+
+  it("webhook abort: a staged accept whose gig closed underneath it is left pending, unrefunded, for reconciliation", async () => {
+    const curator = await makeApprovedCuratorProfile("t6wabc");
+    const musician = await makeApprovedMusicianProfile("t6wabm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    const intentId = await stageViaPendingCharge(curator, bookingId);
+
+    // The gig goes away while the intent is still settling — transaction B's
+    // validation now permanently rejects this accept.
+    await adb.doc(`gigs/${gigId}`).update({ status: "closed" });
+
+    const evt = fakeEvent("payment_intent.succeeded",
+      { id: intentId, amount: 8742, amount_received: 8742, metadata: { bookingId, purpose: "deposit" } });
+    // 200, and the event is marked processed: the rejection is PERMANENT, so
+    // Stripe must not be told to retry it forever.
+    expect((await postWebhook(evt)).status).toBe(200);
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).data()?.processed).toBe(true);
+
+    // A webhook deliberately does NOT refund (a racer may have committed this
+    // very accept). The booking stays staged — that marker IS the handle
+    // Task 9's reconciliation finds it by.
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargePending).toBe(true);
+    expect(after.depositChargeIntentId).toBe(intentId);
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
+    const stillStaged = await getPaymentDocs(bookingId);
+    expect(stillStaged).toHaveLength(1);
+    expect(stillStaged[0].deposit.status).toBe("unpaid");
+    // The charge itself is still recorded — the ledger tracks money, not outcomes.
+    expect((await adb.doc(`ledger/deposit_charged:${intentId}`).get()).exists).toBe(true);
+  });
+
+  it("whole-run: an occurrence born open during the charge window is left unfilled rather than confirmed unfunded", async () => {
+    const curator = await makeApprovedCuratorProfile("t6newoc");
+    const musician = await makeApprovedMusicianProfile("t6newom");
+    await makeMoneyReady(curator, musician);
+    const series = await seedSeries(curator.profileId);
+    try {
+      const gigA = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+      const gigB = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+      await Promise.all([gigA, gigB].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigA, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+      const intentId = await stageViaPendingCharge(curator, bookingId);
+      expect(await getPaymentDocs(bookingId)).toHaveLength(2);   // both dates staged and charged for
+
+      // The materializer births a THIRD date on this run while the intent is
+      // still settling. Nothing was charged for it, so the commit must not
+      // fill it — a confirmed date with no deposit would never settle.
+      const gigLate = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+      await adb.doc(`gigs/${gigLate}`).update({ seriesId: series.id });
+
+      const evt = fakeEvent("payment_intent.succeeded", {
+        id: intentId, amount: 8742 * 2, amount_received: 8742 * 2,
+        metadata: { bookingId, purpose: "deposit" },
+      });
+      expect((await postWebhook(evt)).status).toBe(200);
+
+      const after = await getBooking(bookingId);
+      expect(after.status).toBe("confirmed");
+      expect(after.depositChargePending).toBe(false);
+      // The two funded dates are filled...
+      for (const gigId of [gigA, gigB]) {
+        const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
+        expect(gig?.status).toBe("filled");
+        expect(gig?.bookingId).toBe(bookingId);
+      }
+      // ...and the unfunded latecomer is left exactly as it was found.
+      const late = (await adb.doc(`gigs/${gigLate}`).get()).data();
+      expect(late?.status).toBe("open");
+      expect(late?.bookingId).toBeNull();
+      // Only the two charged occurrences carry money.
+      const payments = await getPaymentDocs(bookingId);
+      expect(payments).toHaveLength(2);
+      expect(payments.every((p) => p.deposit.status === "held")).toBe(true);
+      expect(after.paymentSummary?.heldCents).toBe(7875 * 2);
+      // The series is still linked, so nothing else can book the run either.
+      expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(bookingId);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
   });
 
   it("SP4's sibling supersede still fires after the saga: a rival open booking on the same gig is superseded", async () => {

@@ -191,7 +191,10 @@ export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number
       await ref.create(full);
     } catch (e) {
       if (!isAlreadyExists(e)) throw e;
-      console.error(`writeLedger: duplicate suppressed for ${full.kind}:${full.stripeId}`, e);
+      // info, not error: a suppressed duplicate is the deterministic-id
+      // design WORKING (a redelivered webhook, a saga retry, the callable and
+      // the webhook both recording one charge), not a fault to investigate.
+      console.info(`writeLedger: duplicate suppressed for ${full.kind}:${full.stripeId}`);
     }
     return;
   }
