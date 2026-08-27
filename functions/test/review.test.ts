@@ -347,24 +347,57 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     expect(reliability).toBeUndefined(); // moderation — no mark
   });
 
-  // SP4 (Task 7)
-  it("reject-from-approved on a CURATOR profile with a confirmed booking: the booking expires too (a filled gig isn't reached by the existing open-gigs-only cascade above)", async () => {
+  // SP4 (Task 7 amendment): a whole-run booking fills BOTH a past and a
+  // future occurrence — the reject cascade must treat them differently
+  // (close+unlink the future one; leave the past one, and its show
+  // history, completely alone) rather than uniformly via the booking unwind
+  // alone, which only ever touches the `bookings` doc, never the gigs.
+  it("reject-from-approved on a CURATOR profile with a confirmed whole-run booking: the booking expires, its FUTURE filled occurrence closes with linkage cleared, its PAST filled occurrence is left entirely untouched", async () => {
     const { owner: curator, profileId: curatorProfileId } = await pendingProfile("rfc1");
     const curatorAdmin = await makeAdminUser("rfc1a");
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfc1m");
-    const gigId = await seedOpenGig(curatorProfileId);
-    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-      "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
-    await callFn("acceptBooking", { bookingId }, curator.user);
-    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+    const seriesId = await seedSeries(curatorProfileId, { fillMode: "whole_run" });
+    try {
+      const pastGigId = await seedOpenGig(curatorProfileId, { seriesId, startsAt: Date.now() - 3_600_000 });
+      const futureGigId = await seedOpenGig(curatorProfileId, { seriesId, startsAt: Date.now() + 100 * 3_600_000 });
 
-    await callFn("reviewProfile",
-      { profileId: curatorProfileId, decision: "rejected", reason: "Policy violation." }, curatorAdmin.user);
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: futureGigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+      // Sanity: acceptBooking fills every currently-open occurrence of the
+      // run, including the past one.
+      expect((await adb.doc(`gigs/${pastGigId}`).get()).data()?.status).toBe("filled");
+      expect((await adb.doc(`gigs/${futureGigId}`).get()).data()?.status).toBe("filled");
 
-    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
-    expect(after.status).toBe("expired");
-    expect(after.cancellation).toBeNull();
+      await callFn("reviewProfile",
+        { profileId: curatorProfileId, decision: "rejected", reason: "Policy violation." }, curatorAdmin.user);
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(after.status).toBe("expired");
+      expect(after.cancellation).toBeNull();
+
+      const futureAfter = (await adb.doc(`gigs/${futureGigId}`).get()).data();
+      expect(futureAfter?.status).toBe("closed");
+      expect(futureAfter?.bookingId).toBeNull();
+      expect(futureAfter?.bookedMusicianProfileId).toBeNull();
+
+      const pastAfter = (await adb.doc(`gigs/${pastGigId}`).get()).data();
+      expect(pastAfter?.status).toBe("filled"); // untouched — the show already happened
+      expect(pastAfter?.bookingId).toBe(bookingId);
+      expect(pastAfter?.bookedMusicianProfileId).toBe(musicianProfileId);
+
+      const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
+      expect(seriesAfter?.status).toBe("paused");
+      expect(seriesAfter?.activeBookingId).toBeNull();
+      expect(seriesAfter?.bookedMusicianProfileId).toBeNull();
+    } finally {
+      // Never leave an active series behind for the shared emulator's daily
+      // sweep scan — the reject cascade above already pauses it on the
+      // success path, but guard defensively in case an assertion throws
+      // first.
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
   });
 });
 
