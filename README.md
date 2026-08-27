@@ -14,9 +14,13 @@ preferences, and server-rendered public portfolio pages at `/@handle`, on both m
 (venues/planners/hosts get the wizard/photos/public-page treatment too), one-off and recurring gig
 postings with budget/location privacy semantics, a shared daily scheduled job that materializes
 recurring series and pays down sub-project 2's cleanup debt, and admin gig moderation + name
-search. See "Gigs & series" below for the concepts, and `docs/superpowers/specs/` /
-`docs/superpowers/plans/` for each sub-project's design spec and implementation plan (exact
-filenames under Design docs below).
+search. **Sub-project 4: Booking Flow** — curators and musicians book each other through either
+door (apply to an open gig / offer a gig directly), negotiate over a capped counter-offer thread,
+and accepting freezes terms + records a 35% deposit as data (no money moves yet); cancellation
+windows, no-show reliability records, musician-controlled booking visibility, and whole-run series
+booking all land on top of sub-project 3's gig/series model. See "Gigs & series" and "Booking flow"
+below for the concepts, and `docs/superpowers/specs/` / `docs/superpowers/plans/` for each
+sub-project's design spec and implementation plan (exact filenames under Design docs below).
 
 ## Monorepo map
 
@@ -181,6 +185,106 @@ unbounded `.get()`, and step 1 additionally skips (and counts) a series whose pr
 at the `MAX_OPEN_GIGS_PER_PROFILE` cap, or whose status changed between the initial scan and that
 series' write. `dailySweep`'s `onSchedule` options set `timeoutSeconds: 540` and
 `memory: "512MiB"` (up from the 2nd-gen defaults) to give this real headroom at scale.
+
+## Booking flow (sub-project 4)
+
+**Concepts.** A `bookings/{id}` top-level doc is the one record of a musician↔curator booking
+relationship, created through either door — `applyToGig` (musician quotes on an `open` gig) or
+`offerGig` (curator quotes to a musician) — and mutated only via callables (clients never write
+`bookings`). Both doors produce the same shape: an embedded `thread: OfferEntry[]` (capped at 50
+entries) carries structured counter-offers (amount, expected quantity, ≤280-char note — **terms
+only, no free chat**), with `awaitingSide` tracking whose turn it is; `counterBooking` appends and
+flips the turn, `declineBooking`/`withdrawBooking` close it out. `acceptBooking` is the fill
+transaction: it freezes the last thread entry into `acceptedTerms`, records a 35% deposit
+(`computeDepositCents`, integer cents, `Math.ceil`) as **data** (`status: "unpaid"` — sub-5 wires
+real money), flips the gig `open → filled` with `bookingId`/`bookedMusicianProfileId` linkage, and
+auto-supersedes rival open bookings on the same gig. Cancellation windows are measured strictly
+against gig start: curator cancels **< 72h** before start → deposit forfeits to the musician (≥72h
+→ refunds); musician cancels **< 24h** before start → refunds the deposit but appends an automatic
+`late_cancel` reliability mark. A curator can also `reportNoShow` after the fact (once per booking,
+within 14 days), which appends a `reported_no_show` mark; admins can `removeReliabilityMark` on a
+disputed mark (audit-preserving — the mark stays, just flagged `removedByAdmin`, never spliced).
+Reliability is a curator-facing summary count only (`noShowCount`/`completedCount`), never public.
+
+**Musician-controlled visibility** resolves sp3-rulings' M-12/M-13: booking rates are **never
+public** — each rate structure (`perHour`/`perSong`/`perSet`) is independently `"curators"` or
+`"private"`, and the preferences block is independently `"public"` or `"curators"`. The source of
+truth (`profiles/{id}/private/booking`) now reads member/admin-only (curators lost their old
+blanket read); `updateBookingInfo` and `bookingVisibility.ts`'s `rebuildBookingProjections` fan
+each save out to two server-built projections in the same batch: `profiles/{id}/private/curatorBooking`
+(rates with any `"private"`-marked structure nulled out, full preferences, the reliability summary
+— **this projection is the curator-facing surface**, readable by curatorAccess holders + members +
+admins) and `ProfileDoc.publicBooking` (the preferences object, only when `preferences: "public"`,
+else `null` — rendered on the public portfolio page, rates never appear here regardless of
+visibility). `profiles/{id}/private/reliability` stays member/admin-only.
+
+**Whole-run booking** consumes sub-project 3's `fillMode`: a booking on a `whole_run` series'
+occurrence carries that `seriesId`, and accepting it fills every currently-`open` occurrence plus
+stamps the series (`activeBookingId`/`bookedMusicianProfileId`) so the daily sweep's materializer
+births future occurrences pre-`filled` (skipping the open-gig cap for that committed work).
+Deposits and cancellation windows are **per occurrence** — `cancelOccurrence` pulls one date off a
+run without ending the booking; `cancelBooking`/`reportNoShow` on a whole-run booking evaluate only
+against the run's next affected occurrence (one forfeiture / one mark max) and unwind future filled
+dates back to `open`.
+
+**Shows sections are now live** — the SP2 "platform events only" contract fulfilled: both public
+portfolio pages (`/@handle`) query `filled`/booked-`closed` gigs by `bookedMusicianProfileId` (or
+`curatorProfileId` for the curator's own page) and render upcoming/past bookings; the two Shows
+queries are intentionally separate (`status=="filled"` vs `status=="closed" && bookedMusicianProfileId
+!= null"`) because Firestore rules can only list-provably deny an unfiltered `status in [...]` read
+that would leak an unbooked `closed` gig.
+
+**`backfillBookingVisibility`** (admin-gated onCall, `functions/src/bookingVisibility.ts`) is a
+one-shot migration alongside sub-project 3's `backfillDisplayNameLower` (see "Sub-project 4 launch
+checklist" below for the deploy-ordering caveat that makes this one load-bearing, not just
+convenience).
+
+**Directories are placeholder-grade** (`apps/web/app/gigs/`, `apps/web/app/dashboard/curator/[profileId]/musicians/`,
+and their mobile equivalents under `apps/mobile/src/bookings/`): plain Firestore queries + basic
+client-side filters, by design — sub-project 8 (full search: text search, ranking, maps, saved
+searches/alerts) replaces both directories' query internals; nothing here should be treated as the
+long-term shape.
+
+**Sub-5 handoff (settlement inputs this sub-project produces, doesn't consume).** `BookingDeposit.status`
+is `"unpaid"` today; sub-5 adds `"held" | "refunded" | "forfeited"` and wires the state machine to
+real money. Settlement math starts from the frozen `acceptedTerms` (`amountCents`,
+`expectedQuantity`, `expectedTotalCents`) — sub-5 recomputes overtime for `perHour` and a
+count-true-up for `perSong` from that snapshot, per occurrence for whole-run bookings.
+`occurrenceCancellations` (whole-run per-date cancellation records, capped at
+`MAX_OCCURRENCE_CANCELLATIONS`=100) are themselves settlement inputs — a full 100-entry array is a
+**tripwire** sub-5 must alarm on, not silently drop-oldest (unacceptable for money-adjacent
+records, unlike the sweep's own drop-oldest reliability-mark idiom). A booking-linked gig that
+ends up `taken_down` (an admin pulled that one date off a still-confirmed whole-run booking, per
+`gigs.ts`'s `takedownGig` occurrence scope) settles as **not performed** — the completion sweep
+(step 7) deliberately excludes it from the "filled linked occurrence" set it uses to decide
+completion, and that same **filled-linked-gigs set is the intended per-occurrence settlement
+basis** for sub-5 to walk. A booking that resolves to `expired` with a non-null `deposit` (gig/series
+takedown or profile-reject cascades, i.e. moderation, nobody's fault) reads as a **refund**, no
+forfeiture either way. When a deposit does forfeit, it goes to the **musician**
+(`deposit.forfeitedTo: "musician"`) — whether the platform carves out a fee from that forfeiture is
+explicitly left as sub-5's decision, not decided here.
+
+**Sub-8 note:** both discovery directories above are placeholder-grade by design; sub-8 replaces
+their internals wholesale (see "Directories are placeholder-grade" above).
+
+**Scale/hardening follow-ups recorded for later sweeps of this code** (none block v1, all
+identified during Task 8/13's review rounds):
+- **Materializer birth-decision race**: a `cancelBooking` landing between the sweep's step-1
+  per-series read and that step's end-of-step commit can yield `filled` gigs linked to a
+  non-`confirmed` booking, with no reconciling sweep step today — accepted at v1 given the low
+  probability of hitting exactly that daily-sweep window; fix menu for whoever revisits it: a
+  filled-linkage sanity-check step, or per-series batches guarded by a `lastUpdateTime`
+  precondition.
+- **Sweep step 6 (booking expiry)** reads each `open` booking's gig with a separate `get()`;
+  batching those reads via `db.getAll()` per page would cut round-trips at scale.
+- **`inviteMember`/`respondToInvite` guard gaps** (inherited from sub-project 3's Task 13 deferred
+  list, still open): `inviteMember` lacks an `isValidDocId(profileId)` guard; `respondToInvite`
+  validates `inviteId` by existence only, not shape.
+- **`functions/test/` helper duplication**: `bookings.test.ts`, `bookingLifecycle.test.ts`, and
+  `scheduled.test.ts` each carry their own near-identical copies of `makeApprovedCuratorProfile`/
+  `makeApprovedMusicianProfile`/`createOpenGig`/`gigContent`/`offerPayload`/`pollNotifications`/
+  `seedSeries` rather than sharing them from `functions/test/helpers.ts` — worth consolidating the
+  next time one of those files is touched.
 
 ## Environment variables
 
@@ -366,6 +470,33 @@ before a real launch:
   Google/Apple sign-in, so this only gets exercised on a real `expo-dev-client` build; confirm both
   providers still work end-to-end there.
 
+### Sub-project 4 launch checklist (booking flow)
+
+- **`backfillBookingVisibility` (one-shot) — CRITICAL ordering, must ship in the SAME release as
+  the rules deploy**: `firestore.rules`' sub-project 4 tighten removes curators' old blanket read
+  of `profiles/{id}/private/booking` (see "Booking flow" above) — curators from then on read only
+  the server-built `private/curatorBooking` projection. That projection only exists for a profile
+  once something has written it (`updateBookingInfo` going forward, or this backfill for every
+  pre-sub-4 `private/booking` doc). **Deploy the tightened rules and run
+  `backfillBookingVisibility` in the same release** — if the rules land first without the backfill
+  (or the backfill is deferred to "later"), every pre-existing musician's rates/preferences become
+  invisible to every curator until it runs; if the backfill somehow ran before the old rules were
+  removed, nothing breaks, but there is no reason to split the two. Run it once against production
+  after deploy (Firebase console's Functions testing tab, or a short authenticated admin script),
+  the same way as `backfillDisplayNameLower` above — it's idempotent (a profile whose
+  `private/booking` doc already has `visibility` is left untouched), and it defaults migrated
+  profiles to all-`"curators"` visibility (preserves pre-sub-4 exposure exactly, exposes nothing
+  new).
+- **New composite indexes deploy with `firebase deploy`**: sub-project 4 adds 16 composite indexes
+  to `firestore.indexes.json` (7 more `gigs` composites — booked-musician/series/booking linkage
+  queries — plus 9 new `bookings` composites, since `bookings` is itself a new collection this
+  sub-project introduces). Same caveat as the sub-project 3 indexes below: the emulator does not
+  enforce composite indexes, so `pnpm emu:test`/`pnpm emu:rules` passing locally proves nothing
+  about them — confirm they actually build on the real project after the first production deploy
+  (Firebase console → Firestore → Indexes, or `firebase deploy --only firestore:indexes` then watch
+  for "Enabled") before the booking thread/inbox/Shows/directory queries that depend on them will
+  work in production.
+
 ### Sub-project 2 polish follow-ups (non-blocking)
 
 Smaller items from the sub-project 2 quality-review rounds — recorded in full in
@@ -414,3 +545,9 @@ task-by-task implementation plan.
 for the full design spec and `docs/superpowers/plans/2026-08-26-curator-gigs.md` for the
 task-by-task implementation plan. Durable rulings/handoff record: `docs/superpowers/sp3-rulings.md`
 (mirrors `sp2-rulings.md`'s structure).
+
+**Sub-project 4: Booking Flow** — `docs/superpowers/specs/2026-08-26-booking-flow-design.md` for
+the full design spec and `docs/superpowers/plans/2026-08-26-booking-flow.md` for the task-by-task
+implementation plan. Builds on and resolves obligations recorded in `docs/superpowers/sp3-rulings.md`
+(rulings 23/24 and the M-12/M-13 + booking-widening obligation bullets, annotated
+"RESOLVED (SP4)" in place).

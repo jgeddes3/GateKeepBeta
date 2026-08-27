@@ -1,5 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, FieldPath } from "firebase-admin/firestore";
 import {
   validateLookingFor, isValidDocId,
   MAX_ABOUT_LENGTH, MAX_ADDRESS_LENGTH, MAX_CITY_LENGTH, MAX_AMENITY_NOTES_LENGTH, MAX_CAPACITY,
@@ -218,12 +218,42 @@ export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
 // instant) use a direct `.set({})` fast path instead; every call site where
 // access could have been LOST (reviewProfile's reject-from-approved,
 // removeMember) must use this recompute.
+// SP4 (Task 13 item 7): pages the memberships collection-group scan
+// (100/page, cursor loop) instead of one unbounded `.get()` — a uid that
+// belongs to many profiles across the app's lifetime (many bands, many
+// curator profiles) is unbounded, same defensive-pagination rationale as
+// scheduled.ts's own `paginate()` helper. Behavior-preserving: still visits
+// EVERY membership doc for this uid before deciding hasApprovedCurator, just
+// PAGE_SIZE at a time. Not reused from scheduled.ts directly (that module
+// imports THIS one — syncCuratorAccess is a step-5 call site — so importing
+// back would cycle); the loop is small enough to duplicate locally.
+const MEMBERSHIP_SCAN_PAGE_SIZE = 100;
+
 export async function syncCuratorAccess(uid: string): Promise<void> {
+  // SP4 (Task 13 item 1): a malformed uid reaching this far (currently only
+  // reachable via the daily sweep's curatorAccessRetries retry queue — see
+  // scheduled.ts step 5, itself only admin-SDK-writable, never client-
+  // writable) must fail loudly and distinctly rather than silently
+  // misbehaving against `curatorAccess/{uid}` / the membership query below.
+  if (!isValidDocId(uid)) {
+    throw new Error(`syncCuratorAccess: invalid uid "${String(uid)}"`);
+  }
   const db = getFirestore();
-  const memberDocs = await db.collectionGroup("members").where("uid", "==", uid).get();
-  const profileIds = memberDocs.docs
-    .map((d) => d.ref.parent.parent?.id)
-    .filter((id): id is string => !!id);
+  const profileIds: string[] = [];
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+  for (;;) {
+    let page = db.collectionGroup("members").where("uid", "==", uid)
+      .orderBy(FieldPath.documentId()).limit(MEMBERSHIP_SCAN_PAGE_SIZE);
+    if (cursor) page = page.startAfter(cursor);
+    const snap = await page.get();
+    if (snap.empty) break;
+    for (const d of snap.docs) {
+      const profileId = d.ref.parent.parent?.id;
+      if (profileId) profileIds.push(profileId);
+    }
+    if (snap.docs.length < MEMBERSHIP_SCAN_PAGE_SIZE) break;
+    cursor = snap.docs[snap.docs.length - 1];
+  }
   let hasApprovedCurator = false;
   for (const profileId of profileIds) {
     const p = await db.doc(`profiles/${profileId}`).get();

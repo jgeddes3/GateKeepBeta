@@ -12,7 +12,12 @@ export default function CuratorTabs() {
           own per-screen headers/back buttons/titles, which own that
           responsibility for every screen under this tab. */}
       <Tabs.Screen name="events" options={{ title: "My Events", headerShown: false }} />
-      <Tabs.Screen name="talent" options={{ title: "Find Talent" }} />
+      {/* SP4 Task 12: was the "Find Talent" placeholder (talent.tsx, now
+          deleted) — replaced by musicians.tsx, the MusicianBrowse "Find
+          musicians" screen, per the plan's explicit file naming. */}
+      <Tabs.Screen name="musicians" options={{ title: "Find Musicians" }} />
+      {/* SP4 Task 12: BookingInbox for this curator profile's own threads. */}
+      <Tabs.Screen name="bookings" options={{ title: "Bookings" }} />
       <Tabs.Screen name="messages" options={{ title: "Messages" }} />
       <Tabs.Screen name="account" options={{ title: "Account" }} />
     </Tabs>

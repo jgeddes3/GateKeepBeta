@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import { validateHandle, type ProfileDoc, type TrackDoc, type GigDoc } from "@gatekeep/shared";
+import { validateHandle, type ProfileDoc, type TrackDoc, type GigDoc, type GigPublicLocation } from "@gatekeep/shared";
 import { MusicianProfile } from "./MusicianProfile";
 import { CuratorProfile } from "./CuratorProfile";
 
@@ -28,16 +28,29 @@ export function generateStaticParams() {
 export type LoadedTrack = { id: string; title: string; durationSec: number | null; url: string };
 export type PublicGig = GigDoc & { id: string };
 
+// Task 11 Shows entry: one filled/closed-booked gig, plus the OTHER party's
+// resolved display name/handle (curator, on the musician page; booked
+// musician, on the curator page — see resolveProfileLabels below).
+// `location` is always populated (every GigDoc has one) even though only
+// MusicianProfile.tsx's ShowCard renders it — the curator already knows
+// their own gig's location.
+export type ShowEntry = {
+  gigId: string; title: string; startsAtMs: number; location: GigPublicLocation;
+  otherProfileName: string; otherProfileHandle: string | null;
+};
+
 export type MusicianLoaded = {
   kind: "musician";
   profile: ProfileDoc; tracks: LoadedTrack[];
   avatarUrl: string | null; coverUrl: string | null;
+  upcomingShows: ShowEntry[]; pastShows: ShowEntry[];
 };
 export type CuratorLoaded = {
   kind: "curator";
   profile: ProfileDoc;
   photoUrls: string[];
   openGigs: PublicGig[];
+  upcomingShows: ShowEntry[]; pastShows: ShowEntry[];
 };
 type Loaded = MusicianLoaded | CuratorLoaded;
 
@@ -53,12 +66,134 @@ async function storageUrl(path: string | null | undefined): Promise<string | nul
   }
 }
 
+// Batched cross-reference profile-name lookup for the Shows section below
+// (curator names on the musician page, musician names on the curator page) —
+// one Promise.all over the *unique* ids in a Shows result set, not one
+// sequential getDoc per row (n+1-avoidance, same shape the admin page's own
+// TracksQueue/GigsAdmin batched name resolution uses). A single id's lookup
+// failing — permission-denied (that profile has since gone
+// unapproved/deleted) or any other read error — doesn't fail the whole Shows
+// section: same "auxiliary content shouldn't 500 the whole page" tradeoff as
+// storageUrl above, just falling back to an unlinked placeholder name for
+// that one row instead of a null URL.
+async function resolveProfileLabels(ids: string[]): Promise<Map<string, { name: string; handle: string | null }>> {
+  const { db } = getServerFirebase();
+  const unique = Array.from(new Set(ids));
+  const entries = await Promise.all(unique.map(async (id): Promise<readonly [string, { name: string; handle: string | null }]> => {
+    try {
+      const snap = await getDoc(doc(db, "profiles", id));
+      if (!snap.exists()) return [id, { name: "Unknown", handle: null }];
+      const p = snap.data() as ProfileDoc;
+      return [id, { name: p.name, handle: p.handle }];
+    } catch (e) {
+      // Duck-typed per loadProfile's own comment below — a stranger's
+      // profile that went unapproved/private reads as permission-denied,
+      // which is a legitimate (if unusual) state for a Shows row's OTHER
+      // party, not a bug worth logging loudly.
+      const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
+      if (code !== "permission-denied" && code !== "not-found") {
+        console.warn("resolveProfileLabels: lookup failed", id, e);
+      }
+      return [id, { name: "Unknown", handle: null }];
+    }
+  }));
+  return new Map(entries);
+}
+
+// Musician-page Shows query (Task 11): a single `status in [...]` query is
+// list-provable here because bookedMusicianProfileId is pinned by EQUALITY
+// to one specific non-null profileId — see firestore.rules' own comment on
+// the gigs read rule for why that alone proves the status=='closed'
+// disjunct's `bookedMusicianProfileId != null` requirement (the curator page
+// below can't take this shortcut — see loadCuratorShows). No `.limit()`: the
+// Shows section's own design assumption (this task's plan) is that this
+// returns at most a few dozen docs per profile at V1 scale — capping the
+// ascending-ordered result at the Firestore level would bias toward the
+// OLDEST rows instead of the ones nearest "now", so the 20/20 caps are
+// applied in JS below, after the full (bounded-in-practice) result is in
+// hand.
+async function loadMusicianShows(profileId: string): Promise<{ upcoming: ShowEntry[]; past: ShowEntry[] }> {
+  try {
+    const { db } = getServerFirebase();
+    const snap = await getDocs(query(
+      collection(db, "gigs"),
+      where("bookedMusicianProfileId", "==", profileId),
+      where("status", "in", ["filled", "closed"]),
+      orderBy("startsAt")));
+    const gigs = snap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
+    const labels = await resolveProfileLabels(gigs.map((g) => g.curatorProfileId));
+    const now = Date.now();
+    const entries: ShowEntry[] = gigs.map((g) => {
+      const label = labels.get(g.curatorProfileId) ?? { name: "Unknown", handle: null };
+      return {
+        gigId: g.id, title: g.title, startsAtMs: g.startsAt, location: g.location,
+        otherProfileName: label.name, otherProfileHandle: label.handle,
+      };
+    });
+    return {
+      upcoming: entries.filter((e) => e.startsAtMs > now).slice(0, 20), // already ascending -> soonest first
+      past: entries.filter((e) => e.startsAtMs <= now).slice(-20).reverse(), // newest first
+    };
+  } catch (e) {
+    // Same "auxiliary content shouldn't 500 the whole page" tradeoff as
+    // storageUrl above — an empty Shows section (indistinguishable from the
+    // legitimate no-shows-yet case, per the section's own hidden-while-empty
+    // contract) beats a 500 for every visitor to this profile.
+    console.error("loadMusicianShows failed", profileId, e);
+    return { upcoming: [], past: [] };
+  }
+}
+
+// Curator-page Shows query (Task 11): MUST split into two queries per the
+// rules-provability constraint (Task 2 audit) — a combined `status in`
+// query filtered only by curatorProfileId can't prove the closed leg's
+// `bookedMusicianProfileId != null` requirement (unlike the musician page's
+// single query above, curatorProfileId doesn't pin bookedMusicianProfileId
+// to anything). The closed leg's inequality filter (`> ""`) forces an
+// implicit order by bookedMusicianProfileId when no explicit orderBy is
+// given — not startsAt — so chronological ordering happens here, in JS,
+// over the merged result, rather than at the query level for either leg.
+async function loadCuratorShows(profileId: string): Promise<{ upcoming: ShowEntry[]; past: ShowEntry[] }> {
+  try {
+    const { db } = getServerFirebase();
+    const [filledSnap, closedSnap] = await Promise.all([
+      getDocs(query(collection(db, "gigs"),
+        where("curatorProfileId", "==", profileId), where("status", "==", "filled"))),
+      getDocs(query(collection(db, "gigs"),
+        where("curatorProfileId", "==", profileId), where("status", "==", "closed"),
+        where("bookedMusicianProfileId", ">", ""))),
+    ]);
+    const gigs = [...filledSnap.docs, ...closedSnap.docs]
+      .map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))
+      .sort((a, b) => a.startsAt - b.startsAt);
+    const musicianIds = gigs
+      .map((g) => g.bookedMusicianProfileId)
+      .filter((id): id is string => id !== null);
+    const labels = await resolveProfileLabels(musicianIds);
+    const now = Date.now();
+    const entries: ShowEntry[] = gigs.map((g) => {
+      const label = g.bookedMusicianProfileId ? labels.get(g.bookedMusicianProfileId) : undefined;
+      return {
+        gigId: g.id, title: g.title, startsAtMs: g.startsAt, location: g.location,
+        otherProfileName: label?.name ?? "Unknown", otherProfileHandle: label?.handle ?? null,
+      };
+    });
+    return {
+      upcoming: entries.filter((e) => e.startsAtMs > now).slice(0, 20),
+      past: entries.filter((e) => e.startsAtMs <= now).slice(-20).reverse(),
+    };
+  } catch (e) {
+    console.error("loadCuratorShows failed", profileId, e);
+    return { upcoming: [], past: [] };
+  }
+}
+
 async function loadMusician(profileId: string, profile: ProfileDoc): Promise<MusicianLoaded> {
   const { db } = getServerFirebase();
   const trackSnap = await getDocs(query(
     collection(db, `profiles/${profileId}/tracks`),
     where("status", "==", "approved"), orderBy("order")));
-  const [tracks, avatarUrl, coverUrl] = await Promise.all([
+  const [tracks, avatarUrl, coverUrl, shows] = await Promise.all([
     Promise.all(trackSnap.docs.map(async (t) => {
       const d = t.data() as TrackDoc;
       const url = await storageUrl(d.storagePath);
@@ -66,8 +201,9 @@ async function loadMusician(profileId: string, profile: ProfileDoc): Promise<Mus
     })).then((rows) => rows.filter((t): t is LoadedTrack => t !== null)),
     storageUrl(profile.portfolio?.avatarPhotoPath),
     storageUrl(profile.portfolio?.coverPhotoPath),
+    loadMusicianShows(profileId),
   ]);
-  return { kind: "musician", profile, tracks, avatarUrl, coverUrl };
+  return { kind: "musician", profile, tracks, avatarUrl, coverUrl, upcomingShows: shows.upcoming, pastShows: shows.past };
 }
 
 async function loadCurator(profileId: string, profile: ProfileDoc): Promise<CuratorLoaded> {
@@ -82,16 +218,17 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
   // further rules exposure (rules only ever see per-document field values,
   // never result ordering) — it only changes which composite index the
   // query needs at the datastore layer (see firestore.indexes.json).
-  const [gigsSnap, photoUrls] = await Promise.all([
+  const [gigsSnap, photoUrls, shows] = await Promise.all([
     getDocs(query(
       collection(db, "gigs"),
       where("curatorProfileId", "==", profileId),
       where("status", "==", "open"),
       orderBy("startsAt"))),
     Promise.all(photoPaths.map((p) => storageUrl(p))).then((urls) => urls.filter((u): u is string => u !== null)),
+    loadCuratorShows(profileId),
   ]);
   const openGigs = gigsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
-  return { kind: "curator", profile, photoUrls, openGigs };
+  return { kind: "curator", profile, photoUrls, openGigs, upcomingShows: shows.upcoming, pastShows: shows.past };
 }
 
 // cache() dedupes this per-request across generateMetadata and the page body —

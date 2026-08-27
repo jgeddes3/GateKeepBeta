@@ -5,7 +5,7 @@ import {
   MAX_ACTIVE_SERIES_PER_PROFILE, FILL_MODES,
   type GigContentInput, type GigBudget, type GigRecurrence, type FillMode,
   type GigSeriesDoc, type GigPublicLocation, type GigStatus,
-  type CuratorSubtype, type CuratorDetails,
+  type CuratorSubtype, type CuratorDetails, type BookingRequestDoc,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
@@ -14,6 +14,7 @@ import {
   resolveGigLocation, validateLocationInput, GEOCODE_FAILURE_MESSAGE, type GigLocationInput,
 } from "./gigs.js";
 import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
+import { executeCancellation, ALREADY_STARTED_MESSAGE, NO_UPCOMING_DATES_MESSAGE } from "./bookingLifecycle.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -113,6 +114,9 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1", s
     // Task 7's daily sweep materializes the first batch of occurrences on
     // its next run — createSeries deliberately writes no occurrence docs.
     status: "active", materializedThrough: 0, createdAt: now, updatedAt: now,
+    // SP4 whole-run booking (Task 5) is the sole writer of these — no run is
+    // booked yet at series creation.
+    activeBookingId: null, bookedMusicianProfileId: null,
   };
   await seriesRef.set(series);
   return { seriesId: seriesRef.id };
@@ -243,6 +247,16 @@ export const updateSeries = onCall<UpdateSeriesInput>(
     .where("seriesId", "==", input.seriesId).where("startsAt", ">", now).get();
   for (const doc of futureSnap.docs) {
     if (doc.data().detachedFromTemplate === true) continue;
+    // F2 (security audit wave): a FILLED (or CLOSED) occurrence is a
+    // booked, contract-locked date — the two sides negotiated and accepted
+    // its specific terms via acceptBooking, exactly like updateGig now
+    // refuses to edit a filled/closed gig directly (gigs.ts). A template
+    // propagation sweep is a SILENT, no-confirmation write path — it must
+    // never retroactively rewrite a booked date's schedule/terms out from
+    // under an already-confirmed booking just because the curator edited
+    // some OTHER future occurrence's template.
+    const occStatus = doc.data().status as GigStatus;
+    if (occStatus === "filled" || occStatus === "closed") continue;
     batch.update(doc.ref, {
       title: template.title, description: template.description, wants: template.wants,
       budget: template.budget, durationMinutes: template.durationMinutes, provisions: template.provisions,
@@ -262,6 +276,43 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   return { ok: true };
 });
 
+// Task 7 fix: shared by pauseSeries/endSeries below — attempts a
+// curator-side cancellation of the series' active run booking (if any, and
+// still "confirmed") via executeCancellation, but TOLERATES exactly the
+// "no cancellable dates left" family of failures it can throw
+// (ALREADY_STARTED_MESSAGE / NO_UPCOMING_DATES_MESSAGE — a zombie run: every
+// future date was already cancelled per-occurrence, or the run's last date
+// already started). Matched via the exact exported message constants, never
+// an ad-hoc substring check, so this can never accidentally swallow some
+// OTHER failed-precondition it doesn't actually understand.
+//
+// The pause/end action itself must never be blocked by this zombie state —
+// the curator's intent (pause/end the series) has nothing to do with
+// whether this particular booking still has a cancellable date. Leaving the
+// booking "confirmed" with a now-stale series.activeBookingId is safe
+// interim state, not a bug: the materializer only births FILLED occurrences
+// for a still-ACTIVE series (a paused/ended one births nothing), the
+// rebooking-door guard in acceptBooking still correctly refuses a fresh
+// accept against this series' activeBookingId, and Task 8's daily sweep
+// resolves the booking (to "completed") within a day regardless. Any OTHER
+// error (not-found, a genuine transient failure, ...) still propagates —
+// this must never silently swallow a failure it doesn't recognize.
+async function cancelActiveRunBookingTolerant(
+  db: FirebaseFirestore.Firestore, activeBookingId: string, reason: string, now: number,
+): Promise<void> {
+  const bookingSnap = await db.doc(`bookings/${activeBookingId}`).get();
+  const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+  if (booking?.status !== "confirmed") return;
+  try {
+    await executeCancellation(activeBookingId, booking, "curator", reason, now);
+  } catch (e) {
+    // Upgrade path: coded HttpsError details instead of message identity.
+    const isNoCancellableDates = e instanceof HttpsError && e.code === "failed-precondition"
+      && (e.message === ALREADY_STARTED_MESSAGE || e.message === NO_UPCOMING_DATES_MESSAGE);
+    if (!isNoCancellableDates) throw e;
+  }
+}
+
 export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
@@ -270,17 +321,83 @@ export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1" 
 
   const db = getFirestore();
   const seriesRef = db.doc(`gigSeries/${seriesId}`);
-  const seriesSnap = await seriesRef.get();
+  let seriesSnap = await seriesRef.get();
   if (!seriesSnap.exists) throw new HttpsError("not-found", "Series not found.");
-  const series = seriesSnap.data() as GigSeriesDoc;
+  let series = seriesSnap.data() as GigSeriesDoc;
   await requireProfileMember(series.curatorProfileId, uid);
   if (series.status !== "active") {
     throw new HttpsError("failed-precondition", `Cannot pause a series in status "${series.status}".`);
   }
 
-  await seriesRef.update({ status: "paused", updatedAt: Date.now() });
-  return { ok: true };
+  // F3 (security audit wave, TOCTOU hardening): the series' status flip
+  // below carries a REAL optimistic precondition (`lastUpdateTime`,
+  // mirroring supersedeSiblingBooking's idiom in bookings.ts) — closing the
+  // race where an accept (acceptBooking's own transaction stamps
+  // activeBookingId/bookedMusicianProfileId onto this SAME series doc)
+  // lands between this callable's outer read above and its status-flip
+  // write; without it, the flip could commit right after an accept this
+  // callable never saw, pausing a series whose freshly-booked run
+  // `cancelActiveRunBookingTolerant` above never even looked at.
+  //
+  // This precondition ALSO — expectedly — trips on attempt 0 whenever
+  // `cancelActiveRunBookingTolerant` just above actually cancelled a run:
+  // that call's own executeCancellation transaction writes
+  // activeBookingId:null onto this SAME series doc, which is exactly a
+  // "concurrent" write from this function's own point of view (`seriesSnap`
+  // was captured before it happened). That is not a real conflict this
+  // function needs to give up on — it re-reads the series ONCE (as it would
+  // for a genuine race too), finds activeBookingId now cleared (or, on a
+  // genuine race, a DIFFERENT confirmed booking that just landed) and
+  // retries with the fresh precondition. A SECOND conflict at that point is
+  // a real race this function cannot resolve on its own and propagates.
+  for (let attempt = 0; ; attempt++) {
+    if (series.activeBookingId) {
+      await cancelActiveRunBookingTolerant(db, series.activeBookingId, "Series paused by curator", Date.now());
+    }
+    try {
+      await seriesRef.update(
+        { status: "paused", updatedAt: Date.now() }, { lastUpdateTime: seriesSnap.updateTime });
+      return { ok: true };
+    } catch (e) {
+      if (attempt >= 1) throw e;
+      seriesSnap = await seriesRef.get();
+      if (!seriesSnap.exists) throw new HttpsError("not-found", "Series not found.");
+      series = seriesSnap.data() as GigSeriesDoc;
+      if (series.status !== "active") {
+        throw new HttpsError("failed-precondition", `Cannot pause a series in status "${series.status}".`);
+      }
+    }
+  }
 });
+
+// Runs endSeries' own occurrence sweep (future open|draft -> cancelled)
+// against a FRESH `now`/gig snapshot, as one batch alongside the series'
+// own status flip — extracted so pauseSeries/endSeries' shared F3 retry
+// loop shape (attempt the whole flow, retry once on a precondition
+// conflict, propagate a second) can re-run this WHOLE step, not just the
+// series doc's own write, on a retry (see endSeries' own comment for why a
+// stale-`now` occurrence sweep would be a subtler, silent bug otherwise).
+async function attemptEndSeries(
+  db: FirebaseFirestore.Firestore, seriesRef: FirebaseFirestore.DocumentReference,
+  seriesSnap: FirebaseFirestore.DocumentSnapshot,
+): Promise<void> {
+  const now = Date.now();
+  const batch = db.batch();
+  batch.update(seriesRef, { status: "ended", updatedAt: now }, { lastUpdateTime: seriesSnap.updateTime });
+
+  // Same query shape as updateSeries's propagation query — reuses the
+  // (seriesId,startsAt) composite index, filters status in application code.
+  const futureSnap = await db.collection("gigs")
+    .where("seriesId", "==", seriesRef.id).where("startsAt", ">", now).get();
+  for (const doc of futureSnap.docs) {
+    const status = doc.data().status as GigStatus;
+    if (status === "open" || status === "draft") {
+      batch.update(doc.ref, { status: "cancelled", updatedAt: now });
+    }
+  }
+
+  await batch.commit();
+}
 
 export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
@@ -290,29 +407,43 @@ export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1" },
 
   const db = getFirestore();
   const seriesRef = db.doc(`gigSeries/${seriesId}`);
-  const seriesSnap = await seriesRef.get();
+  let seriesSnap = await seriesRef.get();
   if (!seriesSnap.exists) throw new HttpsError("not-found", "Series not found.");
-  const series = seriesSnap.data() as GigSeriesDoc;
+  let series = seriesSnap.data() as GigSeriesDoc;
   await requireProfileMember(series.curatorProfileId, uid);
   if (series.status === "ended") {
     throw new HttpsError("failed-precondition", "Series has already ended.");
   }
 
-  const now = Date.now();
-  const batch = db.batch();
-  batch.update(seriesRef, { status: "ended", updatedAt: now });
-
-  // Same query shape as updateSeries's propagation query — reuses the
-  // (seriesId,startsAt) composite index, filters status in application code.
-  const futureSnap = await db.collection("gigs")
-    .where("seriesId", "==", seriesId).where("startsAt", ">", now).get();
-  for (const doc of futureSnap.docs) {
-    const status = doc.data().status as GigStatus;
-    if (status === "open" || status === "draft") {
-      batch.update(doc.ref, { status: "cancelled", updatedAt: now });
+  // F3 (security audit wave, TOCTOU hardening) — same race/precondition/
+  // retry rationale as pauseSeries above: the series' status flip (inside
+  // attemptEndSeries, alongside the future-occurrence cancel sweep in the
+  // SAME batch) carries a real `lastUpdateTime` precondition, and the WHOLE
+  // attempt (not just the write) is retried once on a conflict — a stale
+  // retry that only re-ran the series doc's own write while keeping an
+  // occurrence sweep computed against a now-stale `now`/gig snapshot would
+  // be a subtler bug of its own (e.g. missing an occurrence that became
+  // "open" in the interim). SP4 (Task 7): same curator-side run
+  // cancellation as pauseSeries — run FIRST, so the occurrences it reopens
+  // (filled -> open) fall straight into the ordinary future open|draft
+  // sweep inside attemptEndSeries, exactly like any other open date does
+  // when a series ends. Tolerates a zombie (no-cancellable-dates) booking —
+  // see cancelActiveRunBookingTolerant's own comment.
+  for (let attempt = 0; ; attempt++) {
+    if (series.activeBookingId) {
+      await cancelActiveRunBookingTolerant(db, series.activeBookingId, "Series ended by curator", Date.now());
+    }
+    try {
+      await attemptEndSeries(db, seriesRef, seriesSnap);
+      return { ok: true };
+    } catch (e) {
+      if (attempt >= 1) throw e;
+      seriesSnap = await seriesRef.get();
+      if (!seriesSnap.exists) throw new HttpsError("not-found", "Series not found.");
+      series = seriesSnap.data() as GigSeriesDoc;
+      if (series.status === "ended") {
+        throw new HttpsError("failed-precondition", "Series has already ended.");
+      }
     }
   }
-
-  await batch.commit();
-  return { ok: true };
 });

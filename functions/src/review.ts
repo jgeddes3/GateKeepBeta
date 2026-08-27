@@ -4,6 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import { isValidDocId, type AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
 import { syncCuratorAccess } from "./curator.js";
+import { unwindBookingsForModeration } from "./bookingLifecycle.js";
 
 export function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
@@ -118,6 +119,50 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
           batch.update(doc.ref, { status: "closed", updatedAt: now });
           closedGigs++;
         }
+        // SP4 (Task 7 amendment): a FILLED gig is not reached by the
+        // "open"-only query above. Its confirmed booking is expired by the
+        // unwindBookingsForModeration call below, but left alone the GIG
+        // doc itself would still read status:"filled" — which is publicly
+        // readable unconditionally (the gigs read rule's status=='filled'
+        // disjunct is not gated on the curator profile's own approval
+        // status) — and a FUTURE-dated one would keep rendering as a
+        // phantom "upcoming show" on the booked musician's own public Shows
+        // section (Task 11 queries filled+closed gigs by linkage). Close it
+        // and clear its booking linkage here: a closed gig with
+        // bookedMusicianProfileId:null fails BOTH public-read disjuncts
+        // (status=='filled' no longer applies, and the status=='closed'
+        // disjunct requires a non-null bookedMusicianProfileId), so it stops
+        // being publicly readable at all. A PAST-dated filled gig is left
+        // COMPLETELY untouched instead — the show really happened, the
+        // musician's Shows HISTORY legitimately retains it, and a full
+        // scrub (deleting the gig outright) remains the deliberate two-step
+        // reject -> deleteProfile, exactly like SP2's content-takedown
+        // model. (unwindBookingsForModeration's own series-level
+        // activeBookingId/bookedMusicianProfileId clear is idempotent
+        // regardless of whether it runs before or after this gig-side
+        // write, since it re-reads the series fresh and only acts if the
+        // series still names the just-expired booking.)
+        // Minor fix (Task 7 quality review): unbounded (no .limit()) —
+        // accepted at v1 scale, same as the openGigsSnap query just above;
+        // a single profile's live "filled" occurrence count is bounded by
+        // its own MAX_OPEN_GIGS_PER_PROFILE-shaped usage in practice, and
+        // this batch (openGigsSnap + filledGigsSnap + activeSeriesSnap
+        // combined) must stay under Firestore's 500-write-per-batch ceiling
+        // regardless — a curator with enough simultaneously-live content to
+        // approach that ceiling is itself a v2 pagination problem, not a
+        // v1 one.
+        const filledGigsSnap = await db.collection("gigs")
+          .where("curatorProfileId", "==", profileId).where("status", "==", "filled").get();
+        for (const doc of filledGigsSnap.docs) {
+          const startsAt = doc.data().startsAt as number;
+          if (startsAt > now) {
+            batch.update(doc.ref, {
+              status: "closed", bookingId: null, bookedMusicianProfileId: null, updatedAt: now,
+            });
+            closedGigs++;
+          }
+          // past-dated: left entirely alone — see comment above.
+        }
         const activeSeriesSnap = await db.collection("gigSeries")
           .where("curatorProfileId", "==", profileId).where("status", "==", "active").get();
         for (const doc of activeSeriesSnap.docs) {
@@ -128,6 +173,14 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     }
 
     await batch.commit();
+
+    // SP4 (Task 7): unwind every booking naming this profile as EITHER side
+    // — added regardless of isCurator (a musician profile's own confirmed
+    // bookings need this exactly as much as a curator's do; the isCurator
+    // branch above only ever touched gigs/series, never bookings).
+    if (decision === "rejected" && wasApproved) {
+      await unwindBookingsForModeration({ profileId });
+    }
 
     // curatorAccess recompute for reject-from-approved runs AFTER the batch
     // commits: syncCuratorAccess re-reads each member's profiles live, and

@@ -6,6 +6,7 @@ import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { AboutForm, LocationForm, LookingForForm, AmenitiesForm, GalleryPhotosSection } from "../../../../src/curator/CuratorForms";
+import { BookingInbox } from "../../../../src/bookings/BookingInbox";
 import { validateLookingFor, type ProfileDoc, type CuratorDetails, type CuratorSubtype } from "@gatekeep/shared";
 
 // Mirrors functions/src/profiles.ts's submitProfileForReview curator gate
@@ -99,6 +100,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
           <>
             {" "}· <a href={`/@${profile.handle}`} target="_blank" rel="noopener noreferrer">view public page</a>
             {" "}· <a href={`/dashboard/curator/${profileId}/gigs`}>gigs & series</a>
+            {" "}· <a href={`/dashboard/curator/${profileId}/musicians`}>find musicians</a>
           </>
         )}
       </p>
@@ -129,6 +131,18 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
       <LocationForm key={`location-${profileId}`} profileId={profileId} subtype={subtype} initial={c?.location} />
       <LookingForForm key={`looking-for-${profileId}`} profileId={profileId} initial={c?.lookingFor} />
       <AmenitiesForm key={`amenities-${profileId}`} profileId={profileId} initial={c?.amenities} initialAdvertising={c?.advertisingInterest} />
+      {profile.status === "approved" && (
+        // Only an approved curator profile can have bookings at all
+        // (applyToGig/offerGig both require requireApprovedCuratorProfile)
+        // — mirrors the musician portfolio editor's identical gate. Keyed
+        // by profileId so switching profiles under this same route resets
+        // BookingInbox's three onSnapshot subscriptions instead of reusing
+        // the previous profile's listeners against new params.
+        <section style={{ borderTop: "1px solid #eee", paddingTop: 24 }}>
+          <h2>Bookings</h2>
+          <BookingInbox key={profileId} profileId={profileId} role="curator" />
+        </section>
+      )}
       {showSubmit && (
         <section style={{ display: "grid", gap: 8, borderTop: "1px solid #eee", paddingTop: 24 }}>
           <h2>Ready to submit?</h2>

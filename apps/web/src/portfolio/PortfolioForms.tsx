@@ -5,7 +5,8 @@ import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
 import {
   GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
-  type PortfolioData, type BookingDoc, type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
+  type PortfolioData, type BookingDoc, type BookingVisibility,
+  type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
 } from "@gatekeep/shared";
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
@@ -214,6 +215,15 @@ type RateInput = { amount: string; note: string | null };
 const rateInputFrom = (r: RateAmount | null | undefined): RateInput =>
   r ? { amount: (r.amountCents / 100).toString(), note: r.note ?? null } : { amount: "", note: null };
 
+// SP4 Task 1 stopgap: BookingUpdateInput now requires `visibility`, but the
+// per-field visibility toggle UI is a later SP4 task. Until it lands, saves
+// from this form preserve whatever visibility is already stored (edit case)
+// or fall back to this default (matches the SP4 backfill's default and
+// preserves pre-SP4 exposure: rates readable by curators, prefs by curators).
+const DEFAULT_BOOKING_VISIBILITY: BookingVisibility = {
+  perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
+};
+
 export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
   // Raw strings, not derived cents: converting dollars -> cents -> back to a
@@ -256,7 +266,10 @@ export function BookingForm({ profileId, initial }:
       }
       rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
     }
-    const input = { profileId, rates, preferences: prefs };
+    const input = {
+      profileId, rates, preferences: prefs,
+      visibility: initial?.visibility ?? DEFAULT_BOOKING_VISIBILITY,
+    };
     const v = validateBookingUpdate(input);
     if (!v.ok) { window.alert(v.reason); return; }
     setBusy(true);

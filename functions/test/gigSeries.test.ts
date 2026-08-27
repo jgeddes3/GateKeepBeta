@@ -4,14 +4,18 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder, coarsen } from "../src/geocode.js";
 import {
-  MAX_ACTIVE_SERIES_PER_PROFILE, type ProfileDraftInput, type GigSeriesDoc, type GigDoc,
+  MAX_ACTIVE_SERIES_PER_PROFILE, type ProfileDraftInput, type GigSeriesDoc, type GigDoc, type BookingRequestDoc,
 } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
 const stub = new StubGeocoder();
-vi.setConfig({ testTimeout: 15_000 });
+// 20s (not this file's prior 15s) — the SP4 (Task 7) pauseSeries/endSeries
+// active-run-booking tests below chain a real applyToGig -> acceptBooking
+// pair on top of the profile setup, matching bookingLifecycle.test.ts's own
+// precedent for this same family of chain-heavy booking tests.
+vi.setConfig({ testTimeout: 20_000 });
 
 const SEED_ADDRESS = "123 Main St, Austin, TX"; // matches helpers.ts's seedCuratorGateContent
 
@@ -24,6 +28,33 @@ async function makeApprovedCuratorProfile(
     { type: "curator", subtype, name: "The Green Room", handle: `${emailPrefix}_${Date.now()}_${Math.floor(Math.random() * 1e6)}` },
     owner.user);
   await seedCuratorGateContent(adb, profileId);
+  await callFn("submitProfileForReview", { profileId }, owner.user);
+  const admin = await makeAdminUser(`${emailPrefix}a`);
+  await callFn("reviewProfile", { profileId, decision: "approved" }, admin.user);
+  return { owner, profileId };
+}
+
+// SP4 (Task 7) fixture — an approved musician profile, mirroring
+// bookings.test.ts/bookingLifecycle.test.ts's identical helper. This file's
+// own subject is series lifecycle, not booking negotiation mechanics, so
+// this stays minimal (single-offer accept only).
+async function makeApprovedMusicianProfile(emailPrefix: string) {
+  const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+    "createProfileDraft",
+    { type: "musician", subtype: "solo", name: "The Act", handle: `${emailPrefix}_${Date.now()}_${Math.floor(Math.random() * 1e6)}` },
+    owner.user);
+  await adb.doc(`profiles/${profileId}`).update({
+    "portfolio.bio": "A great live act.",
+    "portfolio.genres": ["rock"],
+    "portfolio.avatarPhotoPath": "public/photos/seed/avatar-seed.jpg",
+  });
+  await adb.doc(`profiles/${profileId}/tracks/seed-track`).set({
+    title: "Demo", status: "approved", uploaderUid: owner.uid,
+    startSec: 0, durationSec: 20, storagePath: "public/tracks/seed/demo.m4a",
+    rejectionReason: null, failureReason: null, order: 0,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  });
   await callFn("submitProfileForReview", { profileId }, owner.user);
   const admin = await makeAdminUser(`${emailPrefix}a`);
   await callFn("reviewProfile", { profileId, decision: "approved" }, admin.user);
@@ -74,6 +105,7 @@ async function seedOccurrence(
       geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: SEED_ADDRESS,
     },
     status: "open", createdAt: now, updatedAt: now,
+    bookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   };
   await ref.set(doc);
@@ -177,6 +209,7 @@ describe("createSeries", () => {
         },
         templatePrivateLocation: { address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 } },
         status: "active", materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+        activeBookingId: null, bookedMusicianProfileId: null,
       };
       batch.set(ref, doc);
     }
@@ -223,6 +256,21 @@ describe("updateSeries", () => {
     const occPriv = (await adb.doc(`gigs/${occId}/private/location`).get()).data();
     expect(occPriv?.address).toBe(newAddress);
     expect(occPriv?.geo).toEqual({ lat: expected!.lat, lng: expected!.lng });
+  });
+
+  // F2 (security audit wave): a FILLED occurrence is a booked, contract-
+  // locked date — the template propagation sweep must skip it exactly like
+  // a detached occurrence, while an ordinary open sibling still updates.
+  it("F2: propagation SKIPS a FILLED occurrence (booked dates are contract-locked); an open sibling still updates", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("usfilled", "venue");
+    const seriesId = await createSeries(profileId, owner.user);
+    const filledOccId = await seedOccurrence(seriesId, profileId, { status: "filled", title: "Filled original" });
+    const openOccId = await seedOccurrence(seriesId, profileId, { title: "Open original" });
+    await callFn("updateSeries", { seriesId, ...seriesContent({ title: "Propagated Title" }) }, owner.user);
+    const filledOcc = (await adb.doc(`gigs/${filledOccId}`).get()).data();
+    expect(filledOcc?.title).toBe("Filled original"); // locked — untouched
+    const openOcc = (await adb.doc(`gigs/${openOccId}`).get()).data();
+    expect(openOcc?.title).toBe("Propagated Title"); // still updates
   });
 
   it("does NOT propagate to a DETACHED future occurrence", async () => {
@@ -328,6 +376,87 @@ describe("pauseSeries", () => {
     await expect(callFn("pauseSeries", { seriesId }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
+
+  // SP4 (Task 7)
+  it("with an active run booking at 71h before the next occurrence: curator-cancels the run (deposit_forfeited recorded, reason names the pause), series pauses, occurrences stay reopened (open)", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps4", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps4m");
+    const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
+    try {
+      const gigId1 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 71 * 3_600_000 });
+      const gigId2 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 200 * 3_600_000 });
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+      expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
+
+      await callFn("pauseSeries", { seriesId }, curator.user);
+
+      const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(bookingAfter.status).toBe("cancelled_by_curator");
+      expect(bookingAfter.cancellation).toMatchObject({
+        by: "curator", outcome: "deposit_forfeited", reason: "Series paused by curator",
+      });
+      expect(bookingAfter.deposit?.forfeitedTo).toBe("musician");
+
+      const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
+      expect(seriesAfter?.status).toBe("paused");
+      expect(seriesAfter?.activeBookingId).toBeNull();
+      expect(seriesAfter?.bookedMusicianProfileId).toBeNull();
+
+      // executeCancellation reopens the run's occurrences (filled -> open);
+      // pause leaves them exactly there — no separate cancel sweep for pause.
+      const [gig1After, gig2After] = await Promise.all(
+        [gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).get()));
+      expect(gig1After.data()?.status).toBe("open");
+      expect(gig1After.data()?.bookingId).toBeNull();
+      expect(gig2After.data()?.status).toBe("open");
+      expect(gig2After.data()?.bookingId).toBeNull();
+    } finally {
+      // Never leave an active series behind — already "paused" (non-active)
+      // on the success path, but guard defensively in case an assertion
+      // above throws before that write ever lands.
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
+  });
+
+  // SP4 (Task 7 quality review, IMPORTANT #3)
+  it("zombie tolerance: once every future date was cancelled per-occurrence (no cancellable date left), pauseSeries still succeeds — the booking + linkage are left untouched for Task 8's sweep", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps5", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps5m");
+    const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
+    try {
+      const gigId = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 50 * 3_600_000 });
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+      expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
+
+      // Cancel the run's only date PER-OCCURRENCE — the run survives
+      // (booking stays "confirmed"), but no date remains future+filled
+      // under this booking, and cancelOccurrence never touches the
+      // series' own activeBookingId linkage.
+      await callFn("cancelOccurrence", { bookingId, gigId, reason: "Scheduling conflict." }, curator.user);
+      expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
+
+      // pauseSeries must NOT throw despite the now-zombie booking.
+      await callFn("pauseSeries", { seriesId }, curator.user);
+
+      const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
+      expect(seriesAfter?.status).toBe("paused");
+      // Left untouched — executeCancellation's no-cancellable-dates failure
+      // was tolerated, not a successful cancellation.
+      expect(seriesAfter?.activeBookingId).toBe(bookingId);
+
+      const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data();
+      expect(bookingAfter?.status).toBe("confirmed");
+      expect(bookingAfter?.cancellation).toBeNull();
+    } finally {
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
+  });
 });
 
 describe("endSeries", () => {
@@ -370,5 +499,41 @@ describe("endSeries", () => {
     await callFn("pauseSeries", { seriesId }, owner.user);
     await callFn("endSeries", { seriesId }, owner.user);
     expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.status).toBe("ended");
+  });
+
+  // SP4 (Task 7)
+  it("with an active run booking: curator-cancels the run (reason names the end), then the reopened future occurrences fall into the ordinary open|draft cancel sweep", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("es5", "venue");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("es5m");
+    const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
+    try {
+      const gigId1 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 100 * 3_600_000 });
+      const gigId2 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 200 * 3_600_000 });
+
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+
+      await callFn("endSeries", { seriesId }, curator.user);
+
+      const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(bookingAfter.status).toBe("cancelled_by_curator");
+      expect(bookingAfter.cancellation?.reason).toBe("Series ended by curator");
+      expect(bookingAfter.cancellation?.outcome).toBe("deposit_refunded"); // well outside the 72h forfeit window
+
+      const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
+      expect(seriesAfter?.status).toBe("ended");
+      expect(seriesAfter?.activeBookingId).toBeNull();
+
+      // executeCancellation reopens both (filled -> open); endSeries' own
+      // existing open|draft sweep then cancels them, exactly like any other
+      // open date when its series ends.
+      const [gig1After, gig2After] = await Promise.all(
+        [gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).get()));
+      expect(gig1After.data()?.status).toBe("cancelled");
+      expect(gig2After.data()?.status).toBe("cancelled");
+    } finally {
+      await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
+    }
   });
 });

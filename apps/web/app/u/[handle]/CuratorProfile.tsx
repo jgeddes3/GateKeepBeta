@@ -1,12 +1,14 @@
 import styles from "./portfolio.module.css";
-import type { CuratorLoaded, PublicGig } from "./page";
-import { LAUNCH_TIMEZONE, type BudgetStructure, type CuratorDetails, type CuratorSubtype, type GigPublicLocation } from "@gatekeep/shared";
+import type { CuratorLoaded, PublicGig, ShowEntry } from "./page";
+import { type BudgetStructure, type CuratorDetails, type CuratorSubtype } from "@gatekeep/shared";
+import { formatGigDateTime, gigLocationLabel } from "./gigDisplay";
 
 // Sub-3's curator counterpart of MusicianProfile.tsx — same page.tsx SSR/ISR/
 // canonical/404 machinery, different content: no avatar/cover (curators have
 // no such fields — see CuratorDetails), just a gallery of curator.photoPaths,
 // the profile's own about/amenities/lookingFor sections, and a public Open
-// gigs listing.
+// gigs listing. Task 11 adds a Shows section (this curator's own past/
+// upcoming filled bookings, "featuring <musician>") below Open gigs.
 
 const SUBTYPE_LABEL: Record<CuratorSubtype, string> = {
   venue: "Venue", planner: "Planner", individual_host: "Individual host",
@@ -28,36 +30,9 @@ const BUDGET_STRUCTURE_LABEL: Record<BudgetStructure, string> = {
 // BUDGET_STRUCTURE_LABEL above.
 const fmtCents = (cents: number) => (cents % 100 === 0 ? `$${(cents / 100).toFixed(0)}` : `$${(cents / 100).toFixed(2)}`);
 
-// Display-only duplicate of ../../../src/gigs/GigForms.tsx's
-// formatGigDateTime — see that file's comment for the full rationale
-// (pinning every gig-time display, public and dashboard alike, to one
-// LAUNCH_TIMEZONE so a curator and a fan see the same wall time, labeled
-// with the zone's own short name so it's never ambiguous). Duplicated here
-// rather than imported for the same "use client" import-boundary reason as
-// BUDGET_STRUCTURE_LABEL above — this page has no other client boundary to
-// spend on pulling in a client-only module.
-function formatGigDateTime(startsAtMs: number): string {
-  const date = new Date(startsAtMs);
-  const formatted = date.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: LAUNCH_TIMEZONE });
-  const tzName = new Intl.DateTimeFormat("en-US", { timeZone: LAUNCH_TIMEZONE, timeZoneName: "short" })
-    .formatToParts(date).find((p) => p.type === "timeZoneName")?.value;
-  return tzName ? `${formatted} ${tzName}` : formatted;
-}
-
 function mapUrl(location: CuratorDetails["location"]): string {
   const q = location.geo ? `${location.geo.lat},${location.geo.lng}` : (location.address ?? location.city);
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
-}
-
-// Public precision per gig, matching GigPublicLocation's own shape: `address`
-// is present on the doc ONLY when addressVisibility=='public' (the write
-// path in functions/src/gigs.ts nulls it out otherwise), so this never needs
-// to branch on anything the client couldn't already see.
-function gigLocationLabel(location: GigPublicLocation): string {
-  if (location.addressVisibility === "public") {
-    return location.venueName ? `${location.venueName} — ${location.address}` : (location.address ?? location.city);
-  }
-  return location.neighborhood ? `${location.neighborhood}, ${location.city}` : location.city;
 }
 
 function GigCard({ gig }: { gig: PublicGig }) {
@@ -78,8 +53,36 @@ function GigCard({ gig }: { gig: PublicGig }) {
   );
 }
 
+// Task 11 Shows entry — this curator's own filled/closed-booked gig, tagged
+// with the booked musician's name (linked to their public page when a handle
+// is known — see page.tsx's resolveProfileLabels for the "profile since
+// went private/deleted" fallback). No location line for a VENUE curator
+// (their own fixed address is already shown at the profile level, above —
+// they already know where it is), but a planner/individual_host has no such
+// fixed home base (spec: only venues geocode a full street address; the
+// other two subtypes are "roaming" — a different address per gig is the
+// normal case), so the public-precision location line (SP4 Task 13 item 9;
+// same gigLocationLabel MusicianProfile.tsx's ShowCard already renders) is
+// the only way a viewer learns WHERE one of their non-venue shows actually
+// took/takes place.
+function ShowCard({ show, isVenue }: { show: ShowEntry; isVenue: boolean }) {
+  return (
+    <li className={styles.gigCard}>
+      <strong>{show.title || "Untitled gig"}</strong>
+      <p className={styles.gigMeta}>{formatGigDateTime(show.startsAtMs)}</p>
+      {!isVenue && <p className={styles.gigMeta}>{gigLocationLabel(show.location)}</p>}
+      <p className={styles.gigMeta}>
+        featuring{" "}
+        {show.otherProfileHandle
+          ? <a href={`/@${show.otherProfileHandle}`}>{show.otherProfileName}</a>
+          : show.otherProfileName}
+      </p>
+    </li>
+  );
+}
+
 export function CuratorProfile({ data }: { data: CuratorLoaded }) {
-  const { profile, photoUrls, openGigs } = data;
+  const { profile, photoUrls, openGigs, upcomingShows, pastShows } = data;
   const c = profile.curator;
   const subtype = profile.subtype as CuratorSubtype;
   const isVenue = subtype === "venue";
@@ -163,9 +166,36 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
               </ul>
             </section>
           )}
+          {/* Shows (Task 11): this curator's own filled/closed-booked gigs —
+              the SP2 hidden-while-empty contract, now real. Hidden entirely
+              (not an empty-state message) when there are none, same as every
+              other optional section on this page. */}
+          {(upcomingShows.length > 0 || pastShows.length > 0) && (
+            <section className={styles.section}>
+              <h2>Shows</h2>
+              {upcomingShows.length > 0 && (
+                <>
+                  <h3>Upcoming shows</h3>
+                  <ul className={styles.gigList}>
+                    {upcomingShows.map((s) => <ShowCard key={s.gigId} show={s} isVenue={isVenue} />)}
+                  </ul>
+                </>
+              )}
+              {pastShows.length > 0 && (
+                <>
+                  <h3>Past shows</h3>
+                  <ul className={styles.gigList}>
+                    {pastShows.map((s) => <ShowCard key={s.gigId} show={s} isVenue={isVenue} />)}
+                  </ul>
+                </>
+              )}
+            </section>
+          )}
           {/* Upcoming Events: platform-ticketed events for this curator ship
-              in sub-6 (spec §"Out (later sub-projects)") — hidden until that
-              collection exists, same as MusicianProfile.tsx's Shows section. */}
+              in sub-6 (spec §"Out (later sub-projects)") — a DIFFERENT
+              feature from the Shows section above (that's this curator's
+              booked-gig history; this is platform ticketing) — hidden until
+              that collection exists. */}
         </div>
       </div>
     </main>

@@ -10,6 +10,7 @@ import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { writeAudit } from "./review.js";
 import { bucket, logDeleteFailure } from "./storage.js";
 import { syncCuratorAccess } from "./curator.js";
+import { unwindBookingsForModeration } from "./bookingLifecycle.js";
 
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
@@ -101,6 +102,11 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
       type: input.type, subtype: input.subtype as ProfileDoc["subtype"],
       name: input.name.trim(), handle: input.handle,
       status: "draft", rejectionReason: null, createdAt: now, updatedAt: now,
+      // SP4: rebuildBookingProjections is the sole writer of this field
+      // post-creation (Task 6's recomputeReliability only ever touches
+      // curatorBooking's `reliability` summary, never publicBooking) — no
+      // booking prefs are public yet for a brand-new draft.
+      publicBooking: null,
       ...(input.type === "musician"
         ? { portfolio: { bio: "", genres: [], externalLinks: [], avatarPhotoPath: null, coverPhotoPath: null } }
         : input.type === "curator"
@@ -247,8 +253,6 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const name = snap.data()?.name as string | undefined;
   const isCurator = snap.data()?.type === "curator";
 
-  if (handle) await db.doc(`handles/${handle}`).delete();
-
   // S6: collect member uids BEFORE the profile's own recursiveDelete removes
   // the members subcollection — syncCuratorAccess (post-delete, below) needs
   // to run for each of them once this profile's membership docs are truly
@@ -281,6 +285,43 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   if (isCurator) {
     await deleteGigsForProfile(db, profileId);
     await deleteSeriesForProfile(db, profileId);
+  }
+
+  // SP4 (Task 7): unwind every booking naming this profile as either side —
+  // musician or curator. Deliberately runs before recursiveDelete (mirrors
+  // the gig/series cascade's own ordering just above), though it would work
+  // equally well after: `bookings` is a top-level collection, not a
+  // subcollection of this profile, so recursiveDelete never reaches it
+  // either way. These bookings deliberately SURVIVE as "expired" top-level
+  // records that now reference a dead profile id — sub-5 must tolerate that.
+  await unwindBookingsForModeration({ profileId });
+
+  // SP4 (Task 13 item 5): handle delete moved to AFTER the gig/series/booking
+  // cascade above (was: the first write this callable made). Freeing the
+  // handle FIRST would let a brand-new profile claim it while this cascade
+  // is still in flight — every step above is its own await, any of which can
+  // throw and abort the rest, leaving gigs/series/bookings that still name
+  // THIS (about-to-be-orphaned) profileId while a DIFFERENT, unrelated
+  // profile now owns the handle that used to point at them. Keeping the
+  // handle claimed until the cascade's writes are actually done, and only
+  // freeing it here — right before recursiveDelete finally removes the
+  // profile doc itself — closes that window.
+  if (handle) {
+    const handleRef = db.doc(`handles/${handle}`);
+    // SP4 (Task 13 review): only delete the handle doc if it STILL names
+    // THIS profileId — a precondition-read, not a blind delete. Closes a
+    // retry edge: if an EARLIER deleteProfile attempt on this same profile
+    // already reached this point and freed the handle, then crashed before
+    // recursiveDelete below ever ran (so this profile doc — and its
+    // draft/rejected status — is still here for a client retry to find), a
+    // DIFFERENT profile could have claimed that now-free handle string in
+    // between. A blind unconditional delete on the retry would destroy that
+    // new owner's claim instead of correctly no-op'ing (this profile's own
+    // claim on the handle is already gone).
+    const handleSnap = await handleRef.get();
+    if (handleSnap.data()?.profileId === profileId) {
+      await handleRef.delete();
+    }
   }
 
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections

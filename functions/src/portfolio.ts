@@ -5,6 +5,7 @@ import {
   type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount, type PortfolioData,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
+import { rebuildBookingProjections } from "./bookingVisibility.js";
 
 // Strips any extra/untrusted keys off a rate object and normalizes an
 // absent (undefined) rate the same as an explicit null. Without this, a
@@ -81,11 +82,31 @@ export const updateBookingInfo = onCall<BookingUpdateInput>({ region: "us-centra
       bringsOwnPA: input.preferences.bringsOwnPA ?? null,
       availabilityPattern: input.preferences.availabilityPattern ?? null,
     },
+    // validateBookingUpdate (validateBookingVisibility) already confirmed
+    // this carries exactly the four legal keys with in-set values — the
+    // callable always writes a complete visibility going forward; legacy
+    // docs written before this field existed are converged by
+    // backfillBookingVisibility (Task 3).
+    visibility: input.visibility,
     updatedAt: Date.now(),
   };
-  // full-doc last-write-wins between members is accepted for v1; a delete
-  // racing this write can recreate an orphaned booking doc — accepted,
-  // mirrors account.ts's documented-race precedent
-  await getFirestore().doc(`profiles/${input.profileId}/private/booking`).set(docData);
+  // full-doc last-write-wins between members is accepted for v1 — and, since
+  // rebuildBookingProjections(profileId, docData) folds this write into its
+  // own batch alongside both projections (SP4 quality-fix: atomic
+  // source+projection commit — see that function's comment), "last write
+  // wins" now applies to the whole triple at once: no window where the
+  // source has landed but curatorBooking/publicBooking still reflect an
+  // older write. A profile delete racing this call is a separate, still-
+  // accepted race (mirrors account.ts's documented-race precedent): if
+  // deleteProfile's recursiveDelete is mid-flight, this batch can still
+  // commit afterward and recreate an orphaned private/booking doc under a
+  // profile that's otherwise gone. That's distinct from — and narrower than
+  // — the resurrection risk in rebuildBookingProjections' missing-source
+  // clear branch (not reachable from here, since this call always passes
+  // `docData`): a caller that hits that branch (e.g. backfillBookingVisibility,
+  // or any future direct rebuild) while recursiveDelete is also running can
+  // recreate profiles/{id} from nothing, as an inert stub containing only
+  // `{publicBooking: null}`.
+  await rebuildBookingProjections(input.profileId, docData);
   return { ok: true };
 });

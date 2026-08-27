@@ -195,6 +195,20 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
     trigger point is sub-4 (M-12 below — booking has no real writers yet, so no live traffic depends
     on the current shape today).
 
+    **RESOLVED (SP4):** the blanket `isApprovedCuratorMember()` disjunct on `private/booking` is
+    REMOVED (`firestore.rules`, SP4 Task 2) — that path now reads member/admin-only. Curators
+    "shopping for acts" instead read a server-built `profiles/{id}/private/curatorBooking`
+    projection (`functions/src/bookingVisibility.ts`'s `rebuildBookingProjections`), and the musician
+    decides per-rate-structure what's in it: each of `perHour`/`perSong`/`perSet` is independently
+    `"curators"` (appears in the projection) or `"private"` (nulled out there — rates are never
+    public regardless). The blast-radius question this ruling posed — "any member of any approved
+    curator profile" vs. curator-profile admins only vs. a scoped/audited lookup — is answered by
+    neither of the offered options: SP4's `curatorBooking` read rule keeps the same curatorAccess-holder
+    breadth (any member of any approved curator profile, per `USER DECISION (2026-08-26)` below), but
+    now gates it on the musician's own opt-in rather than platform default, so the product-level risk
+    (every rate exposed platform-wide to everyone with curator access) is closed at the data-visibility
+    layer instead of the membership layer.
+
 24. **Final pre-merge fix wave — M-12 booking-read tightening deferred to sub-4**: related to ruling
     23 but narrower — `profiles/{id}/private/booking` currently has no real WRITERS in this
     sub-project (booking rates/preferences are sub-2 musician self-service data; nothing here
@@ -202,6 +216,13 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
     product flow yet. Revisit whether/how to tighten `isApprovedCuratorMember()`'s scope once sub-4
     actually adds booking writers (offers, requests, confirmed bookings) and the read boundary starts
     mattering for real traffic instead of just being reachable in principle.
+
+    **RESOLVED (SP4):** sub-4 added the real booking writers this ruling was waiting on
+    (`applyToGig`/`offerGig`/`counterBooking`/`acceptBooking`, `functions/src/bookings.ts`), and
+    tightened the read boundary in the same pass as ruling 23 above — `isApprovedCuratorMember()`'s
+    disjunct on `private/booking` is gone; curators read `private/curatorBooking` (server-projected,
+    musician-controlled per-structure) instead. The read boundary now matters for real traffic and
+    has been narrowed accordingly, not left for a future sub-project.
 
 25. **Final pre-merge fix wave — sub-4 obligations addendum**: on top of the pre-existing sub-4
     obligations below, sub-4 must also: (a) be aware of `curatorAccessRetries/{uid}` (S4) when
@@ -223,7 +244,11 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
   unpublish path) from a curator-initiated one (`pauseSeries`) — only the latter should be
   resumable by a plain member. The schema has no such distinction today (`gigSeries.status` is a
   bare enum); sub-4 needs to add one (e.g. `pausedBy: "curator" | "admin"`) before `resumeSeries`
-  can ship safely. Getting this wrong silently breaks takedown durability.
+  can ship safely. Getting this wrong silently breaks takedown durability. **(SP4: unchanged —
+  carried forward.)** SP4 deliberately did NOT add `resumeSeries` (see its spec's scope boundary and
+  plan's Global Constraints — "pause stays one-way"); it checked this obligation and chose not to
+  touch it rather than missing it. Pause remains one-way; this item is still OPEN for whichever
+  sub-project first needs a resume action.
 - **`curatorAccessRetries/{uid}` awareness** — any new code path that can cause a `syncCuratorAccess`
   call to fail (S4) should record the uid to `curatorAccessRetries/{uid}` (write:false in rules) so
   the daily sweep's retry step picks it up, rather than silently dropping the failure the way
@@ -233,8 +258,21 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
   booking rates/preferences platform-wide" (the current `isApprovedCuratorMember()` shape) is the
   intended scope, or whether it should narrow to curator-profile ADMINS or a scoped/audited lookup —
   before sub-4 builds real booking flows on top of the current wide-open read boundary.
+
+  **RESOLVED (SP4):** per the `USER DECISION (2026-08-26)` below, the product decision was
+  "musician-controlled visibility," not a narrower membership scope — `isApprovedCuratorMember()`'s
+  disjunct on `private/booking` is removed entirely (see ruling 23's annotation above); the
+  remaining curatorAccess-holder breadth applies only to the server-built `private/curatorBooking`
+  projection, and only for the rate structures/preferences the musician has opted into
+  `"curators"` visibility. The platform-wide blast radius question is moot for anything the
+  musician marked `"private"`.
 - **M-12 booking-read tightening** (ruling 24) — `private/booking` has no real writers yet; revisit
   the read boundary (ruling 23) once sub-4 adds them and it starts mattering for live traffic.
+
+  **RESOLVED (SP4):** sub-4 is exactly the "real writers land" moment this bullet was waiting for
+  (`applyToGig`/`offerGig`/`acceptBooking` et al., `functions/src/bookings.ts`) — the read boundary
+  was tightened in the same release (ruling 24's annotation above), not left open once live traffic
+  arrived.
 - **Geocoder budget + secret note** — `GEOCODER_API_KEY` is a `defineSecret()` param now (ruling 22);
   any NEW onCall sub-4 adds that can trigger a geocode must declare `secrets: [geocoderApiKey]`
   (`functions/src/geocode.ts`) or it will silently fail to resolve the key in production. Any new
@@ -242,6 +280,12 @@ Prior sub-project's record: `docs/superpowers/sp2-rulings.md`
 - **Widen `gigs/{id}/private/location` read access to the booked musician** — currently
   member/admin-only (see `firestore.rules`'s comment: "booked musician joins in sub-4"). Booking
   doesn't exist yet as a concept in this sub-project.
+
+  **RESOLVED (SP4):** `gigs/{id}/private/location`'s read rule now also grants the booked
+  musician's profile members access, gated on `gigs/{gigId}.bookedMusicianProfileId` naming them
+  (`firestore.rules`, SP4 Task 2 — the promised reveal) — the address becomes visible to the
+  musician side exactly once `acceptBooking` fills the gig, and reverts if the booking is later
+  cancelled and the gig reopens (linkage cleared).
 - **Wire the `filled` gig status** — `GIG_STATUSES` and the gig lifecycle don't yet have a status
   representing "booked/filled" distinct from `open`/`closed`/`cancelled`/`taken_down`; sub-4's
   booking flow needs to both introduce and consume it.

@@ -39,6 +39,12 @@ const seedGig = async (id: string, overrides: Record<string, unknown> = {}) => {
       addressVisibility: "neighborhood", address: null,
     },
     status: "open", createdAt: 1, updatedAt: 1,
+    // SP4: public queryable booking linkage (GigDoc.bookingId /
+    // .bookedMusicianProfileId) — defaulted to "not booked" so every
+    // pre-SP4 test that doesn't care about booking state keeps working
+    // unmodified; the new gigs read rule's closed+booked disjunct and the
+    // private/location booked-musician disjunct both reference this field.
+    bookingId: null, bookedMusicianProfileId: null,
     ...overrides,
   });
 };
@@ -48,6 +54,20 @@ const seedSeries = async (id: string, overrides: Record<string, unknown> = {}) =
     recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
     fillMode: "per_occurrence", template: {},
     status: "active", materializedThrough: 0, createdAt: 1, updatedAt: 1,
+    ...overrides,
+  });
+};
+// SP4: BookingRequestDoc (packages/shared's bookings/{bookingId} shape),
+// defaulted to a plausible open, musician-initiated booking between prof1
+// (curator) and prof2 (musician) so each test only overrides what it needs.
+const seedBooking = async (id: string, overrides: Record<string, unknown> = {}) => {
+  await seed(`bookings/${id}`, {
+    gigId: "g1", seriesId: null,
+    curatorProfileId: "prof1", musicianProfileId: "prof2",
+    initiatedBy: "musician", structure: "perHour",
+    thread: [], awaitingSide: "curator", status: "open",
+    acceptedTerms: null, deposit: null, cancellation: null,
+    createdAt: 1, updatedAt: 1, confirmedAt: null, resolvedAt: null,
     ...overrides,
   });
 };
@@ -372,26 +392,87 @@ describe("private booking subdoc", () => {
     await assertFails(setDoc(doc(alice, "profiles/prof1/private/booking"), { rates: {} }));
     await assertFails(setDoc(doc(admin, "profiles/prof1/private/booking"), { rates: {} }));
   });
-  it("SP3 widening: a caller with a seeded curatorAccess marker reads ANY profile's booking; without the marker they cannot; member/admin paths are unchanged", async () => {
+  it("SP4 tighten: curatorAccess marker no longer grants private/booking; curatorBooking is the curator surface", async () => {
     await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
     await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
     // carol is not a member of prof1, but she IS a member of >=1 *approved
     // curator* profile elsewhere — represented here by a seeded curatorAccess
-    // marker. The live write path that keeps this marker in sync (curator
-    // approval / unpublish / membership-change cascade) lands in Task 4/6;
-    // this task only lands the rule, so the marker is seeded directly via
+    // marker. Pre-SP4 this granted her a private/booking read (SP3's
+    // isApprovedCuratorMember() disjunct); SP4 removes that disjunct — she
+    // must now go through the private/curatorBooking projection instead
+    // (see the "private curatorBooking subdoc" describe block below). The
+    // live write path that keeps this marker in sync (curator approval /
+    // unpublish / membership-change cascade) landed in SP3; this task only
+    // touches the rule, so the marker is seeded directly via
     // withSecurityRulesDisabled to test the read boundary in isolation.
+    await seed("curatorAccess/carol", {});
+    const alice = env.authenticatedContext("alice").firestore();
+    const carol = env.authenticatedContext("carol").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/booking"))); // member, as before
+    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking"))); // admin, as before
+    await assertFails(getDoc(doc(carol, "profiles/prof1/private/booking"))); // TIGHTEN: marker alone no longer suffices
+    await assertFails(setDoc(doc(carol, "profiles/prof1/private/booking"), { rates: {} })); // still no client writes
+  });
+});
+
+describe("private curatorBooking subdoc", () => {
+  it("curatorAccess marker reads ANY profile's projection; a stranger without the marker cannot; member and admin can; nobody writes", async () => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seed("profiles/prof1/private/curatorBooking", {
+      rates: {}, preferences: {}, reliability: { noShowCount: 0, completedCount: 0 }, updatedAt: 1,
+    });
+    // Same curatorAccess/{uid} marker as private/booking used to check —
+    // this projection is now the curator-shopping surface it feeds.
     await seed("curatorAccess/carol", {});
     const alice = env.authenticatedContext("alice").firestore();
     const carol = env.authenticatedContext("carol").firestore();
     const dave = env.authenticatedContext("dave").firestore(); // no marker, no membership
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
-    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/booking"))); // member, as before
-    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/booking"))); // admin, as before
-    await assertSucceeds(getDoc(doc(carol, "profiles/prof1/private/booking"))); // NEW: approved-curator-member widening
-    await assertFails(getDoc(doc(dave, "profiles/prof1/private/booking")));
-    await assertFails(setDoc(doc(carol, "profiles/prof1/private/booking"), { rates: {} })); // still no client writes
+    await assertSucceeds(getDoc(doc(carol, "profiles/prof1/private/curatorBooking"))); // curatorAccess marker
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/curatorBooking"))); // member
+    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/curatorBooking"))); // admin
+    await assertFails(getDoc(doc(dave, "profiles/prof1/private/curatorBooking")));
+    await assertFails(setDoc(doc(carol, "profiles/prof1/private/curatorBooking"), { rates: {} }));
+    await assertFails(setDoc(doc(admin, "profiles/prof1/private/curatorBooking"), { rates: {} }));
+  });
+});
+
+describe("private reliability subdoc", () => {
+  it("member and admin read; a curatorAccess-marker holder cannot (not the curator-shopping surface); nobody writes", async () => {
+    await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
+    await seed("profiles/prof1/private/reliability", { marks: [], completedCount: 0, updatedAt: 1 });
+    await seed("curatorAccess/carol", {});
+    const alice = env.authenticatedContext("alice").firestore();
+    const carol = env.authenticatedContext("carol").firestore();
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "profiles/prof1/private/reliability")));
+    await assertSucceeds(getDoc(doc(admin, "profiles/prof1/private/reliability")));
+    await assertFails(getDoc(doc(carol, "profiles/prof1/private/reliability"))); // curatorAccess is not enough here
+    await assertFails(setDoc(doc(alice, "profiles/prof1/private/reliability"), { marks: [] }));
+    await assertFails(setDoc(doc(admin, "profiles/prof1/private/reliability"), { marks: [] }));
+  });
+});
+
+describe("bookings", () => {
+  it("musician-side member reads; curator-side member reads; a stranger cannot; admin can; nobody writes (either side or admin)", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" }); // curator side
+    await seed("profiles/prof2/members/bob", { uid: "bob", role: "admin" });     // musician side
+    await seedBooking("bk1");
+    const alice = env.authenticatedContext("alice").firestore();
+    const bob = env.authenticatedContext("bob").firestore();
+    const carol = env.authenticatedContext("carol").firestore(); // stranger to both sides
+    const admin = env.authenticatedContext("root", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(alice, "bookings/bk1"))); // curator-side member
+    await assertSucceeds(getDoc(doc(bob, "bookings/bk1")));   // musician-side member
+    await assertFails(getDoc(doc(carol, "bookings/bk1")));
+    await assertSucceeds(getDoc(doc(admin, "bookings/bk1")));
+    await assertFails(setDoc(doc(alice, "bookings/bk1"), { status: "confirmed" }));
+    await assertFails(setDoc(doc(bob, "bookings/bk1"), { status: "confirmed" }));
+    await assertFails(setDoc(doc(admin, "bookings/bk1"), { status: "confirmed" }));
   });
 });
 
@@ -404,6 +485,16 @@ describe("gigs", () => {
     await assertSucceeds(getDoc(doc(anon, "gigs/g-open")));
     await assertFails(getDoc(doc(anon, "gigs/g-draft")));
     await assertFails(getDoc(doc(anon, "gigs/g-taken")));
+  });
+
+  it("anon reads a filled gig; a closed gig with a booked musician; a closed-but-unbooked gig is denied", async () => {
+    await seedGig("g-filled", { status: "filled", bookedMusicianProfileId: "prof2" });
+    await seedGig("g-closed-booked", { status: "closed", bookedMusicianProfileId: "prof2" });
+    await seedGig("g-closed-unbooked", { status: "closed", bookedMusicianProfileId: null });
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "gigs/g-filled")));
+    await assertSucceeds(getDoc(doc(anon, "gigs/g-closed-booked")));
+    await assertFails(getDoc(doc(anon, "gigs/g-closed-unbooked")));
   });
 
   it("clients cannot write gigs (callables only)", async () => {
@@ -522,6 +613,17 @@ describe("gigs/private/location", () => {
     await assertFails(getDoc(doc(bob, "gigs/g-loc/private/location")));
     await assertFails(getDoc(doc(anon, "gigs/g-loc/private/location")));
     await assertSucceeds(getDoc(doc(admin, "gigs/g-loc/private/location")));
+  });
+  it("the booked musician's member reads via bookedMusicianProfileId; an unbooked musician's member cannot", async () => {
+    await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" }); // curator
+    await seed("profiles/prof2/members/carol", { uid: "carol", role: "admin" }); // booked musician
+    await seed("profiles/prof3/members/dave", { uid: "dave", role: "admin" });   // unbooked musician
+    await seedGig("g-loc3", { status: "filled", bookedMusicianProfileId: "prof2" });
+    await seed("gigs/g-loc3/private/location", { address: "123 Main St", geo: { lat: 1, lng: 2 } });
+    const carol = env.authenticatedContext("carol").firestore();
+    const dave = env.authenticatedContext("dave").firestore();
+    await assertSucceeds(getDoc(doc(carol, "gigs/g-loc3/private/location")));
+    await assertFails(getDoc(doc(dave, "gigs/g-loc3/private/location")));
   });
   it("clients cannot write gigs/private/location", async () => {
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });

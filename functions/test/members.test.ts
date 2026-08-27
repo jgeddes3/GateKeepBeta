@@ -165,6 +165,24 @@ describe("invites", () => {
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
 
+  it("SP4 Task 13 (review): revokeInvite rejects a malformed inviteId with invalid-argument and requires a verified caller email", async () => {
+    const { owner, profileId } = await bandWithOwner("inv13");
+    const email = `rev3-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+
+    await expect(callFn("revokeInvite", { inviteId: "bad/id" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+
+    const unverified = await signUpUnverifiedTestUser(`rev3u-${Date.now()}@test.com`);
+    await expect(callFn("revokeInvite", { inviteId }, unverified.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // Neither rejected call actually revoked the invite.
+    expect((await adb.doc(`invites/${inviteId}`).get()).data()?.status).toBe("pending");
+  });
+
   it("an unverified invitee cannot accept an invite (email verification required)", async () => {
     const { owner, profileId } = await bandWithOwner("inv12");
     const email = `unv-${Date.now()}@test.com`;
@@ -259,12 +277,56 @@ describe("removal and admin transfer", () => {
     await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, member.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+  it("SP4 Task 13 (review): transferAdmin rejects a malformed profileId/toUid with invalid-argument and requires a verified caller email", async () => {
+    const { owner, profileId } = await bandWithOwner("rm9");
+    await expect(callFn("transferAdmin", { profileId: "bad/id", toUid: owner.uid }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("transferAdmin", { profileId, toUid: "bad/id" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+
+    const unverified = await signUpUnverifiedTestUser(`rm9u-${Date.now()}@test.com`);
+    await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, unverified.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // Owner is still the only admin — none of the rejected calls took effect.
+    expect((await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get()).data()?.role).toBe("admin");
+  });
   it("transferAdmin to a non-member fails not-found", async () => {
     const { owner, profileId } = await bandWithOwner("rm5");
     const stranger = await signUpTestUser(`nf-${Date.now()}@test.com`);
     await expect(callFn("transferAdmin", { profileId, toUid: stranger.uid }, owner.user))
       .rejects.toMatchObject({ code: "functions/not-found" });
   });
+  it("SP4 Task 13 item 3: removeMember rejects malformed profileId/uid with invalid-argument", async () => {
+    const { owner, profileId } = await bandWithOwner("rm7");
+    await expect(callFn("removeMember", { profileId: "bad/id", uid: owner.uid }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("removeMember", { profileId, uid: "bad/id" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("removeMember", { profileId: "", uid: owner.uid }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    // None of the rejected calls actually removed anything — owner is still
+    // a member (and still admin) of the real profile.
+    const ownerMember = await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get();
+    expect(ownerMember.exists).toBe(true);
+    expect(ownerMember.data()?.role).toBe("admin");
+  });
+
+  it("SP4 Task 13 item 3: removeMember requires a verified email on the caller", async () => {
+    const { owner, profileId } = await bandWithOwner("rm8");
+    const email = `rm8m-${Date.now()}@test.com`;
+    const member = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, member.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, member.user);
+
+    const unverified = await signUpUnverifiedTestUser(`rm8u-${Date.now()}@test.com`);
+    await expect(callFn("removeMember", { profileId, uid: member.uid }, unverified.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    // The rejected call didn't remove the target member.
+    expect((await adb.doc(`profiles/${profileId}/members/${member.uid}`).get()).exists).toBe(true);
+  });
+
   it("transferAdmin promotes the target without demoting the original admin", async () => {
     const { owner, profileId } = await bandWithOwner("rm6");
     const email = `co2-${Date.now()}@test.com`;
@@ -345,6 +407,41 @@ describe("curatorAccess touchpoints", () => {
     expect((await adb.doc(`curatorAccess/${member.uid}`).get()).exists).toBe(false);
   });
 
+  it("SP4 Task 13 item 6: respondToInvite's curatorAccess grant reflects the profile's status at completion, not the pre-transaction snapshot", async () => {
+    const { owner, profileId } = await approvedVenueWithOwner("rti1");
+    const email = `rti1-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+
+    // Genuine concurrency (not sequenced): fire the accept and a direct
+    // status flip to "rejected" at (nearly) the same instant, unawaited
+    // relative to each other — a best-effort discriminator, not a
+    // deterministic one. respondToInvite's own membership transaction +
+    // (post-fix) fresh re-read/recompute is several sequential round trips —
+    // slower than this one direct admin write — so in PRACTICE the flip
+    // reliably lands before respondToInvite's post-transaction curatorAccess
+    // decision runs, and consistently does in this suite. But the true
+    // regression this pins only manifests when the flip lands AFTER
+    // respondToInvite's very FIRST profileSnap read (the one taken before
+    // its own transaction) — if the flip instead won THAT earlier race too,
+    // even the OLD code's single pre-transaction read would already see
+    // "rejected" and correctly skip granting the marker, and this test would
+    // pass under both old and new code without having exercised the bug.
+    // What's asserted below (marker absent once the profile ends up
+    // rejected) is a real invariant either way — it just isn't a guaranteed
+    // RED-under-old-code proof on every run, only a highly likely one.
+    const [acceptOutcome] = await Promise.allSettled([
+      callFn("respondToInvite", { inviteId, accept: true }, invitee.user),
+      adb.doc(`profiles/${profileId}`).update({ status: "rejected" }),
+    ]);
+    expect(acceptOutcome.status).toBe("fulfilled"); // membership itself never depends on profile status
+
+    expect((await adb.doc(`profiles/${profileId}/members/${invitee.uid}`).get()).exists).toBe(true);
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("rejected");
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+  });
+
   it("S4: removing an already-removed member succeeds idempotently (no not-found) and still recomputes curatorAccess", async () => {
     const { owner, profileId } = await approvedVenueWithOwner("mca6");
     const email = `mca6-inv-${Date.now()}@test.com`;
@@ -364,6 +461,28 @@ describe("curatorAccess touchpoints", () => {
     // the already-cleared marker).
     await expect(callFn("removeMember", { profileId, uid: invitee.uid }, owner.user))
       .resolves.toMatchObject({ ok: true });
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
+  });
+
+  it("SP4 Task 13 item 4 (S4 test gap): removeMember from an already-REJECTED curator profile still recomputes away a stale curatorAccess marker", async () => {
+    const { owner, profileId } = await approvedVenueWithOwner("mca8");
+    const email = `mca8-inv-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true);
+
+    // Flip the profile to rejected directly (bypassing reviewProfile's own
+    // reject-from-approved cascade entirely) — this reproduces exactly the
+    // "stale marker" state that cascade's own recompute failing (and being
+    // queued to curatorAccessRetries rather than resolved inline) would
+    // leave behind: an already-REJECTED curator profile whose member still
+    // holds a curatorAccess marker earned while it was approved.
+    await adb.doc(`profiles/${profileId}`).update({ status: "rejected" });
+    expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true); // still stale
+
+    await callFn("removeMember", { profileId, uid: invitee.uid }, owner.user);
     expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(false);
   });
 

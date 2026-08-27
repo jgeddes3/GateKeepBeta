@@ -1,16 +1,59 @@
 import { TrackPlayer } from "./TrackPlayer";
 import styles from "./portfolio.module.css";
-import type { MusicianLoaded } from "./page";
+import type { MusicianLoaded, ShowEntry } from "./page";
+import { formatGigDateTime, gigLocationLabel } from "./gigDisplay";
+import { type ActSize, type AvailabilityPattern } from "@gatekeep/shared";
 
 // Split out of page.tsx's default export when sub-3 widened this route to
 // curators (see CuratorProfile.tsx) — the render body itself is unchanged
 // from the SP2 original, just relocated so page.tsx can branch on
 // `profile.type` between two type-specific components instead of growing one
-// file with both layouts inline.
+// file with both layouts inline. Task 11 adds the Shows section (this
+// musician's own filled/closed-booked gigs — the SP2 hidden-while-empty
+// contract, now wired for real) and a public "Booking preferences" section
+// (profile.publicBooking, when the musician has opted their preferences
+// public — see BookingVisibility/rebuildBookingProjections. NEVER rates.)
+
+const ACT_SIZE_LABEL: Record<ActSize, string> = { solo: "Solo", duo: "Duo", band: "Band" };
+const AVAILABILITY_LABEL: Record<AvailabilityPattern, string> = {
+  weekends: "Weekends", weeknights: "Weeknights", anytime: "Anytime", limited: "Limited",
+};
+
+// Task 11 Shows entry — venue-or-city at public precision (same
+// gigLocationLabel used by CuratorProfile.tsx's own "Open gigs" list) plus a
+// link to the booking curator's public page (unlinked plain text when the
+// curator's handle isn't known — see page.tsx's resolveProfileLabels).
+function ShowCard({ show }: { show: ShowEntry }) {
+  return (
+    <li className={styles.gigCard}>
+      <strong>{show.title || "Untitled gig"}</strong>
+      <p className={styles.gigMeta}>{formatGigDateTime(show.startsAtMs)} · {gigLocationLabel(show.location)}</p>
+      <p className={styles.gigMeta}>
+        {show.otherProfileHandle
+          ? <a href={`/@${show.otherProfileHandle}`}>{show.otherProfileName}</a>
+          : show.otherProfileName}
+      </p>
+    </li>
+  );
+}
+
 export function MusicianProfile({ data }: { data: MusicianLoaded }) {
-  const { profile, tracks, avatarUrl, coverUrl } = data;
+  const { profile, tracks, avatarUrl, coverUrl, upcomingShows, pastShows } = data;
   const pf = profile.portfolio;
   const links = (pf?.externalLinks ?? []).filter((l) => l.url.startsWith("https://"));
+  // Optional (not `publicBooking:`) on ProfileDoc — legacy pre-SP4 docs lack
+  // the field entirely; `?? null` treats "absent" identically to "present
+  // and explicitly null" (never public), per the field's own migration
+  // comment in packages/shared/src/types.ts.
+  const publicBooking = profile.publicBooking ?? null;
+  // SP4 (Task 13 item 9): ports mobile's identical gate (apps/mobile/app/
+  // artist/[handle].tsx) — an all-null publicBooking (every field explicitly
+  // opted out, or a projection written before any field was filled in) would
+  // otherwise render a bare "Booking preferences" heading with nothing
+  // under it.
+  const hasAnyBookingPref = publicBooking != null && (
+    publicBooking.actSize != null || publicBooking.typicalSetMinutes != null
+    || publicBooking.bringsOwnPA != null || publicBooking.availabilityPattern != null);
   return (
     <main className={styles.page}>
       {coverUrl
@@ -46,8 +89,58 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
           {tracks.length === 0 && !pf?.bio && (
             <p className={styles.empty}>This artist hasn&apos;t added content yet.</p>
           )}
-          {/* Shows: platform events only (spec §2). The events collection ships in
-              sub-projects 4/6 — this section stays hidden until it has data. */}
+          {/* Booking preferences (Task 11): rendered only when this musician
+              has opted their preferences public (BookingVisibility.preferences
+              == "public") AND at least one field is actually set (Task 13
+              item 9 — see hasAnyBookingPref above). Rates are NEVER shown
+              here, by design (spec decision 4) — this section literally
+              cannot render them, since publicBooking's type
+              (BookingPreferences) has no rate fields. */}
+          {hasAnyBookingPref && publicBooking && (
+            <section className={styles.section}>
+              <h2>Booking preferences</h2>
+              <dl className={styles.amenities}>
+                {publicBooking.actSize != null && (
+                  <><dt>Act size</dt><dd>{ACT_SIZE_LABEL[publicBooking.actSize]}</dd></>
+                )}
+                {publicBooking.typicalSetMinutes != null && (
+                  <><dt>Typical set</dt><dd>{publicBooking.typicalSetMinutes} min</dd></>
+                )}
+                {publicBooking.bringsOwnPA != null && (
+                  <><dt>Brings own PA</dt><dd>{publicBooking.bringsOwnPA ? "Yes" : "No"}</dd></>
+                )}
+                {publicBooking.availabilityPattern != null && (
+                  <><dt>Availability</dt><dd>{AVAILABILITY_LABEL[publicBooking.availabilityPattern]}</dd></>
+                )}
+              </dl>
+            </section>
+          )}
+          {/* Shows (Task 11): filled/closed-booked gigs — the SP2 hidden-
+              while-empty contract, now wired for real (was platform-events-
+              only in SP2; SP4's booking flow is what actually populates it).
+              Hidden entirely (not an empty-state message) when there are
+              none, same as every other optional section on this page. */}
+          {(upcomingShows.length > 0 || pastShows.length > 0) && (
+            <section className={styles.section}>
+              <h2>Shows</h2>
+              {upcomingShows.length > 0 && (
+                <>
+                  <h3>Upcoming shows</h3>
+                  <ul className={styles.gigList}>
+                    {upcomingShows.map((s) => <ShowCard key={s.gigId} show={s} />)}
+                  </ul>
+                </>
+              )}
+              {pastShows.length > 0 && (
+                <>
+                  <h3>Past shows</h3>
+                  <ul className={styles.gigList}>
+                    {pastShows.map((s) => <ShowCard key={s.gigId} show={s} />)}
+                  </ul>
+                </>
+              )}
+            </section>
+          )}
         </div>
       </div>
     </main>
