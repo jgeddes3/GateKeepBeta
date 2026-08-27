@@ -7,7 +7,7 @@ import { getFunctions, connectFunctionsEmulator, httpsCallable } from "firebase/
 import { getStorage as getClientStorage, connectStorageEmulator, ref as storageRef, uploadBytes } from "firebase/storage";
 import * as adminApp from "firebase-admin/app";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
-import type { Firestore } from "firebase-admin/firestore";
+import { getFirestore as getAdminFirestore, type Firestore } from "firebase-admin/firestore";
 
 // Needed before the admin app initializes below, so admin SDK auth calls
 // (e.g. updateUser) target the emulator rather than production.
@@ -56,6 +56,32 @@ export async function makeAdminUser(prefix: string) {
   await getAdminAuth(adminAppInstance).setCustomUserClaims(uid, { admin: true });
   await user.getIdToken(true); // refresh claims
   return { user, uid };
+}
+
+// Makes both sides of a booking money-ready for the Task 5 gates: the
+// curator gets a saved card (createSetupIntent's fake contract caches it on
+// profiles/{curator}/private/stripe immediately — no separate Elements flow
+// needed against the fake), and the musician gets an Express account whose
+// transfer flags are force-enabled directly (createOnboardingLink alone only
+// creates the account; onboarding completion is normally driven by the
+// account.updated webhook, which nothing in these fixtures triggers). Both
+// the fake's own object doc AND the cached private/stripe doc are flipped so
+// every gate helper — which reads the cached doc, not the fake's live state —
+// sees a payout-ready musician. As-built fake object path (see stripeClient.ts):
+// `stripeFake/state/objects/{id}`, NOT the stale `stripeFake/objects/{id}`
+// some earlier plan drafts show.
+export async function makeMoneyReady(
+  curator: { owner: { user: User }; profileId: string },
+  musician: { owner: { user: User }; profileId: string },
+): Promise<void> {
+  await callFn("createSetupIntent", { profileId: curator.profileId }, curator.owner.user);
+  await callFn("createOnboardingLink", { profileId: musician.profileId }, musician.owner.user);
+  const adb = getAdminFirestore(adminAppInstance);
+  const sp = (await adb.doc(`profiles/${musician.profileId}/private/stripe`).get()).data()!;
+  await adb.doc(`stripeFake/state/objects/${sp.accountId}`).set(
+    { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
+  await adb.doc(`profiles/${musician.profileId}/private/stripe`).set(
+    { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
 }
 
 export async function callFn<T, R>(name: string, data: T, asUser?: User): Promise<R> {

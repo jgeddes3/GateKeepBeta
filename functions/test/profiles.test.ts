@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   signUpTestUser, signUpUnverifiedTestUser, callFn, wait, uploadTestAudio, makeWav, waitForTrackStatus, makeAdminUser,
-  seedCuratorGateContent,
+  seedCuratorGateContent, makeMoneyReady,
 } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
@@ -345,6 +345,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, adminUser.user);
 
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("s6dm");
+    await makeMoneyReady({ owner: { user: curatorUser }, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await seedOpenGig(curatorProfileId);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
@@ -390,6 +391,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, adminUser.user);
 
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("f1dmm");
+    await makeMoneyReady({ owner: { user: curatorUser }, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await seedOpenGig(curatorProfileId);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);

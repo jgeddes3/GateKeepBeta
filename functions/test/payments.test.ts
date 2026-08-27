@@ -1,9 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import type { ProfileDraftInput, StripeProfileDoc } from "@gatekeep/shared";
 import type { RefreshPaymentMethodInput } from "../src/payments.js";
+import {
+  CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
+} from "../src/paymentsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -296,5 +299,86 @@ describe("refreshPaymentMethod", () => {
     await expect(callFn<{ profileId: string; setupIntentId: number }, unknown>(
       "refreshPaymentMethod", { profileId, setupIntentId: 123 }, owner.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+});
+
+// ---------- Task 5: booking money gates ----------
+// Mirrors bookings.test.ts's own gig/offer fixtures (this suite's subject is
+// the money gates, not booking negotiation mechanics — a minimal single-gig
+// perHour setup is enough to exercise applyToGig/offerGig/acceptBooking).
+function gigContent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    title: "Friday Night Jazz",
+    description: "A cozy weekly set in the back room.",
+    wants: { genres: ["rock"], actSizes: ["band"] },
+    durationMinutes: 90,
+    provisions: { hasPA: null, hasBackline: null, notes: null },
+    budget: { minCents: 10_000, maxCents: 20_000, structure: "perHour" },
+    startsAt: Date.now() + 7 * 24 * 3600 * 1000,
+    ...overrides,
+  };
+}
+
+async function createOpenGig(
+  profileId: string, user: import("firebase/auth").User, overrides: Record<string, unknown> = {},
+): Promise<string> {
+  const { gigId } = await callFn<Record<string, unknown>, { gigId: string }>(
+    "createGig", { profileId, ...gigContent(overrides) }, user);
+  await callFn("publishGig", { gigId }, user);
+  return gigId;
+}
+
+function offerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { amountCents: 15000, note: "Looking forward to it!", ...overrides };
+}
+
+describe("Task 5 money gates", () => {
+  it("applyToGig without a payout-ready musician fails with failed-precondition and the exact message", async () => {
+    const curator = await makeApprovedCuratorProfile("g5at1c");
+    const musician = await makeApprovedMusicianProfile("g5at1m");
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+
+    await expect(callFn(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: MUSICIAN_PAYOUTS_REQUIRED_MESSAGE });
+  });
+
+  it("offerGig without a curator card fails with failed-precondition and the exact message", async () => {
+    const curator = await makeApprovedCuratorProfile("g5og1c");
+    const musician = await makeApprovedMusicianProfile("g5og1m");
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+
+    await expect(callFn(
+      "offerGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: CURATOR_CARD_REQUIRED_MESSAGE });
+  });
+
+  it("acceptBooking with a card on file but a delinquent curator fails with failed-precondition and the exact message", async () => {
+    const curator = await makeApprovedCuratorProfile("g5ab1c");
+    const musician = await makeApprovedMusicianProfile("g5ab1m");
+    await makeMoneyReady(curator, musician);
+    await adb.doc(`profiles/${curator.profileId}/private/stripe`).set({ delinquent: true }, { merge: true });
+
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: CURATOR_DELINQUENT_MESSAGE });
+  });
+
+  it("a fully money-ready pair can accept — gates only, no deposit charge yet at this task", async () => {
+    const curator = await makeApprovedCuratorProfile("g5ab2c");
+    const musician = await makeApprovedMusicianProfile("g5ab2m");
+    await makeMoneyReady(curator, musician);
+
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    await callFn("acceptBooking", { bookingId }, curator.owner.user);
+
+    const booking = await adb.doc(`bookings/${bookingId}`).get();
+    expect(booking.data()?.status).toBe("confirmed");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder, coarsen } from "../src/geocode.js";
@@ -469,6 +469,7 @@ describe("cancelGig", () => {
   it("rejects cancelling a FILLED gig with a distinct 'cancel the booking instead' message — cancelGig never touches a real booking", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cn5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cn5m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createDraftGig(curatorProfileId, curator.user);
     await callFn("publishGig", { gigId }, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -490,6 +491,7 @@ describe("cancelGig", () => {
   it("cancelling a still-open gig expires its open booking requests (application), notifying the applicant", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cn6", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cn6m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createDraftGig(curatorProfileId, curator.user);
     await callFn("publishGig", { gigId }, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -636,6 +638,7 @@ describe("takedownGig", () => {
   it("occurrence scope with a confirmed booking: the booking expires (no cancellation record/forfeit/mark), deposit untouched, musician notified", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td8", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td8m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createDraftGig(curatorProfileId, curator.user);
     await callFn("publishGig", { gigId }, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -665,6 +668,7 @@ describe("takedownGig", () => {
   it("series scope with a confirmed whole-run booking: the run booking expires and the series' activeBookingId linkage clears", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td9", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td9m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesRef = adb.collection("gigSeries").doc();
     await seriesRef.set({
       curatorProfileId, fillMode: "whole_run", status: "active",
@@ -718,6 +722,7 @@ describe("takedownGig", () => {
   it("series scope also sweeps FILLED siblings, not just open ones — a booked run's other occurrences all get taken down too", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td10", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td10m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedWholeRunSeries(curatorProfileId);
     try {
       const rootId = await createDraftGig(curatorProfileId, curator.user);
@@ -757,6 +762,7 @@ describe("takedownGig", () => {
   it("occurrence scope on a confirmed whole-run booking's initiating gig: the run survives (booking stays confirmed), the musician is notified about just that ONE date", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td11", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td11m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedWholeRunSeries(curatorProfileId);
     try {
       const rootId = await createDraftGig(curatorProfileId, curator.user);
@@ -798,6 +804,7 @@ describe("takedownGig", () => {
   it("occurrence scope on a gig with an OPEN whole-run application (never accepted): the application still expires normally", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td12", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td12m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedWholeRunSeries(curatorProfileId);
     try {
       const gigId = await createDraftGig(curatorProfileId, curator.user);

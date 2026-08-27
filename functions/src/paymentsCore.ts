@@ -1,4 +1,5 @@
 import { getFirestore } from "firebase-admin/firestore";
+import { HttpsError } from "firebase-functions/v2/https";
 import type { DepositStatus, LedgerEntry, PaymentDoc, PaymentSummary, StripeProfileDoc } from "@gatekeep/shared";
 
 // profiles/{profileId}/private/stripe — the payment-identity doc. Shared
@@ -8,6 +9,38 @@ import type { DepositStatus, LedgerEntry, PaymentDoc, PaymentSummary, StripeProf
 export async function getStripeProfileDoc(profileId: string): Promise<StripeProfileDoc | null> {
   const snap = await getFirestore().doc(`profiles/${profileId}/private/stripe`).get();
   return (snap.data() as StripeProfileDoc | undefined) ?? null;
+}
+
+// Task 5 booking gates. Distinct messages — the web UI keys its two inline
+// prompts off them.
+export const CURATOR_CARD_REQUIRED_MESSAGE = "Save a payment card before sending offers or booking musicians.";
+export const CURATOR_DELINQUENT_MESSAGE = "This profile has an overdue payment — settle it before booking again.";
+export const MUSICIAN_PAYOUTS_REQUIRED_MESSAGE = "Finish payout setup before applying to or accepting bookings.";
+
+// Curator-side money gate: saved card + not delinquent. Required before
+// offerGig and before acceptBooking (either side accepting lands the deposit
+// charge on the CURATOR's card, so acceptBooking always checks the curator
+// profile regardless of which side is calling).
+export async function requireCuratorChargeable(curatorProfileId: string): Promise<StripeProfileDoc> {
+  const sp = await getStripeProfileDoc(curatorProfileId);
+  if (!sp?.customerId || !sp.defaultPaymentMethodId) {
+    throw new HttpsError("failed-precondition", CURATOR_CARD_REQUIRED_MESSAGE);
+  }
+  // === true, never truthiness alone on the PERMISSIVE side: these docs are
+  // cast unchecked from Firestore — a partial doc must fail CLOSED (Task 4
+  // review M8). delinquent's check is already fail-closed as written.
+  if (sp.delinquent === true) throw new HttpsError("failed-precondition", CURATOR_DELINQUENT_MESSAGE);
+  return sp;
+}
+
+// Musician-side money gate: payout-ready Express account. Required before
+// applyToGig and re-checked at acceptBooking.
+export async function requireMusicianPayoutReady(musicianProfileId: string): Promise<StripeProfileDoc> {
+  const sp = await getStripeProfileDoc(musicianProfileId);
+  if (!sp?.accountId || sp.transfersEnabled !== true) {   // fail closed on partial docs (Task 4 review M8)
+    throw new HttpsError("failed-precondition", MUSICIAN_PAYOUTS_REQUIRED_MESSAGE);
+  }
+  return sp;
 }
 
 function isAlreadyExists(e: unknown): boolean {

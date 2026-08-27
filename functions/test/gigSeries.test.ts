@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder, coarsen } from "../src/geocode.js";
@@ -381,6 +381,7 @@ describe("pauseSeries", () => {
   it("with an active run booking at 71h before the next occurrence: curator-cancels the run (deposit_forfeited recorded, reason names the pause), series pauses, occurrences stay reopened (open)", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps4", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps4m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
     try {
       const gigId1 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 71 * 3_600_000 });
@@ -425,6 +426,7 @@ describe("pauseSeries", () => {
   it("zombie tolerance: once every future date was cancelled per-occurrence (no cancellable date left), pauseSeries still succeeds — the booking + linkage are left untouched for Task 8's sweep", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps5m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
     try {
       const gigId = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 50 * 3_600_000 });
@@ -505,6 +507,7 @@ describe("endSeries", () => {
   it("with an active run booking: curator-cancels the run (reason names the end), then the reopened future occurrences fall into the ordinary open|draft cancel sweep", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("es5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("es5m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
     try {
       const gigId1 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 100 * 3_600_000 });

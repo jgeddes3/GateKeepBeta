@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
@@ -130,6 +130,7 @@ async function setGigStartsAt(gigId: string, hoursFromNow: number): Promise<void
 async function makeConfirmedBooking(prefix: string, gigOverrides: Record<string, unknown> = {}) {
   const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile(`${prefix}c`);
   const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile(`${prefix}m`);
+  await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
   const gigId = await createOpenGig(curatorProfileId, curator.user, gigOverrides);
   const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
     "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -307,6 +308,7 @@ describe("recomputeReliability / cancelBooking", () => {
     it("cancelling mid-run reopens future occurrences, leaves a past/started one untouched, clears series linkage, records exactly one mark for a <24h musician cancel", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wrcbc");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wrcbm");
+      await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const series = await seedSeries(curatorProfileId);
       try {
         // publishGig rejects a past startsAt outright — create it with a
@@ -361,6 +363,7 @@ describe("recomputeReliability / cancelBooking", () => {
     it("whole-run cancel with no future filled occurrence left, but the booking's last occurrence is in the PAST: keeps 'already started' advice", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wrpastc");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wrpastm");
+      await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const series = await seedSeries(curatorProfileId);
       try {
         const gigId = await createOpenGig(curatorProfileId, curator.user);
@@ -386,6 +389,7 @@ describe("recomputeReliability / cancelBooking", () => {
     it("whole-run cancel with no future filled occurrence left AND no date currently linked to this booking (cancelled per-occurrence): truthful 'nothing to cancel' message, NOT 'already started'", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wrzombiec");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wrzombiem");
+      await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const series = await seedSeries(curatorProfileId);
       try {
         const gigId = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 50 * 3_600_000 });
@@ -421,6 +425,7 @@ describe("cancelOccurrence", () => {
   it("the run survives (booking stays confirmed), the named date reopens, an occurrenceCancellations entry is recorded", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cocc");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ocm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedSeries(curatorProfileId);
     try {
       const gigId1 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 20 * 3_600_000 });
@@ -471,6 +476,7 @@ describe("cancelOccurrence", () => {
   it("musician <24h cancel of one date applies exactly one mark", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("occmc");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("occmm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedSeries(curatorProfileId);
     try {
       const gigId1 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 10 * 3_600_000 });
@@ -508,6 +514,7 @@ describe("cancelOccurrence", () => {
   it("F7: refuses with resource-exhausted once occurrenceCancellations is at the cap; the array is left unchanged", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("occcap");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("occcapm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedSeries(curatorProfileId);
     try {
       const gigId = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 50 * 3_600_000 });
@@ -610,6 +617,7 @@ describe("reportNoShow", () => {
   it("whole-run: reopens the run's future filled occurrences, clears series linkage, leaves the reported (past) occurrence untouched", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("nswrc");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("nswrm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedSeries(curatorProfileId);
     try {
       // publishGig rejects a past startsAt outright — create with a future
@@ -797,6 +805,7 @@ describe("removeReliabilityMark", () => {
   it("R2: a selfDeal booking's false-report restore leaves completedCount at 0 while status returns to completed", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("r2sdc");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("r2sdm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     // Overlap: the MUSICIAN's own owner uid is ALSO a member of the
     // CURATOR profile (mirrors bookings.test.ts's F5 fixture — this
     // direction keeps the curator's own acceptBooking/reportNoShow calls

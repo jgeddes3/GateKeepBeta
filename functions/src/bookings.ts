@@ -12,6 +12,7 @@ import {
   requireApprovedMusicianProfile, requireApprovedCuratorProfile,
 } from "./guards.js";
 import { notifyProfileMembers } from "./notifications.js";
+import { requireCuratorChargeable, requireMusicianPayoutReady } from "./paymentsCore.js";
 
 // Untrusted onCall payload shape — same defensive-runtime rationale used
 // throughout this codebase (a compile-time type only binds trusted callers).
@@ -181,6 +182,7 @@ export const applyToGig = onCall<ApplyToGigInput>({ region: "us-central1" }, asy
   // rationale in gigs.ts (a since-rejected profile's gig can still be
   // "open" until the review-reject cascade or a later sweep catches it).
   await requireApprovedCuratorProfile(gig.curatorProfileId);
+  await requireMusicianPayoutReady(input.musicianProfileId);
 
   const musicianName = (musicianSnap.data()?.name as string | undefined) ?? "A profile";
   return finalizeBookingRequest({
@@ -215,6 +217,7 @@ export const offerGig = onCall<OfferGigInput>({ region: "us-central1" }, async (
     throw new HttpsError("failed-precondition", `Cannot offer on a gig in status "${gig.status}".`);
   }
   await requireApprovedMusicianProfile(input.musicianProfileId);
+  await requireCuratorChargeable(gig.curatorProfileId);
 
   const curatorName = (curatorSnap.data()?.name as string | undefined) ?? "A profile";
   return finalizeBookingRequest({
@@ -491,6 +494,14 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
   // F5: computed once, outside the transaction — see detectSelfDeal's own
   // comment on why memberships are stable enough for this to be safe here.
   const isSelfDeal = await detectSelfDeal(db, booking.curatorProfileId, booking.musicianProfileId);
+
+  // Task 5 money gates: either side accepting lands the deposit charge on
+  // the CURATOR's card, so the curator profile is always checked regardless
+  // of which side is calling. curatorStripe is consumed by the Task 6
+  // deposit saga.
+  const curatorStripe = await requireCuratorChargeable(booking.curatorProfileId);
+  void curatorStripe; // consumed by the Task 6 deposit saga
+  await requireMusicianPayoutReady(booking.musicianProfileId);
 
   const now = Date.now();
   // Everything that decides whether the fill can happen — the booking's own
