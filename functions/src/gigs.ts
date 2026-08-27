@@ -240,6 +240,23 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
   if (gig.status === "cancelled" || gig.status === "taken_down") {
     throw new HttpsError("failed-precondition", `Cannot edit a gig in status "${gig.status}".`);
   }
+  // F2 (security audit wave): a FILLED gig has a confirmed booking behind
+  // it — its schedule/terms are exactly what the two sides negotiated and
+  // accepted, and acceptBooking's own F2 guard (bookings.ts) refuses to
+  // accept an offer against a gig edited after the last thread entry
+  // specifically to protect that. Freeze the gig itself once it's filled,
+  // rather than relying solely on that accept-time guard: an edit here
+  // could otherwise silently change a filled gig's date/duration/budget out
+  // over an ALREADY-confirmed booking with no accept ever happening again
+  // to catch it. `closed` (a filled gig whose curator profile went dark, or
+  // whose date elapsed) is locked for the same reason — a booking may still
+  // reference it (see review.ts's reject-from-approved cascade / the
+  // dailySweep's completion step). cancelGig already refuses a filled gig
+  // in favor of cancelBooking for the identical reason.
+  if (gig.status === "filled" || gig.status === "closed") {
+    throw new HttpsError("failed-precondition",
+      "This gig is filled/closed — its schedule and terms are locked.");
+  }
 
   const privateRef = db.doc(`gigs/${input.gigId}/private/location`);
   let publicLocation = gig.location;
@@ -332,28 +349,47 @@ export const cancelGig = onCall<{ gigId: string }>({ region: "us-central1" }, as
   const { gigId } = req.data;
   if (!isValidDocId(gigId)) throw new HttpsError("invalid-argument", "A gig id is required.");
 
-  const gigRef = getFirestore().doc(`gigs/${gigId}`);
+  const db = getFirestore();
+  const gigRef = db.doc(`gigs/${gigId}`);
   const gigSnap = await gigRef.get();
   if (!gigSnap.exists) throw new HttpsError("not-found", "Gig not found.");
   const gig = gigSnap.data() as GigDoc;
   await requireProfileMember(gig.curatorProfileId, uid);
-  // SP4: a filled gig has a confirmed booking behind it — cancelGig is a
-  // plain status flip with no cancellation-window/deposit/reliability
-  // consequences, none of which are appropriate once a real booking exists.
-  // cancelBooking is the correct callable for that case (it runs the
-  // curator-forfeit-window/musician-mark math and notifies the musician with
-  // the real outcome) — refuse here with a pointer to it, rather than
-  // silently reducing a booked act's gig to "cancelled" with no recorded
-  // consequence at all.
-  if (gig.status === "filled") {
-    throw new HttpsError("failed-precondition", "This gig is filled — cancel the booking instead.");
-  }
-  if (gig.status !== "draft" && gig.status !== "open") {
-    throw new HttpsError("failed-precondition", `Cannot cancel a gig in status "${gig.status}".`);
-  }
 
-  const wasOpen = gig.status === "open";
-  await gigRef.update({ status: "cancelled", updatedAt: Date.now() });
+  // F3 (security audit wave, TOCTOU hardening): the status check and the
+  // status-flip write now share ONE transaction (re-reading the gig fresh
+  // inside it) rather than acting on the outer, already-possibly-stale
+  // `gigSnap` read above. Closes the race where a concurrent acceptBooking
+  // (or another cancelGig/publishGig-family call) flips this gig's status
+  // between this callable's outer read and its write — pre-fix, that
+  // window let a gig get cancelled the instant AFTER it became "filled"
+  // underneath this call, silently bypassing the filled-gig refusal below
+  // and orphaning a just-confirmed booking with no cancellation record.
+  // Membership is resolved above, outside the transaction — it doesn't
+  // depend on the gig's own mutable status (mirrors this codebase's other
+  // "resolve membership once, re-check mutable state in-txn" idiom, e.g.
+  // bookingLifecycle.ts's cancelBooking).
+  const wasOpen = await db.runTransaction(async (tx) => {
+    const freshSnap = await tx.get(gigRef);
+    if (!freshSnap.exists) throw new HttpsError("not-found", "Gig not found.");
+    const freshGig = freshSnap.data() as GigDoc;
+    // SP4: a filled gig has a confirmed booking behind it — cancelGig is a
+    // plain status flip with no cancellation-window/deposit/reliability
+    // consequences, none of which are appropriate once a real booking
+    // exists. cancelBooking is the correct callable for that case (it runs
+    // the curator-forfeit-window/musician-mark math and notifies the
+    // musician with the real outcome) — refuse here with a pointer to it,
+    // rather than silently reducing a booked act's gig to "cancelled" with
+    // no recorded consequence at all.
+    if (freshGig.status === "filled") {
+      throw new HttpsError("failed-precondition", "This gig is filled — cancel the booking instead.");
+    }
+    if (freshGig.status !== "draft" && freshGig.status !== "open") {
+      throw new HttpsError("failed-precondition", `Cannot cancel a gig in status "${freshGig.status}".`);
+    }
+    tx.update(gigRef, { status: "cancelled", updatedAt: Date.now() });
+    return freshGig.status === "open";
+  });
   // SP4: a still-"open" gig may have pending (open) booking requests on it
   // (applyToGig/offerGig) — those must not be left dangling once the gig
   // itself is gone. A "draft" gig can never have any (applyToGig/offerGig

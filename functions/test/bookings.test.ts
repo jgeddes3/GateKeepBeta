@@ -506,6 +506,9 @@ describe("acceptBooking", () => {
       amountCents: 5251, status: "unpaid", forfeitedTo: null,
       policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
     });
+    // F5: no membership overlap between the two profiles here — selfDeal
+    // must stay unset (falsy) on an ordinary booking.
+    expect(booking.selfDeal).toBeFalsy();
 
     const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
     expect(gig?.status).toBe("filled");
@@ -749,5 +752,54 @@ describe("acceptBooking", () => {
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.status).toBe("open");
     expect(after.deposit).toBeNull();
+  });
+
+  // F2 (security audit wave): if the gig was edited (updateGig) AFTER the
+  // thread's last offer, the terms about to be frozen may no longer match
+  // what the two sides actually negotiated over — most dangerously for
+  // perHour, where a silently-changed durationMinutes changes the money
+  // owed even though amountCents itself never moved. Refuse rather than
+  // silently accept stale terms against a since-edited gig.
+  it("F2: refuses to accept once the gig was edited after the last offer", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab10c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab10m");
+    const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+
+    // Curator (the awaiting side) edits the gig's terms before accepting.
+    await callFn("updateGig", { gigId, ...gigContent({ durationMinutes: 120 }) }, curator.user);
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("open");
+    expect(after.acceptedTerms).toBeNull();
+  });
+
+  // F5 (security audit wave, ruling: allow but exclude from trust metric).
+  it("F5: overlapping membership between the two profiles stamps selfDeal:true", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("sd1c");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("sd1m");
+    // Overlap: the MUSICIAN's own owner uid is ALSO a member of the
+    // CURATOR profile (deliberately this direction, not the reverse —
+    // requireBookingSide resolves a dual-member caller "musician"-first, so
+    // adding the CURATOR's own uid to the musician profile would make the
+    // curator's own acceptBooking call below misresolve as the musician
+    // side and trip the turn-enforcement check instead of exercising this
+    // fix; overlap detection itself is direction-independent).
+    await adb.doc(`profiles/${curatorProfileId}/members/${musician.uid}`).set({
+      uid: musician.uid, role: "member", label: "also here", joinedAt: Date.now(),
+    });
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+
+    await callFn("acceptBooking", { bookingId }, curator.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("confirmed");
+    expect(after.selfDeal).toBe(true);
   });
 });

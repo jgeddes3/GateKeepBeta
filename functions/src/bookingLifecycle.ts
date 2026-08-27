@@ -308,6 +308,17 @@ export async function executeCancellation(
     }
 
     const hoursBeforeStart = (nextStartsAt - now) / 3_600_000;
+    // F6 (security audit wave): window thresholds are read from THIS
+    // booking's OWN frozen deposit.policy snapshot (acceptBooking stamps it
+    // once, at accept time — see BookingDeposit's own "snapshot, never
+    // re-read from constants" comment in types.ts) — falling back to the
+    // live shared constants only when the snapshot is missing (a
+    // pre-deposit-snapshot booking, or a defensive fallback for corrupted
+    // data). Without this, a later change to the shared constants would
+    // retroactively change the deal the two sides already accepted, and the
+    // deposit's own policy snapshot would be a lie.
+    const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
+    const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
     let outcome: CancelOutcome;
     let markApplied = false;
     // { [key]: unknown } rather than a typed literal — the conditional
@@ -319,13 +330,13 @@ export async function executeCancellation(
     };
 
     if (side === "curator") {
-      // STRICTLY less-than — exactly CURATOR_FORFEIT_WINDOW_HOURS refunds.
-      outcome = hoursBeforeStart < CURATOR_FORFEIT_WINDOW_HOURS ? "deposit_forfeited" : "deposit_refunded";
+      // STRICTLY less-than — exactly curatorForfeitHours refunds.
+      outcome = hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
       if (outcome === "deposit_forfeited") bookingUpdate["deposit.forfeitedTo"] = "musician";
     } else {
       // Musician side never forfeits the curator's deposit — always refunded.
       outcome = "deposit_refunded";
-      markApplied = hoursBeforeStart < MUSICIAN_MARK_WINDOW_HOURS;
+      markApplied = hoursBeforeStart < musicianMarkHours;
     }
 
     bookingUpdate.cancellation = {
@@ -474,30 +485,46 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
     }
     if (gig.startsAt <= now) throw new HttpsError("failed-precondition", ALREADY_STARTED_MESSAGE);
 
+    // F7 (security audit wave, ruling: reject-when-full): once the array is
+    // already at MAX_OCCURRENCE_CANCELLATIONS, refuse outright rather than
+    // silently dropping the oldest settlement record — sub-5 reads every
+    // entry here as a real per-date settlement input, and none of them may
+    // ever be discarded without a human choosing to. Checked before any
+    // other write in this transaction so a refusal never has a side effect.
+    const existing = freshBooking.occurrenceCancellations ?? [];
+    if (existing.length >= MAX_OCCURRENCE_CANCELLATIONS) {
+      throw new HttpsError("resource-exhausted",
+        "Too many individual date cancellations on this booking — cancel the whole run instead.");
+    }
+
     const hoursBeforeStart = (gig.startsAt - now) / 3_600_000;
+    // F6 (security audit wave): read from the booking's OWN deposit.policy
+    // snapshot — see executeCancellation's identical fix/comment above.
+    const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
+    const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
     let outcome: CancelOutcome;
     let markApplied = false;
     if (callerSide === "curator") {
-      outcome = hoursBeforeStart < CURATOR_FORFEIT_WINDOW_HOURS ? "deposit_forfeited" : "deposit_refunded";
+      outcome = hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
       // Deliberately does NOT touch booking.deposit/deposit.forfeitedTo —
       // that field is the RUN-level outcome (cancelBooking's alone to set).
       // This occurrence's own outcome lives only in the
       // occurrenceCancellations entry below; sub-5 reads it from there.
     } else {
       outcome = "deposit_refunded";
-      markApplied = hoursBeforeStart < MUSICIAN_MARK_WINDOW_HOURS;
+      markApplied = hoursBeforeStart < musicianMarkHours;
     }
 
     const entry: OccurrenceCancellation = { gigId, by: callerSide, at: now, hoursBeforeStart, outcome, markApplied };
-    const existing = freshBooking.occurrenceCancellations ?? [];
+    // No cap/drop-oldest here — the check above already refused before this
+    // point whenever appending would exceed the cap, so `existing` is always
+    // strictly under it and this append can never itself reach the ceiling.
     const nextEntries = [...existing, entry];
-    const cappedEntries = nextEntries.length > MAX_OCCURRENCE_CANCELLATIONS
-      ? nextEntries.slice(nextEntries.length - MAX_OCCURRENCE_CANCELLATIONS) : nextEntries;
 
     // ---- WRITES ----
     // Booking itself stays "confirmed" — only this one date is affected;
     // the run continues with its remaining occurrences.
-    tx.update(bookingRef, { occurrenceCancellations: cappedEntries, updatedAt: now });
+    tx.update(bookingRef, { occurrenceCancellations: nextEntries, updatedAt: now });
     tx.update(gigRef, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
     if (markApplied) {
       const mark: ReliabilityMark = {
@@ -686,6 +713,62 @@ interface RemoveReliabilityMarkInput {
   musicianProfileId: string; bookingId: string; kind: ReliabilityMark["kind"];
 }
 
+// F4 (security audit wave): reversing a FALSE `reported_no_show` mark must
+// also restore the settlement record the false report stole — reportNoShow
+// flipped the booking to `cancelled_by_musician` (deposit_refunded,
+// markApplied:true), pre-empting the "completed" resolution
+// scheduled.ts step 7 would otherwise have reached. Scoped tightly by TWO
+// independent signals so this can never misfire on a genuine cancellation
+// that merely happens to carry the same mark kind:
+//   1. the booking's status is still exactly `cancelled_by_musician` (an
+//      idempotency guard too — a booking already restored, or resolved some
+//      OTHER way since, is left alone: `!== "cancelled_by_musician"` is a
+//      no-op here, matching the "only if not already completed" mandate).
+//   2. its cancellation record's hoursBeforeStart is <= 0 — reportNoShow's
+//      OWN transaction only ever fires after the relevant occurrence's
+//      start (see its `pastSnap` query), so this is exactly the signature
+//      of a report-caused flip; a musician's own late_cancel is always
+//      hoursBeforeStart > 0 (still before the start) and is correctly left
+//      alone by this check even if it somehow arrived paired with this mark
+//      kind. late_cancel mark removals never reach this function at all
+//      (the caller below gates the call on kind === "reported_no_show").
+// completedCount increments here mirror scheduled.ts step 7's own idiom
+// exactly (read-modify-write, merge:true) — it's the exact credit the false
+// report stole. Deposit/acceptedTerms are left completely untouched (the
+// terms of the deal never changed, only whether the show is credited as
+// having happened).
+async function restoreFalselyReportedBooking(
+  db: FirebaseFirestore.Firestore, bookingId: string, now: number,
+): Promise<{ restored: boolean; curatorProfileId: string | null; musicianProfileId: string | null }> {
+  const bookingRef = db.doc(`bookings/${bookingId}`);
+  const bookingSnap = await bookingRef.get();
+  const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+  if (!booking) return { restored: false, curatorProfileId: null, musicianProfileId: null };
+  if (booking.status !== "cancelled_by_musician") {
+    return { restored: false, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };
+  }
+  if (!booking.cancellation || booking.cancellation.hoursBeforeStart > 0) {
+    return { restored: false, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };
+  }
+
+  await bookingRef.update({ status: "completed", cancellation: null, resolvedAt: now, updatedAt: now });
+
+  // Mirrors scheduled.ts step 7's completedCount increment idiom exactly —
+  // direct (non-batched) read-modify-write, then recomputeReliability so the
+  // curatorBooking projection reflects the new count immediately.
+  const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
+  const reliabilitySnap = await reliabilityRef.get();
+  const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
+  await reliabilityRef.set({
+    marks: reliability?.marks ?? [],
+    completedCount: (reliability?.completedCount ?? 0) + 1,
+    updatedAt: now,
+  }, { merge: true });
+  await recomputeReliability(booking.musicianProfileId);
+
+  return { restored: true, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };
+}
+
 export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region: "us-central1" }, async (req) => {
   const actorUid = requireAdmin(req);
   const { musicianProfileId, bookingId, kind } = req.data ?? ({} as RemoveReliabilityMarkInput);
@@ -716,9 +799,18 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
   });
 
   await recomputeReliability(musicianProfileId);
+
+  // F4: only a reversed `reported_no_show` can ever trigger a restoration —
+  // a late_cancel removal only ever changes the MARK judgment, never the
+  // (genuinely real) cancellation itself.
+  const { restored, curatorProfileId } = kind === "reported_no_show"
+    ? await restoreFalselyReportedBooking(db, bookingId, now)
+    : { restored: false, curatorProfileId: null };
+
   await writeAudit({
     actorUid, action: "reliability_mark_removed", targetId: musicianProfileId,
-    detail: `${kind} mark for booking ${bookingId} removed`,
+    detail: `${kind} mark for booking ${bookingId} removed`
+      + (restored ? " (booking restored to completed — reversed a false no-show report)" : ""),
   });
 
   try {
@@ -728,6 +820,24 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
     });
   } catch (e) {
     console.error(`removeReliabilityMark: failed to notify profile ${musicianProfileId}`, e);
+  }
+
+  if (restored && curatorProfileId) {
+    const restoreBody = "An admin reversed a no-show report — the booking is restored as completed.";
+    try {
+      await notifyProfileMembers(musicianProfileId, {
+        kind: "booking", refId: bookingId, title: "Booking restored", body: restoreBody,
+      });
+    } catch (e) {
+      console.error(`removeReliabilityMark: failed to notify musician side of restoration for booking ${bookingId}`, e);
+    }
+    try {
+      await notifyProfileMembers(curatorProfileId, {
+        kind: "booking", refId: bookingId, title: "Booking restored", body: restoreBody,
+      });
+    } catch (e) {
+      console.error(`removeReliabilityMark: failed to notify curator side of restoration for booking ${bookingId}`, e);
+    }
   }
 
   return { ok: true };
@@ -767,9 +877,22 @@ const DEFAULT_UNWIND_NOTIFY_BODY = "This gig is no longer available.";
 // bookings ALSO simply expire — sub-5 reads status:"expired" + a non-null
 // `deposit` as "refund the deposit", no separate write needed here.
 //
-// Reopens NOTHING: every caller here is ALSO taking the affected gig(s) down
-// (closed/cancelled/taken_down) or removing the profile from the world in
-// its OWN write — there is nothing live left for a reopened gig to serve.
+// Reopens nothing for a gigId/seriesId-scoped call (takedownGig, cancelGig),
+// nor for a profileId-scoped call whose moderated profile is the CURATOR
+// side (reviewProfile's reject-from-approved + deleteProfile's cascade
+// already close/clear that profile's OWN gigs directly, in their own
+// caller-side code, before or alongside calling here) — every one of those
+// callers is ALSO taking the affected gig(s) down in its own write, so
+// there is nothing live left for a reopened gig to serve.
+//
+// F1 (security audit wave) fix: that assumption is FALSE for a
+// profileId-scoped call whose moderated profile is the booking's MUSICIAN
+// side — the CURATOR'S OWN gig is entirely innocent and stays live; nothing
+// else in this cascade ever touches it. Left alone, a confirmed booking's
+// linked gig(s) would sit "filled" — still publicly readable, still linked
+// to a booking that just silently expired — forever. See
+// reopenGigsForMusicianModeration below for the reopen logic this case
+// alone triggers.
 //
 // Per-booking failure isolation (try/catch, log, continue) — mirrors
 // acceptBooking's supersedeSiblingBooking idiom in bookings.ts: one poisoned
@@ -779,6 +902,67 @@ const DEFAULT_UNWIND_NOTIFY_BODY = "This gig is no longer available.";
 // (seriesId,status), (musicianProfileId,status,updatedAt) and
 // (curatorProfileId,status,updatedAt) composite indexes already in
 // firestore.indexes.json; no new index needed.
+
+// F1 fix: reopens every FUTURE-dated linked FILLED gig of `booking` (single-
+// gig: the one gig, iff its startsAt is still ahead of `now`; whole-run:
+// every future filled occurrence still owned by this booking, via the same
+// query shape as getFutureFilledOccurrences/reopenSeriesOccurrences above —
+// duplicated rather than shared because those two are transaction-only
+// helpers, and this path deliberately stays the SAME best-effort,
+// non-transactional, per-booking-isolated style as the rest of this
+// function, with a real optimistic precondition — `lastUpdateTime`, the
+// supersedeSiblingBooking idiom in bookings.ts — on each write so a lost
+// race just skips that one occurrence rather than clobbering a concurrent
+// write). PAST-dated linked gigs are left completely untouched — the show's
+// date has already elapsed either way, and there is nothing to reopen.
+// Returns whether anything actually reopened, so the caller only sends its
+// "the date has reopened" notification to the curator side when that's
+// literally true (a past-only case must never claim a reopen that never
+// happened). Series-linkage clearing is NOT this function's job — the
+// existing ownership-gated clear a few lines below in the main loop already
+// runs unconditionally for every seriesId-carrying booking here, musician-
+// caused or not.
+async function reopenGigsForMusicianModeration(
+  db: FirebaseFirestore.Firestore, booking: BookingRequestDoc, bookingId: string, now: number,
+): Promise<boolean> {
+  let reopenedAny = false;
+  if (booking.seriesId) {
+    const snap = await db.collection("gigs")
+      .where("seriesId", "==", booking.seriesId)
+      .where("status", "==", "filled")
+      .where("startsAt", ">", now)
+      .orderBy("startsAt", "asc")
+      .get();
+    const occurrenceDocs = snap.docs.filter((occ) => occ.data().bookingId === bookingId);
+    for (const occ of occurrenceDocs) {
+      try {
+        await occ.ref.update(
+          { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now },
+          { lastUpdateTime: occ.updateTime });
+        reopenedAny = true;
+      } catch (e) {
+        console.error(`unwindBookingsForModeration: failed to reopen occurrence ${occ.id} for booking ${bookingId}`, e);
+      }
+    }
+  } else {
+    const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
+    const gig = gigSnap.data() as GigDoc | undefined;
+    if (gig && gig.status === "filled" && gig.startsAt > now) {
+      try {
+        await gigSnap.ref.update(
+          { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now },
+          { lastUpdateTime: gigSnap.updateTime });
+        reopenedAny = true;
+      } catch (e) {
+        console.error(`unwindBookingsForModeration: failed to reopen gig ${booking.gigId} for booking ${bookingId}`, e);
+      }
+    }
+    // Past-dated (or already-non-filled): left untouched — see this
+    // function's own comment.
+  }
+  return reopenedAny;
+}
+
 export async function unwindBookingsForModeration(opts: UnwindModerationOpts): Promise<void> {
   const db = getFirestore();
   const now = Date.now();
@@ -825,8 +1009,26 @@ export async function unwindBookingsForModeration(opts: UnwindModerationOpts): P
   for (const doc of candidates.values()) {
     try {
       const booking = doc.data() as BookingRequestDoc;
+      // F1 fix: was this unwind reached BECAUSE the moderated profile is
+      // this booking's MUSICIAN side? (opts.profileId is set only by
+      // reviewProfile's reject-from-approved cascade and deleteProfile's
+      // cascade — never by the gigId/seriesId-scoped callers, for which this
+      // is always false.) `wasConfirmed` must be read from the ORIGINAL
+      // (pre-expire) status below — only a booking that actually filled a
+      // gig has anything to reopen.
+      const isMusicianCausedUnwind = opts.profileId != null && opts.profileId === booking.musicianProfileId;
+      const wasConfirmed = booking.status === "confirmed";
+
       // Booking expiry — unconditional, the core effect of this call.
       await doc.ref.update({ status: "expired", resolvedAt: now, updatedAt: now });
+
+      // F1 fix: reopen the innocent curator's gig(s) — see
+      // reopenGigsForMusicianModeration's own comment for why this is the
+      // one case that must reopen rather than leave the gig(s) alone.
+      let reopened = false;
+      if (isMusicianCausedUnwind && wasConfirmed) {
+        reopened = await reopenGigsForMusicianModeration(db, booking, doc.id, now);
+      }
 
       // Series-linkage clear — best-effort and DELIBERATELY separate from
       // the booking-expiry write above: it clears ONLY when the series
@@ -861,6 +1063,28 @@ export async function unwindBookingsForModeration(opts: UnwindModerationOpts): P
       await notifyProfileMembers(booking.musicianProfileId, {
         kind: "booking", refId: doc.id, title: "Booking no longer available", body: notifyBody,
       });
+
+      // F1 fix: the curator side deserves its own honest notice too — the
+      // musician-facing `notifyBody` above is written for the MODERATED
+      // side and is never appropriate for the innocent curator (e.g.
+      // cancelGig's override reads "The gig ... was cancelled", which is
+      // false from the curator's own point of view when they're the one
+      // who cancelled it — that path never reaches here anyway since
+      // isMusicianCausedUnwind is always false for it, but the point holds
+      // generally). Sent only when a gig actually reopened — see
+      // reopenGigsForMusicianModeration's own comment on why a past-only
+      // case must never claim "the date has reopened". No reason leak —
+      // mirrors this function's own notifyBody contract.
+      if (reopened) {
+        try {
+          await notifyProfileMembers(booking.curatorProfileId, {
+            kind: "booking", refId: doc.id, title: "Booking no longer available",
+            body: "Your booked act is no longer available — the date has reopened.",
+          });
+        } catch (e) {
+          console.error(`unwindBookingsForModeration: failed to notify curator side for booking ${doc.id}`, e);
+        }
+      }
     } catch (e) {
       console.error(`unwindBookingsForModeration: failed to unwind booking ${doc.id}`, e);
     }

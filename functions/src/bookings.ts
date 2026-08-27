@@ -403,6 +403,30 @@ export const withdrawBooking = onCall<{ bookingId: string }>({ region: "us-centr
   return { ok: true };
 });
 
+// F5 (security audit wave, ruling: allow but exclude from trust metric):
+// detects membership overlap between the two profiles on a booking — any
+// uid that is a member of BOTH the curator profile AND the musician profile
+// (e.g. a venue owner who is also a member of the musician profile
+// performing there). Reads both profiles' `members` subcollections in full
+// and intersects the uid sets — bounded by each profile's own member cap
+// (mirrors syncCuratorAccess/reviewProfile's own "read a profile's members"
+// idiom elsewhere in this codebase), cheaper and simpler than resolving
+// which SPECIFIC uid to check membership for on the other side. Called
+// OUTSIDE acceptBooking's own transaction — memberships are stable at
+// accept time (nothing in this codebase changes membership as a side effect
+// of a booking action), so a non-transactional read here carries no TOCTOU
+// risk the way the booking/gig/series state itself does.
+async function detectSelfDeal(
+  db: FirebaseFirestore.Firestore, curatorProfileId: string, musicianProfileId: string,
+): Promise<boolean> {
+  const [curatorMembersSnap, musicianMembersSnap] = await Promise.all([
+    db.collection(`profiles/${curatorProfileId}/members`).get(),
+    db.collection(`profiles/${musicianProfileId}/members`).get(),
+  ]);
+  const curatorUids = new Set(curatorMembersSnap.docs.map((d) => d.id));
+  return musicianMembersSnap.docs.some((d) => curatorUids.has(d.id));
+}
+
 // Generic message for every reason a gig/run can be unavailable at accept
 // time (gig closed underneath the negotiation, or — whole-run — the series
 // paused/ended mid-thread). Deliberately identical across both branches: the
@@ -464,6 +488,10 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
   // Membership resolved once, outside the transaction — see requireBookingSide.
   const callerSide = await requireBookingSide(booking, uid);
 
+  // F5: computed once, outside the transaction — see detectSelfDeal's own
+  // comment on why memberships are stable enough for this to be safe here.
+  const isSelfDeal = await detectSelfDeal(db, booking.curatorProfileId, booking.musicianProfileId);
+
   const now = Date.now();
   // Everything that decides whether the fill can happen — the booking's own
   // turn/status/thread, the gig's live status, and (whole-run) the series'
@@ -494,6 +522,34 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
     // always names an existing gig at creation time and nothing deletes gigs.
     if (!gig) throw new HttpsError("internal", "This booking's gig could not be found.");
     if (gig.status !== "open") throw new HttpsError("failed-precondition", GIG_UNAVAILABLE_MESSAGE);
+
+    // F2 (security audit wave): refuse to accept once the gig has been
+    // edited (updateGig) AFTER the thread's last offer — the terms about to
+    // be frozen below may no longer match what the two sides actually
+    // negotiated over. Most dangerous for perHour: amountCents (the rate)
+    // never has to change for the accepted TOTAL to silently change, if
+    // durationMinutes moved underneath the thread. Compared against the
+    // LAST entry (not the first) — a counter made AFTER the edit is a fresh
+    // negotiation over the current gig and must not be blocked by an edit
+    // that came before it.
+    //
+    // Edge case considered (and ruled out): publishGig bumps gig.updatedAt
+    // at publish time, which is ALWAYS strictly before the first thread
+    // entry's `at` — applyToGig/offerGig can only create a booking against
+    // an already-"open" gig, so the publish write must have already
+    // committed by the time either fires, and both timestamps are
+    // server-side `Date.now()` calls in the same request-sequential flow.
+    // No legitimate "accept the first offer right after publish" sequence
+    // trips this. A theoretical multi-instance clock-skew trip is accepted
+    // risk, the same tier as every other Date.now()-based window check in
+    // this codebase; updateGig itself now separately refuses to edit a
+    // FILLED/CLOSED gig (gigs.ts), so this guard's own exposure window is
+    // bounded to the open negotiation period alone.
+    const lastEntry = freshBooking.thread[freshBooking.thread.length - 1];
+    if (gig.updatedAt > lastEntry.at) {
+      throw new HttpsError("failed-precondition",
+        "The gig was updated after the last offer — review the gig and send a new offer.");
+    }
 
     // Whole-run: re-read the series (must still be active) and every
     // currently-open occurrence of the run — bounded (series occurrences
@@ -534,8 +590,8 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
     // that has since detached from the series template (updateGig) and
     // carries its own edited duration is NOT reflected here; sub-5
     // recomputes each occurrence's own total from `acceptedTerms.amountCents`
-    // at settlement time, using THAT occurrence's actual duration. ----
-    const lastEntry = freshBooking.thread[freshBooking.thread.length - 1];
+    // at settlement time, using THAT occurrence's actual duration. `lastEntry`
+    // is the same value the F2 gig-edit guard above already computed. ----
     const expectedTotalCents = computeExpectedTotalCents(freshBooking.structure, lastEntry.amountCents, {
       durationMinutes: gig.durationMinutes, songCount: lastEntry.expectedQuantity ?? undefined,
     });
@@ -558,7 +614,14 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
     };
 
     // ---- WRITES ----
-    tx.update(bookingRef, { status: "confirmed", confirmedAt: now, updatedAt: now, acceptedTerms, deposit });
+    // F5: `selfDeal` is only ever included (true) when overlap was detected
+    // — never written as an explicit `false`, so a normal booking's doc
+    // shape is unchanged (the field simply stays absent, exactly like every
+    // pre-F5 booking).
+    tx.update(bookingRef, {
+      status: "confirmed", confirmedAt: now, updatedAt: now, acceptedTerms, deposit,
+      ...(isSelfDeal ? { selfDeal: true } : {}),
+    });
 
     const filledGigIds: string[] = [];
     if (freshBooking.seriesId) {

@@ -724,7 +724,18 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         else report.bookingsExpired++;
         if (isWholeRun) report.wholeRunResolutions++;
 
-        if (outcome === "completed") {
+        // F5 (security audit wave, ruling: allow but exclude from trust
+        // metric): a `selfDeal` booking (acceptBooking stamped it — the
+        // same uid is a member of both the curator and musician side, e.g.
+        // a venue owner performing at their own venue) still resolves to
+        // "completed" above like any other booking — the work genuinely
+        // happened — but must never credit completedCount, the
+        // curator-facing reliability/trust metric: nothing stops a
+        // self-dealing profile from "completing" an unlimited number of its
+        // own self-bookings otherwise. Sub-5 note: settlement (deposit
+        // refund) is unaffected by this — selfDeal only touches the
+        // reliability metric, never the money.
+        if (outcome === "completed" && !booking.selfDeal) {
           // Read-modify-write on the reliability doc (create-if-missing),
           // then recomputeReliability — mirrors bookingLifecycle.ts's own
           // completedCount bump idiom. recomputeReliability does its OWN

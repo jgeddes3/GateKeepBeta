@@ -373,6 +373,45 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     expect(musicianNotes.docs.some((d) =>
       d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
   });
+
+  // F1 (security audit wave): deleteProfile of a MUSICIAN with a confirmed
+  // booking must free the innocent curator's gig exactly like
+  // reviewProfile's reject-from-approved cascade does (review.test.ts) — the
+  // curator's own content is never touched by THIS profile's deletion, so
+  // its gig must reopen rather than sit "filled" against a booking that just
+  // silently expired.
+  it("F1: deleteProfile of a MUSICIAN with a confirmed booking on a future gig reopens the curator's gig", async () => {
+    const { user: curatorUser } = await signUpTestUser(`f1dm-${Date.now()}@test.com`);
+    const { profileId: curatorProfileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`f1dm_${Date.now()}`), curatorUser);
+    await seedCuratorGateContent(adb, curatorProfileId);
+    await callFn("submitProfileForReview", { profileId: curatorProfileId }, curatorUser);
+    const adminUser = await makeAdminUser("f1dmadmin");
+    await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, adminUser.user);
+
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("f1dmm");
+    const gigId = await seedOpenGig(curatorProfileId);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curatorUser);
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+
+    // Flip straight to "rejected" via the admin SDK (bypasses reviewProfile's
+    // OWN reject-from-approved cascade entirely, isolating deleteProfile's
+    // own unwind — mirrors the curator-side cascade test above).
+    await adb.doc(`profiles/${musicianProfileId}`).update({ status: "rejected" });
+
+    await callFn("deleteProfile", { profileId: musicianProfileId }, musician.user);
+
+    expect((await adb.doc(`profiles/${musicianProfileId}`).get()).exists).toBe(false);
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+
+    const gigAfter = (await adb.doc(`gigs/${gigId}`).get()).data();
+    expect(gigAfter?.status).toBe("open"); // reopened — the curator's OWN content stays live
+    expect(gigAfter?.bookingId).toBeNull();
+    expect(gigAfter?.bookedMusicianProfileId).toBeNull();
+  });
 });
 
 describe("submitProfileForReview", () => {

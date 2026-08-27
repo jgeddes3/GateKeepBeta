@@ -341,7 +341,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     const curatorAdmin = await makeAdminUser("rfm1a");
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfm1m");
-    const gigId = await seedOpenGig(curatorProfileId);
+    const gigId = await seedOpenGig(curatorProfileId); // future startsAt (default)
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
     await callFn("acceptBooking", { bookingId }, curator.user);
@@ -365,6 +365,49 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     const musicianNotes = await pollNotifications(musician.uid);
     expect(musicianNotes.docs.some((d) =>
       d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
+
+    // F1 (security audit wave): the MUSICIAN side is the one being
+    // moderated here — unlike a curator-side reject/delete (whose own
+    // cascade already retires its gigs), the CURATOR's content here is
+    // entirely innocent and stays live. Without the fix, this gig would sit
+    // "filled" (still publicly readable, still linked to a booking that
+    // just silently expired) forever. It's future-dated, so it must reopen,
+    // clearing the linkage, and the curator side gets its own honest notice.
+    const gigAfter = (await adb.doc(`gigs/${gigId}`).get()).data();
+    expect(gigAfter?.status).toBe("open");
+    expect(gigAfter?.bookingId).toBeNull();
+    expect(gigAfter?.bookedMusicianProfileId).toBeNull();
+
+    const curatorNotes = await pollNotifications(curator.uid);
+    expect(curatorNotes.docs.some((d) =>
+      d.data().kind === "booking" && /no longer available|reopened/i.test(d.data().body as string))).toBe(true);
+  });
+
+  // F1 (security audit wave) — the past-dated counterpart: a linked gig
+  // whose date has already elapsed must be left completely untouched (the
+  // show already happened; the gig's own filled status is its history).
+  it("reject-from-approved on a MUSICIAN profile with a confirmed booking on a PAST-dated gig: the gig is left untouched", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await pendingProfile("rfm2");
+    const curatorAdmin = await makeAdminUser("rfm2a");
+    await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfm2m");
+    const gigId = await seedOpenGig(curatorProfileId);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curator.user);
+    // Push the gig's date into the past AFTER it's already filled.
+    await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 });
+
+    await callFn("reviewProfile",
+      { profileId: musicianProfileId, decision: "rejected", reason: "Policy violation." }, curatorAdmin.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("expired");
+
+    const gigAfter = (await adb.doc(`gigs/${gigId}`).get()).data();
+    expect(gigAfter?.status).toBe("filled"); // untouched — the show already happened
+    expect(gigAfter?.bookingId).toBe(bookingId);
+    expect(gigAfter?.bookedMusicianProfileId).toBe(musicianProfileId);
   });
 
   // SP4 (Task 7 amendment): a whole-run booking fills BOTH a past and a

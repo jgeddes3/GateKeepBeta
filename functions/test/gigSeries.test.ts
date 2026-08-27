@@ -258,6 +258,21 @@ describe("updateSeries", () => {
     expect(occPriv?.geo).toEqual({ lat: expected!.lat, lng: expected!.lng });
   });
 
+  // F2 (security audit wave): a FILLED occurrence is a booked, contract-
+  // locked date — the template propagation sweep must skip it exactly like
+  // a detached occurrence, while an ordinary open sibling still updates.
+  it("F2: propagation SKIPS a FILLED occurrence (booked dates are contract-locked); an open sibling still updates", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("usfilled", "venue");
+    const seriesId = await createSeries(profileId, owner.user);
+    const filledOccId = await seedOccurrence(seriesId, profileId, { status: "filled", title: "Filled original" });
+    const openOccId = await seedOccurrence(seriesId, profileId, { title: "Open original" });
+    await callFn("updateSeries", { seriesId, ...seriesContent({ title: "Propagated Title" }) }, owner.user);
+    const filledOcc = (await adb.doc(`gigs/${filledOccId}`).get()).data();
+    expect(filledOcc?.title).toBe("Filled original"); // locked — untouched
+    const openOcc = (await adb.doc(`gigs/${openOccId}`).get()).data();
+    expect(openOcc?.title).toBe("Propagated Title"); // still updates
+  });
+
   it("does NOT propagate to a DETACHED future occurrence", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("us3", "venue");
     const seriesId = await createSeries(profileId, owner.user);

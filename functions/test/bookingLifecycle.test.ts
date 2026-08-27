@@ -4,7 +4,9 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
   CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, NO_SHOW_REPORT_WINDOW_DAYS,
+  MAX_OCCURRENCE_CANCELLATIONS,
   type ProfileDraftInput, type BookingRequestDoc, type ReliabilityDoc, type CuratorBookingDoc,
+  type OccurrenceCancellation,
 } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -188,6 +190,26 @@ describe("recomputeReliability / cancelBooking", () => {
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.cancellation?.outcome).toBe("deposit_refunded");
     expect(after.deposit?.forfeitedTo).toBeNull();
+  });
+
+  // F6 (security audit wave): the window thresholds must be read from THIS
+  // booking's OWN frozen deposit.policy snapshot, never re-read live from
+  // the shared constants — a later change to the shared constants (or, as
+  // here, a directly-modified snapshot) must not retroactively change the
+  // deal the two sides actually accepted. 80h is on the REFUND side of the
+  // live CURATOR_FORFEIT_WINDOW_HOURS constant (72h) but on the FORFEIT
+  // side of this booking's own (modified) 100h snapshot — proving the
+  // snapshot, not the live constant, governs.
+  it("F6: cancellation windows are read from the booking's OWN deposit.policy snapshot, not the live shared constant", async () => {
+    const { curator, bookingId, gigId } = await makeConfirmedBooking("f6pol");
+    await adb.doc(`bookings/${bookingId}`).update({ "deposit.policy.curatorForfeitHours": 100 });
+    await setGigStartsAt(gigId, 80);
+
+    await callFn("cancelBooking", { bookingId, reason: "Testing the policy snapshot." }, curator.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.cancellation?.outcome).toBe("deposit_forfeited");
+    expect(after.deposit?.forfeitedTo).toBe("musician");
   });
 
   it("musician cancels at 30h before start: refund, no mark", async () => {
@@ -478,6 +500,41 @@ describe("cancelOccurrence", () => {
       await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
     }
   });
+
+  // F7 (security audit wave, ruling: reject-when-full): once
+  // occurrenceCancellations is already at MAX_OCCURRENCE_CANCELLATIONS, a
+  // further cancelOccurrence call must be REFUSED outright — never silently
+  // drop the oldest settlement record to make room for a new one.
+  it("F7: refuses with resource-exhausted once occurrenceCancellations is at the cap; the array is left unchanged", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("occcap");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("occcapm");
+    const series = await seedSeries(curatorProfileId);
+    try {
+      const gigId = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 50 * 3_600_000 });
+      await adb.doc(`gigs/${gigId}`).update({ seriesId: series.id });
+      const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+      await callFn("acceptBooking", { bookingId }, curator.user);
+
+      const fullArray: OccurrenceCancellation[] = Array.from(
+        { length: MAX_OCCURRENCE_CANCELLATIONS }, (_, i) => ({
+          gigId: `filler-gig-${i}`, by: "curator" as const, at: Date.now(), hoursBeforeStart: 100,
+          outcome: "deposit_refunded" as const, markApplied: false,
+        }));
+      await adb.doc(`bookings/${bookingId}`).update({ occurrenceCancellations: fullArray });
+
+      await expect(callFn("cancelOccurrence", { bookingId, gigId, reason: "One too many." }, curator.user))
+        .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+
+      const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+      expect(after.occurrenceCancellations).toHaveLength(MAX_OCCURRENCE_CANCELLATIONS);
+      expect(after.occurrenceCancellations).toEqual(fullArray); // unchanged, nothing dropped or appended
+      // A refused call must not have touched the gig either.
+      expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
 });
 
 describe("reportNoShow", () => {
@@ -631,6 +688,69 @@ describe("removeReliabilityMark", () => {
     const auditSnap = await adb.collection("auditLogs")
       .where("action", "==", "reliability_mark_removed").where("targetId", "==", musicianProfileId).get();
     expect(auditSnap.empty).toBe(false);
+  });
+
+  // F4 (security audit wave): reversing a FALSE reported_no_show also
+  // restores the settlement record the false report stole — the booking
+  // goes back to "completed" (what scheduled.ts step 7 would have resolved
+  // it to had the report never happened), completedCount is netted back,
+  // and both sides are notified.
+  it("F4: reversing a false reported_no_show restores the booking to completed and nets completedCount, notifying both sides", async () => {
+    const { curator, musician, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("f4fr");
+    await setGigStartsAt(gigId, -5); // 5 hours ago
+    await callFn("reportNoShow", { bookingId, reason: "Never showed up." }, curator.user);
+
+    const beforeAdmin = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(beforeAdmin.status).toBe("cancelled_by_musician");
+    const depositBefore = beforeAdmin.deposit;
+    const acceptedTermsBefore = beforeAdmin.acceptedTerms;
+
+    const admin = await makeAdminUser("f4fra");
+    await callFn("removeReliabilityMark",
+      { musicianProfileId, bookingId, kind: "reported_no_show" }, admin.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("completed");
+    expect(after.cancellation).toBeNull();
+    expect(after.deposit).toEqual(depositBefore); // untouched
+    expect(after.acceptedTerms).toEqual(acceptedTermsBefore); // untouched
+
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
+      .data() as ReliabilityDoc;
+    expect(reliability.completedCount).toBe(1);
+    const curatorBooking = (await adb.doc(`profiles/${musicianProfileId}/private/curatorBooking`).get())
+      .data() as CuratorBookingDoc;
+    expect(curatorBooking.reliability.completedCount).toBe(1);
+    expect(curatorBooking.reliability.noShowCount).toBe(0); // the mark itself was also removed
+
+    const musicianNotes = await pollNotifications(musician.uid);
+    expect(musicianNotes.docs.some((d) =>
+      d.data().kind === "booking" && /restored as completed/i.test(d.data().body as string))).toBe(true);
+    const curatorNotes = await pollNotifications(curator.uid);
+    expect(curatorNotes.docs.some((d) =>
+      d.data().kind === "booking" && /restored as completed/i.test(d.data().body as string))).toBe(true);
+  });
+
+  it("F4: removing a late_cancel mark does NOT touch the booking — the cancellation was real, only the mark judgment changes", async () => {
+    const { musician, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("f4lc");
+    await setGigStartsAt(gigId, 20); // <24h -> mark applied
+    await callFn("cancelBooking", { bookingId, reason: "Van broke down." }, musician.user);
+
+    const beforeAdmin = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(beforeAdmin.status).toBe("cancelled_by_musician");
+    expect(beforeAdmin.cancellation?.markApplied).toBe(true);
+
+    const admin = await makeAdminUser("f4lca");
+    await callFn("removeReliabilityMark",
+      { musicianProfileId, bookingId, kind: "late_cancel" }, admin.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("cancelled_by_musician"); // untouched
+    expect(after.cancellation).toEqual(beforeAdmin.cancellation); // untouched, still present
+
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
+      .data() as ReliabilityDoc;
+    expect(reliability.completedCount).toBe(0); // no restoration credit
   });
 
   it("non-admin callers are denied", async () => {

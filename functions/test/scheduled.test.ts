@@ -698,6 +698,30 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     expect(projection?.reliability?.completedCount).toBe(1);
   });
 
+  // F5 (security audit wave, ruling: allow but exclude from trust metric):
+  // a selfDeal booking still resolves to "completed" (the work happened),
+  // but must never credit the curator-facing completedCount metric.
+  it("F5: a selfDeal booking completes WITHOUT bumping completedCount", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const { bookingId } = await seedBooking({
+      gigId: "pending", seriesId: null, curatorProfileId, musicianProfileId, status: "confirmed", selfDeal: true,
+    });
+    const gigId = await seedOccurrence("not-a-real-series", curatorProfileId, {
+      status: "filled", startsAt: now - 2 * 3600_000, durationMinutes: 60,
+      bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+    await adb.doc(`bookings/${bookingId}`).update({ gigId });
+
+    await runDailySweep(now);
+
+    const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(booking.status).toBe("completed"); // the work still happened
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
+    expect(reliability?.completedCount ?? 0).toBe(0); // no trust-metric credit
+  });
+
   it("does not complete a single-gig confirmed booking whose gig hasn't ended yet", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();

@@ -365,9 +365,23 @@ export interface BookingRequestDoc {
   // bookings.ts's own finalizeBookingRequest write, and every existing
   // fixture in bookings.test.ts — stays valid without modification; absent
   // is treated identically to an empty array by readers. Capped at
-  // MAX_OCCURRENCE_CANCELLATIONS, drop-oldest, once cancelOccurrence starts
-  // writing it.
+  // MAX_OCCURRENCE_CANCELLATIONS; cancelOccurrence REFUSES (resource-
+  // exhausted) once the array is already at the cap rather than
+  // dropping the oldest entry (security audit wave F7, ruling:
+  // reject-when-full — a settlement record must never be silently
+  // discarded).
   occurrenceCancellations?: OccurrenceCancellation[];
+  // Security audit wave F5 (ruling: allow but exclude from trust metric):
+  // stamped true by acceptBooking when it detects membership overlap
+  // between the two profiles (the same uid is a member of BOTH the
+  // curator and musician side) — e.g. a venue owner performing at their
+  // own venue. The booking is allowed to proceed exactly as any other, but
+  // scheduled.ts's sweep step 7 skips the completedCount increment (and
+  // recompute) for a selfDeal booking so a self-booking can never farm the
+  // curator-facing reliability/trust metric. Optional/backward-compatible
+  // — absent on every pre-existing booking and on any booking accepted
+  // before this fix landed, treated identically to false.
+  selfDeal?: boolean;
 }
 
 // visibility + projections + reliability

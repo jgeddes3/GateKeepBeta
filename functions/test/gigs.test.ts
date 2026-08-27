@@ -365,6 +365,31 @@ describe("updateGig", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 
+  // F2 (security audit wave): a FILLED gig has a confirmed booking behind
+  // it — its schedule/terms are what the two sides actually negotiated and
+  // accepted; editing it out from under the booking (silently changing the
+  // perHour basis, the date, etc.) must be refused with a distinct,
+  // actionable message, exactly like cancelGig already refuses a filled
+  // gig in favor of cancelBooking.
+  it("F2: refuses to edit a FILLED gig with a distinct 'locked' message", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ugfilled", "venue");
+    const gigId = await createDraftGig(profileId, owner.user);
+    await callFn("publishGig", { gigId }, owner.user);
+    await adb.doc(`gigs/${gigId}`).update({ status: "filled" });
+    await expect(callFn("updateGig", { gigId, ...gigContent({ title: "Should not land" }) }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.title).not.toBe("Should not land");
+  });
+
+  it("F2: refuses to edit a CLOSED gig", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ugclosed", "venue");
+    const gigId = await createDraftGig(profileId, owner.user);
+    await callFn("publishGig", { gigId }, owner.user);
+    await adb.doc(`gigs/${gigId}`).update({ status: "closed" });
+    await expect(callFn("updateGig", { gigId, ...gigContent() }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
   it("rejects an invalid budget with invalid-argument", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("ug8", "venue");
     const gigId = await createDraftGig(profileId, owner.user);
