@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait, makeMoneyReady } from "./helpers";
+import {
+  signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait, makeMoneyReady,
+  setGigStartsAt, setConfirmedAtAgo, ageConfirmedAt,
+} from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
@@ -113,29 +116,10 @@ async function pollNotifications(uid: string) {
   return notes;
 }
 
-// Sets a gig's startsAt relative to "now" AT THE MOMENT THIS RUNS — called
-// immediately before the boundary-sensitive callable under test, never
-// before the (multi-call, multi-second) profile/gig/booking setup chain.
-// That ordering matters: the setup chain's own wall-clock time would
-// otherwise erode any fixed buffer computed before it ran.
-async function setGigStartsAt(gigId: string, hoursFromNow: number): Promise<void> {
-  await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() + hoursFromNow * 3_600_000 });
-}
-
-// SP5 Task 7: pushes a booking's confirmedAt `msAgo` milliseconds into the
-// past — called immediately before the boundary-sensitive callable under
-// test (same ordering rationale as setGigStartsAt above).
-async function setConfirmedAtAgo(bookingId: string, msAgo: number): Promise<void> {
-  await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - msAgo });
-}
-
-// The common case: safely outside CANCEL_GRACE_MS (1h). Every SP4 window
-// test in this file (forfeit AND refund/no-mark alike — see
-// makeConfirmedBooking's own comment on why refund-side assertions need
-// this too) calls this immediately before its cancel/cancelOccurrence call.
-function ageConfirmedAt(bookingId: string): Promise<void> {
-  return setConfirmedAtAgo(bookingId, 2 * 3_600_000);
-}
+// setGigStartsAt / setConfirmedAtAgo / ageConfirmedAt now live in
+// ./helpers (SP5 Task 8 shares them with payments.test.ts's cancellation-
+// money suite) — see their comments there for the ordering rules every
+// caller below relies on.
 
 // Builds a real, fully confirmed single-gig booking (through the actual
 // applyToGig -> acceptBooking chain, so membership docs/deposit/acceptedTerms

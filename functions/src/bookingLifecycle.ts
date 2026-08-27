@@ -4,11 +4,12 @@ import {
   isValidDocId, MAX_CANCEL_REASON_LENGTH, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
   MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS, CANCEL_GRACE_MS,
   type BookingRequestDoc, type BookingSide, type GigDoc, type GigSeriesDoc,
-  type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation,
+  type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation, type PaymentDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
+import { markDepositsPendingInTx, resolveDepositPending } from "./paymentsCore.js";
 
 // Same "already started" message for both the whole-booking and
 // single-occurrence cancel paths — a caller who missed the cancellation
@@ -307,6 +308,20 @@ export async function executeCancellation(
       nextStartsAt = gig.startsAt;
     }
 
+    // SP5 Task 8: every FUTURE-dated payment doc of this booking — the docs
+    // whose money this cancellation decides. Single-field range filter on a
+    // subcollection ⇒ no composite index needed. Last read of the read phase.
+    //
+    // DELIBERATELY future-only: a PAST-start doc (the occurrence already
+    // happened, or is in progress right now) is NOT the cancellation's to
+    // touch. Its show either happened or is happening, so it settles
+    // normally via Task 10 — even on a booking that is being cancelled for
+    // its remaining dates. Waiving it here would silently un-pay a musician
+    // for work already done. (SP4's own occurrence reopen has the exact same
+    // past/future split — see getFutureFilledOccurrences.)
+    const paymentsSnap = await tx.get(
+      db.collection(`bookings/${bookingId}/payments`).where("occurrenceStartsAt", ">", now));
+
     const hoursBeforeStart = (nextStartsAt - now) / 3_600_000;
     // F6 (security audit wave): window thresholds are read from THIS
     // booking's OWN frozen deposit.policy snapshot (acceptBooking stamps it
@@ -367,8 +382,26 @@ export async function executeCancellation(
       tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
     }
 
-    return { outcome, markApplied };
+    // SP5 Task 8: the transactional intent-to-move-money. On a run-level
+    // forfeit ONLY the occurrence the window was measured against
+    // (`nextGigId`) forfeits — every other future date refunds, since the
+    // curator was never late on those (plan refinement, binding). A refund
+    // outcome (musician side, grace, or >= the forfeit window) refunds every
+    // future doc.
+    const forfeitGigId = outcome === "deposit_forfeited" ? nextGigId : null;
+    const touchedGigIds = markDepositsPendingInTx(tx, paymentsSnap.docs, forfeitGigId, now);
+
+    return { outcome, markApplied, touchedGigIds };
   });
+
+  // SP5 Task 8: the money itself, post-commit. Per-doc catch: one failed
+  // Stripe call must never abort the others, and must never surface as an
+  // error on an already-committed cancellation — the doc stays `*_pending`,
+  // which is exactly the handle Task 9's sweep retries it by.
+  for (const gigId of result.touchedGigIds) {
+    await resolveDepositPending(bookingId, gigId).catch((e) =>
+      console.error(`executeCancellation: deposit resolution failed for ${bookingId}/${gigId} (sweep will retry)`, e));
+  }
 
   // recomputeReliability stays post-transaction — it's a pure re-derivation
   // from the reliability doc's current marks (self-healing: a failure here
@@ -506,6 +539,13 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
         "Too many individual date cancellations on this booking — cancel the whole run instead.");
     }
 
+    // SP5 Task 8: this date's OWN payment doc — the only money this callable
+    // may touch (the run's other dates are untouched, they're still on).
+    // Read by path rather than by query: exactly one doc, and its id IS the
+    // gigId. A missing doc (a pre-SP5 booking, or an occurrence that was
+    // never staged) silently no-ops downstream.
+    const paymentSnap = await tx.get(db.doc(`bookings/${bookingId}/payments/${gigId}`));
+
     const hoursBeforeStart = (gig.startsAt - now) / 3_600_000;
     // F6 (security audit wave): read from the booking's OWN deposit.policy
     // snapshot — see executeCancellation's identical fix/comment above.
@@ -551,8 +591,21 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
       tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
     }
 
-    return { outcome, markApplied };
+    // SP5 Task 8: same pending-marker machinery as executeCancellation, scoped
+    // to this ONE date — it forfeits iff THIS date's own outcome forfeited.
+    const touchedGigIds = markDepositsPendingInTx(
+      tx, [paymentSnap], outcome === "deposit_forfeited" ? gigId : null, now);
+
+    return { outcome, markApplied, touchedGigIds };
   });
+
+  // SP5 Task 8: the money, post-commit — see executeCancellation's identical
+  // per-doc catch rationale (a stuck `*_pending` doc is the sweep's retry
+  // handle, never a caller-visible error on a committed cancellation).
+  for (const touchedGigId of result.touchedGigIds) {
+    await resolveDepositPending(bookingId, touchedGigId).catch((e) =>
+      console.error(`cancelOccurrence: deposit resolution failed for ${bookingId}/${touchedGigId} (sweep will retry)`, e));
+  }
 
   // recomputeReliability stays post-transaction — see cancelBooking's
   // identical rationale (a pure, self-healing re-derivation; only the mark
@@ -674,6 +727,13 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       futureOccurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, bookingId, now);
     }
 
+    // SP5 Task 8: the REPORTED occurrence's own payment doc, plus every
+    // future-dated one (a no-show ends the whole run — see the unwind above).
+    // Both read here, in the read phase; written below.
+    const reportedPaymentSnap = await tx.get(db.doc(`bookings/${bookingId}/payments/${occurrenceGigId}`));
+    const futurePaymentsSnap = await tx.get(
+      db.collection(`bookings/${bookingId}/payments`).where("occurrenceStartsAt", ">", now));
+
     const daysSinceStart = (now - occurrenceStartsAt) / (24 * 3_600_000);
     if (daysSinceStart > NO_SHOW_REPORT_WINDOW_DAYS) {
       throw new HttpsError("failed-precondition",
@@ -721,8 +781,41 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       reopenSeriesOccurrences(tx, db, freshBooking.seriesId, bookingId, seriesActiveBookingId, futureOccurrenceDocs, now);
     }
 
-    return { occurrenceGigId };
+    // SP5 Task 8: the musician failed to appear, so nothing is forfeited to
+    // them — every touched date refunds. The reported occurrence is excluded
+    // from the future set (it is normally past-dated and so absent anyway;
+    // filtering makes that independent of the two dates' provenance — the
+    // payment doc's occurrenceStartsAt is stamped at accept, the gig's own
+    // startsAt can be edited afterwards) and handled explicitly below.
+    const touchedGigIds = markDepositsPendingInTx(
+      tx, futurePaymentsSnap.docs.filter((d) => d.id !== occurrenceGigId), null, now);
+    const reportedPayment = reportedPaymentSnap.data() as PaymentDoc | undefined;
+    // ONLY `held` — deliberately narrow:
+    //   - `applied` (the deposit was already released into a settlement that
+    //     paid the musician) is the POST-TRANSFER CLAWBACK case, which is
+    //     Task 12's job and needs a transfer reversal, not a refund;
+    //   - `unpaid` was never charged, so there is nothing here to send back;
+    //   - anything else is already resolved.
+    if (reportedPayment?.deposit.status === "held") {
+      const reportedUpdate: { [key: string]: unknown } = { "deposit.status": "refund_pending", updatedAt: now };
+      // Same guard markDepositsPendingInTx uses: a `paid`/`past_due`
+      // settlement is a real money record and is never waived away here.
+      if (reportedPayment.settlement.status === "not_due" || reportedPayment.settlement.status === "pending") {
+        reportedUpdate["settlement.status"] = "waived";
+      }
+      tx.update(reportedPaymentSnap.ref, reportedUpdate);
+      touchedGigIds.push(occurrenceGigId);
+    }
+
+    return { occurrenceGigId, touchedGigIds };
   });
+
+  // SP5 Task 8: the money, post-commit — see executeCancellation's identical
+  // per-doc catch rationale.
+  for (const touchedGigId of result.touchedGigIds) {
+    await resolveDepositPending(bookingId, touchedGigId).catch((e) =>
+      console.error(`reportNoShow: deposit resolution failed for ${bookingId}/${touchedGigId} (sweep will retry)`, e));
+  }
 
   await recomputeReliability(booking.musicianProfileId);
 

@@ -7,6 +7,7 @@ import type {
   BookingRequestDoc, BudgetStructure, DepositStatus, FeePolicy, LedgerEntry, PaymentDoc,
   PaymentSummary, StripeProfileDoc,
 } from "@gatekeep/shared";
+import { getStripe } from "./stripeClient.js";
 
 // profiles/{profileId}/private/stripe — the payment-identity doc. Shared
 // helper so every SP5 callable/handler that needs the cached Stripe identity
@@ -262,4 +263,148 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
   // would reorder every BookingInbox listing (orderBy(updatedAt)) on every
   // payment tick, even though nothing the inbox actually displays changed.
   await db.doc(`bookings/${bookingId}`).update({ paymentSummary: summary });
+}
+
+// ---------- Task 8: cancellation money ----------
+
+// Resolves ONE payment doc's `*_pending` deposit to its terminal state by
+// actually moving the money. Runs POST-COMMIT of the cancellation
+// transaction that set the pending marker (that marker is the transactional
+// intent-to-move-money; this is the effect), so it must be safe to run zero,
+// one, or many times:
+//   - the doc CAS below (act only on `refund_pending`/`forfeit_pending`)
+//     makes a second runner a no-op — Task 9's sweep re-runs exactly the
+//     docs still stuck pending after a crash between commit and executor;
+//   - the Stripe idempotency keys are per-(booking,gig,purpose), so even a
+//     genuine double-execute (executor and sweep overlapping) replays the
+//     SAME refund/transfer object rather than moving money twice.
+// Never throws for a missing/already-terminal doc — callers log and continue.
+export async function resolveDepositPending(bookingId: string, gigId: string): Promise<void> {
+  const db = getFirestore();
+  const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
+  const snap = await ref.get();
+  const p = snap.data() as PaymentDoc | undefined;
+  if (!p) return;
+  // The CAS. Anything else — already `refunded`/`forfeited` (a racer got
+  // here first), still `held`/`unpaid` (nothing asked for a resolution), or
+  // `applied` (Task 12's clawback territory) — is deliberately untouched.
+  if (p.deposit.status !== "refund_pending" && p.deposit.status !== "forfeit_pending") return;
+  const now = Date.now();
+
+  if (p.deposit.status === "refund_pending") {
+    // The fee share ALWAYS comes back with the deposit slice on a refund
+    // (spec §1) — the platform only ever keeps it on a FORFEIT, and there by
+    // simply not refunding it.
+    const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
+    if (p.deposit.intentId) {
+      // PARTIAL refund against the accept batch's shared intent: a whole-run
+      // booking's occurrences all point at ONE intent, and each doc refunds
+      // only its own slice+fee of it. Keyed per-(booking,gig) so the
+      // occurrences never collide on one key.
+      const r = await getStripe().refund({
+        intentId: p.deposit.intentId, amountCents,
+        idempotencyKey: `${bookingId}:${gigId}:refund`,
+        meta: { bookingId, gigId, purpose: "deposit_refund" },
+      });
+      await ref.update({ "deposit.status": "refunded", "deposit.resolvedAt": now, updatedAt: now });
+      await writeLedger({
+        kind: "refund", amountCents, bookingId, gigId,
+        profileId: p.curatorProfileId, stripeId: r.id, detail: "deposit refund (incl. fee share)",
+      }).catch((e) => console.error(`resolveDepositPending: ledger write failed for refund ${bookingId}/${gigId}`, e));
+    } else {
+      // Never charged (a doc still `unpaid` when the cancellation landed —
+      // e.g. a webhook-recovery accept whose intent never succeeded, or a
+      // birth deposit the sweep hadn't charged yet). There is no money to
+      // send back, so this resolves straight to the terminal state; no
+      // Stripe call, and no ledger row for money that never moved.
+      await ref.update({ "deposit.status": "refunded", "deposit.resolvedAt": now, updatedAt: now });
+    }
+  } else {
+    // 100% of the deposit BASE to the musician — no commission is taken on a
+    // forfeit; the platform keeps the curator's fee share by simply not
+    // refunding it (see the refund branch above).
+    const musicianStripe = await getStripeProfileDoc(p.musicianProfileId);
+    if (!musicianStripe?.accountId) {
+      // Unreachable in normal flow (accept is gated on a payout-ready
+      // musician), so this is a genuine anomaly worth an error log — the doc
+      // is LEFT `forfeit_pending` on purpose: Task 9's sweep retries it once
+      // the account exists again, and the musician's money is never silently
+      // dropped by flipping to a terminal state here.
+      console.error(`resolveDepositPending: no Stripe account for forfeit ${bookingId}/${gigId} — left pending for the sweep`);
+      return;
+    }
+    const t = await getStripe().transferToAccount({
+      accountId: musicianStripe.accountId, amountCents: p.deposit.sliceCents,
+      idempotencyKey: `${bookingId}:${gigId}:forfeit`,
+      meta: { bookingId, gigId, purpose: "forfeit" },
+      // As-built contract #3: a transfer backed by a fresh charge passes the
+      // charge id so it draws on THAT charge's funds instead of the
+      // platform's aggregate available balance (a not-yet-settled charge
+      // would otherwise fail `balance_insufficient` in live mode). Can
+      // legitimately be null — a deposit finalized out-of-band by the
+      // payment_intent.succeeded webhook need not know its charge id — in
+      // which case the transfer simply draws on the platform balance.
+      ...(p.deposit.chargeId ? { sourceChargeId: p.deposit.chargeId } : {}),
+    });
+    await ref.update({
+      "deposit.status": "forfeited", "deposit.resolvedAt": now,
+      "deposit.forfeitTransferId": t.id, updatedAt: now,
+    });
+    await writeLedger({
+      kind: "forfeit_transfer", amountCents: p.deposit.sliceCents, bookingId, gigId,
+      profileId: p.musicianProfileId, stripeId: t.id, detail: "deposit forfeited to musician (100%)",
+    }).catch((e) => console.error(`resolveDepositPending: ledger write failed for forfeit ${bookingId}/${gigId}`, e));
+  }
+
+  // Best-effort, exactly like every other recompute call site: a failure here
+  // leaves a stale aggregate that the next payment transition re-derives
+  // (self-healing), never a wrong terminal state on the doc above.
+  await recomputePaymentSummary(bookingId)
+    .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
+}
+
+// Marks the given payment docs `*_pending` inside the CALLER'S transaction —
+// the atomic "this money is going to move" record that pairs with the
+// cancellation write itself, so a crash before the executor above runs leaves
+// a doc the sweep can find and finish (rather than a cancelled booking whose
+// deposit nobody ever resolves).
+//
+// `forfeitGigId` names the ONE doc that forfeits (a run-level curator late
+// cancel forfeits only the occurrence the window was measured against — plan
+// refinement, binding); null ⇒ everything refunds. Only `held`/`unpaid` docs
+// are touched: an already-resolved doc, or one whose deposit was `applied`
+// into a settlement, is none of a cancellation's business (Task 12 owns the
+// clawback of an applied deposit).
+//
+// Takes DocumentSnapshot (not QueryDocumentSnapshot) so a single-doc caller —
+// cancelOccurrence, which reads one payment doc by path — can pass its own
+// read straight through; a snapshot for a doc that doesn't exist is skipped,
+// which is exactly the pre-SP5-booking no-op both callers want.
+//
+// Returns the touched gig ids so the caller can run resolveDepositPending on
+// each, post-commit.
+export function markDepositsPendingInTx(
+  tx: FirebaseFirestore.Transaction, paymentDocs: FirebaseFirestore.DocumentSnapshot[],
+  forfeitGigId: string | null, now: number,
+): string[] {
+  const touched: string[] = [];
+  for (const doc of paymentDocs) {
+    const p = doc.data() as PaymentDoc | undefined;
+    if (!p) continue;
+    if (p.deposit.status !== "held" && p.deposit.status !== "unpaid") continue;
+    // doc.id, not p.gigId: the doc id IS the path segment resolveDepositPending
+    // is called with, so a doc whose stored gigId ever disagreed with its own
+    // path would still be resolved at the path that was actually written.
+    const next = doc.id === forfeitGigId ? "forfeit_pending" : "refund_pending";
+    const update: { [key: string]: unknown } = { "deposit.status": next, updatedAt: now };
+    // A cancelled occurrence never settles. Guarded to the two "hasn't
+    // happened yet" settlement states — a `paid`/`past_due` settlement is a
+    // real money record and must never be erased by waiving it here.
+    if (p.settlement.status === "not_due" || p.settlement.status === "pending") {
+      update["settlement.status"] = "waived";
+    }
+    tx.update(doc.ref, update);
+    touched.push(doc.id);
+  }
+  return touched;
 }

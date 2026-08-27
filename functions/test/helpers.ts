@@ -90,6 +90,40 @@ export async function makeMoneyReady(
     { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
 }
 
+// Sets a gig's startsAt relative to "now" AT THE MOMENT THIS RUNS — called
+// immediately before the boundary-sensitive callable under test, never
+// before the (multi-call, multi-second) profile/gig/booking setup chain.
+// That ordering matters: the setup chain's own wall-clock time would
+// otherwise erode any fixed buffer computed before it ran.
+//
+// NOTE (SP5): this moves the GIG's date only. A payment doc's
+// `occurrenceStartsAt` is stamped at accept time and does NOT follow — which
+// is correct for the cancellation-window tests (they only need the gig's
+// date to move), but a test that needs a genuinely PAST-dated payment doc
+// must push the gig into the past BEFORE acceptBooking instead.
+export async function setGigStartsAt(gigId: string, hoursFromNow: number): Promise<void> {
+  await getAdminFirestore(adminAppInstance).doc(`gigs/${gigId}`)
+    .update({ startsAt: Date.now() + hoursFromNow * 3_600_000 });
+}
+
+// SP5 Task 7: pushes a booking's confirmedAt `msAgo` milliseconds into the
+// past — called immediately before the boundary-sensitive callable under
+// test (same ordering rationale as setGigStartsAt above).
+export async function setConfirmedAtAgo(bookingId: string, msAgo: number): Promise<void> {
+  await getAdminFirestore(adminAppInstance).doc(`bookings/${bookingId}`)
+    .update({ confirmedAt: Date.now() - msAgo });
+}
+
+// The common case: safely outside CANCEL_GRACE_MS (1h). Every cancellation-
+// window test (forfeit AND refund/no-mark alike) calls this immediately
+// before its cancel/cancelOccurrence call — a booking that was just accepted
+// is INSIDE the grace window, so without this a refund/no-mark assertion
+// silently passes for the wrong reason (grace, not the window it claims to
+// test), and a forfeit assertion fails outright.
+export function ageConfirmedAt(bookingId: string): Promise<void> {
+  return setConfirmedAtAgo(bookingId, 2 * 3_600_000);
+}
+
 export async function callFn<T, R>(name: string, data: T, asUser?: User): Promise<R> {
   // Explicitly sign out when no user is given so "unauthenticated" calls are
   // truly unauthenticated, regardless of which user a prior call in this

@@ -1,10 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady } from "./helpers";
+import {
+  signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady,
+  setGigStartsAt, setConfirmedAtAgo, ageConfirmedAt,
+} from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   CURATOR_FEE_PCT, DEPOSIT_PERCENT,
-  type BookingRequestDoc, type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
+  type BookingRequestDoc, type LedgerEntry, type PaymentDoc, type ProfileDraftInput,
+  type StripeProfileDoc,
 } from "@gatekeep/shared";
 import type { RefreshPaymentMethodInput } from "../src/payments.js";
 import {
@@ -1075,4 +1079,367 @@ describe("Task 6 accept saga", () => {
     // The loser is superseded, never charged — no payment docs of its own.
     expect(await getPaymentDocs(rivalBookingId)).toHaveLength(0);
   });
+});
+
+// ---------- Task 8: cancellation money (refund/forfeit executors + wiring) ----------
+
+// Every fixture below is the standard single-occurrence shape: 15000c/hr x
+// 90min => base 22500; deposit slice ceil(22500 * 35%) = 7875; curator fee
+// share ceil(7875 * 11%) = 867; so 8742 is charged per occurrence.
+const SLICE_CENTS = 7875;
+const FEE_SHARE_CENTS = 867;
+const CHARGE_CENTS = SLICE_CENTS + FEE_SHARE_CENTS;
+
+async function musicianAccountId(profileId: string): Promise<string> {
+  const sp = await getStripeDoc(profileId);
+  if (!sp?.accountId) throw new Error(`no accountId cached for musician profile ${profileId}`);
+  return sp.accountId;
+}
+
+// FakeStripe's running per-account balance — the only honest way to assert
+// "money actually reached the musician" (the transfer object alone would
+// still exist if the balance write had been lost).
+async function accountBalanceCents(accountId: string): Promise<number> {
+  const d = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+  return (d?.balanceCents as number | undefined) ?? 0;
+}
+
+async function fakeObject(id: string): Promise<Record<string, unknown> | undefined> {
+  return (await adb.doc(`stripeFake/state/objects/${id}`).get()).data();
+}
+
+async function ledgerRows(bookingId: string): Promise<LedgerEntry[]> {
+  const snap = await adb.collection("ledger").where("bookingId", "==", bookingId).get();
+  return snap.docs.map((d) => d.data() as LedgerEntry);
+}
+
+function byGigId(docs: PaymentDoc[]): Map<string, PaymentDoc> {
+  return new Map(docs.map((p) => [p.gigId, p]));
+}
+
+// A real, fully confirmed single-gig booking (genuine applyToGig ->
+// acceptBooking chain, so the deposit is genuinely charged and `held`).
+// `pastStartHours` pushes the gig into the past BEFORE the accept — the only
+// way to get a payment doc whose own `occurrenceStartsAt` is past, since that
+// field is stamped at accept time and never follows a later gig edit (and
+// publishGig refuses a past startsAt outright, hence the post-publish push).
+async function makeConfirmedSingleBooking(prefix: string, opts: { pastStartHours?: number } = {}) {
+  const curator = await makeApprovedCuratorProfile(`${prefix}c`);
+  const musician = await makeApprovedMusicianProfile(`${prefix}m`);
+  await makeMoneyReady(curator, musician);
+  const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
+  const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+    "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+  await callFn("acceptBooking", { bookingId }, curator.owner.user);
+  return { curator, musician, gigId, bookingId };
+}
+
+// A confirmed WHOLE-RUN booking with one occurrence per entry in
+// `offsetsHours` (negative = already started). The accept stages and charges
+// one payment doc per occurrence off a single batch intent. Callers MUST
+// flip the series to "ended" in a finally — the shared emulator's dailySweep
+// scans active series (same contract as every other series fixture here).
+async function makeConfirmedRun(prefix: string, offsetsHours: number[]) {
+  const curator = await makeApprovedCuratorProfile(`${prefix}c`);
+  const musician = await makeApprovedMusicianProfile(`${prefix}m`);
+  await makeMoneyReady(curator, musician);
+  const series = await seedSeries(curator.profileId);
+  const gigIds: string[] = [];
+  for (const hours of offsetsHours) {
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user,
+      hours > 0 ? { startsAt: Date.now() + hours * 3_600_000 } : {});
+    if (hours <= 0) await setGigStartsAt(gigId, hours);   // see makeConfirmedSingleBooking's note
+    await adb.doc(`gigs/${gigId}`).update({ seriesId: series.id });
+    gigIds.push(gigId);
+  }
+  // Initiated from the earliest FUTURE occurrence (applying against an
+  // already-started date isn't the subject here); a whole-run accept stages
+  // every open occurrence of the series regardless of which one initiated it.
+  const initiatingGigId = gigIds[offsetsHours.findIndex((h) => h > 0)];
+  const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+    "applyToGig",
+    { gigId: initiatingGigId, musicianProfileId: musician.profileId, offer: offerPayload() },
+    musician.owner.user);
+  await callFn("acceptBooking", { bookingId }, curator.owner.user);
+  return { curator, musician, series, gigIds, bookingId };
+}
+
+describe("Task 8 cancellation money", () => {
+  it("curator cancel at 80h: the deposit refunds slice + fee share, the ledger records it, and the gig reopens", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8ref");
+    const before = (await getPaymentDocs(bookingId))[0];
+    const intentId = before.deposit.intentId!;
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    await setGigStartsAt(gigId, 80);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Double-booked the venue." }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("refunded");
+    expect(typeof p.deposit.resolvedAt).toBe("number");
+    expect(p.deposit.forfeitTransferId).toBeNull();
+    expect(p.settlement.status).toBe("waived");   // a cancelled occurrence never settles
+
+    // A PARTIAL refund of exactly slice + fee share against the accept
+    // batch's intent — the fee share ALWAYS comes back on a refund.
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
+    const refundRow = (await ledgerRows(bookingId)).find((r) => r.kind === "refund");
+    expect(refundRow?.amountCents).toBe(CHARGE_CENTS);
+    expect(refundRow?.profileId).toBe(curator.profileId);
+    expect(refundRow?.gigId).toBe(gigId);
+    expect(refundRow?.detail).toBe("deposit refund (incl. fee share)");
+    expect(await fakeObject(refundRow!.stripeId!))
+      .toMatchObject({ kind: "refund", intentId, amountCents: CHARGE_CENTS });
+    // Nothing reached the musician on a refund.
+    expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
+
+    // SP4 behavior intact: the date is bookable again...
+    const gig = (await adb.doc(`gigs/${gigId}`).get()).data();
+    expect(gig?.status).toBe("open");
+    expect(gig?.bookingId).toBeNull();
+    // ...and the summary no longer holds (or counts) the curator's money.
+    const booking = await getBooking(bookingId);
+    expect(booking.cancellation?.outcome).toBe("deposit_refunded");
+    expect(booking.paymentSummary?.heldCents).toBe(0);
+    expect(booking.paymentSummary?.paidCents).toBe(0);
+    expect(booking.paymentSummary?.transferredCents).toBe(0);
+  });
+
+  it("curator cancel at 10h: exactly the deposit slice transfers to the musician and the fee share is NOT refunded", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8for");
+    const before = (await getPaymentDocs(bookingId))[0];
+    const intentId = before.deposit.intentId!;
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    await setGigStartsAt(gigId, 10);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("forfeited");
+    expect(p.deposit.forfeitTransferId).toBeTruthy();
+    expect(typeof p.deposit.resolvedAt).toBe("number");
+    expect(p.settlement.status).toBe("waived");
+
+    // 100% of the deposit BASE, no commission — and the platform keeps the
+    // fee share by simply never refunding it.
+    expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+    expect(await fakeObject(p.deposit.forfeitTransferId!)).toMatchObject({
+      kind: "transfer", accountId, amountCents: SLICE_CENTS,
+      // As-built contract #3: backed by the deposit charge itself.
+      sourceChargeId: before.deposit.chargeId,
+    });
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
+
+    const rows = await ledgerRows(bookingId);
+    expect(rows.some((r) => r.kind === "refund")).toBe(false);
+    const forfeitRow = rows.find((r) => r.kind === "forfeit_transfer");
+    expect(forfeitRow?.amountCents).toBe(SLICE_CENTS);
+    expect(forfeitRow?.profileId).toBe(musician.profileId);
+    expect(forfeitRow?.gigId).toBe(gigId);
+    expect(forfeitRow?.stripeId).toBe(p.deposit.forfeitTransferId);
+    expect(forfeitRow?.detail).toBe("deposit forfeited to musician (100%)");
+
+    const booking = await getBooking(bookingId);
+    expect(booking.cancellation?.outcome).toBe("deposit_forfeited");
+    expect(booking.deposit?.forfeitedTo).toBe("musician");
+    expect(booking.paymentSummary?.heldCents).toBe(0);
+    expect(booking.paymentSummary?.transferredCents).toBe(SLICE_CENTS);
+    expect(booking.paymentSummary?.paidCents).toBe(CHARGE_CENTS);
+  });
+
+  it("grace-hour curator cancel inside the forfeit window refunds instead of forfeiting", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8gra");
+    const before = (await getPaymentDocs(bookingId))[0];
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    // 2h out — deep inside the 72h forfeit window — but only 10 minutes after
+    // the accept, so the 1h grace (Task 7) governs the outcome, and the money
+    // follows the OUTCOME with no grace-specific money code of its own.
+    await setGigStartsAt(gigId, 2);
+    await setConfirmedAtAgo(bookingId, 10 * 60_000);
+    await callFn("cancelBooking", { bookingId, reason: "Booked by mistake." }, curator.owner.user);
+
+    const booking = await getBooking(bookingId);
+    expect(booking.cancellation?.graceApplied).toBe(true);
+    expect(booking.cancellation?.outcome).toBe("deposit_refunded");
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("refunded");
+    expect(p.deposit.forfeitTransferId).toBeNull();
+    expect(await getFakeIntent(before.deposit.intentId!).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
+    expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "forfeit_transfer")).toBe(false);
+  });
+
+  it("musician cancel at 20h: refunded in full (fee share included) and the late-cancel mark still applies", async () => {
+    const { musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8mus");
+    const before = (await getPaymentDocs(bookingId))[0];
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    await setGigStartsAt(gigId, 20);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Van broke down." }, musician.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("refunded");
+    expect(p.settlement.status).toBe("waived");
+    expect(await getFakeIntent(before.deposit.intentId!).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
+    // The musician side never forfeits the curator's deposit — the penalty is
+    // the reliability mark (SP4), not the money.
+    expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
+
+    const booking = await getBooking(bookingId);
+    expect(booking.cancellation?.outcome).toBe("deposit_refunded");
+    expect(booking.cancellation?.markApplied).toBe(true);
+    expect(booking.paymentSummary?.heldCents).toBe(0);
+    const reliability = (await adb.doc(`profiles/${musician.profileId}/private/reliability`).get()).data();
+    expect(reliability?.marks).toHaveLength(1);
+    expect(reliability?.marks[0]).toMatchObject({ bookingId, kind: "late_cancel" });
+  });
+
+  it("whole-run curator late cancel: only the next occurrence forfeits, every other future date refunds", async () => {
+    const { curator, musician, series, gigIds, bookingId } = await makeConfirmedRun("t8run", [10, 100, 200]);
+    try {
+      const [next, mid, later] = gigIds;
+      const beforeDocs = await getPaymentDocs(bookingId);
+      expect(beforeDocs).toHaveLength(3);
+      const intentId = beforeDocs[0].deposit.intentId!;   // ONE batch intent behind all three
+      const accountId = await musicianAccountId(musician.profileId);
+      const balanceBefore = await accountBalanceCents(accountId);
+
+      await ageConfirmedAt(bookingId);
+      await callFn("cancelBooking", { bookingId, reason: "Venue closing." }, curator.owner.user);
+
+      const after = byGigId(await getPaymentDocs(bookingId));
+      // The window was measured against `next` — only THAT date's deposit is
+      // forfeited; the curator was never late on the run's other dates.
+      expect(after.get(next)?.deposit.status).toBe("forfeited");
+      expect(after.get(mid)?.deposit.status).toBe("refunded");
+      expect(after.get(later)?.deposit.status).toBe("refunded");
+      for (const p of after.values()) {
+        expect(p.settlement.status).toBe("waived");
+        expect(typeof p.deposit.resolvedAt).toBe("number");   // all three terminal
+      }
+
+      expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+      // Two partial refunds off the shared intent — the forfeited slice stays put.
+      expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS * 2);
+      const rows = await ledgerRows(bookingId);
+      expect(rows.filter((r) => r.kind === "refund")).toHaveLength(2);
+      expect(rows.filter((r) => r.kind === "forfeit_transfer")).toHaveLength(1);
+
+      const booking = await getBooking(bookingId);
+      expect(booking.paymentSummary?.heldCents).toBe(0);
+      expect(booking.paymentSummary?.transferredCents).toBe(SLICE_CENTS);
+      expect(booking.paymentSummary?.paidCents).toBe(CHARGE_CENTS);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  }, 45_000);
+
+  it("cancelOccurrence late: only that date's deposit forfeits; the run's other dates keep their escrow", async () => {
+    const { curator, musician, series, gigIds, bookingId } = await makeConfirmedRun("t8occ", [10, 100]);
+    try {
+      const [target, keep] = gigIds;
+      const beforeDocs = byGigId(await getPaymentDocs(bookingId));
+      const intentId = beforeDocs.get(target)!.deposit.intentId!;
+      const accountId = await musicianAccountId(musician.profileId);
+      const balanceBefore = await accountBalanceCents(accountId);
+
+      await ageConfirmedAt(bookingId);
+      await callFn("cancelOccurrence",
+        { bookingId, gigId: target, reason: "Room double-booked." }, curator.owner.user);
+
+      const after = byGigId(await getPaymentDocs(bookingId));
+      expect(after.get(target)?.deposit.status).toBe("forfeited");
+      expect(after.get(target)?.settlement.status).toBe("waived");
+      // Untouched — the run continues, and its remaining date's deposit is
+      // still in escrow for a show that is still on.
+      expect(after.get(keep)?.deposit.status).toBe("held");
+      expect(after.get(keep)?.settlement.status).toBe("not_due");
+      expect(after.get(keep)?.deposit.resolvedAt).toBeNull();
+
+      expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+      expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
+
+      const booking = await getBooking(bookingId);
+      expect(booking.status).toBe("confirmed");   // one date cancelled, not the run
+      expect(booking.occurrenceCancellations).toHaveLength(1);
+      expect(booking.occurrenceCancellations?.[0]).toMatchObject({ gigId: target, outcome: "deposit_forfeited" });
+      expect(booking.paymentSummary?.heldCents).toBe(SLICE_CENTS);
+      expect(booking.paymentSummary?.transferredCents).toBe(SLICE_CENTS);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  }, 45_000);
+
+  it("reportNoShow in-window: the reported date's deposit refunds and its settlement is waived", async () => {
+    const { curator, musician, bookingId } = await makeConfirmedSingleBooking("t8nos", { pastStartHours: 1 });
+    const before = (await getPaymentDocs(bookingId))[0];
+    expect(before.deposit.status).toBe("held");
+    expect(before.occurrenceStartsAt).toBeLessThan(Date.now());   // genuinely a past-dated doc
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    await callFn("reportNoShow", { bookingId, reason: "The act never turned up." }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("refunded");
+    expect(p.settlement.status).toBe("waived");
+    expect(await getFakeIntent(before.deposit.intentId!).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
+    const refundRow = (await ledgerRows(bookingId)).find((r) => r.kind === "refund");
+    expect(refundRow?.amountCents).toBe(CHARGE_CENTS);
+    expect(refundRow?.profileId).toBe(curator.profileId);
+    // A no-show is the musician's fault — nothing is forfeited TO them.
+    expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
+
+    const booking = await getBooking(bookingId);
+    expect(booking.status).toBe("cancelled_by_musician");
+    expect(booking.paymentSummary?.heldCents).toBe(0);
+    expect(booking.paymentSummary?.paidCents).toBe(0);
+  });
+
+  it("a PAST-start occurrence's payment doc is left completely untouched by a whole-run cancel", async () => {
+    const { curator, musician, series, gigIds, bookingId } = await makeConfirmedRun("t8pst", [-1, 10]);
+    try {
+      const [past, next] = gigIds;
+      const beforeDocs = byGigId(await getPaymentDocs(bookingId));
+      expect(beforeDocs.size).toBe(2);
+      const intentId = beforeDocs.get(past)!.deposit.intentId!;
+      const accountId = await musicianAccountId(musician.profileId);
+      const balanceBefore = await accountBalanceCents(accountId);
+
+      await ageConfirmedAt(bookingId);
+      await callFn("cancelBooking", { bookingId, reason: "Closing the venue." }, curator.owner.user);
+
+      const after = byGigId(await getPaymentDocs(bookingId));
+      // The already-started date keeps BOTH its escrow and its settlement:
+      // that show happened (or is happening right now), so Task 10 settles it
+      // even though the booking is cancelled for its remaining dates. Waiving
+      // it here would silently un-pay work already done.
+      expect(after.get(past)?.deposit.status).toBe("held");
+      expect(after.get(past)?.settlement.status).toBe("not_due");
+      expect(after.get(past)?.deposit.resolvedAt).toBeNull();
+      // The future date is the one the window was measured against.
+      expect(after.get(next)?.deposit.status).toBe("forfeited");
+      expect(after.get(next)?.settlement.status).toBe("waived");
+
+      expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+      expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
+      const booking = await getBooking(bookingId);
+      // The past date's deposit is still held — the only money that moved was
+      // the forfeited slice.
+      expect(booking.paymentSummary?.heldCents).toBe(SLICE_CENTS);
+      expect(booking.paymentSummary?.transferredCents).toBe(SLICE_CENTS);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  }, 45_000);
 });
