@@ -210,15 +210,6 @@ export interface SweepReport {
   // materialization time — see step 1's own comment below); a subset of
   // occurrencesCreated, not additional to it.
   occurrencesBornFilled: number;
-  // SP4 Task 13 item 8 — step 1: a SINGLE series' per-doc body threw
-  // (malformed recurrence/template/etc., forced via admin SDK — unreachable
-  // via createSeries/updateSeries, which validate). Caught and counted per-
-  // series rather than aborting the whole step, so one poisoned series never
-  // blocks every OTHER active series from materializing that run. Distinct
-  // from `errors.series` below, which now only ever fires for a failure
-  // outside any single series' body (the query/pagination itself, or the
-  // step's writer.commit()) — vanishingly rare in practice post-this-fix.
-  seriesMaterializeSkipped: number;
   // SP4 Task 8 — step 1: a series' activeBookingId named a booking that
   // turned out NOT confirmed at the fresh re-read (the booking has since
   // expired/cancelled/completed through some path that didn't already clear
@@ -250,6 +241,16 @@ export interface SweepReport {
   errors: {
     series: number; pastGigs: number; tracks: number; invites: number; curatorAccessRetries: number;
     bookingExpiry: number; bookingCompletion: number;
+    // SP4 Task 13 item 8 — step 1: a SINGLE series' per-doc body threw
+    // (malformed recurrence/template/etc., forced via admin SDK —
+    // unreachable via createSeries/updateSeries, which validate). Caught
+    // and counted per-series rather than aborting the whole step, so one
+    // poisoned series never blocks every OTHER active series from
+    // materializing that run. Distinct from `series` above, which now only
+    // ever fires for a failure outside any single series' body (the query/
+    // pagination itself, or the step's writer.commit()) — vanishingly rare
+    // in practice post-this-fix.
+    seriesMaterialize: number;
   };
 }
 
@@ -269,11 +270,11 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   const report: SweepReport = {
     occurrencesCreated: 0, seriesAdvanced: 0, pastGigsClosed: 0, tracksFailed: 0, invitesRevoked: 0,
     seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
-    occurrencesBornFilled: 0, seriesMaterializeSkipped: 0, seriesSelfHealed: 0,
+    occurrencesBornFilled: 0, seriesSelfHealed: 0,
     bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
-      bookingExpiry: 0, bookingCompletion: 0,
+      bookingExpiry: 0, bookingCompletion: 0, seriesMaterialize: 0,
     },
   };
 
@@ -298,7 +299,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
       // every run, until the poisoned doc was manually fixed — same
       // isolate-log-continue philosophy as steps 2-7's own per-item
       // try/catches elsewhere in this file, e.g. step 6's per-booking notify
-      // guard). Logged + counted in report.seriesMaterializeSkipped, then
+      // guard). Logged + counted in report.errors.seriesMaterialize, then
       // `continue`s to the next series in this page.
       try {
           const series = seriesDoc.data() as GigSeriesDoc;
@@ -427,7 +428,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           report.seriesAdvanced += 1;
       } catch (e) {
         console.error(`dailySweep: series materialization failed for series ${seriesDoc.id}`, e);
-        report.seriesMaterializeSkipped++;
+        report.errors.seriesMaterialize++;
       }
       }
     }

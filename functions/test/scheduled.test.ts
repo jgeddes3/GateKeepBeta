@@ -412,11 +412,11 @@ describe("runDailySweep — S3 sweep resilience", () => {
     const report = await runDailySweep(now);
 
     // SP4 (Task 13 item 8): a single poisoned series is now caught PER-DOC
-    // (report.seriesMaterializeSkipped), not by the step-level catch
+    // (report.errors.seriesMaterialize), not by the step-level catch
     // (report.errors.series) — the latter no longer fires for this scenario
     // at all, since the per-series catch prevents the throw from ever
     // reaching step 1's outer try/catch.
-    expect(report.seriesMaterializeSkipped).toBeGreaterThanOrEqual(1);
+    expect(report.errors.seriesMaterialize).toBeGreaterThanOrEqual(1);
     expect(report.errors.series).toBe(0);
     expect((await adb.doc(`gigs/${pastId}`).get()).data()?.status).toBe("closed");
     expect((await adb.doc(`profiles/${profileId}/tracks/${staleTrackId}`).get()).data()?.status).toBe("failed");
@@ -450,7 +450,7 @@ describe("runDailySweep — S3 sweep resilience", () => {
 
     const report = await runDailySweep(now);
 
-    expect(report.seriesMaterializeSkipped).toBeGreaterThanOrEqual(1);
+    expect(report.errors.seriesMaterialize).toBeGreaterThanOrEqual(1);
     const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
     expect(poisoned.materializedThrough).toBe(0); // its own iteration aborted, never advanced
 
