@@ -254,6 +254,8 @@ All five: full guard ordering per Global Constraints; every id `isValidDocId`.
 
 **Steps:** failing tests — takedown occurrence with confirmed booking (booking expired, no mark/forfeit, musician notified); takedown series scope (run booking expired, series cleared); cancelGig on filled ✗; pauseSeries with active run booking at 71h before next occurrence → curator forfeit recorded on that occurrence + run unwound + series paused; reject-from-approved musician profile with confirmed booking → expired; deleteProfile cascade → RED → implement → GREEN (SP3 cascade regressions watched) → commit.
 
+**As-built (review fixes, binding):** series-scope takedown sweeps BOTH open and filled siblings to `taken_down` (P11 resolved); occurrence-scope unwind SKIPS confirmed whole-run bookings (`gigId`-net only — series/profile nets still expire them; admin tool for removing a booked run = series scope; the occurrence path notifies the run's musician side "one date is no longer available", no reason leak); pauseSeries/endSeries tolerate the no-cancellable-dates family via `cancelActiveRunBookingTolerant` (exact-match on the two exported message constants; booking + linkage left for Task 8's sweep resolver); takedown audit precedes the unwind fan; the unwind's series-linkage clear is a separate best-effort `{ lastUpdateTime }`-preconditioned write. Nit for the next bookingLifecycle/gigSeries commit: add the one-line "upgrade path: coded HttpsError details instead of message identity" comment on the tolerant catch.
+
 ---
 
 ### Task 8: Sweep additions + run-aware materializer
