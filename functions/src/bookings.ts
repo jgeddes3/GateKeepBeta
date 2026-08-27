@@ -685,40 +685,44 @@ export async function commitAcceptAfterCharge(
 
     const v = await readAndValidateAccept(tx, db, bookingId, bookingRef);
     const paymentsSnap = await tx.get(db.collection(`bookings/${bookingId}/payments`));
-    // Only the docs THIS accept staged: an already-held/resolved doc belongs
-    // to some earlier money event and must not be re-stamped with this
-    // intent.
-    const stagedDocs = paymentsSnap.docs.filter((d) => (d.data() as PaymentDoc).deposit.status === "unpaid");
 
-    // Money-integrity re-check, and the reason B can safely skip
+    // The set of payment docs this commit may mark held — scoped TWICE over:
+    //  - status must still be "unpaid": an already-held/resolved doc belongs
+    //    to some earlier money event and must never be re-stamped with this
+    //    intent;
+    //  - gigId must be in the occurrence set THIS transaction just collected.
+    //    An unpaid doc outside it is a leftover from a failed unstage (or a
+    //    date that left the run), and this intent did not pay for it —
+    //    marking it held would invent money. Logged and left alone.
+    //
+    // The same loop re-derives each doc's baseCents from the CURRENT thread +
+    // that occurrence's own duration and aborts on any divergence. That check
+    // is both a money-integrity guard and the reason B can safely skip
     // acceptBooking's turn check: the charge was sized from the baseCents
-    // staged in A. If the terms moved underneath it in the charge window
+    // staged in A, so if the terms moved underneath it in the charge window
     // (the accepting side countered itself from a second client, or an
-    // occurrence's duration was edited), re-deriving each staged doc's base
-    // from the CURRENT thread + gig no longer agrees — committing anyway
-    // would confirm terms nobody paid for. Abort instead; the caller refunds.
-    const gigById = new Map<string, GigDoc>();
-    if (v.freshBooking.seriesId) {
-      for (const d of v.occurrenceDocs) gigById.set(d.id, d.data() as GigDoc);
-    } else {
-      gigById.set(v.freshBooking.gigId, v.gig);
-    }
-    for (const doc of stagedDocs) {
+    // occurrence's duration was edited), committing anyway would confirm
+    // terms nobody paid for. Abort instead; the caller refunds.
+    const occurrenceByGigId = new Map(collectOccurrences(v).map((o) => [o.gigId, o]));
+    const stagedDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+    for (const doc of paymentsSnap.docs) {
       const p = doc.data() as PaymentDoc;
-      const g = gigById.get(p.gigId);
-      // No live gig for this staged doc (the occurrence was cancelled or
-      // filled elsewhere in the window): nothing to re-derive against, and
-      // its money was already charged — leave the cross-check to the docs we
-      // CAN verify rather than aborting a whole accept over one stale date.
-      if (!g) continue;
+      if (p.deposit.status !== "unpaid") continue;
+      const occ = occurrenceByGigId.get(p.gigId);
+      if (!occ) {
+        console.error(
+          `commitAcceptAfterCharge: unpaid payment doc ${bookingId}/${p.gigId} is outside this accept's occurrence set — leaving it untouched`);
+        continue;
+      }
       const expected = computeExpectedTotalCents(v.freshBooking.structure, v.lastEntry.amountCents, {
-        durationMinutes: g.durationMinutes, songCount: v.lastEntry.expectedQuantity ?? undefined,
+        durationMinutes: occ.durationMinutes, songCount: v.lastEntry.expectedQuantity ?? undefined,
       });
       if (expected !== p.baseCents) {
         console.error(
           `commitAcceptAfterCharge: staged base ${p.baseCents} no longer matches ${expected} for ${bookingId}/${p.gigId} — aborting`);
         return null;
       }
+      stagedDocs.push(doc);
     }
 
     // ---- WRITES ----
@@ -739,9 +743,12 @@ export async function commitAcceptAfterCharge(
       status: "confirmed", confirmedAt: now, updatedAt: now,
       acceptedTerms: v.acceptedTerms,
       // The run-level deposit stays SP4's one-occurrence summary; only its
-      // status moves to "held" — and only when money actually moved. A run
-      // whose every open occurrence has already started stages nothing and
-      // charges nothing, so "unpaid" (SP4's own value) remains the truth.
+      // status moves to "held" — and only when money actually moved.
+      // Defensive: an accept with nothing staged charges nothing, so "unpaid"
+      // (SP4's own value) stays the truth rather than claiming a held
+      // deposit that doesn't exist. Not reachable in normal flow — every
+      // accept fills at least the initiating gig, and every filled
+      // occurrence is staged.
       deposit: { ...v.deposit, status: stagedDocs.length > 0 ? "held" : "unpaid" },
       ...(isSelfDeal ? { selfDeal: true } : {}),
       depositChargePending: false, depositChargeIntentId: null,
@@ -990,10 +997,14 @@ export const acceptBooking = onCall<{ bookingId: string }>(
       }
 
       // ---- WRITES (the only ones in A) ----
-      // Only FUTURE occurrences get a deposit: a run date that has already
-      // started never gets charged for one (and a same-day accept of it
-      // settles directly at Task 10's settlement instead).
-      const occurrences = collectOccurrences(v).filter((o) => o.startsAt > now);
+      // EVERY occurrence this accept fills gets a payment doc, past-dated
+      // ones included. An already-started date can legitimately reach accept
+      // (the daily sweep that closes past gigs runs at most once a day, so
+      // there's a lag of up to ~24h) and its show still happens — leaving it
+      // without a payment doc would mean it never settles and the musician
+      // is never paid for it. A past occurrence's deposit simply applies
+      // toward its settlement like any other.
+      const occurrences = collectOccurrences(v);
       let totalChargeCents = 0;
       for (const occ of occurrences) {
         const doc = buildPaymentDoc({
@@ -1067,16 +1078,31 @@ export const acceptBooking = onCall<{ bookingId: string }>(
       // B did not commit AFTER a successful charge — either it threw, or the
       // world moved under the charge (returned null). Give the money back
       // before surfacing anything: the accept did not happen, so the curator
-      // must not be left paying for it. Then unstage, so the booking is a
-      // clean `open` again and a retry is a fresh attempt.
+      // must not be left paying for it.
+      let refunded = true;
       if (intentId) {
-        await getStripe().refund({
-          intentId, amountCents: staged.totalChargeCents,
-          idempotencyKey: `${bookingId}:accept:refund:${staged.attempt}`,
-          meta: { bookingId, purpose: "accept_abort" },
-        }).catch((re) => console.error(`acceptBooking: abort-refund failed for ${bookingId}`, re));
+        refunded = false;
+        try {
+          await getStripe().refund({
+            intentId, amountCents: staged.totalChargeCents,
+            idempotencyKey: `${bookingId}:accept:refund:${staged.attempt}`,
+            meta: { bookingId, purpose: "accept_abort" },
+          });
+          refunded = true;
+        } catch (re) {
+          console.error(
+            `acceptBooking: abort-refund failed for ${bookingId} (intent ${intentId}, attempt ${staged.attempt}) — leaving the saga staged for reconciliation`, re);
+        }
       }
-      await unstageAccept(db, bookingId, staged.occurrences);
+      // Unstage ONLY once the money is genuinely back. A failed refund means
+      // the curator is still charged, so the saga marker, the staged docs and
+      // the persisted attempt must all survive for Task 9's reconciliation —
+      // which converges without any new money moving: the same attempt-scoped
+      // charge key replays the already-succeeded intent, the commit returns
+      // null again for the same reason it did here, and the refund retries
+      // under its own attempt-scoped key. Clearing the marker here would strand
+      // that charge with nothing left pointing at it.
+      if (refunded) await unstageAccept(db, bookingId, staged.occurrences);
       if (commitError) throw commitError;
       throw new HttpsError("aborted", GIG_UNAVAILABLE_MESSAGE);
     }
@@ -1123,7 +1149,21 @@ paymentIntentSucceededHandlers["deposit"] = async (object) => {
   // documents that, and the transfers that want it treat it as optional).
   const chargeId = typeof object.latest_charge === "string" ? object.latest_charge : null;
 
-  const commit = await commitAcceptAfterCharge(bookingId, intentId, chargeId, now, isSelfDeal);
+  let commit: AcceptCommitResult | null;
+  try {
+    commit = await commitAcceptAfterCharge(bookingId, intentId, chargeId, now, isSelfDeal);
+  } catch (e) {
+    // Every way B throws here is a PERMANENT condition (the gig closed, the
+    // series moved, the F2 gig-edit guard tripped) — never something a later
+    // delivery of this same event would resolve. Returning normally lets the
+    // webhook mark the event processed; letting it escape would 500, and
+    // Stripe would then retry a permanently-failing event forever. The
+    // booking keeps its pending marker either way, which is exactly the
+    // signal Task 9's reconciliation looks for.
+    console.error(
+      `payment_intent.succeeded (deposit): commit threw for ${bookingId} (intent ${intentId}) — left staged for reconciliation`, e);
+    return;
+  }
   if (!commit) {
     // Charged, but the accept can no longer be committed (the gig/series
     // moved while the intent settled). Deliberately NOT auto-refunded from a

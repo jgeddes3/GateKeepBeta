@@ -374,7 +374,10 @@ describe("Task 5 money gates", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: CURATOR_DELINQUENT_MESSAGE });
   });
 
-  it("a fully money-ready pair can accept — gates only, no deposit charge yet at this task", async () => {
+  // Gate coverage only: that a money-ready pair gets PAST the gates. What the
+  // accept then does with the money (staged payment docs, the batch deposit
+  // charge, held marking) is the "Task 6 accept saga" describe's subject.
+  it("a fully money-ready pair passes every gate and can accept", async () => {
     const curator = await makeApprovedCuratorProfile("g5ab2c");
     const musician = await makeApprovedMusicianProfile("g5ab2m");
     await makeMoneyReady(curator, musician);
@@ -705,6 +708,44 @@ describe("Task 6 accept saga", () => {
     expect(afterReplay.status).toBe("confirmed");
     expect(afterReplay.confirmedAt).toBe(confirmed.confirmedAt);
     expect((await getPaymentDocs(bookingId))[0].deposit.chargedAt).toBe(heldDoc.deposit.chargedAt);
+  });
+
+  // Task 10 carry-forward: an occurrence whose start time has already passed
+  // is still staged and charged. The daily sweep that closes past gigs runs
+  // at most once a day, so an already-started gig can legitimately reach
+  // accept — its show still happens, and a filled occurrence with no payment
+  // doc would never settle, so the musician would never be paid for it.
+  it("an already-started occurrence is still staged and charged", async () => {
+    const curator = await makeApprovedCuratorProfile("t6pstc");
+    const musician = await makeApprovedMusicianProfile("t6pstm");
+    await makeMoneyReady(curator, musician);
+    // publishGig refuses a past startsAt outright, so publish it in the
+    // future and push it into the past via the admin SDK — BEFORE the offer,
+    // so the thread's only entry postdates the edit and the F2 gig-edit guard
+    // has nothing to trip on. (Mirrors bookingLifecycle.test.ts's
+    // setGigStartsAt, whose whole-run fixture seeds a past occurrence the
+    // same way.)
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
+    await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 });
+
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    await callFn("acceptBooking", { bookingId }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.gigId).toBe(gigId);
+    expect(p.occurrenceStartsAt).toBeLessThan(Date.now());
+    expect(p.baseCents).toBe(22500);
+    expect(p.deposit.sliceCents).toBe(7875);
+    expect(p.deposit.status).toBe("held");
+    expect(p.deposit.intentId).toBeTruthy();
+
+    const booking = await getBooking(bookingId);
+    expect(booking.status).toBe("confirmed");
+    expect(booking.deposit?.status).toBe("held");
+    expect(booking.paymentSummary?.heldCents).toBe(7875);
+    expect(await getFakeIntent(p.deposit.intentId!).then((i) => i?.amountCents)).toBe(8742);
   });
 
   it("perSong: baseCents is amount x songCount, regardless of the gig's duration", async () => {
