@@ -683,7 +683,21 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       at: now, reportedByProfileId: booking.curatorProfileId, removedByAdmin: false,
     };
     const marks = appendMarkCapped(existingMarks, mark);
-    tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
+    // R1 (post-audit residual): if this booking was ALREADY "completed" —
+    // scheduled.ts's sweep step 7 already credited it once — flipping it to
+    // cancelled_by_musician here must claw that credit back, in the SAME
+    // write as the mark append (same in-txn rationale as the mark itself:
+    // a crash between two transactions must never leave a committed
+    // no-show report with a stale, uncorrected completedCount that nothing
+    // else would ever re-touch). Floored at 0 — never negative, matching
+    // the "restore" side's own idempotency posture. A booking reported from
+    // "confirmed" (never yet swept) leaves completedCount untouched, same
+    // as before this fix. removeReliabilityMark's own restoreFalselyReported
+    // Booking is what later re-credits this — see its own comment.
+    const currentCompletedCount = reliability?.completedCount ?? 0;
+    const nextCompletedCount = freshBooking.status === "completed"
+      ? Math.max(0, currentCompletedCount - 1) : currentCompletedCount;
+    tx.set(reliabilityRef, { marks, completedCount: nextCompletedCount, updatedAt: now });
 
     // Whole-run unwind — see the read-phase comment above.
     if (freshBooking.seriesId) {
@@ -753,18 +767,33 @@ async function restoreFalselyReportedBooking(
 
   await bookingRef.update({ status: "completed", cancellation: null, resolvedAt: now, updatedAt: now });
 
-  // Mirrors scheduled.ts step 7's completedCount increment idiom exactly —
-  // direct (non-batched) read-modify-write, then recomputeReliability so the
-  // curatorBooking projection reflects the new count immediately.
-  const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
-  const reliabilitySnap = await reliabilityRef.get();
-  const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
-  await reliabilityRef.set({
-    marks: reliability?.marks ?? [],
-    completedCount: (reliability?.completedCount ?? 0) + 1,
-    updatedAt: now,
-  }, { merge: true });
-  await recomputeReliability(booking.musicianProfileId);
+  // R2 (post-audit residual): a `selfDeal` booking (F5 — the same uid sits
+  // on both sides) never earns completedCount credit anywhere else in this
+  // codebase (scheduled.ts step 7's own increment is gated on
+  // `!booking.selfDeal`) — this restoration path must match that exclusion
+  // exactly, or reversing a false no-show report would become a backdoor
+  // that lets a self-dealing profile farm the curator-facing trust metric
+  // after all. The STATUS restore (above) still happens regardless — the
+  // booking is genuinely "completed" work either way, selfDeal only ever
+  // gates the reliability CREDIT, never the resolution itself. No
+  // reliability-doc write or recompute needed here in that case — nothing
+  // about the reliability doc changed, and removeReliabilityMark's own
+  // caller already ran recomputeReliability once for the mark removal
+  // itself just before this function was called.
+  if (!booking.selfDeal) {
+    // Mirrors scheduled.ts step 7's completedCount increment idiom exactly —
+    // direct (non-batched) read-modify-write, then recomputeReliability so
+    // the curatorBooking projection reflects the new count immediately.
+    const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
+    const reliabilitySnap = await reliabilityRef.get();
+    const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
+    await reliabilityRef.set({
+      marks: reliability?.marks ?? [],
+      completedCount: (reliability?.completedCount ?? 0) + 1,
+      updatedAt: now,
+    }, { merge: true });
+    await recomputeReliability(booking.musicianProfileId);
+  }
 
   return { restored: true, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };
 }

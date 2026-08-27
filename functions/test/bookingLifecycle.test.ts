@@ -753,6 +753,79 @@ describe("removeReliabilityMark", () => {
     expect(reliability.completedCount).toBe(0); // no restoration credit
   });
 
+  // R1 (post-audit residual): a booking the sweep already resolved to
+  // "completed" (crediting completedCount once) that is THEN falsely
+  // reported as a no-show must have that credit clawed back by reportNoShow
+  // itself — otherwise sweep(+1) -> report(no change) -> admin restore(+1)
+  // nets 2 for one single performance. The restore's own +1 is then the
+  // correct, single credit for the one show that actually happened.
+  it("R1/R2: sweep-completed booking -> reportNoShow nets completedCount back to 0 -> admin restore lands exactly 1", async () => {
+    const { curator, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("r1a");
+    await setGigStartsAt(gigId, -5); // 5 hours ago
+    // Simulate scheduled.ts's sweep step 7 having already completed + credited
+    // this booking (this file's subject is the callables, not the sweep
+    // itself — scheduled.test.ts owns that; seeding directly isolates this
+    // test to reportNoShow/removeReliabilityMark's own netting logic).
+    await adb.doc(`bookings/${bookingId}`).update({ status: "completed", resolvedAt: Date.now() });
+    await adb.doc(`profiles/${musicianProfileId}/private/reliability`).set({
+      marks: [], completedCount: 1, updatedAt: Date.now(),
+    });
+
+    await callFn("reportNoShow", { bookingId, reason: "Actually never showed." }, curator.user);
+
+    const afterReport = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
+      .data() as ReliabilityDoc;
+    expect(afterReport.completedCount).toBe(0); // netted back — the sweep's credit reversed
+
+    const admin = await makeAdminUser("r1aa");
+    await callFn("removeReliabilityMark",
+      { musicianProfileId, bookingId, kind: "reported_no_show" }, admin.user);
+
+    const afterRestore = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
+      .data() as ReliabilityDoc;
+    expect(afterRestore.completedCount).toBe(1); // exactly one credit for the one performance
+
+    const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(bookingAfter.status).toBe("completed");
+  });
+
+  // R2 (post-audit residual): restoreFalselyReportedBooking must match the
+  // sweep's own selfDeal exclusion (F5) — the booking still genuinely
+  // resolves back to "completed" (the STATUS restore always happens), but a
+  // self-dealing profile must never be able to farm the trust metric via a
+  // reversed false-report either.
+  it("R2: a selfDeal booking's false-report restore leaves completedCount at 0 while status returns to completed", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("r2sdc");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("r2sdm");
+    // Overlap: the MUSICIAN's own owner uid is ALSO a member of the
+    // CURATOR profile (mirrors bookings.test.ts's F5 fixture — this
+    // direction keeps the curator's own acceptBooking/reportNoShow calls
+    // below unambiguous, since requireBookingSide/resolveBookingSideStrict
+    // resolve a dual-member caller musician-first).
+    await adb.doc(`profiles/${curatorProfileId}/members/${musician.uid}`).set({
+      uid: musician.uid, role: "member", label: "also here", joinedAt: Date.now(),
+    });
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
+    await callFn("acceptBooking", { bookingId }, curator.user);
+    expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.selfDeal).toBe(true);
+
+    await setGigStartsAt(gigId, -5);
+    await callFn("reportNoShow", { bookingId, reason: "Never showed." }, curator.user);
+
+    const admin = await makeAdminUser("r2sda");
+    await callFn("removeReliabilityMark",
+      { musicianProfileId, bookingId, kind: "reported_no_show" }, admin.user);
+
+    const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(after.status).toBe("completed"); // restored — the status flip is unconditional
+
+    const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
+      .data() as ReliabilityDoc;
+    expect(reliability.completedCount ?? 0).toBe(0); // selfDeal — no trust-metric credit
+  });
+
   it("non-admin callers are denied", async () => {
     const { profileId: musicianProfileId } = await makeApprovedMusicianProfile("rrmna");
     await adb.doc(`profiles/${musicianProfileId}/private/reliability`).set({
