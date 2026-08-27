@@ -4,11 +4,13 @@ import { collection, doc, getDoc, onSnapshot, orderBy, query, where } from "fire
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL, badge } from "../gigs/GigForms";
-import { formatDuration, bookingHistoryLabel, depositLine, useNow, type OfferPayload } from "./BookingForms";
+import { formatDuration, type OfferPayload } from "./BookingForms";
+import { bookingHistoryLabel, depositLine } from "./BookingInbox";
 import { OfferForm } from "./OfferForm";
 import { CancelDialog } from "./CancelDialog";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
+  NO_SHOW_REPORT_WINDOW_DAYS,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
 
@@ -21,6 +23,41 @@ function ErrorBox({ message }: { message: string }) {
       {message}
     </p>
   );
+}
+
+// A render-safe "now" — eslint-config-next's React Compiler rules
+// (react-hooks/purity) forbid calling the impure `Date.now()` directly
+// inside a component's render body ("can produce unstable results that
+// update unpredictably when the component happens to re-render"); the fix
+// is the same shape as any other async-derived state — defer the actual
+// read to an effect (which runs AFTER render, not during it). Every
+// render-time "is this occurrence in the future" / "how many hours until
+// the gig" / "how many days since the gig" computation in this file and
+// CancelDialog.tsx goes through this rather than a bare `Date.now()` call.
+// Not a field-group (BookingForms.tsx) or inbox concern (BookingInbox.tsx)
+// — lives here, its originating/primary consumer; CancelDialog imports it
+// from here too (Task 10 review).
+//
+// Ticks on mount AND every 30s afterward (Task 10 review) — a "now" frozen
+// at mount time would otherwise never grow, so e.g. the completed-view
+// no-show report button could stay hidden past the moment it should appear
+// (a report window boundary crossed) or a per-date cancel button could stay
+// visible past a date's start, for as long as this screen is left open.
+// Both the initial and periodic reads happen inside a setTimeout/setInterval
+// CALLBACK, not synchronously at the top of the effect body — the latter is
+// what eslint-config-next's react-hooks/set-state-in-effect rule flags
+// ("calling setState synchronously within an effect can trigger cascading
+// renders"; its own message names the fix as calling setState "in a
+// callback function when external state changes").
+export function useNow(): number | null {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    const initial = setTimeout(tick, 0);
+    const interval = setInterval(tick, 30_000);
+    return () => { clearTimeout(initial); clearInterval(interval); };
+  }, []);
+  return now;
 }
 
 // Resolves which side(s) `uid` belongs to for this booking's two profiles —
@@ -50,7 +87,7 @@ function useRole(musicianProfileId: string | undefined, curatorProfileId: string
   return role;
 }
 
-// The booking's initiating gig — permission-tolerant (see BookingForms.tsx's
+// The booking's initiating gig — permission-tolerant (see BookingInbox.tsx's
 // useRowGigTitle comment for the identical rationale: a direct GET is
 // evaluated per-document, but a stale gig can leave every publicly-readable
 // disjunct for a viewer who's only on the musician side). Live (onSnapshot,
@@ -71,14 +108,17 @@ function useGig(gigId: string | undefined): GigDoc | null | "loading" | "unavail
 }
 
 // Every currently-linked, still-"filled" occurrence of this booking — see
-// BookingForms.tsx's useNextOccurrence for why status=="filled" is pinned
+// BookingInbox.tsx's useNextOccurrence for why status=="filled" is pinned
 // in addition to bookingId (rules list-provability, not just a display
 // filter) and why this reuses the (bookingId,status,startsAt) index rather
 // than needing a new one. Populated for BOTH single-gig and whole-run
 // bookings (a single-gig booking's own gig also carries bookingId while
 // filled) — the render below only shows the full per-date list once
 // seriesId != null, but the single-gig "next date" summary reuses the same
-// query rather than a second, separate fetch.
+// query rather than a second, separate fetch. Past FILLED gigs deliberately
+// stay "filled" forever (Task 8's review), so this list — and its LAST
+// entry in particular — is also what the completed-view no-show report
+// window below is computed from.
 function useOccurrences(bookingId: string): Occurrence[] {
   const [rows, setRows] = useState<Occurrence[]>([]);
   useEffect(() => {
@@ -153,8 +193,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const role = useRole(musicianProfileId, curatorProfileId, uid);
   const gig = useGig(gigId);
   const occurrences = useOccurrences(bookingId);
-  // Render-safe "now" — see BookingForms.tsx's useNow comment (the React
-  // Compiler's purity rule forbids a bare Date.now() call during render).
+  // Render-safe "now" — see useNow's comment above.
   const now = useNow();
 
   if (booking === "loading" || role === "loading") return <p>Loading…</p>;
@@ -182,6 +221,16 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   // (resolveBookingSideStrict) — those actions are disabled below instead,
   // per the recorded ruling (Task 4/6).
   const mySide: BookingSide = bothSides ? "musician" : (role as BookingSide);
+  // Distinct from `mySide` on purpose: `mySide` force-resolves a both-sides
+  // member to "musician" for the NEGOTIATION action bar (matching what the
+  // server will actually do), which would wrongly HIDE the curator-only
+  // cancel/report controls for a both-sides member entirely (rather than
+  // showing them disabled, as the banner below promises) if used to gate
+  // their visibility too. `isCuratorSide` answers "is this profile
+  // genuinely on the curator side at all" — true for both "curator" and
+  // "both" — and is what the report-a-no-show visibility checks use;
+  // `bothSides` alone still gates whether the button is actually clickable.
+  const isCuratorSide = role === "curator" || bothSides;
 
   const lastEntry = booking.thread[booking.thread.length - 1];
   // Accept-preview total/deposit — pure derivation, recomputed every render
@@ -249,6 +298,11 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     }
     setActionBusy("reportNoShow"); setActionError(null);
     try {
+      // already-exists (a second report on the same booking) surfaces here
+      // verbatim — server copy: "A no-show has already been reported for
+      // this booking." No client-side "already reported" special-case
+      // needed; the friendly-wrapper pattern this whole app uses already
+      // reads correctly as-is.
       await httpsCallable(getFirebase().functions, "reportNoShow")({ bookingId, reason: trimmed });
       setShowReportForm(false);
     } catch (e) {
@@ -262,6 +316,12 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   // Earliest occurrence overall (past or future) — used only for the
   // single-gig "confirmed" summary's date display.
   const displayOccurrence = occurrences.length > 0 ? occurrences[0] : null;
+  // Latest occurrence overall — the one a COMPLETED booking's report window
+  // is computed against (mirrors reportNoShow's own server-side "most
+  // recent past occurrence" — see bookingLifecycle.ts's pastSnap query;
+  // every occurrence here is already in the past by the time a booking has
+  // reached "completed", so the latest IS the most recent past one).
+  const lastOccurrence = occurrences.length > 0 ? occurrences[occurrences.length - 1] : null;
   // Earliest FUTURE occurrence — the one cancelBooking's window math is
   // computed against server-side (executeCancellation's "next affected
   // occurrence"); the top-level Cancel button is hidden without one (there's
@@ -269,6 +329,50 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   // ALREADY_STARTED refusals rather than surfacing them as a clicked error).
   const cancelTarget = now == null ? null : (occurrences.find((o) => o.startsAt > now) ?? null);
   const hasStartedOccurrence = now != null && occurrences.some((o) => o.startsAt <= now);
+  // Completed-view "report a no-show" — the PRIMARY real-world flow: the
+  // daily sweep (scheduled.ts step 7) completes a booking once its last
+  // occurrence ends, typically well before the curator gets a chance to
+  // report anything while the booking is still "confirmed". Client-computed
+  // from the same occurrence query already run above and the same
+  // NO_SHOW_REPORT_WINDOW_DAYS constant reportNoShow's own server-side
+  // window check uses — the server independently re-validates this at
+  // submit time regardless.
+  const daysSinceLastOccurrence = (now != null && lastOccurrence != null) ? (now - lastOccurrence.startsAt) / (24 * 3_600_000) : null;
+  const canReportInCompleted = daysSinceLastOccurrence != null && daysSinceLastOccurrence <= NO_SHOW_REPORT_WINDOW_DAYS;
+
+  // Shared by the "confirmed" (post-start, run still ongoing) and
+  // "completed" (the primary flow — see canReportInCompleted's comment)
+  // report-a-no-show surfaces — same form, same busy/error state, just a
+  // different visibility gate per status. Visible but DISABLED for a
+  // both-sides member (not hidden) — matches the ambiguity banner's own
+  // promise ("cancellation and no-show reporting are disabled here").
+  const reportNoShowBlock = (
+    <div style={{ borderTop: "1px solid #eee", paddingTop: 12, display: "grid", gap: 8 }}>
+      {showReportForm ? (
+        <div style={{ display: "grid", gap: 8 }}>
+          <textarea rows={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reportReason}
+            onChange={(e) => setReportReason(e.target.value)} placeholder="What happened?" disabled={actionBusy !== null}
+            aria-label="No-show report reason" style={{ width: "100%" }} />
+          <p style={{ margin: 0, fontSize: 12, color: "#666" }}>{reportReason.length}/{MAX_CANCEL_REASON_LENGTH}</p>
+          {actionError && <ErrorBox message={actionError} />}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={reportNoShow} disabled={actionBusy !== null} style={{ color: "#dc2626" }}>
+              {actionBusy === "reportNoShow" ? "Reporting…" : "Submit report"}
+            </button>
+            <button type="button" onClick={() => { setShowReportForm(false); setActionError(null); }} disabled={actionBusy !== null}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setShowReportForm(true)} disabled={bothSides}
+          title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
+          style={{ width: "fit-content", color: "#dc2626" }}>
+          Report a no-show
+        </button>
+      )}
+    </div>
+  );
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
@@ -393,40 +497,14 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
           ) : (
             cancelTarget && (
               <button onClick={() => setShowCancelFor({ mode: "booking", startsAt: cancelTarget.startsAt })}
-                disabled={bothSides} title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
+                disabled={bothSides || actionBusy !== null} title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
                 style={{ width: "fit-content", color: "#dc2626" }}>
                 Cancel this booking
               </button>
             )
           )}
 
-          {mySide === "curator" && hasStartedOccurrence && (
-            <div style={{ borderTop: "1px solid #eee", paddingTop: 12, display: "grid", gap: 8 }}>
-              {showReportForm ? (
-                <div style={{ display: "grid", gap: 8 }}>
-                  <textarea rows={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reportReason}
-                    onChange={(e) => setReportReason(e.target.value)} placeholder="What happened?" disabled={actionBusy !== null}
-                    aria-label="No-show report reason" style={{ width: "100%" }} />
-                  <p style={{ margin: 0, fontSize: 12, color: "#666" }}>{reportReason.length}/{MAX_CANCEL_REASON_LENGTH}</p>
-                  {actionError && <ErrorBox message={actionError} />}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={reportNoShow} disabled={actionBusy !== null} style={{ color: "#dc2626" }}>
-                      {actionBusy === "reportNoShow" ? "Reporting…" : "Submit report"}
-                    </button>
-                    <button type="button" onClick={() => { setShowReportForm(false); setActionError(null); }} disabled={actionBusy !== null}>
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button onClick={() => setShowReportForm(true)} disabled={bothSides}
-                  title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
-                  style={{ width: "fit-content", color: "#dc2626" }}>
-                  Report a no-show
-                </button>
-              )}
-            </div>
-          )}
+          {isCuratorSide && hasStartedOccurrence && reportNoShowBlock}
         </section>
       )}
 
@@ -441,11 +519,25 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
               <p style={{ margin: 0, color: "#666" }}>Reason: {booking.cancellation.reason}</p>
               <p style={{ margin: 0, color: "#666" }}>
                 {booking.cancellation.outcome === "deposit_forfeited" ? "Deposit forfeited to the musician." : "Deposit refunded."}
-                {booking.cancellation.markApplied ? " A late-cancellation mark was recorded." : ""}
+                {booking.cancellation.markApplied ? (
+                  // reportNoShow always produces hoursBeforeStart <= 0 (the
+                  // occurrence had already started when reported); a
+                  // genuine LATE-but-before-start cancellation (cancelBooking
+                  // /cancelOccurrence's musician-side <24h path) always has
+                  // hoursBeforeStart > 0 — the sign reliably tells the two
+                  // apart without a dedicated field, since only one of these
+                  // two callables can ever produce a negative value.
+                  <> {booking.cancellation.hoursBeforeStart <= 0 ? "A reliability mark was recorded." : "A late-cancellation mark was recorded."}</>
+                ) : ""}
               </p>
             </div>
           )}
-          {booking.status === "completed" && <p style={{ color: "#666" }}>This booking is complete.</p>}
+          {booking.status === "completed" && (
+            <>
+              <p style={{ color: "#666" }}>This booking is complete.</p>
+              {isCuratorSide && canReportInCompleted && reportNoShowBlock}
+            </>
+          )}
         </section>
       )}
     </div>

@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { collectionGroup, collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -92,9 +93,13 @@ function NotificationsList({ uid }: { uid: string }) {
         return (
           <li key={n.id} style={{ opacity: n.read ? 0.5 : 1 }}>
             {href ? (
-              <a href={href} onClick={() => markRead(n.id)} style={{ color: "inherit", textDecoration: "none", cursor: "pointer" }}>
+              // Next <Link> (client-side nav), not a plain <a> — a full-
+              // document navigation can abort the in-flight markRead()
+              // updateDoc before it lands (Task 10 review); client-side
+              // routing lets the write complete regardless of the nav.
+              <Link href={href} onClick={() => markRead(n.id)} style={{ color: "inherit", textDecoration: "none", cursor: "pointer" }}>
                 {body}
-              </a>
+              </Link>
             ) : (
               <span onClick={() => markRead(n.id)} style={{ cursor: "pointer" }}>{body}</span>
             )}

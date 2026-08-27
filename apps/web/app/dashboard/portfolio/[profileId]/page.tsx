@@ -7,7 +7,7 @@ import { getFirebase } from "../../../../src/lib/firebase";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../../../src/portfolio/PortfolioForms";
 import { TrackManager } from "../../../../src/portfolio/TrackManager";
-import { BookingInbox } from "../../../../src/bookings/BookingForms";
+import { BookingInbox } from "../../../../src/bookings/BookingInbox";
 import type { ProfileDoc, BookingDoc, TrackDoc } from "@gatekeep/shared";
 
 type TrackRow = TrackDoc & { id: string };

@@ -3,7 +3,14 @@ import { useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents } from "../gigs/GigForms";
-import { useNow } from "./BookingForms";
+// useNow lives in BookingThread.tsx (its primary/originating consumer, and
+// not a field-group — see BookingForms.tsx's Task 10 review comment); this
+// is a same-directory sibling import, not a package boundary, and useNow is
+// only ever CALLED from within a component body (never referenced at
+// either module's top level), so the resulting circular import (BookingThread
+// -> CancelDialog -> BookingThread) resolves cleanly the same way any two
+// mutually-referencing function declarations do.
+import { useNow } from "./BookingThread";
 import {
   CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_CANCEL_REASON_LENGTH,
   type BookingSide,

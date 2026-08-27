@@ -736,6 +736,9 @@ describe("takedownGig", () => {
       expect(musicianNotes.docs.some((d) =>
         d.data().kind === "booking" && /one date/i.test(d.data().title as string)
         && !/Complaint about this specific date/.test(d.data().body as string))).toBe(true); // no reason leak
+      // SP4 Task 10 review: refId carries the bookingId here too (this
+      // notify call site was missed by Task 10a's original sweep).
+      expect(musicianNotes.docs.some((d) => d.data().kind === "booking" && d.data().refId === bookingId)).toBe(true);
     } finally {
       await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
     }

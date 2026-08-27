@@ -6,7 +6,7 @@ import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { AboutForm, LocationForm, LookingForForm, AmenitiesForm, GalleryPhotosSection } from "../../../../src/curator/CuratorForms";
-import { BookingInbox } from "../../../../src/bookings/BookingForms";
+import { BookingInbox } from "../../../../src/bookings/BookingInbox";
 import { validateLookingFor, type ProfileDoc, type CuratorDetails, type CuratorSubtype } from "@gatekeep/shared";
 
 // Mirrors functions/src/profiles.ts's submitProfileForReview curator gate

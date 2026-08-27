@@ -461,7 +461,7 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
     if (runBooking && runBooking.status === "confirmed" && runBooking.seriesId != null) {
       try {
         await notifyProfileMembers(runBooking.musicianProfileId, {
-          kind: "booking", title: "One date of your booking is no longer available",
+          kind: "booking", refId: gig.bookingId, title: "One date of your booking is no longer available",
           body: `"${gig.title}" is no longer available. The rest of your booking is unaffected.`,
         });
       } catch (e) {
