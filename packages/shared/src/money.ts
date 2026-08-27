@@ -87,8 +87,13 @@ export function computeSettlementBaseCents(
   if (!Number.isInteger(opts.durationMinutes) || opts.durationMinutes < 0) {
     throw new Error("durationMinutes must be a non-negative integer.");
   }
-  if (structure === "perSong" && opts.songCount == null) {
-    throw new Error("perSong settlement requires a songCount");
+  if (structure === "perSong") {
+    if (opts.songCount == null) {
+      throw new Error("perSong settlement requires a songCount.");
+    }
+    if (!Number.isInteger(opts.songCount) || opts.songCount < 0) {
+      throw new Error("songCount must be a non-negative integer.");
+    }
   }
   const extraMinutes = Number.isInteger(opts.extraMinutes) && opts.extraMinutes > 0 ? opts.extraMinutes : 0;
   const extraSongs = Number.isInteger(opts.extraSongs) && opts.extraSongs > 0 ? opts.extraSongs : 0;
@@ -106,13 +111,17 @@ export function computeSettlementBaseCents(
 // must read a booking's fee policy through resolveFeePolicy — never
 // hand-roll `booking.feePolicy ?? { curatorFeePct: CURATOR_FEE_PCT, ... }`
 // at each call site, which risks the fallback drifting from this one.
-export const DEFAULT_FEE_POLICY: FeePolicy = {
+// Frozen: resolveFeePolicy returns this object BY REFERENCE, so a stray
+// mutation on a warm Functions instance would otherwise corrupt every later
+// fallback for the process's remaining lifetime. Object.freeze makes any
+// write to it throw (ESM modules run in strict mode).
+export const DEFAULT_FEE_POLICY: FeePolicy = Object.freeze({
   curatorFeePct: CURATOR_FEE_PCT,
   musicianFeePct: MUSICIAN_FEE_PCT,
   instantFeePct: INSTANT_FEE_PCT,
   lateFeePct: LATE_FEE_PCT,
   lateFeeMusicianPct: LATE_FEE_MUSICIAN_PCT,
-};
+});
 
 export function resolveFeePolicy(feePolicy: FeePolicy | null | undefined): FeePolicy {
   return feePolicy ?? DEFAULT_FEE_POLICY;

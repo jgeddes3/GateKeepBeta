@@ -442,7 +442,9 @@ export const MAX_TRUE_UP_EXTRA_MINUTES = 720;
 export const MAX_TRUE_UP_EXTRA_SONGS = 500;
 
 // Snapshotted onto the booking at accept (alongside SP4's deposit.policy) —
-// later fee-constant changes never touch an accepted booking.
+// later fee-constant changes never touch an accepted booking. All five
+// fields are INTEGER percent values — the money layer's assertPct rejects
+// fractional pcts at runtime, so never author a snapshot like 11.5.
 export interface FeePolicy {
   curatorFeePct: number; musicianFeePct: number; instantFeePct: number;
   lateFeePct: number; lateFeeMusicianPct: number;

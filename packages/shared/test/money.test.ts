@@ -34,13 +34,10 @@ describe("computeEarningsCents", () => {
   it("rejects a malformed pct", () => {
     expect(() => computeEarningsCents(1000, 150)).toThrow();
   });
-  it("invariant: floor/ceil law sandwich holds across a deterministic sweep", () => {
+  it("invariant: earnings + fee share exactly reconstitutes the base across a deterministic sweep", () => {
     for (let i = 0; i < 1000; i++) {
       const base = (i * 9973 + 17) % 5_000_000;
-      const earnings = computeEarningsCents(base, 2);
-      const feeShare = computeFeeShareCents(base, 2);
-      expect(earnings).toBeLessThanOrEqual(base);
-      expect(earnings + feeShare).toBeGreaterThanOrEqual(base);
+      expect(computeEarningsCents(base, 2) + computeFeeShareCents(base, 2)).toBe(base);
     }
   });
 });
@@ -100,6 +97,10 @@ describe("computeSettlementBaseCents", () => {
   it("rejects a null songCount for perSong", () => {
     expect(() => computeSettlementBaseCents("perSong", 500, { durationMinutes: 0, extraMinutes: 0, songCount: null, extraSongs: 0 })).toThrow();
   });
+  it("rejects a fractional or negative songCount for perSong", () => {
+    expect(() => computeSettlementBaseCents("perSong", 500, { durationMinutes: 0, extraMinutes: 0, songCount: 2.5, extraSongs: 0 })).toThrow();
+    expect(() => computeSettlementBaseCents("perSong", 500, { durationMinutes: 0, extraMinutes: 0, songCount: -1, extraSongs: 0 })).toThrow();
+  });
 });
 
 describe("deposit + fee worked example from the spec", () => {
@@ -115,6 +116,9 @@ describe("deposit + fee worked example from the spec", () => {
 });
 
 describe("resolveFeePolicy", () => {
+  it("DEFAULT_FEE_POLICY is frozen", () => {
+    expect(Object.isFrozen(DEFAULT_FEE_POLICY)).toBe(true);
+  });
   it("falls back to DEFAULT_FEE_POLICY when absent", () => {
     expect(resolveFeePolicy(undefined)).toBe(DEFAULT_FEE_POLICY);
     expect(resolveFeePolicy(null)).toBe(DEFAULT_FEE_POLICY);
