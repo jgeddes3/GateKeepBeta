@@ -16,6 +16,16 @@ export async function getStripeProfileDoc(profileId: string): Promise<StripeProf
 export const CURATOR_CARD_REQUIRED_MESSAGE = "Save a payment card before sending offers or booking musicians.";
 export const CURATOR_DELINQUENT_MESSAGE = "This profile has an overdue payment — settle it before booking again.";
 export const MUSICIAN_PAYOUTS_REQUIRED_MESSAGE = "Finish payout setup before applying to or accepting bookings.";
+// Task 5 review #1: the two curator-gate messages above are second-person,
+// curator-authored copy ("Save a payment card...") — actionable only by
+// someone on the curator side. acceptBooking can be called by EITHER side
+// (either direction lands the deposit charge on the curator's card), so a
+// musician-side caller who trips the curator gate must never see them; both
+// curator-gate failure kinds collapse to this one neutral message for a
+// musician-side caller instead. A curator-side caller keeps the specific
+// message either way — it names exactly what they need to fix.
+export const BOOKING_NOT_CONFIRMABLE_MESSAGE =
+  "This booking can't be confirmed right now — the other side needs to update its payment details.";
 
 // Curator-side money gate: saved card + not delinquent. Required before
 // offerGig and before acceptBooking (either side accepting lands the deposit
@@ -28,7 +38,12 @@ export async function requireCuratorChargeable(curatorProfileId: string): Promis
   }
   // === true, never truthiness alone on the PERMISSIVE side: these docs are
   // cast unchecked from Firestore — a partial doc must fail CLOSED (Task 4
-  // review M8). delinquent's check is already fail-closed as written.
+  // review M8). COPY HAZARD: this line is fail-closed only as a COMPOSITE
+  // with the card check above it, not on its own — a doc with `delinquent`
+  // absent entirely (undefined !== true) sails straight through THIS check;
+  // it's caught only because the card-fields check already threw for any
+  // doc that isn't fully populated. Don't lift this line out to somewhere
+  // that doesn't have that guarantee already in front of it.
   if (sp.delinquent === true) throw new HttpsError("failed-precondition", CURATOR_DELINQUENT_MESSAGE);
   return sp;
 }

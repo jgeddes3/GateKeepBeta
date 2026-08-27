@@ -12,7 +12,10 @@ import {
   requireApprovedMusicianProfile, requireApprovedCuratorProfile,
 } from "./guards.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { requireCuratorChargeable, requireMusicianPayoutReady } from "./paymentsCore.js";
+import {
+  requireCuratorChargeable, requireMusicianPayoutReady,
+  CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, BOOKING_NOT_CONFIRMABLE_MESSAGE,
+} from "./paymentsCore.js";
 
 // Untrusted onCall payload shape — same defensive-runtime rationale used
 // throughout this codebase (a compile-time type only binds trusted callers).
@@ -497,10 +500,39 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
 
   // Task 5 money gates: either side accepting lands the deposit charge on
   // the CURATOR's card, so the curator profile is always checked regardless
-  // of which side is calling. curatorStripe is consumed by the Task 6
-  // deposit saga.
-  const curatorStripe = await requireCuratorChargeable(booking.curatorProfileId);
-  void curatorStripe; // consumed by the Task 6 deposit saga
+  // of which side is calling — same for the musician's own payout-readiness
+  // (applyToGig already checked it once; re-checked here in case it lapsed
+  // between apply and accept).
+  //
+  // TOCTOU (deliberately accepted at this task): unlike detectSelfDeal's
+  // memberships above, profiles/*/private/stripe is MUTABLE in the window
+  // between these gate reads and Task 6's eventual commit — e.g. Task 11's
+  // hourly sweep can flip `delinquent` true asynchronously at any moment.
+  // Harmless in THIS task specifically: nothing charges yet (accept still
+  // just flips booking status — Task 6 adds the deposit saga). Task 6's
+  // transaction A re-reads and re-asserts both gates transactionally (see
+  // the plan's Task 6 section, "Task 5 review #2") and takes the charge's
+  // customerId from that same transactional snapshot rather than the
+  // outer read here — so a doc that goes stale in this window is caught
+  // before any money moves, not papered over.
+  //
+  // Audience: acceptBooking's caller can be EITHER side. The curator gate's
+  // messages are curator-authored, second-person copy the MUSICIAN side
+  // can't act on — remap both curator-gate failure kinds to one neutral
+  // message when the caller is the musician; a curator-side caller keeps
+  // the specific message (it names exactly what they need to fix). The
+  // musician gate's own message stays specific either way — a musician-side
+  // caller can act on it directly, and it's still informative to a
+  // curator-side caller even though not directly actionable by them.
+  try {
+    await requireCuratorChargeable(booking.curatorProfileId);
+  } catch (e) {
+    if (callerSide === "musician" && e instanceof HttpsError
+        && (e.message === CURATOR_CARD_REQUIRED_MESSAGE || e.message === CURATOR_DELINQUENT_MESSAGE)) {
+      throw new HttpsError("failed-precondition", BOOKING_NOT_CONFIRMABLE_MESSAGE);
+    }
+    throw e;
+  }
   await requireMusicianPayoutReady(booking.musicianProfileId);
 
   const now = Date.now();

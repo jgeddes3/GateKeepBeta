@@ -11,9 +11,11 @@ import {
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
-// 30s (not the file-wide-standard 15s, nor the prior 20s), matching
-// bookingVisibility.test.ts's own precedent for this suite's other unusually
-// chain-heavy booking file: several tests here run 3-5 chained callables
+// 30s (not the file-wide-standard 15s, nor the prior 20s) — the 20s step
+// matched bookingVisibility.test.ts's own precedent for this suite's other
+// unusually chain-heavy booking file; the further bump to 30s matches
+// members.test.ts's own 30s precedent instead (bookingVisibility.test.ts
+// itself stayed at 20s). Several tests here run 3-5 chained callables
 // (createProfileDraft x2, submitProfileForReview x2, reviewProfile x2,
 // createGig, publishGig, applyToGig, counterBooking, acceptBooking...)
 // before ever reaching an assertion. Task 5's acceptBooking gates pushed the

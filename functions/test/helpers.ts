@@ -78,6 +78,12 @@ export async function makeMoneyReady(
   await callFn("createOnboardingLink", { profileId: musician.profileId }, musician.owner.user);
   const adb = getAdminFirestore(adminAppInstance);
   const sp = (await adb.doc(`profiles/${musician.profileId}/private/stripe`).get()).data()!;
+  // Review round 1: fail with a named error instead of silently writing a
+  // junk `stripeFake/state/objects/undefined` doc if createOnboardingLink
+  // somehow didn't persist an accountId.
+  if (!sp?.accountId) {
+    throw new Error(`makeMoneyReady: musician ${musician.profileId} has no accountId after createOnboardingLink.`);
+  }
   await adb.doc(`stripeFake/state/objects/${sp.accountId}`).set(
     { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
   await adb.doc(`profiles/${musician.profileId}/private/stripe`).set(

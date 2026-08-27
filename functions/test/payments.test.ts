@@ -6,6 +6,7 @@ import type { ProfileDraftInput, StripeProfileDoc } from "@gatekeep/shared";
 import type { RefreshPaymentMethodInput } from "../src/payments.js";
 import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
+  BOOKING_NOT_CONFIRMABLE_MESSAGE,
 } from "../src/paymentsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -380,5 +381,50 @@ describe("Task 5 money gates", () => {
 
     const booking = await adb.doc(`bookings/${bookingId}`).get();
     expect(booking.data()?.status).toBe("confirmed");
+  });
+
+  // Review round 1, item 3: the musician gate is RE-CHECKED at accept (not
+  // just at applyToGig) — a musician who was payout-ready when they applied
+  // but lost transfersEnabled before the curator accepted must still block
+  // the accept. The curator is the caller here, so the specific message
+  // (not the audience-remapped one below) is expected.
+  it("acceptBooking re-checks musician payout-readiness — lost transfersEnabled after applying blocks a curator-side accept with the specific message", async () => {
+    const curator = await makeApprovedCuratorProfile("g5ab5c");
+    const musician = await makeApprovedMusicianProfile("g5ab5m");
+    await makeMoneyReady(curator, musician);
+
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    // applyToGig itself would have refused this — the only way to reach a
+    // staged application against a now-not-payout-ready musician is for the
+    // flag to flip AFTER applying (e.g. Stripe disabled the account).
+    await adb.doc(`profiles/${musician.profileId}/private/stripe`).set({ transfersEnabled: false }, { merge: true });
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: MUSICIAN_PAYOUTS_REQUIRED_MESSAGE });
+  });
+
+  // Review round 1, item 1: audience-aware curator-gate message. A
+  // musician-side caller who trips the CURATOR gate (accepting a curator's
+  // earlier offer, whose curator has since gone delinquent) must get the
+  // neutral BOOKING_NOT_CONFIRMABLE_MESSAGE, never the curator-authored
+  // CURATOR_DELINQUENT_MESSAGE — the musician can't act on curator-specific
+  // copy. offerGig itself would have refused a delinquent curator, so the
+  // curator must go delinquent AFTER making the offer.
+  it("musician accepts a delinquent curator's earlier offer: gets the neutral BOOKING_NOT_CONFIRMABLE_MESSAGE, not the curator-authored text", async () => {
+    const curator = await makeApprovedCuratorProfile("g5ab6c");
+    const musician = await makeApprovedMusicianProfile("g5ab6m");
+    await makeMoneyReady(curator, musician);
+
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "offerGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
+
+    await adb.doc(`profiles/${curator.profileId}/private/stripe`).set({ delinquent: true }, { merge: true });
+
+    await expect(callFn("acceptBooking", { bookingId }, musician.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: BOOKING_NOT_CONFIRMABLE_MESSAGE });
   });
 });
