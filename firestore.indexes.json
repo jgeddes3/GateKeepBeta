@@ -113,6 +113,16 @@
       { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
       { "fieldPath": "initiatedBy", "order": "ASCENDING" },
       { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "musicianProfileId", "order": "ASCENDING" },
+      { "fieldPath": "updatedAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "updatedAt", "order": "DESCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

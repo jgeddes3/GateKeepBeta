@@ -9,10 +9,11 @@ import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import { getFirebase } from "../../src/lib/firebase";
 import { AdminGate } from "./AdminGate";
 import { GIG_STATUS_LABEL, formatGigDateTime, badge } from "../../src/gigs/GigForms";
+import { bookingHistoryLabel } from "../../src/bookings/BookingInbox";
 import {
   GIG_STATUSES,
   type ProfileDoc, type AuditLogDoc, type UserDoc, type TrackDoc, type GigDoc, type GigStatus,
-  type CuratorSubtype, type AdminNoteDoc,
+  type CuratorSubtype, type AdminNoteDoc, type ReliabilityMark, type ReliabilityDoc, type BookingRequestDoc,
 } from "@gatekeep/shared";
 
 type Row<T> = T & { id: string };
@@ -521,13 +522,155 @@ function GigsAdmin() {
   );
 }
 
+// SP4 Task 11's reliability panel — profiles/{profileId}/private/reliability,
+// admin-readable per firestore.rules (`allow read: if isMember(profileId) ||
+// isAdmin();`). Musician-only (a curator profile has no reliability doc — the
+// mark record is keyed to the MUSICIAN side of a booking; see
+// ReliabilityMark/ReliabilityDoc in packages/shared/src/types.ts) —
+// TakedownsPanel below only mounts this when profile.type === "musician".
+// Same load-on-id-change idiom as UserProfiles/AdminNotes above ("loading"
+// sentinel as the useState initial value, own `cancelled` guard) — TakedownsPanel
+// mounts this with `key={profileId}` so a fresh lookup remounts it (and its
+// "loading" initial state) fresh rather than needing an imperative reset
+// inside the effect. A per-row busy lock, keyed by `${bookingId}-${kind}`
+// (the exact pair removeReliabilityMark matches against — a booking can
+// carry at most one mark of each kind), mirrors QueueRow/TrackQueueRow's
+// per-row busy state.
+function ReliabilityPanel({ profileId }: { profileId: string }) {
+  const [marks, setMarks] = useState<ReliabilityMark[] | "loading">("loading");
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { db } = getFirebase();
+      const snap = await getDoc(doc(db, `profiles/${profileId}/private/reliability`));
+      if (!cancelled) setMarks(snap.exists() ? (snap.data() as ReliabilityDoc).marks : []);
+    })().catch((e) => {
+      console.error("ReliabilityPanel: load failed", profileId, e);
+      if (!cancelled) setMarks([]);
+    });
+    return () => { cancelled = true; };
+  }, [profileId]);
+
+  const remove = async (mark: ReliabilityMark) => {
+    const key = `${mark.bookingId}-${mark.kind}`;
+    setBusyKey(key);
+    try {
+      await httpsCallable(getFirebase().functions, "removeReliabilityMark")(
+        { musicianProfileId: profileId, bookingId: mark.bookingId, kind: mark.kind });
+      setMarks((prev) => (prev === "loading" ? prev : prev.map((m) => (
+        m.bookingId === mark.bookingId && m.kind === mark.kind ? { ...m, removedByAdmin: true } : m))));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not remove the mark — try again.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  if (marks === "loading") return <p style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#888" }}>Loading reliability record…</p>;
+  if (marks.length === 0) return <p style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#888" }}>No reliability marks.</p>;
+  return (
+    <table style={{ marginTop: 4, marginLeft: 16, fontSize: 14, borderCollapse: "collapse" }}>
+      <thead>
+        <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+          <th style={{ padding: "4px 12px 4px 0" }}>Kind</th>
+          <th style={{ padding: "4px 12px" }}>Date</th>
+          <th style={{ padding: "4px 12px" }}>Source booking</th>
+          <th style={{ padding: "4px 12px" }}>Status</th>
+          <th />
+        </tr>
+      </thead>
+      <tbody>
+        {marks.map((m) => {
+          const key = `${m.bookingId}-${m.kind}`;
+          return (
+            <tr key={key} style={{ borderBottom: "1px solid #eee" }}>
+              <td style={{ padding: "4px 12px 4px 0" }}>{m.kind === "late_cancel" ? "Late cancel" : "No-show"}</td>
+              <td style={{ padding: "4px 12px" }}>{new Date(m.at).toLocaleString()}</td>
+              <td style={{ padding: "4px 12px" }}>
+                <a href={`/dashboard/bookings/${m.bookingId}`} target="_blank" rel="noopener noreferrer">{m.bookingId}</a>
+              </td>
+              <td style={{ padding: "4px 12px" }}>{m.removedByAdmin ? "Removed" : "Active"}</td>
+              <td style={{ padding: "4px 12px" }}>
+                {!m.removedByAdmin && (
+                  <button disabled={busyKey === key} onClick={() => remove(m)}>
+                    {busyKey === key ? "Removing…" : "Remove"}
+                  </button>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+type AdminBookingRow = Row<BookingRequestDoc>;
+
+// SP4 Task 11's per-profile bookings list — a profile id sits on EITHER side
+// of a booking (curatorProfileId or musicianProfileId — never both: a
+// profile id is only ever one type, musician or curator), so both queries
+// fire unconditionally rather than branching on profile.type, matching the
+// task brief's "either side — two queries, statuses any" shape and keeping
+// this component profile-type-agnostic (at most one of the two ever returns
+// rows for a given profileId in practice). Admin read is provable via
+// firestore.rules' bookings rule's isAdmin() disjunct alone — it doesn't
+// depend on resource.data, so it holds for every result regardless of
+// status, the same way the gigs rule's isAdmin() disjunct does (see that
+// rule's own comment). Same load-on-id-change idiom as ReliabilityPanel
+// above (mounted with `key={profileId}` by TakedownsPanel, so a fresh lookup
+// remounts fresh "loading" state rather than needing an imperative reset).
+function ProfileBookingsList({ profileId }: { profileId: string }) {
+  const [rows, setRows] = useState<AdminBookingRow[] | "loading">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { db } = getFirebase();
+      const [curatorSide, musicianSide] = await Promise.all([
+        getDocs(query(collection(db, "bookings"), where("curatorProfileId", "==", profileId),
+          orderBy("updatedAt", "desc"), limit(25))),
+        getDocs(query(collection(db, "bookings"), where("musicianProfileId", "==", profileId),
+          orderBy("updatedAt", "desc"), limit(25))),
+      ]);
+      if (cancelled) return;
+      const merged = [...curatorSide.docs, ...musicianSide.docs]
+        .map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      setRows(merged);
+    })().catch((e) => {
+      console.error("ProfileBookingsList: load failed", profileId, e);
+      if (!cancelled) setRows([]);
+    });
+    return () => { cancelled = true; };
+  }, [profileId]);
+
+  if (rows === "loading") return <p style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#888" }}>Loading bookings…</p>;
+  if (rows.length === 0) return <p style={{ margin: "4px 0 0 16px", fontSize: 14, color: "#888" }}>No bookings.</p>;
+  return (
+    <ul style={{ margin: "4px 0 0 16px", fontSize: 14, padding: 0, listStyle: "none" }}>
+      {rows.map((b) => (
+        <li key={b.id} style={{ margin: "2px 0" }}>
+          <a href={`/dashboard/bookings/${b.id}`} target="_blank" rel="noopener noreferrer">{b.id}</a>
+          {" — "}{b.status === "open" || b.status === "confirmed" ? b.status : bookingHistoryLabel(b)}
+          <span style={{ color: "#888" }}> · updated {new Date(b.updatedAt).toLocaleString()}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // Retroactive-takedown panel (spec §6: "admins can retroactively unpublish").
 // reviewTrack already accepts decision:"rejected" against an already-approved
 // track — TracksQueue above can't reach that path since it only ever lists
 // pending_review tracks, so this gives admins a way in: look a profile up by
 // handle, see its live (approved) tracks, remove one with a reason. Same
 // handles/{handle} -> profileId indirection the public /u/[handle] route
-// uses, and handles are stored lowercase there too.
+// uses, and handles are stored lowercase there too. SP4 Task 11 additionally
+// mounts a reliability panel (musician profiles only) and a bookings list
+// (either type) inside this same lookup result area.
 function TakedownsPanel() {
   const [handle, setHandle] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
@@ -655,7 +798,7 @@ function TakedownsPanel() {
         onKeyDown={(e) => { if (e.key === "Enter" && !lookupBusy) void lookup(); }}
       />{" "}
       <button disabled={lookupBusy} onClick={lookup}>{lookupBusy ? "Looking up…" : "Look up"}</button>
-      {profile && (
+      {profile && profileId && (
         <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 8, background: "#fafafa" }}>
           <strong>{profile.name}</strong> @{profile.handle} — {profile.status.replace("_", " ")}
           {profile.status === "approved" ? (
@@ -667,6 +810,16 @@ function TakedownsPanel() {
           ) : (
             <p style={{ color: "#888", margin: "4px 0 0" }}>Not currently live — nothing to unpublish.</p>
           )}
+          {profile.type === "musician" && (
+            <div style={{ marginTop: 12 }}>
+              <h3 style={{ margin: "0 0 4px", fontSize: 15 }}>Reliability record</h3>
+              <ReliabilityPanel key={profileId} profileId={profileId} />
+            </div>
+          )}
+          <div style={{ marginTop: 12 }}>
+            <h3 style={{ margin: "0 0 4px", fontSize: 15 }}>Bookings</h3>
+            <ProfileBookingsList key={profileId} profileId={profileId} />
+          </div>
         </div>
       )}
       {tracks.map((t) => (
