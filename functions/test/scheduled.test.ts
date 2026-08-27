@@ -544,6 +544,25 @@ describe("runDailySweep — SP4 Task 8: booking expiry sweep (step 6)", () => {
     const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(booking.status).toBe("open");
   });
+
+  it("Task 8 review: expires an open booking whose gig doc has been deleted outright (e.g. deleteProfile's cascade); notifies the musician side", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const musicianUid = fakeUid();
+    await seedMember(musicianProfileId, musicianUid);
+    const gigId = await seedOccurrence("not-a-real-series", curatorProfileId, { status: "open", startsAt: now + 3600_000 });
+    const { bookingId } = await seedBooking({ gigId, seriesId: null, curatorProfileId, musicianProfileId, status: "open" });
+    await adb.doc(`gigs/${gigId}`).delete(); // gig gone outright — the strongest "can never be accepted" case
+
+    await runDailySweep(now);
+
+    const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(booking.status).toBe("expired");
+    expect(booking.resolvedAt).toBe(now);
+    const notes = await pollNotifications(musicianUid);
+    expect(notes.empty).toBe(false);
+  });
 });
 
 describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () => {
@@ -635,24 +654,25 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
       status: "filled", startsAt: now - 3 * 3600_000, durationMinutes: 60,
       bookingId, bookedMusicianProfileId: musicianProfileId,
     });
-    const futureGigId = await seedOccurrence(seriesId, curatorProfileId, {
+    // Its own future date, still linked and "filled" — the mid-run sweep
+    // must not complete the booking while this exists.
+    await seedOccurrence(seriesId, curatorProfileId, {
       status: "filled", startsAt: now + 2 * 3600_000, durationMinutes: 60,
       bookingId, bookedMusicianProfileId: musicianProfileId,
     });
     await adb.doc(`bookings/${bookingId}`).update({ gigId: pastGigId });
 
     try {
-      await runDailySweep(now); // mid-run: futureGigId hasn't ended yet
+      await runDailySweep(now); // mid-run: the future date hasn't ended yet
       let booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(booking.status).toBe("confirmed");
 
-      await runDailySweep(now + 4 * 3600_000); // after futureGigId (ends at now+3h) has ended
+      await runDailySweep(now + 4 * 3600_000); // after the future date (ends at now+3h) has ended
       booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(booking.status).toBe("completed");
       const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
       expect(series.activeBookingId).toBeNull();
       expect(series.bookedMusicianProfileId).toBeNull();
-      void futureGigId;
     } finally {
       await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
     }
@@ -839,11 +859,10 @@ describe("runDailySweep — SP4 Task 8: run-aware materializer (step 1 change)",
     const { bookingId } = await seedBooking({
       gigId: "pending", seriesId: "pending", status: "cancelled_by_curator", musicianProfileId,
     });
-    const { seriesId, profileId: curatorProfileId } = await seedSeries({
+    const { seriesId } = await seedSeries({
       createdAt, updatedAt: createdAt, fillMode: "whole_run",
       activeBookingId: bookingId, bookedMusicianProfileId: musicianProfileId,
     });
-    void curatorProfileId;
     const anchor = expectedAnchor(createdAt, 5, 20, 0);
 
     try {

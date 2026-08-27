@@ -229,11 +229,13 @@ export interface SweepReport {
   // SP4 Task 8 — step 7: whole-run confirmed bookings resolved (to either
   // "completed" or "expired" — see bookingsCompleted/bookingsExpired above,
   // which those are ALSO counted under) via the zero-future-linked-occurrence
-  // rule — the committed resolver for the pause/end tolerance path
-  // (pauseSeries/endSeries's cancelActiveRunBookingTolerant) and for a run
-  // whose schedule simply ran its course. A diagnostic sub-metric, not an
-  // additional outcome.
-  bookingsResolvedZombie: number;
+  // rule. Named for WHAT it counts (every whole-run resolution through this
+  // rule), not why — it covers both the committed resolver for the pause/end
+  // tolerance path (pauseSeries/endSeries's cancelActiveRunBookingTolerant)
+  // AND a run whose schedule simply ran its course; "zombie" would mislead a
+  // dashboard reader into thinking only the former counts here. A
+  // diagnostic sub-metric, not an additional outcome.
+  wholeRunResolutions: number;
   // S3: per-step failure counts — a step that throws is caught, logged, and
   // counted here rather than aborting the remaining steps.
   errors: {
@@ -259,7 +261,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     occurrencesCreated: 0, seriesAdvanced: 0, pastGigsClosed: 0, tracksFailed: 0, invitesRevoked: 0,
     seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
     occurrencesBornFilled: 0, seriesSelfHealed: 0,
-    bookingsExpired: 0, bookingsCompleted: 0, bookingsResolvedZombie: 0,
+    bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
       bookingExpiry: 0, bookingCompletion: 0,
@@ -387,6 +389,16 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           materializedThrough: newMaterializedThrough, updatedAt: now,
         };
         if (selfHeal) {
+          // This clear rides the same unguarded batched `seriesUpdate` write
+          // as materializedThrough below — no {lastUpdateTime} precondition
+          // of its own. What closes the otherwise-obvious clobber race (a
+          // fresh whole-run accept lands on this series between the
+          // freshSnap re-read above and this write actually committing) is
+          // a CROSS-FILE guard, not anything in this step: acceptBooking's
+          // in-txn rebooking-door check (bookings.ts) refuses a new accept
+          // outright whenever series.activeBookingId already names ANY
+          // booking — stale or not — so no fresh accept can be mid-flight
+          // to race against while this stale linkage still stands.
           seriesUpdate.activeBookingId = null;
           seriesUpdate.bookedMusicianProfileId = null;
           report.seriesSelfHealed++;
@@ -496,16 +508,19 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   }
 
   // 6) Booking expiry sweep (SP4 Task 8): an "open" booking whose target gig
-  // has since become unavailable (its startsAt elapsed, or its status is
+  // has since become unavailable (its startsAt elapsed, its status is
   // anything other than "open" — filled by a rival, closed, cancelled, taken
-  // down) never got resolved by acceptBooking's sibling-supersede fan-out or
-  // unwindBookingsForModeration's cascades (both best-effort and
-  // failure-isolated — see their own comments in bookings.ts/
-  // bookingLifecycle.ts). This step is the backstop that guarantees no
-  // "open" booking lingers forever against a gig that can never again be
-  // accepted into. Booking-scoped: reads booking.gigId directly (one extra
-  // get per "open" booking) rather than a join query — the "open" bookings
-  // query itself is what's paginated.
+  // down — or the gig doc is GONE outright, e.g. deleteProfile's cascade
+  // deletes a curator's gigs) never got resolved by acceptBooking's
+  // sibling-supersede fan-out or unwindBookingsForModeration's cascades
+  // (both best-effort and failure-isolated — see their own comments in
+  // bookings.ts/bookingLifecycle.ts). This step is the backstop that
+  // guarantees no "open" booking lingers forever against a gig that can
+  // never again be accepted into — a missing gig is the STRONGEST case of
+  // that (it can never come back), so it expires exactly like any other
+  // unavailable-gig case, not a silent skip. Booking-scoped: reads
+  // booking.gigId directly (one extra get per "open" booking) rather than a
+  // join query — the "open" bookings query itself is what's paginated.
   try {
     const writer = createChunkedWriter(db);
     const openBookingsQuery = db.collection("bookings").where("status", "==", "open").orderBy(FieldPath.documentId());
@@ -514,8 +529,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         const booking = doc.data() as BookingRequestDoc;
         const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
         const gig = gigSnap.data() as GigDoc | undefined;
-        if (!gig) continue; // defensive — a booking always names an existing gig
-        if (gig.startsAt < now || gig.status !== "open") {
+        if (!gig || gig.startsAt < now || gig.status !== "open") {
           await writer.update(doc.ref, { status: "expired", resolvedAt: now, updatedAt: now });
           report.bookingsExpired++;
           // Per-item try/catch (S3 sweep philosophy) — one failed notify
@@ -599,8 +613,23 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // Status-guarded idempotency: once resolved, a booking's status is no
   // longer "confirmed", so a later sweep run's query naturally excludes it —
   // the zombie resolver (or the normal completion path) can never re-fire.
+  //
+  // Direct-write trade (Task 8 review): the booking's status flip below is a
+  // plain `doc.ref.update(...)`, NOT queued on this step's chunked writer,
+  // and happens FIRST — before the completedCount increment, before
+  // recomputeReliability, before any notify. A chunked writer buys nothing
+  // here (this step never approaches the 400-op rotation size a single
+  // booking's own writes could hit), and batching it would mean a crash/
+  // timeout mid-run leaves every booking already resolved in memory this run
+  // un-committed — a re-run would re-process ALL of them: completedCount
+  // (curator-facing) over-increments once per booking per crash, and both
+  // parties get duplicate notifications once per booking per crash. Flipping
+  // the status FIRST and directly converts that into, at worst, ONE lost
+  // completedCount increment for the SINGLE booking that was mid-flight when
+  // the crash hit (its status write either committed, in which case the
+  // re-run's query already excludes it — see the idempotency note above —
+  // or it didn't, in which case nothing downstream of it ran either).
   try {
-    const writer = createChunkedWriter(db);
     const confirmedQuery = db.collection("bookings").where("status", "==", "confirmed").orderBy(FieldPath.documentId());
     for await (const page of paginate(confirmedQuery, SWEEP_PAGE_SIZE)) {
       for (const doc of page) {
@@ -627,19 +656,18 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         }
         if (outcome === null) continue; // still ongoing — nothing to resolve yet
 
-        await writer.update(doc.ref, { status: outcome, resolvedAt: now, updatedAt: now });
+        await doc.ref.update({ status: outcome, resolvedAt: now, updatedAt: now });
         if (outcome === "completed") report.bookingsCompleted++;
         else report.bookingsExpired++;
-        if (isWholeRun) report.bookingsResolvedZombie++;
+        if (isWholeRun) report.wholeRunResolutions++;
 
         if (outcome === "completed") {
           // Read-modify-write on the reliability doc (create-if-missing),
           // then recomputeReliability — mirrors bookingLifecycle.ts's own
-          // completedCount bump idiom. Direct (non-batched) calls, awaited
-          // in-loop rather than queued on `writer`: recomputeReliability
-          // does its OWN read of this same doc immediately after, which
-          // must see the incremented count, not a still-uncommitted batched
-          // write.
+          // completedCount bump idiom. recomputeReliability does its OWN
+          // read of this same doc immediately after, which must see the
+          // incremented count, not a stale one — both calls stay direct
+          // (never batched) for that reason, same as the status flip above.
           const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
           const reliabilitySnap = await reliabilityRef.get();
           const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
@@ -666,19 +694,25 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           }
         }
 
+        // Separate try/catch per side (Task 8 review) — a musician-side
+        // notify failure must never skip the curator's own notification (or
+        // vice versa); each side's delivery is independent.
+        const notifyTitle = outcome === "completed" ? "Booking completed" : "Booking run ended";
+        const notifyBody = outcome === "completed"
+          ? "This booking is now complete."
+          : "This booking's run ended before any date took place.";
         try {
-          const notifyTitle = outcome === "completed" ? "Booking completed" : "Booking run ended";
-          const notifyBody = outcome === "completed"
-            ? "This booking is now complete."
-            : "This booking's run ended before any date took place.";
           await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", title: notifyTitle, body: notifyBody });
+        } catch (e) {
+          console.error(`dailySweep: failed to notify musician side of booking resolution ${bookingId}`, e);
+        }
+        try {
           await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", title: notifyTitle, body: notifyBody });
         } catch (e) {
-          console.error(`dailySweep: failed to notify booking resolution ${bookingId}`, e);
+          console.error(`dailySweep: failed to notify curator side of booking resolution ${bookingId}`, e);
         }
       }
     }
-    await writer.commit();
   } catch (e) {
     console.error("dailySweep: booking completion sweep step failed", e);
     report.errors.bookingCompletion++;
