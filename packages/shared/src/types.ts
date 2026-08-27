@@ -85,6 +85,14 @@ export interface NotificationDoc {
   kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking";
   read: boolean;
   createdAt: number;
+  // SP4 Task 10: optional reference id for deep-linking a notification row
+  // to the thing it's about — today only booking-kind notifications set it
+  // (the bookingId), letting the web notification list link straight to
+  // /dashboard/bookings/[refId]. Optional/backward-compatible: every
+  // pre-Task-10 notification (profile/track review, gig moderation, system)
+  // omits it, and readers must not assume it's present even on a "booking"
+  // kind doc written before this field existed.
+  refId?: string;
 }
 
 export interface ProfileDraftInput {

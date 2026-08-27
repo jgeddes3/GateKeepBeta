@@ -513,6 +513,9 @@ describe("runDailySweep — SP4 Task 8: booking expiry sweep (step 6)", () => {
     expect(booking.resolvedAt).toBe(now);
     const notes = await pollNotifications(musicianUid);
     expect(notes.empty).toBe(false);
+    // SP4 Task 10a: the sweep's expiry notification also carries refId,
+    // the web notification list's deep-link source for /dashboard/bookings/[refId].
+    expect(notes.docs.some((d) => d.data().refId === bookingId)).toBe(true);
   });
 
   it("expires an open booking whose gig is no longer 'open' (e.g. cancelled), even though it hasn't started yet; notifies the musician side", async () => {

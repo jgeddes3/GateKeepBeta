@@ -536,7 +536,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           // must never abort the rest of this step.
           try {
             await notifyProfileMembers(booking.musicianProfileId, {
-              kind: "booking", title: "Booking no longer available", body: "This gig is no longer available.",
+              kind: "booking", refId: doc.id, title: "Booking no longer available", body: "This gig is no longer available.",
             });
           } catch (e) {
             console.error(`dailySweep: failed to notify expired booking ${doc.id}`, e);
@@ -702,12 +702,12 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           ? "This booking is now complete."
           : "This booking's run ended before any date took place.";
         try {
-          await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", title: notifyTitle, body: notifyBody });
+          await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", refId: bookingId, title: notifyTitle, body: notifyBody });
         } catch (e) {
           console.error(`dailySweep: failed to notify musician side of booking resolution ${bookingId}`, e);
         }
         try {
-          await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", title: notifyTitle, body: notifyBody });
+          await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", refId: bookingId, title: notifyTitle, body: notifyBody });
         } catch (e) {
           console.error(`dailySweep: failed to notify curator side of booking resolution ${bookingId}`, e);
         }

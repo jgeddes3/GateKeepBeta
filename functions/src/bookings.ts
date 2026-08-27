@@ -142,7 +142,7 @@ async function finalizeBookingRequest(params: {
   const notifyProfileId = awaitingSide === "musician" ? musicianProfileId : curatorProfileId;
   const verb = initiatedBy === "musician" ? "wants to play this gig" : "wants to book you for this gig";
   await notifyProfileMembers(notifyProfileId, {
-    kind: "booking",
+    kind: "booking", refId: bookingRef.id,
     title: initiatedBy === "musician" ? `New booking request for "${gig.title}"` : `New booking offer for "${gig.title}"`,
     body: `${actingProfileName} ${verb}.`,
   });
@@ -300,7 +300,7 @@ export const counterBooking = onCall<CounterBookingInput>({ region: "us-central1
   const actingProfileId = callerSide === "musician" ? booking.musicianProfileId : booking.curatorProfileId;
   const actingName = await profileName(db, actingProfileId);
   await notifyProfileMembers(notifyProfileId, {
-    kind: "booking",
+    kind: "booking", refId: input.bookingId,
     title: `Countered offer for "${gig.title}"`,
     body: `${actingName} sent a new offer.`,
   });
@@ -347,7 +347,7 @@ export const declineBooking = onCall<{ bookingId: string }>({ region: "us-centra
   const actingName = await profileName(db, actingProfileId);
   const otherProfileId = callerSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
   await notifyProfileMembers(otherProfileId, {
-    kind: "booking",
+    kind: "booking", refId: bookingId,
     title: "Booking request declined",
     body: `${actingName} declined your booking request${gigTitle ? ` for "${gigTitle}"` : ""}.`,
   });
@@ -395,7 +395,7 @@ export const withdrawBooking = onCall<{ bookingId: string }>({ region: "us-centr
   const actingName = await profileName(db, actingProfileId);
   const otherProfileId = callerSide === "musician" ? booking.curatorProfileId : booking.musicianProfileId;
   await notifyProfileMembers(otherProfileId, {
-    kind: "booking",
+    kind: "booking", refId: bookingId,
     title: "Booking request withdrawn",
     body: `${actingName} withdrew their booking request${gigTitle ? ` for "${gigTitle}"` : ""}.`,
   });
@@ -440,7 +440,7 @@ async function supersedeSiblingBooking(
     const rivalGigSnap = await db.doc(`gigs/${rival.gigId}`).get();
     const rivalGigTitle = (rivalGigSnap.data() as GigDoc | undefined)?.title;
     await notifyProfileMembers(rival.musicianProfileId, {
-      kind: "booking",
+      kind: "booking", refId: doc.id,
       title: "Booking request no longer available",
       body: `Another act was booked for${rivalGigTitle ? ` "${rivalGigTitle}"` : " this gig"}.`,
     });
@@ -624,12 +624,12 @@ export const acceptBooking = onCall<{ bookingId: string }>({ region: "us-central
     const musicianName = await profileName(db, booking.musicianProfileId);
     const curatorName = await profileName(db, booking.curatorProfileId);
     await notifyProfileMembers(booking.curatorProfileId, {
-      kind: "booking",
+      kind: "booking", refId: bookingId,
       title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
       body: `${musicianName} is booked and confirmed.`,
     });
     await notifyProfileMembers(booking.musicianProfileId, {
-      kind: "booking",
+      kind: "booking", refId: bookingId,
       title: `Booking confirmed${gigTitle ? ` for "${gigTitle}"` : ""}`,
       body: `You're booked and confirmed with ${curatorName}.`,
     });

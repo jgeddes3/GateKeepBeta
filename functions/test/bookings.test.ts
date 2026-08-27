@@ -168,6 +168,9 @@ describe("applyToGig", () => {
 
     const notes = await pollNotifications(curator.uid);
     expect(notes.docs.some((d) => d.data().kind === "booking" && /New booking request/.test(d.data().title))).toBe(true);
+    // SP4 Task 10a: refId carries the bookingId for the web notification
+    // list's deep-link to /dashboard/bookings/[refId].
+    expect(notes.docs.some((d) => d.data().kind === "booking" && d.data().refId === bookingId)).toBe(true);
   });
 
   it("sets seriesId for a whole_run series occurrence, leaves it null for a per_occurrence one", async () => {
@@ -513,6 +516,9 @@ describe("acceptBooking", () => {
     expect(curatorNotes.docs.some((d) => d.data().kind === "booking" && /confirmed/i.test(d.data().title))).toBe(true);
     const musicianNotes = await pollNotifications(musician.uid);
     expect(musicianNotes.docs.some((d) => d.data().kind === "booking" && /confirmed/i.test(d.data().title))).toBe(true);
+    // SP4 Task 10a: both winner notifications carry refId==bookingId.
+    expect(curatorNotes.docs.some((d) => d.data().kind === "booking" && d.data().refId === bookingId)).toBe(true);
+    expect(musicianNotes.docs.some((d) => d.data().kind === "booking" && d.data().refId === bookingId)).toBe(true);
   });
 
   it("perSong: expectedTotalCents is amount x songCount from the LAST countered songCount (not the first offer), deposit ceils", async () => {

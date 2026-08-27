@@ -367,8 +367,8 @@ export async function executeCancellation(
     const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
     const { curatorBody, musicianBody } =
       cancellationCopy(side, result.outcome, result.markApplied, "booking", gigTitle);
-    await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", title: "Booking cancelled", body: curatorBody });
-    await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", title: "Booking cancelled", body: musicianBody });
+    await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", refId: bookingId, title: "Booking cancelled", body: curatorBody });
+    await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", refId: bookingId, title: "Booking cancelled", body: musicianBody });
   } catch (e) {
     console.error(`executeCancellation: failed to notify for booking ${bookingId}`, e);
   }
@@ -523,9 +523,9 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
     const { curatorBody, musicianBody } =
       cancellationCopy(callerSide, result.outcome, result.markApplied, "occurrence", gigTitle);
     await notifyProfileMembers(booking.curatorProfileId,
-      { kind: "booking", title: "One date of your booking was cancelled", body: curatorBody });
+      { kind: "booking", refId: bookingId, title: "One date of your booking was cancelled", body: curatorBody });
     await notifyProfileMembers(booking.musicianProfileId,
-      { kind: "booking", title: "One date of your booking was cancelled", body: musicianBody });
+      { kind: "booking", refId: bookingId, title: "One date of your booking was cancelled", body: musicianBody });
   } catch (e) {
     console.error(`cancelOccurrence: failed to notify for booking ${bookingId}`, e);
   }
@@ -672,7 +672,7 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
     const gigSnap = await db.doc(`gigs/${result.occurrenceGigId}`).get();
     const gigTitle = (gigSnap.data() as GigDoc | undefined)?.title;
     await notifyProfileMembers(booking.musicianProfileId, {
-      kind: "booking", title: "No-show reported",
+      kind: "booking", refId: bookingId, title: "No-show reported",
       body: `A no-show was reported${gigTitle ? ` for "${gigTitle}"` : ""}. This affects your reliability history.`,
     });
   } catch (e) {
@@ -723,7 +723,7 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
 
   try {
     await notifyProfileMembers(musicianProfileId, {
-      kind: "booking", title: "A reliability mark was removed",
+      kind: "booking", refId: bookingId, title: "A reliability mark was removed",
       body: "An admin reviewed your account and removed a mark from your reliability history.",
     });
   } catch (e) {
@@ -859,7 +859,7 @@ export async function unwindBookingsForModeration(opts: UnwindModerationOpts): P
       }
 
       await notifyProfileMembers(booking.musicianProfileId, {
-        kind: "booking", title: "Booking no longer available", body: notifyBody,
+        kind: "booking", refId: doc.id, title: "Booking no longer available", body: notifyBody,
       });
     } catch (e) {
       console.error(`unwindBookingsForModeration: failed to unwind booking ${doc.id}`, e);
