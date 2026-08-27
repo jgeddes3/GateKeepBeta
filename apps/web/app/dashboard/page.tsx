@@ -76,12 +76,31 @@ function NotificationsList({ uid }: { uid: string }) {
   return (
     <>
       {notes.length === 0 && <p>No notifications yet.</p>}
-      <ul>{notes.map((n) => (
-        <li key={n.id} style={{ opacity: n.read ? 0.5 : 1, cursor: "pointer" }} onClick={() => markRead(n.id)}>
-          <strong>{n.title}</strong>
-          <p style={{ margin: 0 }}>{n.body}</p>
-        </li>
-      ))}</ul>
+      <ul>{notes.map((n) => {
+        // SP4 Task 10: a "booking" notification carries refId (the
+        // bookingId — see Task 10a's NotificationDoc.refId plumbing) once
+        // it was written after that field existed; a booking-kind row
+        // written before then (or, defensively, any other kind) has no
+        // refId and renders as plain text, same as before.
+        const href = n.kind === "booking" && n.refId ? `/dashboard/bookings/${n.refId}` : null;
+        const body = (
+          <>
+            <strong>{n.title}</strong>
+            <p style={{ margin: 0 }}>{n.body}</p>
+          </>
+        );
+        return (
+          <li key={n.id} style={{ opacity: n.read ? 0.5 : 1 }}>
+            {href ? (
+              <a href={href} onClick={() => markRead(n.id)} style={{ color: "inherit", textDecoration: "none", cursor: "pointer" }}>
+                {body}
+              </a>
+            ) : (
+              <span onClick={() => markRead(n.id)} style={{ cursor: "pointer" }}>{body}</span>
+            )}
+          </li>
+        );
+      })}</ul>
     </>
   );
 }

@@ -7,6 +7,7 @@ import { getFirebase } from "../../../../src/lib/firebase";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../../../src/portfolio/PortfolioForms";
 import { TrackManager } from "../../../../src/portfolio/TrackManager";
+import { BookingInbox } from "../../../../src/bookings/BookingForms";
 import type { ProfileDoc, BookingDoc, TrackDoc } from "@gatekeep/shared";
 
 type TrackRow = TrackDoc & { id: string };
@@ -173,6 +174,19 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
       <TrackManager profileId={profileId} />
       <BookingForm key={profileId} profileId={profileId} initial={booking} />
+      {profile.status === "approved" && (
+        // Only an approved musician profile can have bookings at all
+        // (applyToGig/offerGig both require requireApprovedMusicianProfile)
+        // — a draft/pending/rejected profile's inbox would always be empty,
+        // so this section is hidden rather than shown-empty until approval.
+        // Keyed by profileId so switching profiles under this same route
+        // resets BookingInbox's three onSnapshot subscriptions instead of
+        // reusing the previous profile's listeners against new params.
+        <section style={{ borderTop: "1px solid #eee", paddingTop: 24 }}>
+          <h2>Bookings</h2>
+          <BookingInbox key={profileId} profileId={profileId} role="musician" />
+        </section>
+      )}
       {showSubmit && (
         <section style={{ display: "grid", gap: 8, borderTop: "1px solid #eee", paddingTop: 24 }}>
           <button onClick={submit} disabled={!canSubmit || submitBusy} style={{ padding: 12, fontSize: 16 }}>
