@@ -292,16 +292,16 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     const seriesQuery = db.collection("gigSeries").where("status", "==", "active").orderBy(FieldPath.documentId());
     for await (const page of paginate(seriesQuery, SERIES_PAGE_SIZE)) {
       for (const seriesDoc of page) {
-      // SP4 (Task 13 item 8): per-series try/catch — a single poisoned
-      // series (malformed recurrence/template/etc.) throwing must isolate
-      // to THIS series alone, not abort the whole step (which, pre-fix,
-      // meant every OTHER active series also materialized nothing that run,
-      // every run, until the poisoned doc was manually fixed — same
-      // isolate-log-continue philosophy as steps 2-7's own per-item
-      // try/catches elsewhere in this file, e.g. step 6's per-booking notify
-      // guard). Logged + counted in report.errors.seriesMaterialize, then
-      // `continue`s to the next series in this page.
-      try {
+        // SP4 (Task 13 item 8): per-series try/catch — a single poisoned
+        // series (malformed recurrence/template/etc.) throwing must isolate
+        // to THIS series alone, not abort the whole step (which, pre-fix,
+        // meant every OTHER active series also materialized nothing that run,
+        // every run, until the poisoned doc was manually fixed — same
+        // isolate-log-continue philosophy as steps 2-7's own per-item
+        // try/catches elsewhere in this file, e.g. step 6's per-booking notify
+        // guard). Logged + counted in report.errors.seriesMaterialize, then
+        // `continue`s to the next series in this page.
+        try {
           const series = seriesDoc.data() as GigSeriesDoc;
           const { startsAtList, newMaterializedThrough } = computeOccurrences(series, now);
           if (newMaterializedThrough <= series.materializedThrough) continue; // nothing new for this series
@@ -381,6 +381,26 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             continue;
           }
 
+          // SP4 (Task 13 review): stage this series' writes locally FIRST,
+          // and validate the whole batch against a throwaway, never-
+          // committed batch before any of it ever touches the step's SHARED
+          // writer/batch. batch.set() validates its `data` argument
+          // SYNCHRONOUSLY and throws for malformed data (e.g. a corrupted
+          // templatePrivateLocation forced via admin SDK) — without this
+          // staging step, a throw partway through a series' occurrences
+          // (e.g. on the private/location write for the FIRST occurrence,
+          // AFTER that same occurrence's gig doc write already succeeded)
+          // would leave that gig doc's write already durably queued on the
+          // shared batch, which then commits it at step-end regardless of
+          // THIS series' own iteration aborting — orphaning a world-
+          // readable gig doc with no private/location subdoc, forever (the
+          // watermark never advances past it, so every future run retries
+          // and re-orphans the same way). The validation batch is a pure
+          // local/CPU-only check (nothing is ever committed on it); the
+          // real writes still land on the shared `writer` afterward, in the
+          // exact same order as before this change.
+          const pendingWrites: { ref: FirebaseFirestore.DocumentReference; data: FirebaseFirestore.DocumentData }[] = [];
+          let pendingBornFilled = 0;
           for (const startsAt of startsAtList) {
             const gigRef = db.collection("gigs").doc();
             // status:"open" (or, SP4 Task 8, "filled" for a booked run's
@@ -398,13 +418,19 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
               bookingId: birthAs.status === "filled" ? birthAs.bookingId : null,
               bookedMusicianProfileId: birthAs.status === "filled" ? birthAs.bookedMusicianProfileId : null,
             };
-            await writer.set(gigRef, gig);
+            pendingWrites.push({ ref: gigRef, data: gig });
             // Mirrors createGig's own write and updateSeries' propagation sweep —
             // both halves of the template (public content + the exact private
             // address/geo) land on every occurrence.
-            await writer.set(db.doc(`gigs/${gigRef.id}/private/location`), series.templatePrivateLocation);
-            if (birthAs.status === "filled") report.occurrencesBornFilled++;
+            pendingWrites.push({ ref: db.doc(`gigs/${gigRef.id}/private/location`), data: series.templatePrivateLocation });
+            if (birthAs.status === "filled") pendingBornFilled++;
           }
+          const validationBatch = db.batch();
+          for (const w of pendingWrites) validationBatch.set(w.ref, w.data); // throws here — never committed
+
+          for (const w of pendingWrites) await writer.set(w.ref, w.data);
+          report.occurrencesBornFilled += pendingBornFilled;
+
           const seriesUpdate: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {
             materializedThrough: newMaterializedThrough, updatedAt: now,
           };
@@ -426,10 +452,10 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           await writer.update(seriesDoc.ref, seriesUpdate);
           report.occurrencesCreated += startsAtList.length;
           report.seriesAdvanced += 1;
-      } catch (e) {
-        console.error(`dailySweep: series materialization failed for series ${seriesDoc.id}`, e);
-        report.errors.seriesMaterialize++;
-      }
+        } catch (e) {
+          console.error(`dailySweep: series materialization failed for series ${seriesDoc.id}`, e);
+          report.errors.seriesMaterialize++;
+        }
       }
     }
     await writer.commit();

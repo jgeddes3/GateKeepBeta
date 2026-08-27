@@ -464,6 +464,46 @@ describe("runDailySweep — S3 sweep resilience", () => {
     await adb.doc(`gigSeries/${poisonedId}`).update({ status: "ended" });
     await adb.doc(`gigSeries/${healthyId}`).update({ status: "ended" });
   });
+
+  it("SP4 Task 13 (review): a poisoned series (valid template, invalid templatePrivateLocation) commits NOTHING for that series — no orphan gig doc — while a healthy sibling still materializes", async () => {
+    const now = Date.now();
+    const createdAt = now - 60 * DAY_MS;
+    // Distinct poison shape from the "malformed template" test above: the
+    // TEMPLATE is valid (so the gig doc for the first occurrence builds and
+    // validates fine), but templatePrivateLocation is a bare string — legal
+    // to SEED (Firestore is fine with any value nested as a map FIELD), but
+    // illegal as the top-level argument to a document `.set()` (which
+    // requires a plain object) — batch.set() throws synchronously the
+    // moment it's used for the private/location subdoc write. This is
+    // exactly the partial-commit shape the review flagged: without staging,
+    // the gig doc's write would already be durably queued on the shared
+    // batch by the time this throws.
+    const { seriesId: poisonedId } = await seedSeries({
+      createdAt, updatedAt: createdAt,
+      templatePrivateLocation: "not-an-object" as unknown as GigSeriesDoc["templatePrivateLocation"],
+    });
+    const { seriesId: healthyId } = await seedSeries({ createdAt, updatedAt: createdAt });
+
+    const report = await runDailySweep(now);
+
+    expect(report.errors.seriesMaterialize).toBeGreaterThanOrEqual(1);
+    const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
+    expect(poisoned.materializedThrough).toBe(0); // never advanced
+    // No orphan gig doc — the staged-then-validated write set means NOTHING
+    // for this series ever reached the shared writer's batch.
+    const poisonedOccurrences = await occurrencesFor(poisonedId);
+    expect(poisonedOccurrences.length).toBe(0);
+
+    // The healthy series — same run, same page — still materialized.
+    const healthy = (await adb.doc(`gigSeries/${healthyId}`).get()).data() as GigSeriesDoc;
+    expect(healthy.materializedThrough).toBeGreaterThan(0);
+    const healthyOccurrences = await occurrencesFor(healthyId);
+    expect(healthyOccurrences.length).toBeGreaterThan(0);
+
+    // Fixture hygiene (both series, same rationale as above).
+    await adb.doc(`gigSeries/${poisonedId}`).update({ status: "ended" });
+    await adb.doc(`gigSeries/${healthyId}`).update({ status: "ended" });
+  });
 });
 
 describe("runDailySweep — S4 curatorAccess retry sweep", () => {

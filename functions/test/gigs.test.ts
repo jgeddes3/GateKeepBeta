@@ -319,9 +319,17 @@ describe("updateGig", () => {
     // via any legitimate callable path.
     await adb.doc(`gigs/${gigId}/private/location`).delete();
 
+    // Message asserted too (not just the code) — pins THIS guard's own
+    // "missing coordinates" HttpsError specifically, distinguishing it from
+    // any other internal-error path that could otherwise satisfy a
+    // code-only assertion (e.g. a generic uncaught-exception wrap, which
+    // firebase-functions also surfaces as functions/internal).
     await expect(
       callFn("updateGig", { gigId, ...gigContent(), location: { addressVisibility: "public" } }, owner.user),
-    ).rejects.toMatchObject({ code: "functions/internal" });
+    ).rejects.toMatchObject({
+      code: "functions/internal",
+      message: expect.stringContaining("missing coordinates"),
+    });
   });
 
   it("re-geocodes on an address change", async () => {

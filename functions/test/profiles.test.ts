@@ -150,6 +150,31 @@ describe("deleteProfile", () => {
     expect(logs.docs[0].data().actorUid).toBe(uid);
   });
 
+  it("SP4 Task 13 (review): deleteProfile does not clobber a handle already reclaimed by a different profile (retry-safety)", async () => {
+    const { user } = await signUpTestUser(`del1b-${Date.now()}@test.com`);
+    const handle = `del1bp_${Date.now()}`;
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", draft(handle), user);
+    // Simulates the retry edge the fix defends against: an EARLIER
+    // deleteProfile attempt on THIS profile already freed the handle (then
+    // crashed before recursiveDelete, leaving the profile doc — still
+    // draft — for a client retry to find, exactly as here), and a totally
+    // DIFFERENT profile has since claimed that now-free handle string.
+    // Forcing the handles/{handle} doc directly (not via a second real
+    // profile) isolates the assertion to deleteProfile's own precondition-
+    // read, matching this suite's established isolation style elsewhere.
+    const otherProfileId = "unrelated-profile-owns-this-handle-now";
+    await adb.doc(`handles/${handle}`).set({ profileId: otherProfileId });
+
+    await callFn("deleteProfile", { profileId }, user);
+
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(false);
+    // The handle doc survives, untouched, still naming the other claim.
+    const handleDoc = await adb.doc(`handles/${handle}`).get();
+    expect(handleDoc.exists).toBe(true);
+    expect(handleDoc.data()?.profileId).toBe(otherProfileId);
+  });
+
   it("a non-admin cannot delete the profile", async () => {
     const { user: admin } = await signUpTestUser(`del2-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(

@@ -128,7 +128,15 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
 export const revokeInvite = onCall<{ inviteId: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
+    // SP4 (Task 13 review): was missing both requireVerifiedEmail and an
+    // isValidDocId guard on inviteId — flagged when the same gap in
+    // removeMember (below) was fixed and its own comment was found to
+    // (incorrectly) claim this callable already matched.
+    requireVerifiedEmail(req);
     const { inviteId } = req.data;
+    if (!isValidDocId(inviteId)) {
+      throw new HttpsError("invalid-argument", "An invite id is required.");
+    }
     const db = getFirestore();
     const ref = db.doc(`invites/${inviteId}`);
     const snap = await ref.get();
@@ -143,11 +151,18 @@ export const revokeInvite = onCall<{ inviteId: string }>(
 export const removeMember = onCall<{ profileId: string; uid: string }>(
   { region: "us-central1" }, async (req) => {
     const actor = requireAuthUid(req);
-    // SP4 (Task 13 item 3): requireVerifiedEmail + isValidDocId guards on
-    // both ids — missing from this callable while every sibling in this file
-    // (inviteMember, respondToInvite, revokeInvite, transferAdmin) already
-    // carries the same ordering convention (requireAuthUid ->
-    // requireVerifiedEmail -> input validation -> authz guards -> writes).
+    // SP4 (Task 13 item 3, comment corrected per review): requireVerifiedEmail
+    // + isValidDocId guards on both ids — this callable was missing them.
+    // requireAuthUid -> requireVerifiedEmail -> input validation -> authz
+    // guards -> writes is this file's standard ordering; revokeInvite and
+    // transferAdmin below were ALSO missing requireVerifiedEmail + an
+    // isValidDocId guard on their own ids and got the identical fix in this
+    // same review pass. inviteMember and respondToInvite are NOT claimed to
+    // fully match: inviteMember validates email/role/label but never runs
+    // profileId through isValidDocId, and respondToInvite validates inviteId
+    // only by existence (a not-found on a malformed id, not invalid-argument)
+    // rather than isValidDocId — standardizing those two remains a separate,
+    // not-yet-done cleanup.
     requireVerifiedEmail(req);
     const { profileId, uid } = req.data;
     if (!isValidDocId(profileId) || !isValidDocId(uid)) {
@@ -203,7 +218,14 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
 export const transferAdmin = onCall<{ profileId: string; toUid: string }>(
   { region: "us-central1" }, async (req) => {
     const actor = requireAuthUid(req);
+    // SP4 (Task 13 review): was missing both requireVerifiedEmail and
+    // isValidDocId guards on profileId/toUid — same gap this review pass
+    // fixed on revokeInvite above and removeMember below.
+    requireVerifiedEmail(req);
     const { profileId, toUid } = req.data;
+    if (!isValidDocId(profileId) || !isValidDocId(toUid)) {
+      throw new HttpsError("invalid-argument", "A profile id and target uid are required.");
+    }
     await requireProfileAdmin(profileId, actor);
     const db = getFirestore();
     const target = await db.doc(`profiles/${profileId}/members/${toUid}`).get();

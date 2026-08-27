@@ -306,7 +306,23 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   // handle claimed until the cascade's writes are actually done, and only
   // freeing it here — right before recursiveDelete finally removes the
   // profile doc itself — closes that window.
-  if (handle) await db.doc(`handles/${handle}`).delete();
+  if (handle) {
+    const handleRef = db.doc(`handles/${handle}`);
+    // SP4 (Task 13 review): only delete the handle doc if it STILL names
+    // THIS profileId — a precondition-read, not a blind delete. Closes a
+    // retry edge: if an EARLIER deleteProfile attempt on this same profile
+    // already reached this point and freed the handle, then crashed before
+    // recursiveDelete below ever ran (so this profile doc — and its
+    // draft/rejected status — is still here for a client retry to find), a
+    // DIFFERENT profile could have claimed that now-free handle string in
+    // between. A blind unconditional delete on the retry would destroy that
+    // new owner's claim instead of correctly no-op'ing (this profile's own
+    // claim on the handle is already gone).
+    const handleSnap = await handleRef.get();
+    if (handleSnap.data()?.profileId === profileId) {
+      await handleRef.delete();
+    }
+  }
 
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
 

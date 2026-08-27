@@ -165,6 +165,24 @@ describe("invites", () => {
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
 
+  it("SP4 Task 13 (review): revokeInvite rejects a malformed inviteId with invalid-argument and requires a verified caller email", async () => {
+    const { owner, profileId } = await bandWithOwner("inv13");
+    const email = `rev3-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+
+    await expect(callFn("revokeInvite", { inviteId: "bad/id" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+
+    const unverified = await signUpUnverifiedTestUser(`rev3u-${Date.now()}@test.com`);
+    await expect(callFn("revokeInvite", { inviteId }, unverified.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // Neither rejected call actually revoked the invite.
+    expect((await adb.doc(`invites/${inviteId}`).get()).data()?.status).toBe("pending");
+  });
+
   it("an unverified invitee cannot accept an invite (email verification required)", async () => {
     const { owner, profileId } = await bandWithOwner("inv12");
     const email = `unv-${Date.now()}@test.com`;
@@ -259,6 +277,20 @@ describe("removal and admin transfer", () => {
     await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, member.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
+  it("SP4 Task 13 (review): transferAdmin rejects a malformed profileId/toUid with invalid-argument and requires a verified caller email", async () => {
+    const { owner, profileId } = await bandWithOwner("rm9");
+    await expect(callFn("transferAdmin", { profileId: "bad/id", toUid: owner.uid }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("transferAdmin", { profileId, toUid: "bad/id" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+
+    const unverified = await signUpUnverifiedTestUser(`rm9u-${Date.now()}@test.com`);
+    await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, unverified.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    // Owner is still the only admin — none of the rejected calls took effect.
+    expect((await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get()).data()?.role).toBe("admin");
+  });
   it("transferAdmin to a non-member fails not-found", async () => {
     const { owner, profileId } = await bandWithOwner("rm5");
     const stranger = await signUpTestUser(`nf-${Date.now()}@test.com`);
@@ -273,6 +305,11 @@ describe("removal and admin transfer", () => {
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
     await expect(callFn("removeMember", { profileId: "", uid: owner.uid }, owner.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    // None of the rejected calls actually removed anything — owner is still
+    // a member (and still admin) of the real profile.
+    const ownerMember = await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get();
+    expect(ownerMember.exists).toBe(true);
+    expect(ownerMember.data()?.role).toBe("admin");
   });
 
   it("SP4 Task 13 item 3: removeMember requires a verified email on the caller", async () => {
@@ -286,6 +323,8 @@ describe("removal and admin transfer", () => {
     const unverified = await signUpUnverifiedTestUser(`rm8u-${Date.now()}@test.com`);
     await expect(callFn("removeMember", { profileId, uid: member.uid }, unverified.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    // The rejected call didn't remove the target member.
+    expect((await adb.doc(`profiles/${profileId}/members/${member.uid}`).get()).exists).toBe(true);
   });
 
   it("transferAdmin promotes the target without demoting the original admin", async () => {
@@ -377,14 +416,21 @@ describe("curatorAccess touchpoints", () => {
 
     // Genuine concurrency (not sequenced): fire the accept and a direct
     // status flip to "rejected" at (nearly) the same instant, unawaited
-    // relative to each other. respondToInvite's own membership transaction +
+    // relative to each other — a best-effort discriminator, not a
+    // deterministic one. respondToInvite's own membership transaction +
     // (post-fix) fresh re-read/recompute is several sequential round trips —
-    // slower than this one direct admin write — so the flip reliably lands
-    // before respondToInvite's post-transaction curatorAccess decision runs.
-    // Under the OLD code (a single profileSnap read captured before the
-    // transaction, reused afterward unconditionally) this would still grant
-    // the marker despite the profile ending up rejected; the fix re-reads
-    // (via syncCuratorAccess) at that later point and correctly does not.
+    // slower than this one direct admin write — so in PRACTICE the flip
+    // reliably lands before respondToInvite's post-transaction curatorAccess
+    // decision runs, and consistently does in this suite. But the true
+    // regression this pins only manifests when the flip lands AFTER
+    // respondToInvite's very FIRST profileSnap read (the one taken before
+    // its own transaction) — if the flip instead won THAT earlier race too,
+    // even the OLD code's single pre-transaction read would already see
+    // "rejected" and correctly skip granting the marker, and this test would
+    // pass under both old and new code without having exercised the bug.
+    // What's asserted below (marker absent once the profile ends up
+    // rejected) is a real invariant either way — it just isn't a guaranteed
+    // RED-under-old-code proof on every run, only a highly likely one.
     const [acceptOutcome] = await Promise.allSettled([
       callFn("respondToInvite", { inviteId, accept: true }, invitee.user),
       adb.doc(`profiles/${profileId}`).update({ status: "rejected" }),
