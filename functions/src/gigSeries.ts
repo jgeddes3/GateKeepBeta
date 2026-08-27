@@ -296,6 +296,7 @@ async function cancelActiveRunBookingTolerant(
   try {
     await executeCancellation(activeBookingId, booking, "curator", reason, now);
   } catch (e) {
+    // Upgrade path: coded HttpsError details instead of message identity.
     const isNoCancellableDates = e instanceof HttpsError && e.code === "failed-precondition"
       && (e.message === ALREADY_STARTED_MESSAGE || e.message === NO_UPCOMING_DATES_MESSAGE);
     if (!isNoCancellableDates) throw e;

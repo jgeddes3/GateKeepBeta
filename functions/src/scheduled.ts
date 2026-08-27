@@ -2,10 +2,12 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldPath } from "firebase-admin/firestore";
 import {
   SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE,
-  type GigSeriesDoc, type GigDoc, type SeriesCadence,
+  type GigSeriesDoc, type GigDoc, type SeriesCadence, type BookingRequestDoc, type ReliabilityDoc,
 } from "@gatekeep/shared";
 import { INVITE_MAX_AGE_MS } from "./members.js";
 import { syncCuratorAccess } from "./curator.js";
+import { recomputeReliability } from "./bookingLifecycle.js";
+import { notifyProfileMembers } from "./notifications.js";
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -203,10 +205,40 @@ export interface SweepReport {
   seriesSkippedRace: number;
   // S4: curatorAccessRetries entries successfully retried (and cleared) this run.
   curatorAccessRetried: number;
+  // SP4 Task 8 — step 1 (materializer): occurrences born already status:
+  // "filled" (a whole-run series whose active booking is still confirmed at
+  // materialization time — see step 1's own comment below); a subset of
+  // occurrencesCreated, not additional to it.
+  occurrencesBornFilled: number;
+  // SP4 Task 8 — step 1: a series' activeBookingId named a booking that
+  // turned out NOT confirmed at the fresh re-read (the booking has since
+  // expired/cancelled/completed through some path that didn't already clear
+  // this series' own linkage) — self-healed by birthing this run's
+  // occurrences "open" instead and clearing the stale linkage.
+  seriesSelfHealed: number;
+  // SP4 Task 8 — step 6: "open" bookings expired because their target gig
+  // became unavailable (elapsed startsAt, or any non-"open" status) without
+  // ever being resolved by acceptBooking's sibling-supersede fan-out or
+  // unwindBookingsForModeration (both best-effort, failure-isolated).
+  bookingsExpired: number;
+  // SP4 Task 8 — step 7: "confirmed" bookings resolved to "completed" (their
+  // last linked occurrence has ended). Does NOT include zombie resolutions
+  // that resolved to "expired" instead — see bookingsExpired above, which
+  // those are counted under.
+  bookingsCompleted: number;
+  // SP4 Task 8 — step 7: whole-run confirmed bookings resolved (to either
+  // "completed" or "expired" — see bookingsCompleted/bookingsExpired above,
+  // which those are ALSO counted under) via the zero-future-linked-occurrence
+  // rule — the committed resolver for the pause/end tolerance path
+  // (pauseSeries/endSeries's cancelActiveRunBookingTolerant) and for a run
+  // whose schedule simply ran its course. A diagnostic sub-metric, not an
+  // additional outcome.
+  bookingsResolvedZombie: number;
   // S3: per-step failure counts — a step that throws is caught, logged, and
   // counted here rather than aborting the remaining steps.
   errors: {
     series: number; pastGigs: number; tracks: number; invites: number; curatorAccessRetries: number;
+    bookingExpiry: number; bookingCompletion: number;
   };
 }
 
@@ -226,7 +258,12 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   const report: SweepReport = {
     occurrencesCreated: 0, seriesAdvanced: 0, pastGigsClosed: 0, tracksFailed: 0, invitesRevoked: 0,
     seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
-    errors: { series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0 },
+    occurrencesBornFilled: 0, seriesSelfHealed: 0,
+    bookingsExpired: 0, bookingsCompleted: 0, bookingsResolvedZombie: 0,
+    errors: {
+      series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
+      bookingExpiry: 0, bookingCompletion: 0,
+    },
   };
 
   // 1) Materialize active series.
@@ -258,12 +295,18 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         // count) rather than partially materializing; matches this
         // codebase's established non-transactional-cap-read tier (see
         // createGig/createSeries) rather than a hard global enforcement.
+        //
+        // SP4 (Task 8): this guard is later IGNORED for a filled birth (see
+        // below) — a whole-run booking's occurrences are committed work the
+        // curator already owes the musician, never a fresh open slot. It
+        // still runs HERE, unconditionally, rather than only when a filled
+        // birth turns out NOT to be happening, so this step's per-series
+        // round-trip shape/timing stays identical to before this change —
+        // the M-10 TOCTOU race test below depends on the number of real
+        // Firestore round-trips that occur before the freshSnap re-read.
         const openCount = await db.collection("gigs")
           .where("curatorProfileId", "==", series.curatorProfileId).where("status", "==", "open").count().get();
-        if (openCount.data().count >= MAX_OPEN_GIGS_PER_PROFILE) {
-          report.seriesSkippedCapped++;
-          continue;
-        }
+        const isCapped = openCount.data().count >= MAX_OPEN_GIGS_PER_PROFILE;
 
         // P4/M-10 (TOCTOU): re-read the series' status immediately before
         // writing its occurrences. The scan above filtered status=='active'
@@ -273,35 +316,82 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         // with per-step writers (one extra get per series that's actually
         // about to be written, not per occurrence).
         const freshSnap = await seriesDoc.ref.get();
-        if (freshSnap.data()?.status !== "active") {
+        const freshSeries = freshSnap.data() as GigSeriesDoc | undefined;
+        if (freshSeries?.status !== "active") {
           report.seriesSkippedRace++;
+          continue;
+        }
+
+        // SP4 (Task 8): birth mode — FRESH activeBookingId + a fresh re-read
+        // of THAT booking's own status (not the initial scan's `series`
+        // object, which can be stale by the time we get here — same race
+        // window the M-10 re-read above already guards for `status`)
+        // decides whether this series' new occurrences are committed
+        // (filled) work or fresh open slots.
+        let birthAs: { status: "filled"; bookingId: string; bookedMusicianProfileId: string } | { status: "open" } =
+          { status: "open" };
+        let selfHeal = false;
+        if (freshSeries.activeBookingId) {
+          const bookingSnap = await db.doc(`bookings/${freshSeries.activeBookingId}`).get();
+          const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+          if (booking?.status === "confirmed") {
+            birthAs = {
+              status: "filled", bookingId: freshSeries.activeBookingId,
+              bookedMusicianProfileId: freshSeries.bookedMusicianProfileId ?? booking.musicianProfileId,
+            };
+          } else {
+            // Stale linkage — the booking this series still names is no
+            // longer confirmed (expired/cancelled/completed through some
+            // path that didn't already clear this field — step 7 below and
+            // bookingLifecycle.ts's own ownership-gated clears handle the
+            // normal paths; this is the defensive backstop for whatever
+            // those miss). Self-heal: birth open instead, and clear the
+            // stale linkage in the SAME write as materializedThrough below.
+            selfHeal = true;
+          }
+        }
+
+        // The cap guard only ever blocks a fresh OPEN slot — see this
+        // guard's own comment above for why a filled birth ignores `isCapped`
+        // outright rather than never having computed it.
+        if (birthAs.status === "open" && isCapped) {
+          report.seriesSkippedCapped++;
           continue;
         }
 
         for (const startsAt of startsAtList) {
           const gigRef = db.collection("gigs").doc();
-          // status:"open" — the profile was approved at series creation, and
-          // the cascade that unpublishes a rejected profile's content also
-          // pauses its series (Task 6), so an occurrence of an active
-          // series is legitimately publishable straight away, unlike
+          // status:"open" (or, SP4 Task 8, "filled" for a booked run's
+          // committed occurrences) — the profile was approved at series
+          // creation, and the cascade that unpublishes a rejected profile's
+          // content also pauses its series (Task 6), so an occurrence of an
+          // active series is legitimately publishable straight away, unlike
           // createGig's "draft" default for a member-authored one-off.
           const gig: GigDoc = {
             curatorProfileId: series.curatorProfileId, seriesId: seriesDoc.id, detachedFromTemplate: false,
             title: series.template.title, description: series.template.description, wants: series.template.wants,
             budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
             provisions: series.template.provisions, location: series.template.location,
-            status: "open", createdAt: now, updatedAt: now,
-            // SP4 lands whole-run-aware births (Task 8) — until then every
-            // materialized occurrence starts unbooked, same as createGig.
-            bookingId: null, bookedMusicianProfileId: null,
+            status: birthAs.status, createdAt: now, updatedAt: now,
+            bookingId: birthAs.status === "filled" ? birthAs.bookingId : null,
+            bookedMusicianProfileId: birthAs.status === "filled" ? birthAs.bookedMusicianProfileId : null,
           };
           await writer.set(gigRef, gig);
           // Mirrors createGig's own write and updateSeries' propagation sweep —
           // both halves of the template (public content + the exact private
           // address/geo) land on every occurrence.
           await writer.set(db.doc(`gigs/${gigRef.id}/private/location`), series.templatePrivateLocation);
+          if (birthAs.status === "filled") report.occurrencesBornFilled++;
         }
-        await writer.update(seriesDoc.ref, { materializedThrough: newMaterializedThrough, updatedAt: now });
+        const seriesUpdate: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {
+          materializedThrough: newMaterializedThrough, updatedAt: now,
+        };
+        if (selfHeal) {
+          seriesUpdate.activeBookingId = null;
+          seriesUpdate.bookedMusicianProfileId = null;
+          report.seriesSelfHealed++;
+        }
+        await writer.update(seriesDoc.ref, seriesUpdate);
         report.occurrencesCreated += startsAtList.length;
         report.seriesAdvanced += 1;
       }
@@ -403,6 +493,183 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   } catch (e) {
     console.error("dailySweep: curatorAccess retry step failed", e);
     report.errors.curatorAccessRetries++;
+  }
+
+  // 6) Booking expiry sweep (SP4 Task 8): an "open" booking whose target gig
+  // has since become unavailable (its startsAt elapsed, or its status is
+  // anything other than "open" — filled by a rival, closed, cancelled, taken
+  // down) never got resolved by acceptBooking's sibling-supersede fan-out or
+  // unwindBookingsForModeration's cascades (both best-effort and
+  // failure-isolated — see their own comments in bookings.ts/
+  // bookingLifecycle.ts). This step is the backstop that guarantees no
+  // "open" booking lingers forever against a gig that can never again be
+  // accepted into. Booking-scoped: reads booking.gigId directly (one extra
+  // get per "open" booking) rather than a join query — the "open" bookings
+  // query itself is what's paginated.
+  try {
+    const writer = createChunkedWriter(db);
+    const openBookingsQuery = db.collection("bookings").where("status", "==", "open").orderBy(FieldPath.documentId());
+    for await (const page of paginate(openBookingsQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        const booking = doc.data() as BookingRequestDoc;
+        const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
+        const gig = gigSnap.data() as GigDoc | undefined;
+        if (!gig) continue; // defensive — a booking always names an existing gig
+        if (gig.startsAt < now || gig.status !== "open") {
+          await writer.update(doc.ref, { status: "expired", resolvedAt: now, updatedAt: now });
+          report.bookingsExpired++;
+          // Per-item try/catch (S3 sweep philosophy) — one failed notify
+          // must never abort the rest of this step.
+          try {
+            await notifyProfileMembers(booking.musicianProfileId, {
+              kind: "booking", title: "Booking no longer available", body: "This gig is no longer available.",
+            });
+          } catch (e) {
+            console.error(`dailySweep: failed to notify expired booking ${doc.id}`, e);
+          }
+        }
+      }
+    }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: booking expiry sweep step failed", e);
+    report.errors.bookingExpiry++;
+  }
+
+  // 7) Booking completion sweep (SP4 Task 8): resolves every "confirmed"
+  // booking whose committed work is actually done. Booking-scoped occurrence
+  // linkage — "linked" means gigs where bookingId == this booking's own id
+  // (the (bookingId,startsAt) index — mirrors bookingLifecycle.ts's
+  // getFutureFilledOccurrences/reportNoShow rationale for the same booking-
+  // scoping). A linked gig is always status:"filled" by this codebase's own
+  // invariant (bookingId is set/cleared in lockstep with status:"filled"
+  // everywhere a gig's linkage changes), so the most-recently-dated linked
+  // gig is exactly the run's (or single gig's) own last date.
+  //
+  // Single-gig and whole-run bookings share ONE rule: find the linked gig
+  // with the latest startsAt.
+  //  - none found: the booking was confirmed but every occurrence it ever
+  //    filled has since been individually reopened (cancelOccurrence) before
+  //    any of them happened — nothing was ever performed. Whole-run only
+  //    (a single-gig booking has no cancelOccurrence path, so this can't
+  //    happen to one) — resolves to "expired" (the AMENDMENT's zombie
+  //    resolver, no-past-linked-occurrence branch).
+  //  - found, but it hasn't ENDED yet (startsAt + durationMinutes > now):
+  //    still ongoing — for a whole-run booking this also covers "series
+  //    still active, more dates queued": step 1 above always births the next
+  //    due occurrence (already filled — see step 1's own comment) before
+  //    this step runs each sweep, so a genuinely ongoing active series'
+  //    booking always has a fresh future linked occurrence by this point —
+  //    skip.
+  //  - found and ENDED: resolves to "completed". This is simultaneously the
+  //    plan's "Normal" completion path (single-gig; or a whole-run booking
+  //    whose schedule genuinely ran its course) and the AMENDMENT's zombie
+  //    resolver "completed" branch (whole-run whose remaining dates were all
+  //    individually cancelled, or whose series paused/ended and
+  //    cancelActiveRunBookingTolerant — gigSeries.ts — found nothing left to
+  //    cancel) — both collapse to the identical "last linked occurrence
+  //    already ended" check, so one code path serves both without the two
+  //    framings ever disagreeing on the outcome.
+  //
+  // Do NOT complete a confirmed booking whose future linked occurrences
+  // still exist and whose last occurrence hasn't ended — see the "found, not
+  // yet ended" bullet above.
+  //
+  // Whole-run resolutions (either branch) ALSO clear the series'
+  // activeBookingId/bookedMusicianProfileId — ownership-gated (only when the
+  // series still names THIS booking) and best-effort ({lastUpdateTime}
+  // idiom, mirroring unwindBookingsForModeration's own series-linkage clear
+  // in bookingLifecycle.ts) — without this, a completed/expired run would
+  // permanently block the series from ever accepting a fresh whole-run
+  // booking (acceptBooking's rebooking-door guard refuses whenever
+  // activeBookingId names ANY booking other than the one being accepted,
+  // regardless of that named booking's own status).
+  //
+  // Status-guarded idempotency: once resolved, a booking's status is no
+  // longer "confirmed", so a later sweep run's query naturally excludes it —
+  // the zombie resolver (or the normal completion path) can never re-fire.
+  try {
+    const writer = createChunkedWriter(db);
+    const confirmedQuery = db.collection("bookings").where("status", "==", "confirmed").orderBy(FieldPath.documentId());
+    for await (const page of paginate(confirmedQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        const bookingId = doc.id;
+        const booking = doc.data() as BookingRequestDoc;
+        const isWholeRun = booking.seriesId != null;
+
+        const lastLinkedSnap = await db.collection("gigs")
+          .where("bookingId", "==", bookingId).orderBy("startsAt", "desc").limit(1).get();
+        const lastLinked = lastLinkedSnap.docs[0]?.data() as GigDoc | undefined;
+
+        let outcome: "completed" | "expired" | null = null;
+        if (!lastLinked) {
+          // Single-gig booking with no linked gig at all is defensive/
+          // unreachable (its one gig always stays linked while the booking
+          // stays confirmed) — only the whole-run zombie case is real.
+          if (isWholeRun) outcome = "expired";
+          // `startsAt` is epoch ms; `durationMinutes` is minutes — the *
+          // 60_000 conversion is load-bearing (without it this collapses to
+          // "has this occurrence STARTED", not "has it ENDED").
+        } else if (lastLinked.startsAt + lastLinked.durationMinutes * 60_000 <= now) {
+          outcome = "completed";
+        }
+        if (outcome === null) continue; // still ongoing — nothing to resolve yet
+
+        await writer.update(doc.ref, { status: outcome, resolvedAt: now, updatedAt: now });
+        if (outcome === "completed") report.bookingsCompleted++;
+        else report.bookingsExpired++;
+        if (isWholeRun) report.bookingsResolvedZombie++;
+
+        if (outcome === "completed") {
+          // Read-modify-write on the reliability doc (create-if-missing),
+          // then recomputeReliability — mirrors bookingLifecycle.ts's own
+          // completedCount bump idiom. Direct (non-batched) calls, awaited
+          // in-loop rather than queued on `writer`: recomputeReliability
+          // does its OWN read of this same doc immediately after, which
+          // must see the incremented count, not a still-uncommitted batched
+          // write.
+          const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
+          const reliabilitySnap = await reliabilityRef.get();
+          const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
+          await reliabilityRef.set({
+            marks: reliability?.marks ?? [],
+            completedCount: (reliability?.completedCount ?? 0) + 1,
+            updatedAt: now,
+          }, { merge: true });
+          await recomputeReliability(booking.musicianProfileId);
+        }
+
+        if (isWholeRun) {
+          try {
+            const seriesRef = db.doc(`gigSeries/${booking.seriesId}`);
+            const seriesSnap = await seriesRef.get();
+            const series = seriesSnap.data() as GigSeriesDoc | undefined;
+            if (series?.activeBookingId === bookingId) {
+              await seriesRef.update(
+                { activeBookingId: null, bookedMusicianProfileId: null, updatedAt: now },
+                { lastUpdateTime: seriesSnap.updateTime });
+            }
+          } catch (e) {
+            console.error(`dailySweep: failed to clear series linkage for booking ${bookingId}`, e);
+          }
+        }
+
+        try {
+          const notifyTitle = outcome === "completed" ? "Booking completed" : "Booking run ended";
+          const notifyBody = outcome === "completed"
+            ? "This booking is now complete."
+            : "This booking's run ended before any date took place.";
+          await notifyProfileMembers(booking.musicianProfileId, { kind: "booking", title: notifyTitle, body: notifyBody });
+          await notifyProfileMembers(booking.curatorProfileId, { kind: "booking", title: notifyTitle, body: notifyBody });
+        } catch (e) {
+          console.error(`dailySweep: failed to notify booking resolution ${bookingId}`, e);
+        }
+      }
+    }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: booking completion sweep step failed", e);
+    report.errors.bookingCompletion++;
   }
 
   return report;
