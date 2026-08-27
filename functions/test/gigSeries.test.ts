@@ -391,6 +391,11 @@ describe("pauseSeries", () => {
         "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
       await callFn("acceptBooking", { bookingId }, curator.user);
       expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
+      // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h) so this
+      // test exercises the SP4 71h-forfeit window, not the post-accept grace
+      // — a real pauseSeries call minutes after accept would otherwise land
+      // penalty-free.
+      await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
 
       await callFn("pauseSeries", { seriesId }, curator.user);
 

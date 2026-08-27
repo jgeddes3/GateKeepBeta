@@ -2,7 +2,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   isValidDocId, MAX_CANCEL_REASON_LENGTH, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
-  MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS,
+  MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS, CANCEL_GRACE_MS,
   type BookingRequestDoc, type BookingSide, type GigDoc, type GigSeriesDoc,
   type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation,
 } from "@gatekeep/shared";
@@ -319,6 +319,11 @@ export async function executeCancellation(
     // deposit's own policy snapshot would be a lie.
     const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
     const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
+    // SP5: 1h post-accept grace (both sides) — a flash booking accepted
+    // already inside the penalty windows can be undone penalty-free for
+    // CANCEL_GRACE_MS after the accept. Capped at gig start implicitly: the
+    // already-started guards above make now < nextStartsAt.
+    const graceApplied = freshBooking.confirmedAt != null && (now - freshBooking.confirmedAt) < CANCEL_GRACE_MS;
     let outcome: CancelOutcome;
     let markApplied = false;
     // { [key]: unknown } rather than a typed literal — the conditional
@@ -331,16 +336,16 @@ export async function executeCancellation(
 
     if (side === "curator") {
       // STRICTLY less-than — exactly curatorForfeitHours refunds.
-      outcome = hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
+      outcome = !graceApplied && hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
       if (outcome === "deposit_forfeited") bookingUpdate["deposit.forfeitedTo"] = "musician";
     } else {
       // Musician side never forfeits the curator's deposit — always refunded.
       outcome = "deposit_refunded";
-      markApplied = hoursBeforeStart < musicianMarkHours;
+      markApplied = !graceApplied && hoursBeforeStart < musicianMarkHours;
     }
 
     bookingUpdate.cancellation = {
-      by: side, reason: trimmedReason, at: now, hoursBeforeStart, outcome, markApplied,
+      by: side, reason: trimmedReason, at: now, hoursBeforeStart, outcome, markApplied, graceApplied,
     };
 
     // ---- WRITES ----
@@ -502,20 +507,25 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
     // snapshot — see executeCancellation's identical fix/comment above.
     const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
     const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
+    // SP5: 1h post-accept grace (both sides) — see executeCancellation's
+    // identical rationale above.
+    const graceApplied = freshBooking.confirmedAt != null && (now - freshBooking.confirmedAt) < CANCEL_GRACE_MS;
     let outcome: CancelOutcome;
     let markApplied = false;
     if (callerSide === "curator") {
-      outcome = hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
+      outcome = !graceApplied && hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
       // Deliberately does NOT touch booking.deposit/deposit.forfeitedTo —
       // that field is the RUN-level outcome (cancelBooking's alone to set).
       // This occurrence's own outcome lives only in the
       // occurrenceCancellations entry below; sub-5 reads it from there.
     } else {
       outcome = "deposit_refunded";
-      markApplied = hoursBeforeStart < musicianMarkHours;
+      markApplied = !graceApplied && hoursBeforeStart < musicianMarkHours;
     }
 
-    const entry: OccurrenceCancellation = { gigId, by: callerSide, at: now, hoursBeforeStart, outcome, markApplied };
+    const entry: OccurrenceCancellation = {
+      gigId, by: callerSide, at: now, hoursBeforeStart, outcome, markApplied, graceApplied,
+    };
     // No cap/drop-oldest here — the check above already refused before this
     // point whenever appending would exceed the cap, so `existing` is always
     // strictly under it and this append can never itself reach the ceiling.
