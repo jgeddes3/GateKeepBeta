@@ -65,35 +65,62 @@ describe("stripeWebhook", () => {
   // gatekeep.test.throw / gatekeep.test.ok are registered only when
   // FUNCTIONS_EMULATOR === "true" (see paymentsWebhook.ts) — the functions
   // emulator this suite runs against sets that itself.
-  it("a handler that throws returns 500 and leaves the claim processed:false (no delete — the audit row survives)", async () => {
+  it("a handler that throws returns 500, leaves processed:false, and marks failedAt + attempts:1 (no delete — the audit row survives)", async () => {
     const evt = fakeEvent("gatekeep.test.throw", {});
     const res = await post(evt);
     expect(res.status).toBe(500);
     const doc = await adb.doc(`stripeEvents/${evt.id}`).get();
     expect(doc.exists).toBe(true);
-    expect(doc.data()?.processed).toBe(false);
+    const data = doc.data();
+    expect(data?.processed).toBe(false);
+    expect(data?.failedAt).toBeTypeOf("number");
+    expect(data?.attempts).toBe(1);
   });
 
-  it("a second delivery of the SAME failed event id within STALE_CLAIM_MS is a duplicate, not reprocessed", async () => {
+  it("redelivery of a FAILED event (failedAt set) re-processes IMMEDIATELY — no waiting out STALE_CLAIM_MS — another 500, attempts incremented, firstReceivedAt preserved", async () => {
     const evt = fakeEvent("gatekeep.test.throw", {});
     expect((await post(evt)).status).toBe(500);
-    const replay = await post(evt);
-    expect(replay.status).toBe(200);
-    expect(replay.text).toBe("duplicate");
+    const first = (await adb.doc(`stripeEvents/${evt.id}`).get()).data();
+    expect(first?.failedAt).toBeTypeOf("number");
+
+    const redelivery = await post(evt);
+    // Immediate re-claim: the throw handler ran again (another 500), NOT the
+    // "duplicate" 200 a still-fresh in-flight claim would get.
+    expect(redelivery.status).toBe(500);
+    expect(redelivery.text).not.toBe("duplicate");
+    const second = (await adb.doc(`stripeEvents/${evt.id}`).get()).data();
+    expect(second?.attempts).toBe(2);
+    expect(second?.firstReceivedAt).toBe(first?.firstReceivedAt); // carried through the re-claim
+    expect(second?.receivedAt).toBeGreaterThanOrEqual(first?.receivedAt);
   });
 
-  it("a delivery after the claim goes stale re-claims (fresh receivedAt) and reprocesses — the throw handler fires again", async () => {
+  it("a genuinely in-flight claim (processed:false, failedAt:null, fresh receivedAt) is a duplicate, not reprocessed", async () => {
+    const evt = fakeEvent("some.unknown.type", {}); // handler is never reached on the duplicate path
+    await adb.doc(`stripeEvents/${evt.id}`).set({
+      type: evt.type, receivedAt: Date.now(), processed: false, failedAt: null,
+      firstReceivedAt: Date.now(), attempts: 1, expireAt: Date.now() + 60_000,
+    });
+    const res = await post(evt);
+    expect(res.status).toBe(200);
+    expect(res.text).toBe("duplicate");
+  });
+
+  it("an in-flight claim gone STALE (receivedAt older than STALE_CLAIM_MS, no failedAt — an unknown death) re-claims and reprocesses", async () => {
     const evt = fakeEvent("gatekeep.test.throw", {});
-    expect((await post(evt)).status).toBe(500);
-    // Force the claim stale via an admin-SDK rewrite of receivedAt instead of
-    // actually waiting out STALE_CLAIM_MS in a test.
     const staleReceivedAt = Date.now() - STALE_CLAIM_MS - 1000;
-    await adb.doc(`stripeEvents/${evt.id}`).update({ receivedAt: staleReceivedAt });
-    const reprocessed = await post(evt);
-    // Reprocessed (not a "duplicate" 200): the throw handler ran again.
-    expect(reprocessed.status).toBe(500);
-    expect(reprocessed.text).not.toBe("duplicate");
+    // Seed directly via admin SDK (not by actually failing a delivery first)
+    // so this isolates the STALE branch from the KNOWN-failure branch above
+    // — a real failed delivery would set failedAt itself and re-claim
+    // immediately regardless of staleness.
+    await adb.doc(`stripeEvents/${evt.id}`).set({
+      type: evt.type, receivedAt: staleReceivedAt, processed: false, failedAt: null,
+      firstReceivedAt: staleReceivedAt, attempts: 1, expireAt: Date.now() + 60_000,
+    });
+    const res = await post(evt);
+    expect(res.status).toBe(500); // reprocessed: the throw handler ran
+    expect(res.text).not.toBe("duplicate");
     const doc = await adb.doc(`stripeEvents/${evt.id}`).get();
     expect(doc.data()?.receivedAt).toBeGreaterThan(staleReceivedAt);
+    expect(doc.data()?.attempts).toBe(2);
   });
 });

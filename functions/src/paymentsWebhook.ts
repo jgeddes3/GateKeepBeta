@@ -35,12 +35,16 @@ if (process.env.FUNCTIONS_EMULATOR === "true") {
 }
 
 // A claim (stripeEvents/{id} with processed:false) that never resolves — the
-// instance crashed mid-handler, a deploy rolled mid-flight, etc. — must not
-// block that event id forever. Stripe's own retry schedule tops out well
-// under this, so a delivery for the same id arriving after STALE_CLAIM_MS
-// re-claims (and reprocesses) instead of parroting "duplicate" for an event
-// that never actually finished. Re-claiming stamps a FRESH receivedAt, so the
-// new attempt gets its own stale-claim window.
+// instance crashed mid-handler, the container was recycled, etc. — must not
+// block that event id forever. This function doesn't set `timeoutSeconds`,
+// so it runs under Cloud Functions v2's 60s default: an instance still "in
+// flight" past that can no longer possibly be the one that made the claim.
+// STALE_CLAIM_MS (10 min) is a generous multiple of that guarantee — it is
+// NOT sized around Stripe's retry cadence. It's the backstop for an UNKNOWN
+// death (we never found out the handler failed). A KNOWN failure doesn't
+// wait for this at all: see failedAt below, which lets the very next
+// delivery re-claim immediately. Re-claiming (either path) stamps a FRESH
+// receivedAt, so the new attempt gets its own stale-claim window.
 export const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 // Retention window stamped onto every stripeEvents doc as `expireAt` — 30
@@ -84,18 +88,30 @@ export const stripeWebhook = onRequest(
       const db = getFirestore();
       const eventRef = db.doc(`stripeEvents/${event.id}`);
       const now = Date.now();
-      // Claim machine: create-if-absent, OR re-claim a STALE in-flight claim
-      // (processed:false and older than STALE_CLAIM_MS). A fresh, still
-      // in-flight claim, or an already-processed one, both fail to claim —
-      // that's the "duplicate" response.
+      // Claim machine: create-if-absent, OR re-claim when either:
+      //  - the existing claim is a KNOWN failure (failedAt set by the
+      //    handler-failure catch below) — re-claim immediately, no waiting;
+      //  - the existing claim is still processed:false with no failedAt and
+      //    has gone STALE (receivedAt older than STALE_CLAIM_MS) — an
+      //    unknown death (crash, recycle) rather than a reported failure.
+      // A fresh, still in-flight claim (processed:false, no failedAt, not
+      // stale) or an already-processed claim both fail to claim — that's the
+      // "duplicate" response. Either re-claim path preserves firstReceivedAt
+      // (first-ever claim time) and increments attempts — an audit trail for
+      // repeatedly-failing events — while overwriting (and thus clearing)
+      // any prior failedAt.
       const claimed = await db.runTransaction(async (tx) => {
         const snap = await tx.get(eventRef);
         const d = snap.data();
+        const knownFailed = d?.processed === false && d?.failedAt != null;
         const staleInFlight = d?.processed === false && (d?.receivedAt ?? 0) < now - STALE_CLAIM_MS;
-        if (snap.exists && !staleInFlight) return false;
+        const canClaim = !snap.exists || knownFailed || staleInFlight;
+        if (!canClaim) return false;
         tx.set(eventRef, {
           type: event.type, receivedAt: now, processed: false,
           expireAt: now + EVENT_RETENTION_MS,
+          firstReceivedAt: d?.firstReceivedAt ?? now,
+          attempts: (d?.attempts ?? 0) + 1,
         });
         return true;
       });
@@ -109,14 +125,22 @@ export const stripeWebhook = onRequest(
         } catch (e) {
           handlerFailed = true;
           console.error(`stripeWebhook: handler for ${event.type} failed (event ${event.id})`, e);
+          // Mark the failure so the VERY NEXT delivery re-claims immediately
+          // (see the claim transaction above) instead of waiting out
+          // STALE_CLAIM_MS. If this write itself fails, STALE_CLAIM_MS is
+          // still the backstop — never a silent swallow either way.
+          try {
+            await eventRef.update({ failedAt: Date.now() });
+          } catch (markErr) {
+            console.error(`stripeWebhook: failed to mark event ${event.id} failedAt`, markErr);
+          }
         }
       }
       // Shared flag-write for both the "handler succeeded" and "no
       // handler/unknown type" paths — but skipped entirely on handlerFailed:
       // a failed handler must leave processed:false so the claim above stays
-      // reclaimable once STALE_CLAIM_MS elapses. No delete here (that would
-      // discard the audit row, per the review that replaced the old
-      // delete-on-failure behavior) — just never flip the flag.
+      // reclaimable (immediately, via failedAt). No delete here (that would
+      // discard the audit row) — just never flip the flag.
       if (!handlerFailed) {
         try {
           await eventRef.update({ processed: true, processedAt: Date.now() });
@@ -128,6 +152,6 @@ export const stripeWebhook = onRequest(
       res.status(200).send("ok");
     } catch (e) {
       console.error(`stripeWebhook: unhandled error processing event ${event.id}`, e);
-      res.status(500).send("internal error");
+      if (!res.headersSent) res.status(500).send("internal error");
     }
   });

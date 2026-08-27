@@ -21,10 +21,23 @@ function isAlreadyExists(e: unknown): boolean {
 // is detectable — it's swallowed (logged, not thrown; matches the
 // best-effort contract above) rather than silently overwriting the first
 // row. Only entries with no stripeId fall back to a random id via .add().
+//
+// LOAD-BEARING INVARIANT: stripeId must identify the specific Stripe object
+// this ROW is about, and be unique per INTENDED row — `kind` is part of the
+// doc id too, so two DIFFERENT kinds can safely share a stripeId (e.g. a
+// deposit_charged and a later refund both keyed off the same PaymentIntent
+// id), but a caller that legitimately needs two DISTINCT rows of the SAME
+// kind for the same underlying object must invent its own more specific
+// deterministic id — passing the same (kind, stripeId) pair for two
+// intentionally-separate rows silently collapses them into one. None of this
+// task's call sites need that; a future one that does must not reuse
+// stripeId bare. An empty string is treated the same as null (falls back to
+// a random id) — Stripe never issues empty-string ids, so an empty string
+// here only ever means "the caller doesn't have one yet."
 export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number }): Promise<void> {
   const db = getFirestore();
   const full: LedgerEntry = { ...entry, at: entry.at ?? Date.now() };
-  if (full.stripeId != null) {
+  if (full.stripeId) {
     const ref = db.doc(`ledger/${full.kind}:${full.stripeId}`);
     try {
       await ref.create(full);

@@ -95,6 +95,34 @@ describe("recomputePaymentSummary", () => {
     const summary = (await adb.doc(`bookings/${bookingId}`).get()).data()?.paymentSummary;
     expect(summary.state).toBe("delinquent");
   });
+
+  it("refund_pending and forfeit_pending contribute to paidCents only; refunded contributes nothing anywhere", async () => {
+    const bookingId = `pcs-statuses-${Date.now()}`;
+    await adb.doc(`bookings/${bookingId}`).set({ curatorProfileId: "c", musicianProfileId: "m", updatedAt: 1 });
+
+    await adb.doc(`bookings/${bookingId}/payments/g1`).set(basePaymentDoc({
+      gigId: "g1",
+      deposit: { sliceCents: 1000, feeShareCents: 100, intentId: "pi_1", status: "refund_pending", chargedAt: Date.now(), resolvedAt: null, forfeitTransferId: null },
+    }));
+    await adb.doc(`bookings/${bookingId}/payments/g2`).set(basePaymentDoc({
+      gigId: "g2",
+      deposit: { sliceCents: 2000, feeShareCents: 200, intentId: "pi_2", status: "forfeit_pending", chargedAt: Date.now(), resolvedAt: null, forfeitTransferId: null },
+    }));
+    await adb.doc(`bookings/${bookingId}/payments/g3`).set(basePaymentDoc({
+      gigId: "g3",
+      deposit: { sliceCents: 3000, feeShareCents: 300, intentId: "pi_3", status: "refunded", chargedAt: Date.now(), resolvedAt: Date.now(), forfeitTransferId: null },
+    }));
+
+    await recomputePaymentSummary(bookingId);
+    const summary = (await adb.doc(`bookings/${bookingId}`).get()).data()?.paymentSummary;
+    // heldCents: none of these three statuses is "held".
+    expect(summary.heldCents).toBe(0);
+    // paidCents: refund_pending (1000+100) + forfeit_pending (2000+200); refunded contributes 0.
+    expect(summary.paidCents).toBe(3300);
+    // transferredCents: 0 — only "forfeited" (not forfeit_pending) or
+    // transfer.status === "transferred" ever contribute here.
+    expect(summary.transferredCents).toBe(0);
+  });
 });
 
 describe("writeLedger", () => {
