@@ -273,11 +273,18 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
     } else {
       // Visibility-only change (or a no-op location object) — reuse the
       // already-exact private geo/address rather than re-geocoding.
-      const currentPrivate = (await privateRef.get()).data() as GigPrivateLocation;
+      // SP4 (Task 13 item 2): typed `| undefined` (not a bare cast) — the
+      // subdoc can be missing outright (e.g. an admin-SDK-only deletion),
+      // not just present-but-missing-`.geo`, and `.data()` on a
+      // non-existent doc returns `undefined`. The `!currentPrivate?.geo`
+      // guard below catches BOTH shapes with one check, surfacing a clear
+      // `internal` HttpsError instead of an uncaught TypeError on
+      // `undefined.geo`/`.lat`.
+      const currentPrivate = (await privateRef.get()).data() as GigPrivateLocation | undefined;
       // P7: explicit guard instead of a `.geo!` non-null assertion — a
-      // corrupted/partially-written private/location subdoc must surface a
-      // clear internal error here, not an uncaught TypeError on `.lat`.
-      if (!currentPrivate.geo) {
+      // corrupted/partially-written (or missing) private/location subdoc
+      // must surface a clear internal error here, not an uncaught TypeError.
+      if (!currentPrivate?.geo) {
         throw new HttpsError("internal", "This gig's stored location is missing coordinates.");
       }
       resolvedAddress = currentPrivate.address;

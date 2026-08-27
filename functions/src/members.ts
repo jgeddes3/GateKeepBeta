@@ -4,7 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import { requireProfileAdmin } from "./profiles.js";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { syncCuratorAccess } from "./curator.js";
-import type { InviteDoc, MemberDoc, MemberRole } from "@gatekeep/shared";
+import { isValidDocId, type InviteDoc, type MemberDoc, type MemberRole } from "@gatekeep/shared";
 
 const MAX_PENDING_INVITES_PER_PROFILE = 20;
 
@@ -101,13 +101,23 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
         tx.set(memberRef, member);
         tx.update(ref, { status: "accepted" });
       });
-      // curatorAccess/{uid} fast path (Task 6): accepting onto an already-
-      // APPROVED curator profile can only GAIN access, never lose it — a
-      // direct set is correct here (contrast removeMember below, which must
-      // recompute since it can only ever LOSE access).
-      const profileData = profileSnap.data();
-      if (profileData?.type === "curator" && profileData?.status === "approved") {
-        await db.doc(`curatorAccess/${uid}`).set({});
+      // curatorAccess/{uid} (SP4 Task 13 item 6 — repairs the Task 6 fast
+      // path above): the ORIGINAL "accepting can only GAIN access" reasoning
+      // assumed `profileSnap` — read BEFORE the membership transaction above
+      // — was still an accurate picture of the profile's status by the time
+      // we get here. It might not be: a concurrent reviewProfile
+      // reject-from-approved can land in the window between that read and
+      // this transaction's commit, and trusting the stale snapshot would
+      // then grant a marker for a profile that's no longer approved. Re-read
+      // fresh (cheap: only curator-typed profiles pay for the follow-up), and
+      // hand the actual decision to syncCuratorAccess's full recompute
+      // (matches removeMember's own rationale) rather than a blind
+      // `.set({})` on a single profile's possibly-stale status — a recompute
+      // also correctly reflects this uid's access via any OTHER curator
+      // profile it belongs to, which a single-profile check never could.
+      const freshProfile = await db.doc(`profiles/${inv.profileId}`).get();
+      if (freshProfile.data()?.type === "curator") {
+        await syncCuratorAccess(uid);
       }
     } else {
       await ref.update({ status: "declined" });
@@ -133,7 +143,16 @@ export const revokeInvite = onCall<{ inviteId: string }>(
 export const removeMember = onCall<{ profileId: string; uid: string }>(
   { region: "us-central1" }, async (req) => {
     const actor = requireAuthUid(req);
+    // SP4 (Task 13 item 3): requireVerifiedEmail + isValidDocId guards on
+    // both ids — missing from this callable while every sibling in this file
+    // (inviteMember, respondToInvite, revokeInvite, transferAdmin) already
+    // carries the same ordering convention (requireAuthUid ->
+    // requireVerifiedEmail -> input validation -> authz guards -> writes).
+    requireVerifiedEmail(req);
     const { profileId, uid } = req.data;
+    if (!isValidDocId(profileId) || !isValidDocId(uid)) {
+      throw new HttpsError("invalid-argument", "A profile id and member uid are required.");
+    }
     // Members may remove themselves; otherwise admin required. This check can
     // stay outside the transaction — it doesn't participate in the
     // last-admin race (it only reads the actor's own membership, which

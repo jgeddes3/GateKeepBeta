@@ -394,15 +394,16 @@ describe("runDailySweep — S3 sweep resilience", () => {
     // anchorFor's `const { weekday, hour, minute } = series.recurrence;`
     // throws a TypeError. This bypasses createSeries/validateRecurrence
     // entirely (an admin-SDK-only shape — the real callables can never
-    // produce it), simulating the kind of malformed data step 1's
-    // try/catch must survive without blocking the rest of the sweep.
+    // produce it), simulating the kind of malformed data step 1's per-series
+    // try/catch (SP4 Task 13 item 8) must survive without blocking the rest
+    // of the sweep — or any OTHER series in the same step 1 pass.
     const { seriesId: poisonedId } = await seedSeries({
       createdAt: now, updatedAt: now, recurrence: null as unknown as GigSeriesDoc["recurrence"],
     });
 
     // Independent fixtures for steps 2-4, unrelated to the poisoned series —
-    // if the step-level try/catch (not a per-doc catch) is working, step 1's
-    // exception must not stop steps 2/3/4 from running at all.
+    // step 1's per-series (not step-level) catch must not stop steps 2/3/4
+    // from running at all.
     const profileId = fakeProfileId();
     const pastId = await seedOccurrence("not-a-real-series", profileId, { status: "open", startsAt: now - 3600_000 });
     const staleTrackId = await seedTrack(profileId, { status: "processing", createdAt: now - 25 * 3600_000 });
@@ -410,11 +411,17 @@ describe("runDailySweep — S3 sweep resilience", () => {
 
     const report = await runDailySweep(now);
 
-    expect(report.errors.series).toBeGreaterThanOrEqual(1);
+    // SP4 (Task 13 item 8): a single poisoned series is now caught PER-DOC
+    // (report.seriesMaterializeSkipped), not by the step-level catch
+    // (report.errors.series) — the latter no longer fires for this scenario
+    // at all, since the per-series catch prevents the throw from ever
+    // reaching step 1's outer try/catch.
+    expect(report.seriesMaterializeSkipped).toBeGreaterThanOrEqual(1);
+    expect(report.errors.series).toBe(0);
     expect((await adb.doc(`gigs/${pastId}`).get()).data()?.status).toBe("closed");
     expect((await adb.doc(`profiles/${profileId}/tracks/${staleTrackId}`).get()).data()?.status).toBe("failed");
     expect((await adb.doc(`invites/${staleInviteId}`).get()).data()?.status).toBe("revoked");
-    // The poisoned series itself never advanced (its own step aborted).
+    // The poisoned series itself never advanced (its own iteration aborted).
     const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
     expect(poisoned.materializedThrough).toBe(0);
 
@@ -422,10 +429,40 @@ describe("runDailySweep — S3 sweep resilience", () => {
     // Firestore emulator instance, and step 1's query is unscoped
     // (`where("status","==","active")` over the WHOLE collection) — leaving
     // this doc "active" forever would poison every LATER test in this file
-    // that also calls runDailySweep (a single throw anywhere in step 1's
-    // loop aborts that whole step for THAT run, not just this doc). Flip it
-    // out of the query's match set once this test is done with it.
+    // that also calls runDailySweep. Flip it out of the query's match set
+    // once this test is done with it.
     await adb.doc(`gigSeries/${poisonedId}`).update({ status: "ended" });
+  });
+
+  it("SP4 Task 13 item 8: a poisoned series (malformed template, forced via admin SDK) does not stop a healthy active series from materializing in the SAME step 1 pass", async () => {
+    const now = Date.now();
+    const createdAt = now - 60 * DAY_MS; // far enough back that both series have a due occurrence by `now`
+    // Malformed `template` (not `recurrence` — the OTHER poisoned-series
+    // test above already covers that vector): computeOccurrences succeeds
+    // (recurrence is intact), so this throws later in the SAME per-series
+    // iteration, at `series.template.title` while building the gig doc —
+    // proving the try/catch wraps the WHOLE per-series body, not just the
+    // early planning call.
+    const { seriesId: poisonedId } = await seedSeries({
+      createdAt, updatedAt: createdAt, template: null as unknown as GigSeriesDoc["template"],
+    });
+    const { seriesId: healthyId } = await seedSeries({ createdAt, updatedAt: createdAt });
+
+    const report = await runDailySweep(now);
+
+    expect(report.seriesMaterializeSkipped).toBeGreaterThanOrEqual(1);
+    const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
+    expect(poisoned.materializedThrough).toBe(0); // its own iteration aborted, never advanced
+
+    // The healthy series — same run, same page — still materialized.
+    const healthy = (await adb.doc(`gigSeries/${healthyId}`).get()).data() as GigSeriesDoc;
+    expect(healthy.materializedThrough).toBeGreaterThan(0);
+    const healthyOccurrences = await occurrencesFor(healthyId);
+    expect(healthyOccurrences.length).toBeGreaterThan(0);
+
+    // Fixture hygiene (both series, same rationale as above).
+    await adb.doc(`gigSeries/${poisonedId}`).update({ status: "ended" });
+    await adb.doc(`gigSeries/${healthyId}`).update({ status: "ended" });
   });
 });
 
@@ -436,6 +473,34 @@ describe("runDailySweep — S4 curatorAccess retry sweep", () => {
     const report = await runDailySweep(Date.now());
     expect(report.curatorAccessRetried).toBeGreaterThanOrEqual(1);
     expect((await adb.doc(`curatorAccessRetries/${uid}`).get()).exists).toBe(false);
+  });
+
+  it("SP4 Task 13 item 1: a poisoned uid (invalid, forced via admin SDK) does not starve the retry queue — the next uid still drains", async () => {
+    const now = Date.now();
+    // ">64 chars" fails @gatekeep/shared's isValidDocId (syncCuratorAccess's
+    // own guard — SP4 Task 13 item 1) while still being a perfectly legal
+    // Firestore document id (well under its own 1500-byte limit), so this
+    // seeds fine via the admin SDK but syncCuratorAccess rejects it. Prefixed
+    // "0-" so it sorts BEFORE the healthy uid under step 5's
+    // orderBy(FieldPath.documentId()) — first in the queue.
+    const poisonedUid = `0-invalid-${"x".repeat(70)}`;
+    const healthyUid = `zzz-healthy-uid-${now}`;
+    await adb.doc(`curatorAccessRetries/${poisonedUid}`).set({ createdAt: now });
+    await adb.doc(`curatorAccessRetries/${healthyUid}`).set({ createdAt: now });
+
+    const report = await runDailySweep(now);
+
+    expect(report.curatorAccessRetried).toBeGreaterThanOrEqual(1);
+    expect(report.errors.curatorAccessRetries).toBeGreaterThanOrEqual(1);
+    // The poisoned doc stays queued (for a future retry)...
+    expect((await adb.doc(`curatorAccessRetries/${poisonedUid}`).get()).exists).toBe(true);
+    // ...but the healthy uid right behind it in doc-id order still drains.
+    expect((await adb.doc(`curatorAccessRetries/${healthyUid}`).get()).exists).toBe(false);
+
+    // Fixture hygiene: step 5's query is unscoped over the whole collection
+    // (same as step 1's series query) — leaving this doc in place would
+    // poison every LATER test in this file that also calls runDailySweep.
+    await adb.doc(`curatorAccessRetries/${poisonedUid}`).delete();
   });
 });
 

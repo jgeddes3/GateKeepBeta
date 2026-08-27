@@ -253,8 +253,6 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const name = snap.data()?.name as string | undefined;
   const isCurator = snap.data()?.type === "curator";
 
-  if (handle) await db.doc(`handles/${handle}`).delete();
-
   // S6: collect member uids BEFORE the profile's own recursiveDelete removes
   // the members subcollection — syncCuratorAccess (post-delete, below) needs
   // to run for each of them once this profile's membership docs are truly
@@ -297,6 +295,18 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   // either way. These bookings deliberately SURVIVE as "expired" top-level
   // records that now reference a dead profile id — sub-5 must tolerate that.
   await unwindBookingsForModeration({ profileId });
+
+  // SP4 (Task 13 item 5): handle delete moved to AFTER the gig/series/booking
+  // cascade above (was: the first write this callable made). Freeing the
+  // handle FIRST would let a brand-new profile claim it while this cascade
+  // is still in flight — every step above is its own await, any of which can
+  // throw and abort the rest, leaving gigs/series/bookings that still name
+  // THIS (about-to-be-orphaned) profileId while a DIFFERENT, unrelated
+  // profile now owns the handle that used to point at them. Keeping the
+  // handle claimed until the cascade's writes are actually done, and only
+  // freeing it here — right before recursiveDelete finally removes the
+  // profile doc itself — closes that window.
+  if (handle) await db.doc(`handles/${handle}`).delete();
 
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
 

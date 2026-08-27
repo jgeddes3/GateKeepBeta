@@ -307,6 +307,23 @@ describe("updateGig", () => {
     expect(after.location.geo).toEqual(priv?.geo);
   });
 
+  it("SP4 Task 13 item 2: a visibility-only change with a deleted private/location subdoc throws internal, not a TypeError", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ug4b", "planner");
+    const address = "42 Wallaby Way, Boise, ID";
+    const gigId = await createDraftGig(profileId, owner.user, { location: { address } });
+    const before = (await adb.doc(`gigs/${gigId}`).get()).data() as GigDoc;
+    expect(before.location.addressVisibility).toBe("neighborhood");
+
+    // Force the exact corrupted-data shape this guard defends against — an
+    // admin-SDK-only deletion of the private/location subdoc, unreachable
+    // via any legitimate callable path.
+    await adb.doc(`gigs/${gigId}/private/location`).delete();
+
+    await expect(
+      callFn("updateGig", { gigId, ...gigContent(), location: { addressVisibility: "public" } }, owner.user),
+    ).rejects.toMatchObject({ code: "functions/internal" });
+  });
+
   it("re-geocodes on an address change", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("ug5", "planner");
     const original = "1 First St, Reno, NV";

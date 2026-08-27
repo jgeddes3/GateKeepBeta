@@ -210,6 +210,15 @@ export interface SweepReport {
   // materialization time — see step 1's own comment below); a subset of
   // occurrencesCreated, not additional to it.
   occurrencesBornFilled: number;
+  // SP4 Task 13 item 8 — step 1: a SINGLE series' per-doc body threw
+  // (malformed recurrence/template/etc., forced via admin SDK — unreachable
+  // via createSeries/updateSeries, which validate). Caught and counted per-
+  // series rather than aborting the whole step, so one poisoned series never
+  // blocks every OTHER active series from materializing that run. Distinct
+  // from `errors.series` below, which now only ever fires for a failure
+  // outside any single series' body (the query/pagination itself, or the
+  // step's writer.commit()) — vanishingly rare in practice post-this-fix.
+  seriesMaterializeSkipped: number;
   // SP4 Task 8 — step 1: a series' activeBookingId named a booking that
   // turned out NOT confirmed at the fresh re-read (the booking has since
   // expired/cancelled/completed through some path that didn't already clear
@@ -260,7 +269,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   const report: SweepReport = {
     occurrencesCreated: 0, seriesAdvanced: 0, pastGigsClosed: 0, tracksFailed: 0, invitesRevoked: 0,
     seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
-    occurrencesBornFilled: 0, seriesSelfHealed: 0,
+    occurrencesBornFilled: 0, seriesMaterializeSkipped: 0, seriesSelfHealed: 0,
     bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
@@ -282,130 +291,144 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     const seriesQuery = db.collection("gigSeries").where("status", "==", "active").orderBy(FieldPath.documentId());
     for await (const page of paginate(seriesQuery, SERIES_PAGE_SIZE)) {
       for (const seriesDoc of page) {
-        const series = seriesDoc.data() as GigSeriesDoc;
-        const { startsAtList, newMaterializedThrough } = computeOccurrences(series, now);
-        if (newMaterializedThrough <= series.materializedThrough) continue; // nothing new for this series
+      // SP4 (Task 13 item 8): per-series try/catch — a single poisoned
+      // series (malformed recurrence/template/etc.) throwing must isolate
+      // to THIS series alone, not abort the whole step (which, pre-fix,
+      // meant every OTHER active series also materialized nothing that run,
+      // every run, until the poisoned doc was manually fixed — same
+      // isolate-log-continue philosophy as steps 2-7's own per-item
+      // try/catches elsewhere in this file, e.g. step 6's per-booking notify
+      // guard). Logged + counted in report.seriesMaterializeSkipped, then
+      // `continue`s to the next series in this page.
+      try {
+          const series = seriesDoc.data() as GigSeriesDoc;
+          const { startsAtList, newMaterializedThrough } = computeOccurrences(series, now);
+          if (newMaterializedThrough <= series.materializedThrough) continue; // nothing new for this series
 
-        // P4: materializer cap guard — MAX_OPEN_GIGS_PER_PROFILE bounds a
-        // profile's total open gigs; createGig/publishGig enforce it at
-        // request time, but the daily materializer is the OTHER writer of
-        // "open" gigs and, unguarded, could blow well past it in one run
-        // (worst case: MAX_OPEN_GIGS_PER_PROFILE manually-published gigs +
-        // MAX_ACTIVE_SERIES_PER_PROFILE series each materializing a full
-        // SERIES_MATERIALIZE_WEEKS-wide weekly window on their first run —
-        // roughly 50 + 10*8 = 130 open gigs for one profile). Skip (log +
-        // count) rather than partially materializing; matches this
-        // codebase's established non-transactional-cap-read tier (see
-        // createGig/createSeries) rather than a hard global enforcement.
-        //
-        // SP4 (Task 8): this guard is later IGNORED for a filled birth (see
-        // below) — a whole-run booking's occurrences are committed work the
-        // curator already owes the musician, never a fresh open slot. It
-        // still runs HERE, unconditionally, rather than only when a filled
-        // birth turns out NOT to be happening, so this step's per-series
-        // round-trip shape/timing stays identical to before this change —
-        // the M-10 TOCTOU race test below depends on the number of real
-        // Firestore round-trips that occur before the freshSnap re-read.
-        const openCount = await db.collection("gigs")
-          .where("curatorProfileId", "==", series.curatorProfileId).where("status", "==", "open").count().get();
-        const isCapped = openCount.data().count >= MAX_OPEN_GIGS_PER_PROFILE;
+          // P4: materializer cap guard — MAX_OPEN_GIGS_PER_PROFILE bounds a
+          // profile's total open gigs; createGig/publishGig enforce it at
+          // request time, but the daily materializer is the OTHER writer of
+          // "open" gigs and, unguarded, could blow well past it in one run
+          // (worst case: MAX_OPEN_GIGS_PER_PROFILE manually-published gigs +
+          // MAX_ACTIVE_SERIES_PER_PROFILE series each materializing a full
+          // SERIES_MATERIALIZE_WEEKS-wide weekly window on their first run —
+          // roughly 50 + 10*8 = 130 open gigs for one profile). Skip (log +
+          // count) rather than partially materializing; matches this
+          // codebase's established non-transactional-cap-read tier (see
+          // createGig/createSeries) rather than a hard global enforcement.
+          //
+          // SP4 (Task 8): this guard is later IGNORED for a filled birth (see
+          // below) — a whole-run booking's occurrences are committed work the
+          // curator already owes the musician, never a fresh open slot. It
+          // still runs HERE, unconditionally, rather than only when a filled
+          // birth turns out NOT to be happening, so this step's per-series
+          // round-trip shape/timing stays identical to before this change —
+          // the M-10 TOCTOU race test below depends on the number of real
+          // Firestore round-trips that occur before the freshSnap re-read.
+          const openCount = await db.collection("gigs")
+            .where("curatorProfileId", "==", series.curatorProfileId).where("status", "==", "open").count().get();
+          const isCapped = openCount.data().count >= MAX_OPEN_GIGS_PER_PROFILE;
 
-        // P4/M-10 (TOCTOU): re-read the series' status immediately before
-        // writing its occurrences. The scan above filtered status=='active'
-        // at the START of this run, but a curator (pauseSeries/endSeries) or
-        // an admin takedown (takedownGig scope:"series") can flip that
-        // status in the window between that scan and this write — cheap
-        // with per-step writers (one extra get per series that's actually
-        // about to be written, not per occurrence).
-        const freshSnap = await seriesDoc.ref.get();
-        const freshSeries = freshSnap.data() as GigSeriesDoc | undefined;
-        if (freshSeries?.status !== "active") {
-          report.seriesSkippedRace++;
-          continue;
-        }
-
-        // SP4 (Task 8): birth mode — FRESH activeBookingId + a fresh re-read
-        // of THAT booking's own status (not the initial scan's `series`
-        // object, which can be stale by the time we get here — same race
-        // window the M-10 re-read above already guards for `status`)
-        // decides whether this series' new occurrences are committed
-        // (filled) work or fresh open slots.
-        let birthAs: { status: "filled"; bookingId: string; bookedMusicianProfileId: string } | { status: "open" } =
-          { status: "open" };
-        let selfHeal = false;
-        if (freshSeries.activeBookingId) {
-          const bookingSnap = await db.doc(`bookings/${freshSeries.activeBookingId}`).get();
-          const booking = bookingSnap.data() as BookingRequestDoc | undefined;
-          if (booking?.status === "confirmed") {
-            birthAs = {
-              status: "filled", bookingId: freshSeries.activeBookingId,
-              bookedMusicianProfileId: freshSeries.bookedMusicianProfileId ?? booking.musicianProfileId,
-            };
-          } else {
-            // Stale linkage — the booking this series still names is no
-            // longer confirmed (expired/cancelled/completed through some
-            // path that didn't already clear this field — step 7 below and
-            // bookingLifecycle.ts's own ownership-gated clears handle the
-            // normal paths; this is the defensive backstop for whatever
-            // those miss). Self-heal: birth open instead, and clear the
-            // stale linkage in the SAME write as materializedThrough below.
-            selfHeal = true;
+          // P4/M-10 (TOCTOU): re-read the series' status immediately before
+          // writing its occurrences. The scan above filtered status=='active'
+          // at the START of this run, but a curator (pauseSeries/endSeries) or
+          // an admin takedown (takedownGig scope:"series") can flip that
+          // status in the window between that scan and this write — cheap
+          // with per-step writers (one extra get per series that's actually
+          // about to be written, not per occurrence).
+          const freshSnap = await seriesDoc.ref.get();
+          const freshSeries = freshSnap.data() as GigSeriesDoc | undefined;
+          if (freshSeries?.status !== "active") {
+            report.seriesSkippedRace++;
+            continue;
           }
-        }
 
-        // The cap guard only ever blocks a fresh OPEN slot — see this
-        // guard's own comment above for why a filled birth ignores `isCapped`
-        // outright rather than never having computed it.
-        if (birthAs.status === "open" && isCapped) {
-          report.seriesSkippedCapped++;
-          continue;
-        }
+          // SP4 (Task 8): birth mode — FRESH activeBookingId + a fresh re-read
+          // of THAT booking's own status (not the initial scan's `series`
+          // object, which can be stale by the time we get here — same race
+          // window the M-10 re-read above already guards for `status`)
+          // decides whether this series' new occurrences are committed
+          // (filled) work or fresh open slots.
+          let birthAs: { status: "filled"; bookingId: string; bookedMusicianProfileId: string } | { status: "open" } =
+            { status: "open" };
+          let selfHeal = false;
+          if (freshSeries.activeBookingId) {
+            const bookingSnap = await db.doc(`bookings/${freshSeries.activeBookingId}`).get();
+            const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+            if (booking?.status === "confirmed") {
+              birthAs = {
+                status: "filled", bookingId: freshSeries.activeBookingId,
+                bookedMusicianProfileId: freshSeries.bookedMusicianProfileId ?? booking.musicianProfileId,
+              };
+            } else {
+              // Stale linkage — the booking this series still names is no
+              // longer confirmed (expired/cancelled/completed through some
+              // path that didn't already clear this field — step 7 below and
+              // bookingLifecycle.ts's own ownership-gated clears handle the
+              // normal paths; this is the defensive backstop for whatever
+              // those miss). Self-heal: birth open instead, and clear the
+              // stale linkage in the SAME write as materializedThrough below.
+              selfHeal = true;
+            }
+          }
 
-        for (const startsAt of startsAtList) {
-          const gigRef = db.collection("gigs").doc();
-          // status:"open" (or, SP4 Task 8, "filled" for a booked run's
-          // committed occurrences) — the profile was approved at series
-          // creation, and the cascade that unpublishes a rejected profile's
-          // content also pauses its series (Task 6), so an occurrence of an
-          // active series is legitimately publishable straight away, unlike
-          // createGig's "draft" default for a member-authored one-off.
-          const gig: GigDoc = {
-            curatorProfileId: series.curatorProfileId, seriesId: seriesDoc.id, detachedFromTemplate: false,
-            title: series.template.title, description: series.template.description, wants: series.template.wants,
-            budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
-            provisions: series.template.provisions, location: series.template.location,
-            status: birthAs.status, createdAt: now, updatedAt: now,
-            bookingId: birthAs.status === "filled" ? birthAs.bookingId : null,
-            bookedMusicianProfileId: birthAs.status === "filled" ? birthAs.bookedMusicianProfileId : null,
+          // The cap guard only ever blocks a fresh OPEN slot — see this
+          // guard's own comment above for why a filled birth ignores `isCapped`
+          // outright rather than never having computed it.
+          if (birthAs.status === "open" && isCapped) {
+            report.seriesSkippedCapped++;
+            continue;
+          }
+
+          for (const startsAt of startsAtList) {
+            const gigRef = db.collection("gigs").doc();
+            // status:"open" (or, SP4 Task 8, "filled" for a booked run's
+            // committed occurrences) — the profile was approved at series
+            // creation, and the cascade that unpublishes a rejected profile's
+            // content also pauses its series (Task 6), so an occurrence of an
+            // active series is legitimately publishable straight away, unlike
+            // createGig's "draft" default for a member-authored one-off.
+            const gig: GigDoc = {
+              curatorProfileId: series.curatorProfileId, seriesId: seriesDoc.id, detachedFromTemplate: false,
+              title: series.template.title, description: series.template.description, wants: series.template.wants,
+              budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
+              provisions: series.template.provisions, location: series.template.location,
+              status: birthAs.status, createdAt: now, updatedAt: now,
+              bookingId: birthAs.status === "filled" ? birthAs.bookingId : null,
+              bookedMusicianProfileId: birthAs.status === "filled" ? birthAs.bookedMusicianProfileId : null,
+            };
+            await writer.set(gigRef, gig);
+            // Mirrors createGig's own write and updateSeries' propagation sweep —
+            // both halves of the template (public content + the exact private
+            // address/geo) land on every occurrence.
+            await writer.set(db.doc(`gigs/${gigRef.id}/private/location`), series.templatePrivateLocation);
+            if (birthAs.status === "filled") report.occurrencesBornFilled++;
+          }
+          const seriesUpdate: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {
+            materializedThrough: newMaterializedThrough, updatedAt: now,
           };
-          await writer.set(gigRef, gig);
-          // Mirrors createGig's own write and updateSeries' propagation sweep —
-          // both halves of the template (public content + the exact private
-          // address/geo) land on every occurrence.
-          await writer.set(db.doc(`gigs/${gigRef.id}/private/location`), series.templatePrivateLocation);
-          if (birthAs.status === "filled") report.occurrencesBornFilled++;
-        }
-        const seriesUpdate: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {
-          materializedThrough: newMaterializedThrough, updatedAt: now,
-        };
-        if (selfHeal) {
-          // This clear rides the same unguarded batched `seriesUpdate` write
-          // as materializedThrough below — no {lastUpdateTime} precondition
-          // of its own. What closes the otherwise-obvious clobber race (a
-          // fresh whole-run accept lands on this series between the
-          // freshSnap re-read above and this write actually committing) is
-          // a CROSS-FILE guard, not anything in this step: acceptBooking's
-          // in-txn rebooking-door check (bookings.ts) refuses a new accept
-          // outright whenever series.activeBookingId already names ANY
-          // booking — stale or not — so no fresh accept can be mid-flight
-          // to race against while this stale linkage still stands.
-          seriesUpdate.activeBookingId = null;
-          seriesUpdate.bookedMusicianProfileId = null;
-          report.seriesSelfHealed++;
-        }
-        await writer.update(seriesDoc.ref, seriesUpdate);
-        report.occurrencesCreated += startsAtList.length;
-        report.seriesAdvanced += 1;
+          if (selfHeal) {
+            // This clear rides the same unguarded batched `seriesUpdate` write
+            // as materializedThrough below — no {lastUpdateTime} precondition
+            // of its own. What closes the otherwise-obvious clobber race (a
+            // fresh whole-run accept lands on this series between the
+            // freshSnap re-read above and this write actually committing) is
+            // a CROSS-FILE guard, not anything in this step: acceptBooking's
+            // in-txn rebooking-door check (bookings.ts) refuses a new accept
+            // outright whenever series.activeBookingId already names ANY
+            // booking — stale or not — so no fresh accept can be mid-flight
+            // to race against while this stale linkage still stands.
+            seriesUpdate.activeBookingId = null;
+            seriesUpdate.bookedMusicianProfileId = null;
+            report.seriesSelfHealed++;
+          }
+          await writer.update(seriesDoc.ref, seriesUpdate);
+          report.occurrencesCreated += startsAtList.length;
+          report.seriesAdvanced += 1;
+      } catch (e) {
+        console.error(`dailySweep: series materialization failed for series ${seriesDoc.id}`, e);
+        report.seriesMaterializeSkipped++;
+      }
       }
     }
     await writer.commit();
@@ -488,17 +511,30 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // whose recompute failed at its original touchpoint (reviewProfile's
   // reject-from-approved cascade — see review.ts's curatorAccessRetries
   // write) and was recorded to curatorAccessRetries/{uid}. Deletes the
-  // retry doc on success; a renewed failure here leaves it in place (and
-  // aborts the rest of THIS step, per the same step-level try/catch as
-  // steps 1-4) to retry again on the next day's run.
+  // retry doc on success; a renewed failure here leaves it in place to retry
+  // again on the next day's run.
+  //
+  // SP4 (Task 13 item 1): per-doc try/catch (not just the step-level one
+  // below) — one poisoned uid throwing (e.g. a malformed doc id reaching
+  // syncCuratorAccess's own guard) must not starve every OTHER uid queued
+  // behind it in this run; each doc gets its own isolate-log-continue,
+  // matching step 1's identical per-series fix and this file's established
+  // philosophy elsewhere (steps 2-7). The step-level try/catch remains for
+  // failures outside any single doc's body (the query/pagination itself, or
+  // writer.commit()).
   try {
     const writer = createChunkedWriter(db);
     const retryQuery = db.collection("curatorAccessRetries").orderBy(FieldPath.documentId());
     for await (const page of paginate(retryQuery, SWEEP_PAGE_SIZE)) {
       for (const doc of page) {
-        await syncCuratorAccess(doc.id);
-        await writer.delete(doc.ref);
-        report.curatorAccessRetried++;
+        try {
+          await syncCuratorAccess(doc.id);
+          await writer.delete(doc.ref);
+          report.curatorAccessRetried++;
+        } catch (e) {
+          console.error(`dailySweep: curatorAccess retry failed for uid ${doc.id}`, e);
+          report.errors.curatorAccessRetries++;
+        }
       }
     }
     await writer.commit();
