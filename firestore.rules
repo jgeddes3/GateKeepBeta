@@ -97,6 +97,13 @@ service cloud.firestore {
         allow write: if false; // Cloud Functions only
       }
 
+      match /private/stripe {
+        // Payment identity + cached gate flags: members + admins only, same
+        // audience as private/booking. Server-write only.
+        allow read: if isMember(profileId) || isAdmin();
+        allow write: if false; // Cloud Functions only
+      }
+
       match /private/curatorBooking {
         // SP4: server-built projection (bookingVisibility.ts's
         // rebuildBookingProjections) — rates with "private"-visibility

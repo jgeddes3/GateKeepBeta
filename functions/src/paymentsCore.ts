@@ -1,5 +1,14 @@
 import { getFirestore } from "firebase-admin/firestore";
-import type { DepositStatus, LedgerEntry, PaymentDoc, PaymentSummary } from "@gatekeep/shared";
+import type { DepositStatus, LedgerEntry, PaymentDoc, PaymentSummary, StripeProfileDoc } from "@gatekeep/shared";
+
+// profiles/{profileId}/private/stripe — the payment-identity doc. Shared
+// helper so every SP5 callable/handler that needs the cached Stripe identity
+// (payments.ts's callables + the account.updated webhook handler) reads it
+// the same way, rather than each re-deriving the doc path.
+export async function getStripeProfileDoc(profileId: string): Promise<StripeProfileDoc | null> {
+  const snap = await getFirestore().doc(`profiles/${profileId}/private/stripe`).get();
+  return (snap.data() as StripeProfileDoc | undefined) ?? null;
+}
 
 function isAlreadyExists(e: unknown): boolean {
   const code = (e as { code?: unknown } | null)?.code;

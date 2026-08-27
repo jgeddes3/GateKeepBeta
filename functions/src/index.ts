@@ -18,3 +18,4 @@ export { backfillBookingVisibility } from "./bookingVisibility.js";
 export { applyToGig, offerGig, counterBooking, declineBooking, withdrawBooking, acceptBooking } from "./bookings.js";
 export { cancelBooking, cancelOccurrence, reportNoShow, removeReliabilityMark } from "./bookingLifecycle.js";
 export { stripeWebhook } from "./paymentsWebhook.js";
+export { createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus } from "./payments.js";
