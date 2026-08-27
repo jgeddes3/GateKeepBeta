@@ -269,6 +269,8 @@ Materializer change (step 1): when a series has `activeBookingId` (and the booki
 
 **Steps:** failing tests with injected clock — expiry of stale open booking; completion (single: after end; whole-run: only after the LAST occurrence ends; completedCount + projection bumped); materializer births filled with linkage for booked run; races: series linkage present but booking cancelled → births open + clears linkage; double-run idempotency across all new steps → RED → implement → GREEN → commit.
 
+**As-built (review + ruling):** step 7's last-linked query filters `status=="filled"` (ruling — no completedCount credit for taken-down dates; index `gigs (bookingId, status, startsAt)`); step 7 flips each booking with a DIRECT await update before side effects (crash re-run = at-most-one lost increment, never unbounded overcount; no chunked writer in step 7); step 6's expire condition includes missing gig docs (deleteProfile cascade); split notify try/catches; counter named `wholeRunResolutions` (counts natural run-course too); past FILLED gigs deliberately stay `filled` forever (step 2 closes open only; Shows splits on startsAt); the ms-conversion boundary (`durationMinutes * 60_000`) is pinned by a started-not-ended test. Net-new indexes this task: (bookingId, status, startsAt) only — (bookingId, startsAt) landed in Task 6.
+
 ---
 
 ## UI tasks (9–12) — shared rules
