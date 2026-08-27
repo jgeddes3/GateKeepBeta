@@ -99,6 +99,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
           <>
             {" "}· <a href={`/@${profile.handle}`} target="_blank" rel="noopener noreferrer">view public page</a>
             {" "}· <a href={`/dashboard/curator/${profileId}/gigs`}>gigs & series</a>
+            {" "}· <a href={`/dashboard/curator/${profileId}/musicians`}>find musicians</a>
           </>
         )}
       </p>
