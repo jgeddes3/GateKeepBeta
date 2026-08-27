@@ -368,6 +368,20 @@ before a real launch:
   `Constants.expoConfig?.extra?.eas?.projectId` for push token registration. Run `eas init` (or
   set `expo.extra.eas.projectId` in `apps/mobile/app.json` manually) once an EAS project exists;
   this also unblocks the EAS production build in the launch-prep track above.
+- **EAS build setup (in progress, 2026-08-27)**: `apps/mobile/eas.json` (development/preview/
+  production profiles; preview builds an installable Android APK) and the app identifiers
+  (`com.gatekeep.app` for both `android.package` and `ios.bundleIdentifier`) are committed. Still
+  manual: `eas login` + `eas init` against the org account; Firebase console → add an **Android
+  app** (package `com.gatekeep.app`) → download `google-services.json` into `apps/mobile/` and add
+  the EAS keystore's SHA-1 (`eas credentials`) to it (Google Sign-In fails on-device without it);
+  add an **iOS app** (bundle `com.gatekeep.app`) → `GoogleService-Info.plist` likewise; then set
+  `android.googleServicesFile` / `ios.googleServicesFile` in `app.json` once the files exist.
+  iOS on-device builds additionally require Apple Developer Program enrollment (dev builds under a
+  personal Apple ID are fine; store publication waits for the business identity per the ruling in
+  `docs/superpowers/sp4-rulings.md`'s launch notes). Stripe: a personal-entity TEST-MODE account
+  exists (2026-08-27); keys live outside the repo — sub-5 wires `sk_test` via `defineSecret()`
+  (the `GEOCODER_API_KEY` pattern). Never activate live mode or Connect onboarding under the
+  personal entity.
 - **Deploy-time `workspace:*` resolution**: `functions/package.json` depends on
   `@gatekeep/shared` via `"workspace:*"`. Before relying on `firebase deploy --only functions`,
   verify that command actually resolves the workspace dependency into a deployable package (rather

@@ -8,9 +8,12 @@
     "scheme": "gatekeep",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.gatekeep.app",
+      "supportsTablet": false
     },
     "android": {
+      "package": "com.gatekeep.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
