@@ -48,13 +48,14 @@ describe("FakeStripe", () => {
     await adb.doc("stripeFake/config").set({ declineCharges: false, declineCustomerIds: [] });
   });
 
-  it("pendingCustomerIds scopes StripePaymentPendingError, and carries a real, pollable intent id", async () => {
+  it("pendingCustomerIds scopes StripePaymentPendingError, carries a real pollable intent id, and replays the SAME intent id on the SAME key", async () => {
     const customerId = `cus_pending_${Date.now()}`;
     await adb.doc("stripeFake/config").set(
       { declineCharges: false, declineCustomerIds: [], pendingCustomerIds: [customerId] }, { merge: true });
+    const key = `pend-${Date.now()}`;
     let caught: unknown;
     try {
-      await fake.chargeOffSession({ customerId, amountCents: 100, idempotencyKey: `pend-${Date.now()}`, meta: {} });
+      await fake.chargeOffSession({ customerId, amountCents: 100, idempotencyKey: key, meta: {} });
     } catch (e) {
       caught = e;
     }
@@ -65,6 +66,19 @@ describe("FakeStripe", () => {
     // in `processing`, exactly like the real PaymentIntent would.
     const snap = await adb.doc(`stripeFake/state/objects/${intentId}`).get();
     expect(snap.data()).toMatchObject({ status: "processing" });
+    // Same key replays the SAME cached pending outcome — this is the actual
+    // recovery contract StripePaymentPendingError's doc comment describes:
+    // a retry can never observe a different intentId, so callers must key
+    // off the ORIGINAL intentId (persisted, then finalized by the
+    // payment_intent.succeeded webhook), not expect a retry to progress it.
+    let replayed: unknown;
+    try {
+      await fake.chargeOffSession({ customerId, amountCents: 100, idempotencyKey: key, meta: {} });
+    } catch (e) {
+      replayed = e;
+    }
+    expect(replayed).toBeInstanceOf(StripePaymentPendingError);
+    expect((replayed as StripePaymentPendingError).intentId).toBe(intentId);
     await adb.doc("stripeFake/config").set(
       { declineCharges: false, declineCustomerIds: [], pendingCustomerIds: [] }, { merge: true });
   });

@@ -230,8 +230,15 @@ export class FakeStripe implements StripeLike {
 
     try {
       // .create() (not .set()) so a concurrent call racing on the SAME key
-      // can't both "win" — first writer wins, exactly like Stripe locking
-      // concurrent requests sharing a key onto one outcome.
+      // can't both "win" the STORED outcome — first writer wins and the
+      // loser replays it. This gives id CONSISTENCY, not mutual exclusion:
+      // both racers still fully execute make() before this point (e.g. two
+      // payment_intent docs briefly exist) — harmless for chargeOffSession,
+      // and the balance-mutating methods (transferToAccount, createPayout,
+      // debitConnectedAccount) only get away with tolerating it because
+      // nothing in this codebase actually races them on the same key
+      // (documented here, not redesigned — a real race would double-apply
+      // the balance change).
       await ref.create(record);
     } catch (createError) {
       if (!isAlreadyExists(createError)) throw createError;
@@ -432,12 +439,18 @@ export class FakeStripe implements StripeLike {
   async debitConnectedAccount(p: { accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
     return this.idem(p.idempotencyKey, async () => {
       const acct = this.objRef(p.accountId);
+      const id = this.newId("adb");
+      // Both writes — the debit object AND the balance it depends on —
+      // happen in one transaction (same reasoning as transferToAccount):
+      // otherwise an infra throw landing between the two would leave the
+      // balance moved but no debit doc, and since that throw isn't a
+      // modeled error, idem() rethrows it uncached — a same-key retry would
+      // re-run this and double-decrement the balance.
       await this.db.runTransaction(async (tx) => {
         const s = await tx.get(acct);
         tx.set(acct, { balanceCents: ((s.data()?.balanceCents as number | undefined) ?? 0) - p.amountCents }, { merge: true });
+        tx.set(this.objRef(id), { kind: "account_debit", accountId: p.accountId, amountCents: p.amountCents, meta: p.meta });
       });
-      const id = this.newId("adb");
-      await this.objRef(id).set({ kind: "account_debit", accountId: p.accountId, amountCents: p.amountCents, meta: p.meta });
       return { id };
     }, `${p.accountId}:${p.amountCents}`);
   }
@@ -496,12 +509,16 @@ export class RealStripe implements StripeLike {
     // key (Customer always has it, deleted customers are just gone).
     if ("invoice_settings" in customer) {
       const dpm = customer.invoice_settings.default_payment_method;
-      // Expanded above, so this is normally the full PaymentMethod object;
-      // the typeof guard is a defensive fallback for the unexpanded string
-      // form (Stripe's types can't express "expand guarantees the object
-      // shape" statically).
-      if (dpm && typeof dpm !== "string" && dpm.card) {
-        return { id: dpm.id, brand: dpm.card.brand, last4: dpm.card.last4 };
+      if (dpm) {
+        // Expanded above, so this is normally already the full
+        // PaymentMethod object. If Stripe ever hands back just the id
+        // instead (Stripe's types can't express "expand guarantees the
+        // object shape" statically), retrieve THAT specific payment method
+        // by id — falling through to "most recently attached card" here
+        // would silently return a DIFFERENT card than the customer's actual
+        // default.
+        const pm = typeof dpm === "string" ? await this.s.paymentMethods.retrieve(dpm) : dpm;
+        if (pm.card) return { id: pm.id, brand: pm.card.brand, last4: pm.card.last4 };
       }
     }
     // No explicit default set (or it wasn't a card) — fall back to the most
@@ -648,14 +665,14 @@ export function getStripe(): StripeLike {
     return new FakeStripe();
   }
 
-  // Outside the emulator, with no key in the environment yet: give the
-  // SecretParam one more chance before failing closed.
-  const key = stripeSecretKey.value();
-  if (key) return new RealStripe(key);
-
   // Fail CLOSED: a handler that can reach getStripe() but forgot to list
   // `secrets: [stripeSecretKey]` in its options must break loudly in
   // production, never silently move fake money against real Firestore data.
+  // (No point trying stripeSecretKey.value() as a last resort here: Cloud
+  // Functions v2 backs it with the exact same process.env.STRIPE_SECRET_KEY
+  // already checked above, so a second read can't turn up anything the
+  // first one missed — it would only add a spurious emulator-style warning
+  // right before this throw.)
   throw new Error("STRIPE_SECRET_KEY is not configured — refusing to run with FakeStripe outside the emulator.");
 }
 
