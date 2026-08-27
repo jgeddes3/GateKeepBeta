@@ -39,7 +39,7 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Render-safe "now" — see BookingForms.tsx's useNow comment (the React
+  // Render-safe "now" — see BookingThread.tsx's useNow comment (the React
   // Compiler's purity rule forbids a bare Date.now() call during render).
   const now = useNow();
 

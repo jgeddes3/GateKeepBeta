@@ -6,9 +6,9 @@ import { useAuth } from "../../../../src/auth/AuthProvider";
 import { BookingThread } from "../../../../src/bookings/BookingThread";
 
 // The booking thread screen — deep-linked from both dashboards' inbox
-// sections (BookingForms.tsx's BookingInbox) and from notification rows
-// (kind:"booking" rows in app/dashboard/page.tsx's NotificationsList, via
-// NotificationDoc.refId — Task 10a's plumbing).
+// sections (src/bookings/BookingInbox.tsx's BookingInbox) and from
+// notification rows (kind:"booking" rows in app/dashboard/page.tsx's
+// NotificationsList, via NotificationDoc.refId — Task 10a's plumbing).
 export default function BookingThreadPage(props: { params: Promise<{ bookingId: string }> }) {
   const { bookingId } = use(props.params); // client components unwrap params with use()
   const { user, loading } = useAuth();

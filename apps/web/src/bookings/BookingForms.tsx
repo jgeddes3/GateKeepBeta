@@ -1,8 +1,13 @@
 "use client";
 import {
   validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT,
-  type BudgetStructure, type GigPublicLocation,
+  type BudgetStructure,
 } from "@gatekeep/shared";
+// SP4 (Task 13 item 9): re-exported, not redefined — see GigForms.tsx's
+// identical formatGigDateTime re-export comment for the full rationale;
+// gigDisplay.ts is now the ONE canonical gigLocationLabel too (this file
+// used to carry its own, byte-identical, copy).
+export { gigLocationLabel } from "../../app/u/[handle]/gigDisplay";
 
 // Sub-project 4's booking-domain equivalent of ../gigs/GigForms.tsx: shared
 // "apply / offer" building blocks reused by the gig detail page's Apply
@@ -159,16 +164,4 @@ export function launchTzNextDayStartMs(dateInput: string): number | null {
   const next = new Date(Date.UTC(year, month - 1, day + 1));
   const nextInput = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-${String(next.getUTCDate()).padStart(2, "0")}`;
   return launchTzDayStartMs(nextInput);
-}
-
-// Public-precision location label — mirrors app/u/[handle]/CuratorProfile.tsx's
-// (unexported, "use client"-boundary-duplicated) gigLocationLabel exactly:
-// `address` is present on the doc ONLY when addressVisibility=='public'
-// (functions/src/gigs.ts nulls it out otherwise), so this never branches on
-// anything the client couldn't already see.
-export function gigLocationLabel(location: GigPublicLocation): string {
-  if (location.addressVisibility === "public") {
-    return location.venueName ? `${location.venueName} — ${location.address}` : (location.address ?? location.city);
-  }
-  return location.neighborhood ? `${location.neighborhood}, ${location.city}` : location.city;
 }

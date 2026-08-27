@@ -56,14 +56,21 @@ function GigCard({ gig }: { gig: PublicGig }) {
 // Task 11 Shows entry — this curator's own filled/closed-booked gig, tagged
 // with the booked musician's name (linked to their public page when a handle
 // is known — see page.tsx's resolveProfileLabels for the "profile since
-// went private/deleted" fallback). No location line here (unlike
-// MusicianProfile.tsx's ShowCard): it's the curator's own gig, they already
-// know where it is.
-function ShowCard({ show }: { show: ShowEntry }) {
+// went private/deleted" fallback). No location line for a VENUE curator
+// (their own fixed address is already shown at the profile level, above —
+// they already know where it is), but a planner/individual_host has no such
+// fixed home base (spec: only venues geocode a full street address; the
+// other two subtypes are "roaming" — a different address per gig is the
+// normal case), so the public-precision location line (SP4 Task 13 item 9;
+// same gigLocationLabel MusicianProfile.tsx's ShowCard already renders) is
+// the only way a viewer learns WHERE one of their non-venue shows actually
+// took/takes place.
+function ShowCard({ show, isVenue }: { show: ShowEntry; isVenue: boolean }) {
   return (
     <li className={styles.gigCard}>
       <strong>{show.title || "Untitled gig"}</strong>
       <p className={styles.gigMeta}>{formatGigDateTime(show.startsAtMs)}</p>
+      {!isVenue && <p className={styles.gigMeta}>{gigLocationLabel(show.location)}</p>}
       <p className={styles.gigMeta}>
         featuring{" "}
         {show.otherProfileHandle
@@ -170,7 +177,7 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
                 <>
                   <h3>Upcoming shows</h3>
                   <ul className={styles.gigList}>
-                    {upcomingShows.map((s) => <ShowCard key={s.gigId} show={s} />)}
+                    {upcomingShows.map((s) => <ShowCard key={s.gigId} show={s} isVenue={isVenue} />)}
                   </ul>
                 </>
               )}
@@ -178,7 +185,7 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
                 <>
                   <h3>Past shows</h3>
                   <ul className={styles.gigList}>
-                    {pastShows.map((s) => <ShowCard key={s.gigId} show={s} />)}
+                    {pastShows.map((s) => <ShowCard key={s.gigId} show={s} isVenue={isVenue} />)}
                   </ul>
                 </>
               )}

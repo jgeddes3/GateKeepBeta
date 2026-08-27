@@ -636,9 +636,15 @@ function ProfileBookingsList({ profileId }: { profileId: string }) {
           orderBy("updatedAt", "desc"), limit(25))),
       ]);
       if (cancelled) return;
+      // SP4 (Task 13 item 9): re-capped at 25 AFTER the merge — each query is
+      // independently limit(25), so a profile id that (atypically — see this
+      // component's own comment above) returns rows on BOTH sides could
+      // otherwise show up to 50 combined, doubling the "most recent 25"
+      // this list is meant to be everywhere else it's used.
       const merged = [...curatorSide.docs, ...musicianSide.docs]
         .map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 25);
       setRows(merged);
     })().catch((e) => {
       console.error("ProfileBookingsList: load failed", profileId, e);

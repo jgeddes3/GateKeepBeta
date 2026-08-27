@@ -41,13 +41,19 @@ function RatesSummary({ rates }: { rates: CuratorBookingDoc["rates"] }) {
 function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onClose }: {
   curatorProfileId: string; musicianProfileId: string; musicianName: string; onClose: () => void;
 }) {
+  const router = useRouter();
   const [openGigs, setOpenGigs] = useState<(GigDoc & { id: string })[] | "loading">("loading");
   const [gigOverride, setGigOverride] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferState>(emptyOffer());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [alreadySent, setAlreadySent] = useState(false);
-  const [sent, setSent] = useState(false);
+  // SP4 (Task 13 item 9): the returned bookingId (not just a `sent` boolean)
+  // — web parity (src/bookings/OfferComposer.tsx's identical "View the
+  // booking thread ->" deep link) — so a curator who just sent an offer can
+  // jump straight into the thread instead of having to find it again from
+  // their bookings tab.
+  const [bookingId, setBookingId] = useState<string | null>(null);
 
   // Live (not one-shot) — the curator's open-gigs set can change while this
   // panel is open. Needs gigs(curatorProfileId,status,startsAt), already
@@ -73,9 +79,9 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
     if (buildError || !payload) { setError(buildError ?? "Invalid offer."); return; }
     setBusy(true);
     try {
-      await httpsCallable<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>(
+      const { data } = await httpsCallable<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>(
         getFirebase().functions, "offerGig")({ gigId: selectedGig.id, musicianProfileId, offer: payload });
-      setSent(true);
+      setBookingId(data.bookingId);
     } catch (e) {
       if (errorCode(e) === "functions/already-exists") setAlreadySent(true);
       else setError(e instanceof Error ? e.message : "Could not send this offer.");
@@ -87,9 +93,12 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
   return (
     <View style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12, marginTop: 8, gap: 10 }}>
       <Text style={{ fontWeight: "700" }}>Offer a gig to {musicianName}</Text>
-      {sent ? (
+      {bookingId ? (
         <>
           <Text style={{ color: "#16a34a" }}>Offer sent!</Text>
+          <Pressable onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } })}>
+            <Text style={{ textDecorationLine: "underline" }}>View the booking thread →</Text>
+          </Pressable>
           <Pressable onPress={onClose} style={secondaryBtn}><Text>Close</Text></Pressable>
         </>
       ) : alreadySent ? (

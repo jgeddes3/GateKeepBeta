@@ -12,6 +12,14 @@ import { LAUNCH_TIMEZONE, type GigPublicLocation } from "@gatekeep/shared";
 // a second copy-paste became a shared sibling module instead (both
 // consuming files live in this same route directory — no client boundary is
 // crossed by importing a plain .ts file with no "use client" of its own).
+//
+// SP4 (Task 13 item 9): this module is now the ONE canonical copy of both
+// functions app-wide — ../../src/gigs/GigForms.tsx's formatGigDateTime and
+// ../../src/bookings/BookingForms.tsx's gigLocationLabel used to be
+// independent, byte-identical copies; both files now import and re-export
+// from here instead. The import direction only ever runs ONE way (those
+// "use client" files import this plain module, never the reverse) — the
+// rationale above for why THIS file doesn't import THEM still holds.
 
 export function formatGigDateTime(startsAtMs: number): string {
   const date = new Date(startsAtMs);

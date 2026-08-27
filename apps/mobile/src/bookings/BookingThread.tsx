@@ -320,6 +320,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
         <View style={{ gap: 8 }}>
           <TextInput multiline numberOfLines={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reportReason}
             onChangeText={setReportReason} placeholder="What happened?" editable={actionBusy === null}
+            accessibilityLabel="No-show report reason"
             style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 64, textAlignVertical: "top" }} />
           <Text style={{ fontSize: 12, color: "#666" }}>{reportReason.length}/{MAX_CANCEL_REASON_LENGTH}</Text>
           {actionError && <ErrorBox message={actionError} />}

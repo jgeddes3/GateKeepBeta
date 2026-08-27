@@ -80,6 +80,7 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
       <View style={{ gap: 4 }}>
         <TextInput multiline numberOfLines={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reason} editable={!busy}
           onChangeText={setReason} placeholder="Reason (required)"
+          accessibilityLabel="Cancellation reason"
           style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 64, textAlignVertical: "top" }} />
         <Text style={{ fontSize: 12, color: "#666" }}>{reason.length}/{MAX_CANCEL_REASON_LENGTH}</Text>
       </View>

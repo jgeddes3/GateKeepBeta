@@ -164,12 +164,23 @@ export function GigBrowse() {
   const [toDate, setToDate] = useState("");
   const [selectedGigId, setSelectedGigId] = useState<string | null>(null);
 
+  // SP4 (Task 13 item 9): the effect below depends on the PARSED boundaries,
+  // not the raw fromDate/toDate strings — those change on every keystroke
+  // (onChangeText fires per character), but launchTzDayStartMs/
+  // launchTzNextDayStartMs return null for every incomplete/invalid
+  // intermediate value (see their own "round-trip-validated" contracts in
+  // BookingForms.tsx) and only produce a genuinely NEW numeric boundary once
+  // a full valid "YYYY-MM-DD" lands. Memoizing them means the query effect's
+  // dependency array only changes (and re-fetches) when the actual bound
+  // does — typing "2026-08-25" one character at a time no longer re-queries
+  // on every one of those keystrokes.
+  const fromMs = useMemo(() => launchTzDayStartMs(fromDate), [fromDate]);
+  const toMs = useMemo(() => launchTzNextDayStartMs(toDate), [toDate]);
+
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
     const constraints: QueryConstraint[] = [where("status", "==", "open")];
-    const fromMs = launchTzDayStartMs(fromDate);
-    const toMs = launchTzNextDayStartMs(toDate);
     if (fromMs != null) constraints.push(where("startsAt", ">=", fromMs));
     if (toMs != null) constraints.push(where("startsAt", "<", toMs));
     constraints.push(orderBy("startsAt"));
@@ -185,7 +196,7 @@ export function GigBrowse() {
         setError(e instanceof Error ? e.message : "Could not load gigs.");
       });
     return () => { cancelled = true; };
-  }, [fromDate, toDate]);
+  }, [fromMs, toMs]);
 
   const filtered = useMemo(() => {
     if (gigs === "loading") return [];

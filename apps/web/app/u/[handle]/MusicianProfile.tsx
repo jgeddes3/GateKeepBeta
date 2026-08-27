@@ -46,6 +46,14 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
   // and explicitly null" (never public), per the field's own migration
   // comment in packages/shared/src/types.ts.
   const publicBooking = profile.publicBooking ?? null;
+  // SP4 (Task 13 item 9): ports mobile's identical gate (apps/mobile/app/
+  // artist/[handle].tsx) — an all-null publicBooking (every field explicitly
+  // opted out, or a projection written before any field was filled in) would
+  // otherwise render a bare "Booking preferences" heading with nothing
+  // under it.
+  const hasAnyBookingPref = publicBooking != null && (
+    publicBooking.actSize != null || publicBooking.typicalSetMinutes != null
+    || publicBooking.bringsOwnPA != null || publicBooking.availabilityPattern != null);
   return (
     <main className={styles.page}>
       {coverUrl
@@ -83,11 +91,12 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
           )}
           {/* Booking preferences (Task 11): rendered only when this musician
               has opted their preferences public (BookingVisibility.preferences
-              == "public") — rebuildBookingProjections is the sole writer of
-              publicBooking. Rates are NEVER shown here, by design (spec
-              decision 4) — this section literally cannot render them, since
-              publicBooking's type (BookingPreferences) has no rate fields. */}
-          {publicBooking && (
+              == "public") AND at least one field is actually set (Task 13
+              item 9 — see hasAnyBookingPref above). Rates are NEVER shown
+              here, by design (spec decision 4) — this section literally
+              cannot render them, since publicBooking's type
+              (BookingPreferences) has no rate fields. */}
+          {hasAnyBookingPref && publicBooking && (
             <section className={styles.section}>
               <h2>Booking preferences</h2>
               <dl className={styles.amenities}>
