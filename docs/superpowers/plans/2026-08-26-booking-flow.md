@@ -319,6 +319,8 @@ All seven items from sp3-rulings "Post-gate follow-ups" (each with a pinning tes
 
 **Steps:** per item — failing test where the list specifies one → RED → fix → GREEN; items 5/7 are refactors guarded by the existing suites → full functions suite green → commit (one commit per item or one for the task, implementer's call).
 
+**As-built (review round):** materializer step 1 STAGES each series' payloads (local array + throwaway-batch eager validation) before any shared-writer enqueue — no partial commit under any poison shape; `revokeInvite`/`transferAdmin` gained the full guard set (the false sibling-convention comment corrected); deleteProfile's handle delete is precondition-guarded on `profileId` match; syncCuratorAccess pages at 100 + rejects invalid uids. **Deferred cleanup recorded for sub-5's inherited list:** `inviteMember` lacks `isValidDocId(profileId)`; `respondToInvite` validates inviteId by existence only.
+
 ---
 
 ### Task 14: Cleanup, docs, backfill note, gates
