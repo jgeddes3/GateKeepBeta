@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import { FakeStripe, StripeCardDeclinedError } from "../src/stripeClient.js";
+import { FakeStripe, StripeCardDeclinedError, StripePaymentPendingError } from "../src/stripeClient.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -48,6 +48,40 @@ describe("FakeStripe", () => {
     await adb.doc("stripeFake/config").set({ declineCharges: false, declineCustomerIds: [] });
   });
 
+  it("pendingCustomerIds scopes StripePaymentPendingError, and carries a real, pollable intent id", async () => {
+    const customerId = `cus_pending_${Date.now()}`;
+    await adb.doc("stripeFake/config").set(
+      { declineCharges: false, declineCustomerIds: [], pendingCustomerIds: [customerId] }, { merge: true });
+    let caught: unknown;
+    try {
+      await fake.chargeOffSession({ customerId, amountCents: 100, idempotencyKey: `pend-${Date.now()}`, meta: {} });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(StripePaymentPendingError);
+    const intentId = (caught as StripePaymentPendingError).intentId;
+    expect(intentId).toMatch(/^pi_fake_/);
+    // "Pollable" — the intent object the error points at actually exists,
+    // in `processing`, exactly like the real PaymentIntent would.
+    const snap = await adb.doc(`stripeFake/state/objects/${intentId}`).get();
+    expect(snap.data()).toMatchObject({ status: "processing" });
+    await adb.doc("stripeFake/config").set(
+      { declineCharges: false, declineCustomerIds: [], pendingCustomerIds: [] }, { merge: true });
+  });
+
+  it("a same-key race between two concurrent chargeOffSession calls resolves to one intent id", async () => {
+    const key = `race-${Date.now()}`;
+    const [a, b] = await Promise.allSettled([
+      fake.chargeOffSession({ customerId: "cus_race", amountCents: 100, idempotencyKey: key, meta: {} }),
+      fake.chargeOffSession({ customerId: "cus_race", amountCents: 100, idempotencyKey: key, meta: {} }),
+    ]);
+    expect(a.status).toBe("fulfilled");
+    expect(b.status).toBe("fulfilled");
+    const aId = a.status === "fulfilled" ? a.value.id : null;
+    const bId = b.status === "fulfilled" ? b.value.id : null;
+    expect(aId).toBe(bId);
+  });
+
   it("replaying an idempotency key with different params throws instead of replaying the wrong result", async () => {
     const key = `fp-${Date.now()}`;
     await fake.chargeOffSession({ customerId: "cus_fp", amountCents: 1000, idempotencyKey: key, meta: {} });
@@ -89,6 +123,10 @@ describe("FakeStripe", () => {
     expect(await fake.getAvailableBalanceCents(acct)).toBe(0);
     await expect(fake.reverseTransfer({ transferId: acct, idempotencyKey: `rtr2-${Date.now()}` }))
       .rejects.toThrow("is not a transfer");
+    // A second reversal of the SAME transfer (a new idempotencyKey, so this
+    // isn't just idempotency replay) is refused outright.
+    await expect(fake.reverseTransfer({ transferId, idempotencyKey: `rtr3-${Date.now()}` }))
+      .rejects.toThrow("has already been reversed");
   });
 
   it("markCardSaved flips getDefaultPaymentMethod from null to the fabricated Visa card", async () => {
