@@ -370,11 +370,11 @@ before a real launch:
   this also unblocks the EAS production build in the launch-prep track above.
 - **EAS build setup (in progress, 2026-08-27)**: `apps/mobile/eas.json` (development/preview/
   production profiles; preview builds an installable Android APK) and the app identifiers
-  (`com.gatekeepbeta.app` for both `android.package` and `ios.bundleIdentifier`) are committed. Still
+  (`com.gatekeepreal.app` for both `android.package` and `ios.bundleIdentifier`) are committed. Still
   manual: `eas login` + `eas init` against the org account; Firebase console → add an **Android
-  app** (package `com.gatekeepbeta.app`) → download `google-services.json` into `apps/mobile/` and add
+  app** (package `com.gatekeepreal.app`) → download `google-services.json` into `apps/mobile/` and add
   the EAS keystore's SHA-1 (`eas credentials`) to it (Google Sign-In fails on-device without it);
-  add an **iOS app** (bundle `com.gatekeepbeta.app`) → `GoogleService-Info.plist` likewise; then set
+  add an **iOS app** (bundle `com.gatekeepreal.app`) → `GoogleService-Info.plist` likewise; then set
   `android.googleServicesFile` / `ios.googleServicesFile` in `app.json` once the files exist.
   iOS on-device builds additionally require Apple Developer Program enrollment (dev builds under a
   personal Apple ID are fine; store publication waits for the business identity per the ruling in
