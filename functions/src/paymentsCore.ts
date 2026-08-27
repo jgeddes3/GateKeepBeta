@@ -57,6 +57,13 @@ export const DEPOSIT_PROCESSING_MESSAGE =
 // charge).
 export const DEPOSIT_RECONCILING_MESSAGE =
   "This booking's payment is still being processed — try again in a few minutes.";
+// The charge landed but the accept could not be committed (the gig/series
+// moved underneath it), and the refund SUCCEEDED. Told to the caller in place
+// of the raw abort reason so they aren't left wondering whether they were
+// charged for a booking that never happened. Only ever used when the refund
+// is confirmed — a failed refund must not claim the money came back.
+export const ACCEPT_ABORTED_REFUNDED_MESSAGE =
+  "The booking could not be confirmed — your deposit charge has been refunded.";
 
 // Curator-side money gate: saved card + not delinquent. Required before
 // offerGig and before acceptBooking (either side accepting lands the deposit

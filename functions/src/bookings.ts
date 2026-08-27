@@ -17,7 +17,7 @@ import {
   writeLedger, recomputePaymentSummary,
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, BOOKING_NOT_CONFIRMABLE_MESSAGE,
   MUSICIAN_PAYOUTS_REQUIRED_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
-  DEPOSIT_RECONCILING_MESSAGE, type StagedOccurrence,
+  DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE, type StagedOccurrence,
 } from "./paymentsCore.js";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
@@ -643,12 +643,12 @@ function collectOccurrences(v: AcceptValidation): StagedOccurrence[] {
 }
 
 // What transaction B hands its caller: enough to run the post-commit fan-out
-// (supersede + notifications + ledger) without re-reading the booking.
+// (supersede + notifications + summary) without re-reading the booking.
 export interface AcceptCommitResult {
   filledGigIds: string[];
   gigId: string; seriesId: string | null;
   curatorProfileId: string; musicianProfileId: string;
-  depositTotalCents: number;      // Σ(slice + feeShare) actually marked held — the amount charged
+  depositTotalCents: number;      // Σ(slice + feeShare) actually marked held — equals expectedChargeCents
   occurrenceCount: number;        // how many payment docs were marked held
 }
 
@@ -657,18 +657,48 @@ export interface AcceptCommitResult {
 // (the normal path, right after its charge), the payment_intent.succeeded
 // webhook (pending-charge recovery), and Task 9's sweep reconciliation.
 //
-// Returns null — never throws — when the booking is no longer in the
-// staged/open state. That's the IDEMPOTENCY contract the webhook and the
-// sweep depend on: a redelivered event, or a sweep racing the callable, must
-// be a silent no-op, not a second accept. acceptBooking itself treats null as
-// "the world moved under the charge" and refunds.
+// CONTRACT — read all four points before calling:
 //
-// `isSelfDeal` is passed in rather than computed here: detectSelfDeal reads
-// two members subcollections and must not run inside a transaction (and
-// memberships are stable at accept time — see detectSelfDeal's own comment).
-export async function commitAcceptAfterCharge(
-  bookingId: string, intentId: string | null, chargeId: string | null, now: number, isSelfDeal: boolean,
-): Promise<AcceptCommitResult | null> {
+// 1. IT CAN THROW. `readAndValidateAccept`'s HttpsErrors (the gig closed, the
+//    series paused, the F2 gig-edit guard, the $0 tripwire) surface as-is,
+//    and so do transient Firestore/transaction errors. Every caller MUST
+//    wrap the call — and must distinguish the two families, because the
+//    first is permanent and the second is worth retrying (see the webhook
+//    handler's catch for the canonical discrimination).
+//
+// 2. `null` means "THIS CALL DID NOT COMMIT" — it does NOT mean "nothing
+//    committed" and it does NOT mean "no money moved". A concurrent caller
+//    (Task 9's sweep racing the callable, a redelivered webhook) may have
+//    committed the very accept this call was trying to complete, which is
+//    exactly why it found nothing left to do. A caller that responds to null
+//    by refunding MUST first re-read the booking and confirm it is not
+//    confirmed — refunding a committed accept's deposit is the worst
+//    failure mode in this file.
+//
+// 3. It does NOT: fan out (supersede/notify), write the `deposit_charged`
+//    ledger row, recompute paymentSummary, or refund anything. Those are the
+//    caller's, deliberately — B is the transactional core and nothing
+//    best-effort belongs inside a transaction.
+//
+// 4. Params:
+//    - `intentId`/`chargeId` are stamped verbatim onto every deposit it
+//      marks held. `chargeId` may be null (a webhook payload need not carry
+//      latest_charge); `intentId` may be null ONLY when nothing was charged.
+//    - `now` is used for every timestamp it writes (confirmedAt, chargedAt,
+//      updatedAt) — pass the saga's own `now` so A and B agree, or
+//      Date.now() from an out-of-band caller.
+//    - `isSelfDeal` is passed in rather than computed here: detectSelfDeal
+//      reads two members subcollections and must not run inside a
+//      transaction (memberships are stable at accept time — see its comment).
+//    - `expectedChargeCents` is what the caller actually charged. B marks
+//      held only the docs it can account for and returns null unless their
+//      slices+fees sum EXACTLY to this — the charge and the escrow it
+//      creates must never disagree, in either direction.
+export async function commitAcceptAfterCharge(params: {
+  bookingId: string; intentId: string | null; chargeId: string | null;
+  now: number; isSelfDeal: boolean; expectedChargeCents: number;
+}): Promise<AcceptCommitResult | null> {
+  const { bookingId, intentId, chargeId, now, isSelfDeal, expectedChargeCents } = params;
   const db = getFirestore();
   const bookingRef = db.doc(`bookings/${bookingId}`);
 
@@ -705,13 +735,20 @@ export async function commitAcceptAfterCharge(
     // terms nobody paid for. Abort instead; the caller refunds.
     const occurrenceByGigId = new Map(collectOccurrences(v).map((o) => [o.gigId, o]));
     const stagedDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+    // Occurrences this commit is allowed to FILL — the other direction of the
+    // same intersection (see the fill loop below).
+    const fundedGigIds = new Set<string>();
+    let depositTotalCents = 0;
     for (const doc of paymentsSnap.docs) {
       const p = doc.data() as PaymentDoc;
+      // Already held: paid for by an earlier intent (a partially-completed
+      // saga). Not re-stamped, but its occurrence IS funded and may be filled.
+      if (p.deposit.status === "held") { fundedGigIds.add(p.gigId); continue; }
       if (p.deposit.status !== "unpaid") continue;
       const occ = occurrenceByGigId.get(p.gigId);
       if (!occ) {
         console.error(
-          `commitAcceptAfterCharge: unpaid payment doc ${bookingId}/${p.gigId} is outside this accept's occurrence set — leaving it untouched`);
+          `acceptCommit: unpaid payment doc ${bookingId}/${p.gigId} is outside this accept's occurrence set — leaving it untouched`);
         continue;
       }
       const expected = computeExpectedTotalCents(v.freshBooking.structure, v.lastEntry.amountCents, {
@@ -719,10 +756,34 @@ export async function commitAcceptAfterCharge(
       });
       if (expected !== p.baseCents) {
         console.error(
-          `commitAcceptAfterCharge: staged base ${p.baseCents} no longer matches ${expected} for ${bookingId}/${p.gigId} — aborting`);
+          `acceptCommit: staged base ${p.baseCents} no longer matches ${expected} for ${bookingId}/${p.gigId} — aborting`);
         return null;
       }
       stagedDocs.push(doc);
+      fundedGigIds.add(p.gigId);
+      depositTotalCents += p.deposit.sliceCents + p.deposit.feeShareCents;
+    }
+
+    // Charge accounting. The escrow this commit is about to create must equal
+    // the money the caller actually took — exactly, in both directions. Short
+    // means the curator paid for escrow that isn't being recorded; over means
+    // deposits are being marked held that this charge never covered. Either
+    // way the only safe move is not to commit: the caller refunds in full and
+    // the booking stays open.
+    if (depositTotalCents !== expectedChargeCents) {
+      console.error(
+        `acceptCommit: staged deposits total ${depositTotalCents} but ${expectedChargeCents} was charged for ${bookingId} — aborting`);
+      return null;
+    }
+
+    // A single booking has exactly one occurrence, so an unfunded one means
+    // there is nothing to confirm at all — abort rather than confirm a
+    // booking whose only gig stays open. Checked HERE, before any write: a
+    // Firestore transaction commits everything queued on it once the callback
+    // returns, so a bail-out AFTER tx.update would still persist those writes.
+    if (!v.freshBooking.seriesId && !fundedGigIds.has(v.freshBooking.gigId)) {
+      console.error(`acceptCommit: single booking ${bookingId} has no staged deposit for its own gig — aborting`);
+      return null;
     }
 
     // ---- WRITES ----
@@ -730,10 +791,7 @@ export async function commitAcceptAfterCharge(
     // — never written as an explicit `false`, so a normal booking's doc
     // shape is unchanged (the field simply stays absent, exactly like every
     // pre-F5 booking).
-    let depositTotalCents = 0;
     for (const doc of stagedDocs) {
-      const p = doc.data() as PaymentDoc;
-      depositTotalCents += p.deposit.sliceCents + p.deposit.feeShareCents;
       tx.update(doc.ref, {
         "deposit.status": "held", "deposit.intentId": intentId, "deposit.chargeId": chargeId,
         "deposit.chargedAt": now, updatedAt: now,
@@ -754,9 +812,22 @@ export async function commitAcceptAfterCharge(
       depositChargePending: false, depositChargeIntentId: null,
     });
 
+    // Fill ONLY funded occurrences — the second direction of the
+    // intersection. An occurrence in this transaction's re-collected set with
+    // NO payment doc was born open by the materializer during the A-to-B
+    // window: nothing was charged for it, so filling it here would create a
+    // confirmed date with no money behind it and no deposit to settle. Leave
+    // it open; once `activeBookingId` is stamped below, the materializer's
+    // next run births the run's dates already filled, with their own per-birth
+    // deposits (Task 9).
     const filledGigIds: string[] = [];
     if (v.freshBooking.seriesId) {
       for (const doc of v.occurrenceDocs) {
+        if (!fundedGigIds.has(doc.id)) {
+          console.error(
+            `acceptCommit: occurrence ${bookingId}/${doc.id} has no staged deposit — left open for a per-birth deposit`);
+          continue;
+        }
         tx.update(doc.ref, {
           status: "filled", bookingId, bookedMusicianProfileId: v.freshBooking.musicianProfileId, updatedAt: now,
         });
@@ -766,6 +837,7 @@ export async function commitAcceptAfterCharge(
         activeBookingId: bookingId, bookedMusicianProfileId: v.freshBooking.musicianProfileId, updatedAt: now,
       });
     } else {
+      // Funding already asserted above, before the first write.
       tx.update(v.gigRef, {
         status: "filled", bookingId, bookedMusicianProfileId: v.freshBooking.musicianProfileId, updatedAt: now,
       });
@@ -780,12 +852,56 @@ export async function commitAcceptAfterCharge(
   });
 }
 
+// Clears the saga marker, and ONLY when clearing it is still the right thing
+// to do. Two hazards this guards against:
+//  - A racer (Task 9's sweep, a webhook delivery) may have committed the
+//    accept between the unstage decision and this write. Clearing the marker
+//    off a booking that is mid- or post-commit would strip the one field
+//    reconciliation keys off. So: re-read, bail unless the booking is still
+//    open-and-pending, and write under a `lastUpdateTime` precondition taken
+//    from that very read, so a commit landing in the microseconds between
+//    makes this write FAIL rather than clobber.
+//  - The write is the last step of every failure path, so losing it to one
+//    transient error strands the booking. Bounded retry (3 attempts, short
+//    backoff): a precondition failure re-reads and usually then bails
+//    cleanly, a transient error gets another go, and a final failure is
+//    logged loudly for reconciliation rather than swallowed.
+const MARKER_CLEAR_ATTEMPTS = 3;
+
+async function clearStagedMarker(db: FirebaseFirestore.Firestore, bookingId: string): Promise<void> {
+  const ref = db.doc(`bookings/${bookingId}`);
+  for (let attempt = 1; attempt <= MARKER_CLEAR_ATTEMPTS; attempt++) {
+    try {
+      const snap = await ref.get();
+      const b = snap.data() as BookingRequestDoc | undefined;
+      if (!b) return;
+      if (b.status !== "open" || b.depositChargePending !== true) return;  // already resolved by someone else
+      await ref.update(
+        { depositChargePending: false, depositChargeIntentId: null, updatedAt: Date.now() },
+        { lastUpdateTime: snap.updateTime });
+      return;
+    } catch (e) {
+      if (attempt === MARKER_CLEAR_ATTEMPTS) {
+        console.error(
+          `acceptUnstage: could not clear the staged marker on ${bookingId} after ${attempt} attempts — left for reconciliation`, e);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 50 * attempt));
+    }
+  }
+}
+
 // Best-effort undo of transaction A's staging, for every path that decided
 // NOT to (or could not) complete the accept: a declined card, an aborted
 // transaction B, an unexpected Stripe failure. Leaves the booking `open` with
 // no pending marker, so a retry is a clean fresh attempt (with a bumped
 // attempt counter ⇒ a fresh idempotency key ⇒ a real second charge attempt,
 // not a replayed decline).
+//
+// `feePolicy` and `depositChargeAttempt` are deliberately LEFT on the booking:
+// the fee snapshot is the same one a retry would write, and the attempt
+// counter must only ever go up — resetting it would let a retry reuse a
+// consumed (and possibly decline-cached) idempotency key.
 //
 // Each delete is guarded on the doc still being `unpaid`: the caller reaches
 // here only when nothing was committed, but a delete is destructive and a
@@ -795,6 +911,7 @@ export async function commitAcceptAfterCharge(
 async function unstageAccept(
   db: FirebaseFirestore.Firestore, bookingId: string, occurrences: StagedOccurrence[],
 ): Promise<void> {
+  let fullyUnstaged = true;
   for (const occ of occurrences) {
     try {
       const ref = paymentRef(db, bookingId, occ.gigId);
@@ -802,17 +919,26 @@ async function unstageAccept(
       const p = snap.data() as PaymentDoc | undefined;
       if (!p) continue;
       if (p.deposit.status !== "unpaid") {
-        console.error(`unstageAccept: refusing to delete ${bookingId}/${occ.gigId} in deposit status ${p.deposit.status}`);
+        console.error(`acceptUnstage: refusing to delete ${bookingId}/${occ.gigId} in deposit status ${p.deposit.status}`);
+        fullyUnstaged = false;
         continue;
       }
       await ref.delete();
     } catch (e) {
-      console.error(`unstageAccept: failed to remove staged payment doc ${bookingId}/${occ.gigId}`, e);
+      console.error(`acceptUnstage: failed to remove staged payment doc ${bookingId}/${occ.gigId}`, e);
+      fullyUnstaged = false;
     }
   }
-  await db.doc(`bookings/${bookingId}`).update({
-    depositChargePending: false, depositChargeIntentId: null, updatedAt: Date.now(),
-  }).catch((e) => console.error(`unstageAccept: failed to clear the staged marker on ${bookingId}`, e));
+  // Marker LAST, and only if every staged doc actually went away. A refused
+  // delete means a doc is no longer `unpaid` — i.e. a racer is mid-commit (or
+  // already committed) — and a failed delete means a staged doc survives.
+  // Clearing the marker in either case would hide a booking that still needs
+  // reconciliation, so leave the whole saga intact and let the sweep own it.
+  if (!fullyUnstaged) {
+    console.error(`acceptUnstage: ${bookingId} was not fully unstaged — leaving the saga marker set for reconciliation`);
+    return;
+  }
+  await clearStagedMarker(db, bookingId);
 }
 
 // ---- POST-COMMIT TAIL (deliberately outside any transaction) ----
@@ -821,21 +947,17 @@ async function unstageAccept(
 // Every step is best-effort and failure-isolated: the accept and its charge
 // have already committed by the time this runs, so nothing here may surface
 // as a failure to whoever is waiting.
+// The `deposit_charged` ledger row is deliberately NOT written here: it
+// records the CHARGE, so it is written the moment the charge succeeds (before
+// transaction B), not after a commit that might never happen. See
+// acceptBooking's charge block and the webhook handler.
 async function runAcceptPostCommit(
-  db: FirebaseFirestore.Firestore, bookingId: string, commit: AcceptCommitResult,
-  intentId: string | null, now: number,
+  db: FirebaseFirestore.Firestore, bookingId: string, commit: AcceptCommitResult, now: number,
 ): Promise<void> {
   try {
-    if (intentId && commit.depositTotalCents > 0) {
-      await writeLedger({
-        kind: "deposit_charged", amountCents: commit.depositTotalCents,
-        bookingId, gigId: null, profileId: commit.curatorProfileId, stripeId: intentId,
-        detail: `deposit batch (${commit.occurrenceCount} occurrence(s))`,
-      });
-    }
     await recomputePaymentSummary(bookingId);
   } catch (e) {
-    console.error(`acceptBooking: ledger/summary failed for ${bookingId}`, e);
+    console.error(`acceptPostCommit: paymentSummary recompute failed for ${bookingId}`, e);
   }
 
   // Sibling supersede: every other OPEN booking naming any gig this accept
@@ -855,11 +977,20 @@ async function runAcceptPostCommit(
       db.collection("bookings").where("seriesId", "==", commit.seriesId).where("status", "==", "open"));
   }
   for (const q of siblingQueries) {
-    const snap = await q.get();
-    for (const doc of snap.docs) {
-      if (seen.has(doc.id)) continue;
-      seen.add(doc.id);
-      await supersedeSiblingBooking(db, doc, now);
+    // Per-QUERY isolation, on top of supersedeSiblingBooking's own per-doc
+    // isolation: without this, a failing sibling query (a missing index, a
+    // transient read error) would escape a function whose contract is that
+    // nothing here can surface to the caller, and would skip the winner
+    // notifications below too.
+    try {
+      const snap = await q.get();
+      for (const doc of snap.docs) {
+        if (seen.has(doc.id)) continue;
+        seen.add(doc.id);
+        await supersedeSiblingBooking(db, doc, now);
+      }
+    } catch (e) {
+      console.error(`acceptPostCommit: sibling supersede query failed for ${bookingId}`, e);
     }
   }
 
@@ -887,7 +1018,7 @@ async function runAcceptPostCommit(
       body: `You're booked and confirmed with ${curatorName}.`,
     });
   } catch (e) {
-    console.error(`acceptBooking: failed to notify winners for booking ${bookingId}`, e);
+    console.error(`acceptPostCommit: failed to notify winners for booking ${bookingId}`, e);
   }
 }
 
@@ -1012,6 +1143,14 @@ export const acceptBooking = onCall<{ bookingId: string }>(
           amountCents: v.lastEntry.amountCents, expectedQuantity: v.lastEntry.expectedQuantity,
           structure: v.freshBooking.structure, feePolicy, selfDeal: isSelfDeal, now,
         });
+        // Unconditional set (not create), and it may legitimately overwrite:
+        // a previous attempt's docs survive a failed unstage. Safe because of
+        // a saga invariant — a booking only reaches this line while `open`,
+        // and unstageAccept never clears the marker unless every staged doc
+        // was `unpaid` and actually deleted, so a booking that is back to
+        // open-and-not-pending can only have unpaid leftovers here. A HELD
+        // doc can therefore never be overwritten by this line; transaction B
+        // additionally refuses to re-stamp anything that isn't `unpaid`.
         tx.set(paymentRef(db, bookingId, occ.gigId), doc);
         totalChargeCents += doc.deposit.sliceCents + doc.deposit.feeShareCents;
       }
@@ -1046,6 +1185,18 @@ export const acceptBooking = onCall<{ bookingId: string }>(
         });
         intentId = r.id;
         chargeId = r.chargeId;
+        // Ledger row for the CHARGE, written the moment it succeeds — before
+        // transaction B, not after. The row records that money left the
+        // curator's card, which is true regardless of whether the accept goes
+        // on to commit; deferring it to the post-commit tail would lose the
+        // audit trail for exactly the charges that then had to be refunded.
+        // Best-effort (a lost row is an audit gap, never a money bug) and
+        // idempotent via writeLedger's deterministic {kind}:{stripeId} id.
+        await writeLedger({
+          kind: "deposit_charged", amountCents: staged.totalChargeCents,
+          bookingId, gigId: null, profileId: booking.curatorProfileId, stripeId: intentId,
+          detail: `deposit batch (${staged.occurrences.length} occurrence(s))`,
+        }).catch((le) => console.error(`acceptBooking: deposit_charged ledger row failed for ${bookingId}`, le));
       } catch (e) {
         if (e instanceof StripePaymentPendingError) {
           // NOT a failure and NOT unstaged: the intent exists and is still
@@ -1070,7 +1221,9 @@ export const acceptBooking = onCall<{ bookingId: string }>(
     let commit: AcceptCommitResult | null = null;
     let commitError: unknown = null;
     try {
-      commit = await commitAcceptAfterCharge(bookingId, intentId, chargeId, now, isSelfDeal);
+      commit = await commitAcceptAfterCharge({
+        bookingId, intentId, chargeId, now, isSelfDeal, expectedChargeCents: staged.totalChargeCents,
+      });
     } catch (e) {
       commitError = e;
     }
@@ -1079,16 +1232,27 @@ export const acceptBooking = onCall<{ bookingId: string }>(
       // world moved under the charge (returned null). Give the money back
       // before surfacing anything: the accept did not happen, so the curator
       // must not be left paying for it.
+      //
+      // Safe to refund unconditionally on THIS path (unlike an out-of-band
+      // caller, which must re-read first — see commitAcceptAfterCharge's
+      // contract point 2): this request owns the attempt whose charge it is
+      // refunding, and a racer that committed would have had to consume the
+      // very staged docs B just found missing.
       let refunded = true;
       if (intentId) {
         refunded = false;
         try {
-          await getStripe().refund({
+          const r = await getStripe().refund({
             intentId, amountCents: staged.totalChargeCents,
             idempotencyKey: `${bookingId}:accept:refund:${staged.attempt}`,
             meta: { bookingId, purpose: "accept_abort" },
           });
           refunded = true;
+          await writeLedger({
+            kind: "refund", amountCents: staged.totalChargeCents,
+            bookingId, gigId: null, profileId: booking.curatorProfileId, stripeId: r.id,
+            detail: "accept abort — booking no longer confirmable",
+          }).catch((le) => console.error(`acceptBooking: abort-refund ledger row failed for ${bookingId}`, le));
         } catch (re) {
           console.error(
             `acceptBooking: abort-refund failed for ${bookingId} (intent ${intentId}, attempt ${staged.attempt}) — leaving the saga staged for reconciliation`, re);
@@ -1103,11 +1267,20 @@ export const acceptBooking = onCall<{ bookingId: string }>(
       // under its own attempt-scoped key. Clearing the marker here would strand
       // that charge with nothing left pointing at it.
       if (refunded) await unstageAccept(db, bookingId, staged.occurrences);
+      // Tell the caller the money came back — but ONLY when it actually did.
+      // Otherwise surface the underlying reason unchanged: a "we refunded
+      // you" message on a failed refund would be a lie about money.
+      if (intentId && refunded) {
+        if (commitError) {
+          console.error(`acceptBooking: transaction B failed for ${bookingId} after a refunded charge`, commitError);
+        }
+        throw new HttpsError("aborted", ACCEPT_ABORTED_REFUNDED_MESSAGE);
+      }
       if (commitError) throw commitError;
       throw new HttpsError("aborted", GIG_UNAVAILABLE_MESSAGE);
     }
 
-    await runAcceptPostCommit(db, bookingId, commit, intentId, now);
+    await runAcceptPostCommit(db, bookingId, commit, now);
     return { ok: true };
   });
 
@@ -1138,9 +1311,19 @@ paymentIntentSucceededHandlers["deposit"] = async (object) => {
   const snap = await db.doc(`bookings/${bookingId}`).get();
   const booking = snap.data() as BookingRequestDoc | undefined;
   if (!booking) return;
-  // Not the accept this booking is waiting on (already committed, never
-  // staged, or a different attempt's intent) — a no-op, not an error.
-  if (booking.depositChargePending !== true || booking.depositChargeIntentId !== intentId) return;
+  // No accept in flight: this event is a redelivery for an accept that
+  // already committed (or one that was unstaged). Genuinely nothing to do.
+  if (booking.depositChargePending !== true) return;
+  // An accept IS in flight, but on a DIFFERENT intent — and THIS intent just
+  // succeeded. That means two live charges exist for one booking: the one the
+  // booking is waiting on, and this one, which nothing will ever consume.
+  // Not silently ignorable; it's precisely the stuck-money signal Task 9's
+  // reconciliation (and an operator) needs.
+  if (booking.depositChargeIntentId !== intentId) {
+    console.error(
+      `payment_intent.succeeded (deposit): ${bookingId} is awaiting intent ${String(booking.depositChargeIntentId)} but ${intentId} succeeded — unconsumed charge, needs reconciliation`);
+    return;
+  }
 
   const isSelfDeal = await detectSelfDeal(db, booking.curatorProfileId, booking.musicianProfileId);
   const now = Date.now();
@@ -1149,28 +1332,69 @@ paymentIntentSucceededHandlers["deposit"] = async (object) => {
   // documents that, and the transfers that want it treat it as optional).
   const chargeId = typeof object.latest_charge === "string" ? object.latest_charge : null;
 
+  // What this intent actually charged. Prefer the EVENT's own amount — that
+  // is Stripe's word on the money, and the whole point of the accounting
+  // check is to catch a staged set that has drifted from it. Only when the
+  // payload carries no amount (a hand-rolled emulator event) fall back to
+  // summing the staged docs, which still catches a set that changes between
+  // this read and the transaction.
+  let expectedChargeCents: number | null =
+    typeof object.amount_received === "number" ? object.amount_received
+      : typeof object.amount === "number" ? object.amount
+        : null;
+  if (expectedChargeCents == null) {
+    const staged = await db.collection(`bookings/${bookingId}/payments`).get();
+    expectedChargeCents = staged.docs.reduce((sum, d) => {
+      const p = d.data() as PaymentDoc;
+      return p.deposit.status === "unpaid" ? sum + p.deposit.sliceCents + p.deposit.feeShareCents : sum;
+    }, 0);
+  }
+
+  // Ledger row for the charge, written before the commit for the same reason
+  // acceptBooking writes its own there: the money moved, whether or not the
+  // accept goes on to commit. Idempotent via the deterministic id, so the
+  // callable and this handler can never double-count the same intent.
+  await writeLedger({
+    kind: "deposit_charged", amountCents: expectedChargeCents,
+    bookingId, gigId: null, profileId: booking.curatorProfileId, stripeId: intentId,
+    detail: "deposit batch (pending charge confirmed by webhook)",
+  }).catch((le) => console.error(`payment_intent.succeeded (deposit): ledger row failed for ${bookingId}`, le));
+
   let commit: AcceptCommitResult | null;
   try {
-    commit = await commitAcceptAfterCharge(bookingId, intentId, chargeId, now, isSelfDeal);
+    commit = await commitAcceptAfterCharge({
+      bookingId, intentId, chargeId, now, isSelfDeal, expectedChargeCents,
+    });
   } catch (e) {
-    // Every way B throws here is a PERMANENT condition (the gig closed, the
-    // series moved, the F2 gig-edit guard tripped) — never something a later
-    // delivery of this same event would resolve. Returning normally lets the
-    // webhook mark the event processed; letting it escape would 500, and
-    // Stripe would then retry a permanently-failing event forever. The
-    // booking keeps its pending marker either way, which is exactly the
-    // signal Task 9's reconciliation looks for.
+    // Discriminate, because the two failure families want opposite handling:
+    //  - HttpsError is the PERMANENT validation family (the gig closed, the
+    //    series moved, the F2 gig-edit guard, the $0 tripwire). No later
+    //    delivery of this event can resolve it, so swallow it: returning
+    //    normally lets the webhook mark the event processed, whereas letting
+    //    it escape would 500 and Stripe would retry it forever.
+    //  - Anything else is transient (a Firestore contention/abort, an infra
+    //    error). RETHROW it so the claim machine records failedAt and the
+    //    very next delivery re-claims and retries.
+    // The booking keeps its pending marker on both paths, which is exactly
+    // the signal Task 9's reconciliation looks for.
+    if (!(e instanceof HttpsError)) {
+      console.error(
+        `payment_intent.succeeded (deposit): transient commit failure for ${bookingId} (intent ${intentId}) — retrying on redelivery`, e);
+      throw e;
+    }
     console.error(
-      `payment_intent.succeeded (deposit): commit threw for ${bookingId} (intent ${intentId}) — left staged for reconciliation`, e);
+      `payment_intent.succeeded (deposit): commit permanently rejected for ${bookingId} (intent ${intentId}) — left staged for reconciliation`, e);
     return;
   }
   if (!commit) {
     // Charged, but the accept can no longer be committed (the gig/series
-    // moved while the intent settled). Deliberately NOT auto-refunded from a
-    // webhook — Task 9's reconciliation owns stuck money; this is the signal
-    // for it (and for an operator) that this booking needs attention.
+    // moved while the intent settled, or the staged set no longer accounts
+    // for the charge). Deliberately NOT auto-refunded from a webhook — a
+    // racer may have committed this very accept (see commitAcceptAfterCharge
+    // contract point 2), and Task 9's reconciliation owns stuck money. This
+    // log is the signal for it, and for an operator.
     console.error(`payment_intent.succeeded (deposit): could not commit accept for ${bookingId} (intent ${intentId})`);
     return;
   }
-  await runAcceptPostCommit(db, bookingId, commit, intentId, now);
+  await runAcceptPostCommit(db, bookingId, commit, now);
 };

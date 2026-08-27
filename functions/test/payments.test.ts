@@ -10,7 +10,13 @@ import type { RefreshPaymentMethodInput } from "../src/payments.js";
 import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
+  DEPOSIT_RECONCILING_MESSAGE,
 } from "../src/paymentsCore.js";
+// Transaction B of the accept saga, exercised DIRECTLY (not through the
+// callable) below — it is an exported helper precisely because Task 9's sweep
+// and the webhook call it out of band, and those callers' contract (null vs
+// throw, what it does and doesn't write) needs its own coverage.
+import { commitAcceptAfterCharge } from "../src/bookings.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -770,6 +776,144 @@ describe("Task 6 accept saga", () => {
     expect(p.deposit.feeShareCents).toBe(308);
     expect(p.deposit.status).toBe("held");
     expect(await getFakeIntent(p.deposit.intentId!).then((i) => i?.amountCents)).toBe(3108);
+  });
+
+  it("a staged booking with no recorded intent refuses a fresh accept with the reconciling message", async () => {
+    const curator = await makeApprovedCuratorProfile("t6recc");
+    const musician = await makeApprovedMusicianProfile("t6recm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    // The crash window: staged, but the instance died before it learned the
+    // charge's outcome. Whether money moved is UNKNOWN, so accept must refuse
+    // rather than re-stage onto a fresh attempt key (which would charge a
+    // second time if the first attempt had in fact succeeded).
+    await adb.doc(`bookings/${bookingId}`).update({
+      depositChargePending: true, depositChargeIntentId: null, depositChargeAttempt: 1,
+    });
+
+    await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: DEPOSIT_RECONCILING_MESSAGE });
+
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargeAttempt).toBe(1);   // untouched — no new attempt was minted
+  });
+
+  it("payment_intent.succeeded with an unrecognised purpose is a processed 200 no-op", async () => {
+    const evt = fakeEvent("payment_intent.succeeded", {
+      id: `pi_unknownpurpose_${Date.now()}`, metadata: { purpose: "not_a_real_purpose" },
+    });
+    const res = await postWebhook(evt);
+    expect(res.status).toBe(200);
+    // Recorded and marked processed, not left reclaimable: Stripe must not
+    // retry an event we deliberately have nothing to do with.
+    const stored = await adb.doc(`stripeEvents/${evt.id}`).get();
+    expect(stored.data()?.processed).toBe(true);
+  });
+
+  it("commitAcceptAfterCharge: null (writing nothing) when the booking isn't staged, and THROWS when validation fails under a staged one", async () => {
+    const curator = await makeApprovedCuratorProfile("t6cacc");
+    const musician = await makeApprovedMusicianProfile("t6cacm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await adb.doc(`gigs/${gigId}`).update({ status: "closed" });
+
+    // Contract point 2 — "did not commit": no saga is in flight on this
+    // booking, so there is nothing to complete. Null, and not one write.
+    await expect(commitAcceptAfterCharge({
+      bookingId, intentId: "pi_never", chargeId: null, now: Date.now(),
+      isSelfDeal: false, expectedChargeCents: 0,
+    })).resolves.toBeNull();
+
+    let after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.acceptedTerms).toBeNull();
+    expect(after.confirmedAt).toBeNull();
+    expect(await getPaymentDocs(bookingId)).toHaveLength(0);
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("closed");
+
+    // Contract point 1 — it CAN throw: with a saga genuinely in flight,
+    // validation runs and the closed gig surfaces as an HttpsError rather
+    // than a silent null, so callers can tell "nothing to do" apart from
+    // "this accept can never complete".
+    await adb.doc(`bookings/${bookingId}`).update({ depositChargePending: true });
+    await expect(commitAcceptAfterCharge({
+      bookingId, intentId: "pi_never", chargeId: null, now: Date.now(),
+      isSelfDeal: false, expectedChargeCents: 0,
+    })).rejects.toThrow();
+
+    after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.acceptedTerms).toBeNull();
+  });
+
+  it("commitAcceptAfterCharge: a stray unpaid doc breaks the charge accounting, and is left untouched when the accounted set commits", async () => {
+    const curator = await makeApprovedCuratorProfile("t6strc");
+    const musician = await makeApprovedMusicianProfile("t6strm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    const customerId = await curatorCustomerId(curator.profileId);
+
+    // A genuinely staged booking: the pending knob leaves transaction A's
+    // staging and the saga marker in place without committing anything.
+    await setChargeKnob("pendingCustomerIds", customerId, true);
+    try {
+      await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
+        .rejects.toMatchObject({ message: DEPOSIT_PROCESSING_MESSAGE });
+    } finally {
+      await setChargeKnob("pendingCustomerIds", customerId, false);
+    }
+    const intentId = (await getBooking(bookingId)).depositChargeIntentId!;
+
+    // A leftover from a failed unstage: an unpaid doc for a gig that is not
+    // an occurrence of this booking at all.
+    const real = (await getPaymentDocs(bookingId))[0];
+    const strayGigId = `strayGig${Date.now()}`;
+    const strayRef = adb.doc(`bookings/${bookingId}/payments/${strayGigId}`);
+    await strayRef.set({ ...real, gigId: strayGigId });
+
+    // Claiming both docs' worth doesn't reconcile: only the real occurrence
+    // is accountable, so the accounting check refuses to commit rather than
+    // record escrow the charge never covered.
+    await expect(commitAcceptAfterCharge({
+      bookingId, intentId, chargeId: null, now: Date.now(),
+      isSelfDeal: false, expectedChargeCents: 8742 * 2,
+    })).resolves.toBeNull();
+    expect((await getBooking(bookingId)).status).toBe("open");
+    expect((await adb.doc(`bookings/${bookingId}/payments/${gigId}`).get()).data()?.deposit.status).toBe("unpaid");
+
+    // The honest amount commits — the in-set doc is marked held, the stray is
+    // logged and left exactly as it was.
+    const commit = await commitAcceptAfterCharge({
+      bookingId, intentId, chargeId: "ch_direct_test", now: Date.now(),
+      isSelfDeal: false, expectedChargeCents: 8742,
+    });
+    expect(commit?.filledGigIds).toEqual([gigId]);
+    expect(commit?.depositTotalCents).toBe(8742);
+    expect(commit?.occurrenceCount).toBe(1);
+
+    const realAfter = (await adb.doc(`bookings/${bookingId}/payments/${gigId}`).get()).data() as PaymentDoc;
+    expect(realAfter.deposit.status).toBe("held");
+    expect(realAfter.deposit.intentId).toBe(intentId);
+    expect(realAfter.deposit.chargeId).toBe("ch_direct_test");
+    const strayAfter = (await strayRef.get()).data() as PaymentDoc;
+    expect(strayAfter.deposit.status).toBe("unpaid");
+    expect(strayAfter.deposit.intentId).toBeNull();
+
+    const confirmed = await getBooking(bookingId);
+    expect(confirmed.status).toBe("confirmed");
+    expect(confirmed.depositChargePending).toBe(false);
+    expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
+    // Contract point 3: B commits, and does nothing else — no summary
+    // recompute, no ledger row, no fan-out. Those are the caller's.
+    expect(confirmed.paymentSummary).toBeUndefined();
   });
 
   it("SP4's sibling supersede still fires after the saga: a rival open booking on the same gig is superseded", async () => {
