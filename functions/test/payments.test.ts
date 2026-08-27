@@ -15,6 +15,11 @@ import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
   DEPOSIT_RECONCILING_MESSAGE,
+  // Task 8's post-commit executor, exercised DIRECTLY below (same rationale
+  // as commitAcceptAfterCharge above): Task 9's sweep is its other caller,
+  // and its idempotency contract — a re-run against an already-terminal doc
+  // must move no money — is only testable by calling it twice.
+  resolveDepositPending,
 } from "../src/paymentsCore.js";
 // Transaction B of the accept saga, exercised DIRECTLY (not through the
 // callable) below — it is an exported helper precisely because Task 9's sweep
@@ -1404,6 +1409,99 @@ describe("Task 8 cancellation money", () => {
     expect(booking.status).toBe("cancelled_by_musician");
     expect(booking.paymentSummary?.heldCents).toBe(0);
     expect(booking.paymentSummary?.paidCents).toBe(0);
+  });
+
+  // Review round 1: the settlement waive must NOT depend on what the deposit
+  // did. The reported occurrence's gig stays filled+linked (only FUTURE dates
+  // are reopened), so a settlement left `not_due` here is one Task 9 will
+  // schedule and Task 10 will act on — charging the curator the remaining
+  // base + fee and paying the musician who never showed up.
+  it("reportNoShow on a never-charged deposit: settlement still waived, deposit resolves terminal, no Stripe call", async () => {
+    const { curator, gigId, bookingId } = await makeConfirmedSingleBooking("t8unp", { pastStartHours: 1 });
+    const before = (await getPaymentDocs(bookingId))[0];
+    const intentId = before.deposit.intentId!;
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
+
+    // Simulates a birth deposit the sweep hasn't charged yet (Task 9): the
+    // doc exists on a confirmed booking, but no money was ever taken for it.
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
+      "deposit.status": "unpaid", "deposit.intentId": null,
+      "deposit.chargeId": null, "deposit.chargedAt": null,
+    });
+
+    await callFn("reportNoShow", { bookingId, reason: "The act never turned up." }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.settlement.status).toBe("waived");   // the leak this closes
+    expect(p.deposit.status).toBe("refunded");
+    expect(typeof p.deposit.resolvedAt).toBe("number");
+
+    // ...and not a cent moved: the never-charged branch makes no Stripe call
+    // at all, so there is no refund against the batch intent, no refund
+    // object anywhere in the fake, and no ledger row for money that never
+    // left the curator's card.
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
+    const objectsForIntent = await adb.collection("stripeFake/state/objects")
+      .where("intentId", "==", intentId).get();
+    expect(objectsForIntent.docs.filter((d) => d.data().kind === "refund")).toHaveLength(0);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "refund")).toBe(false);
+
+    const booking = await getBooking(bookingId);
+    expect(booking.status).toBe("cancelled_by_musician");
+    expect(booking.paymentSummary?.heldCents).toBe(0);
+    expect(booking.paymentSummary?.paidCents).toBe(0);
+  });
+
+  it("resolveDepositPending is idempotent: a second run against an already-refunded doc refunds nothing more", async () => {
+    const { curator, gigId, bookingId } = await makeConfirmedSingleBooking("t8cas");
+    const intentId = (await getPaymentDocs(bookingId))[0].deposit.intentId!;
+
+    await setGigStartsAt(gigId, 80);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Double-booked the venue." }, curator.owner.user);
+
+    const first = (await getPaymentDocs(bookingId))[0];
+    expect(first.deposit.status).toBe("refunded");
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
+    const refundRowsBefore = (await ledgerRows(bookingId)).filter((r) => r.kind === "refund").length;
+
+    // Exactly what Task 9's sweep does when it can't tell a finished doc from
+    // a crashed one. The doc CAS must make this a pure no-op — a second
+    // refund of the same slice would over-refund the shared batch intent.
+    await resolveDepositPending(bookingId, gigId);
+
+    const second = (await getPaymentDocs(bookingId))[0];
+    expect(second.deposit.status).toBe("refunded");
+    expect(second.deposit.resolvedAt).toBe(first.deposit.resolvedAt);   // not re-stamped
+    expect(second.updatedAt).toBe(first.updatedAt);                     // not rewritten at all
+    expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
+    expect((await ledgerRows(bookingId)).filter((r) => r.kind === "refund")).toHaveLength(refundRowsBefore);
+  });
+
+  it("forfeit with no recorded chargeId: the transfer still lands, drawing on the platform balance instead", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8nch");
+    // A deposit finalized out-of-band by the payment_intent.succeeded webhook
+    // need not know its charge id (DepositState.chargeId is nullable for
+    // exactly this reason) — the forfeit transfer then passes no
+    // sourceChargeId and simply draws on the platform balance.
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({ "deposit.chargeId": null });
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    await setGigStartsAt(gigId, 10);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    expect(p.deposit.status).toBe("forfeited");
+    expect(p.deposit.forfeitTransferId).toBeTruthy();
+    expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+    expect(await fakeObject(p.deposit.forfeitTransferId!)).toMatchObject({
+      kind: "transfer", accountId, amountCents: SLICE_CENTS, sourceChargeId: null,
+    });
+    const forfeitRow = (await ledgerRows(bookingId)).find((r) => r.kind === "forfeit_transfer");
+    expect(forfeitRow?.amountCents).toBe(SLICE_CENTS);
+    expect(forfeitRow?.stripeId).toBe(p.deposit.forfeitTransferId);
   });
 
   it("a PAST-start occurrence's payment doc is left completely untouched by a whole-run cancel", async () => {

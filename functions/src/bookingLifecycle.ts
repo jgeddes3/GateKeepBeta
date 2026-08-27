@@ -790,21 +790,42 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
     const touchedGigIds = markDepositsPendingInTx(
       tx, futurePaymentsSnap.docs.filter((d) => d.id !== occurrenceGigId), null, now);
     const reportedPayment = reportedPaymentSnap.data() as PaymentDoc | undefined;
-    // ONLY `held` — deliberately narrow:
-    //   - `applied` (the deposit was already released into a settlement that
-    //     paid the musician) is the POST-TRANSFER CLAWBACK case, which is
-    //     Task 12's job and needs a transfer reversal, not a refund;
-    //   - `unpaid` was never charged, so there is nothing here to send back;
-    //   - anything else is already resolved.
-    if (reportedPayment?.deposit.status === "held") {
-      const reportedUpdate: { [key: string]: unknown } = { "deposit.status": "refund_pending", updatedAt: now };
-      // Same guard markDepositsPendingInTx uses: a `paid`/`past_due`
-      // settlement is a real money record and is never waived away here.
+    if (reportedPayment) {
+      const reportedUpdate: { [key: string]: unknown } = { updatedAt: now };
+      // The DEPOSIT: `held` (escrowed) and `unpaid` (never charged — a birth
+      // deposit the sweep hadn't reached, or an accept finalized out-of-band)
+      // both refund; the executor's never-charged branch drives an `unpaid`
+      // one straight to terminal `refunded` with no Stripe call at all.
+      // `applied` (the deposit was already released into a settlement that
+      // paid the musician) is deliberately left alone — that's the
+      // POST-TRANSFER CLAWBACK case, which is Task 12's job and needs a
+      // transfer reversal, not a refund. Anything else is already resolved.
+      const flipsDeposit = reportedPayment.deposit.status === "held" || reportedPayment.deposit.status === "unpaid";
+      if (flipsDeposit) reportedUpdate["deposit.status"] = "refund_pending";
+      // The SETTLEMENT waive is DELIBERATELY independent of the deposit
+      // status above (review round 1 — this was a real money leak while it
+      // sat inside the `held` branch). reportNoShow is the ONLY place in the
+      // system that knows this date did not happen: the reported occurrence's
+      // gig stays `filled` and linked (only FUTURE occurrences are reopened
+      // above), so a settlement left `not_due` here is one Task 9's scheduler
+      // will happily schedule and Task 10 will then act on — charging the
+      // curator the remaining base + fee and transferring it to the musician
+      // who never showed up. Waived for EVERY reported doc whose settlement
+      // hasn't happened yet, whatever its deposit did.
+      //
+      // Still guarded to the two "hasn't happened yet" states: a `paid`/
+      // `past_due` settlement is a real money record, and unwinding one is
+      // Task 12's clawback, never an erasure here.
       if (reportedPayment.settlement.status === "not_due" || reportedPayment.settlement.status === "pending") {
         reportedUpdate["settlement.status"] = "waived";
       }
-      tx.update(reportedPaymentSnap.ref, reportedUpdate);
-      touchedGigIds.push(occurrenceGigId);
+      // > 1 key ⇒ something beyond the `updatedAt` bump actually changed.
+      // A fully-resolved doc (e.g. `applied` + `paid`) is left untouched
+      // rather than being given a meaningless updatedAt bump.
+      if (Object.keys(reportedUpdate).length > 1) tx.update(reportedPaymentSnap.ref, reportedUpdate);
+      // Only a deposit flip needs the executor — a settlement-only waive
+      // moves no money and has nothing for resolveDepositPending to do.
+      if (flipsDeposit) touchedGigIds.push(occurrenceGigId);
     }
 
     return { occurrenceGigId, touchedGigIds };
