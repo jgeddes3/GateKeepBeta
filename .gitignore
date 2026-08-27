@@ -6,3 +6,4 @@ dist/
 .expo/
 .next/
 .superpowers/
+.worktrees/
