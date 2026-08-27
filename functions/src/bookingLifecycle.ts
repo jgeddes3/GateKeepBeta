@@ -319,6 +319,13 @@ export async function executeCancellation(
     // its remaining dates. Waiving it here would silently un-pay a musician
     // for work already done. (SP4's own occurrence reopen has the exact same
     // past/future split — see getFutureFilledOccurrences.)
+    //
+    // Two sources of "future" therefore coexist in this transaction: the GIG
+    // docs' `startsAt` (above) and the PAYMENT docs' `occurrenceStartsAt`
+    // (here, stamped at accept). They agree because a filled gig's schedule
+    // is LOCKED — updateGig refuses any edit to a `filled`/`closed` gig
+    // ("its schedule and terms are locked"), so no gig can move between
+    // accept and cancellation while a payment doc exists for it.
     const paymentsSnap = await tx.get(
       db.collection(`bookings/${bookingId}/payments`).where("occurrenceStartsAt", ">", now));
 
@@ -787,7 +794,7 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
     // filtering makes that independent of the two dates' provenance — the
     // payment doc's occurrenceStartsAt is stamped at accept, the gig's own
     // startsAt can be edited afterwards) and handled explicitly below.
-    const touchedGigIds = markDepositsPendingInTx(
+    const depositsToResolve = markDepositsPendingInTx(
       tx, futurePaymentsSnap.docs.filter((d) => d.id !== occurrenceGigId), null, now);
     const reportedPayment = reportedPaymentSnap.data() as PaymentDoc | undefined;
     if (reportedPayment) {
@@ -816,26 +823,37 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       // Still guarded to the two "hasn't happened yet" states: a `paid`/
       // `past_due` settlement is a real money record, and unwinding one is
       // Task 12's clawback, never an erasure here.
-      if (reportedPayment.settlement.status === "not_due" || reportedPayment.settlement.status === "pending") {
-        reportedUpdate["settlement.status"] = "waived";
-      }
-      // > 1 key ⇒ something beyond the `updatedAt` bump actually changed.
+      const waivesSettlement = reportedPayment.settlement.status === "not_due"
+        || reportedPayment.settlement.status === "pending";
+      if (waivesSettlement) reportedUpdate["settlement.status"] = "waived";
       // A fully-resolved doc (e.g. `applied` + `paid`) is left untouched
       // rather than being given a meaningless updatedAt bump.
-      if (Object.keys(reportedUpdate).length > 1) tx.update(reportedPaymentSnap.ref, reportedUpdate);
+      if (flipsDeposit || waivesSettlement) tx.update(reportedPaymentSnap.ref, reportedUpdate);
       // Only a deposit flip needs the executor — a settlement-only waive
       // moves no money and has nothing for resolveDepositPending to do.
-      if (flipsDeposit) touchedGigIds.push(occurrenceGigId);
+      if (flipsDeposit) depositsToResolve.push(occurrenceGigId);
+      // Task 12's DISCOVERY HOOK. An `applied` deposit on the reported date
+      // means the escrow was already released into a settlement — money has
+      // very likely reached the musician for a show that (per this report)
+      // never happened. Nothing here can undo that (it needs a transfer
+      // reversal, not a refund), and waiving a still-unsettled settlement
+      // alongside it leaves a deliberately half-unwound doc. Logged loudly so
+      // the case is findable before Task 12 lands, and so it shows up in
+      // production logs if Task 12 ever misses one.
+      if (reportedPayment.deposit.status === "applied") {
+        console.warn(`reportNoShow: reported occurrence ${bookingId}/${occurrenceGigId} has an APPLIED deposit`
+          + `${waivesSettlement ? " (settlement waived)" : ""} — post-transfer clawback required (Task 12)`);
+      }
     }
 
-    return { occurrenceGigId, touchedGigIds };
+    return { occurrenceGigId, depositsToResolve };
   });
 
   // SP5 Task 8: the money, post-commit — see executeCancellation's identical
   // per-doc catch rationale.
-  for (const touchedGigId of result.touchedGigIds) {
-    await resolveDepositPending(bookingId, touchedGigId).catch((e) =>
-      console.error(`reportNoShow: deposit resolution failed for ${bookingId}/${touchedGigId} (sweep will retry)`, e));
+  for (const gigIdToResolve of result.depositsToResolve) {
+    await resolveDepositPending(bookingId, gigIdToResolve).catch((e) =>
+      console.error(`reportNoShow: deposit resolution failed for ${bookingId}/${gigIdToResolve} (sweep will retry)`, e));
   }
 
   await recomputeReliability(booking.musicianProfileId);

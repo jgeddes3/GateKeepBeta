@@ -1326,8 +1326,13 @@ describe("Task 8 cancellation money", () => {
       // The window was measured against `next` — only THAT date's deposit is
       // forfeited; the curator was never late on the run's other dates.
       expect(after.get(next)?.deposit.status).toBe("forfeited");
+      expect(after.get(next)?.deposit.forfeitTransferId).toBeTruthy();
       expect(after.get(mid)?.deposit.status).toBe("refunded");
       expect(after.get(later)?.deposit.status).toBe("refunded");
+      // A refunded doc never carries a forfeit transfer — proves the run's
+      // other dates took the refund branch outright, not a partial forfeit.
+      expect(after.get(mid)?.deposit.forfeitTransferId).toBeNull();
+      expect(after.get(later)?.deposit.forfeitTransferId).toBeNull();
       for (const p of after.values()) {
         expect(p.settlement.status).toBe("waived");
         expect(typeof p.deposit.resolvedAt).toBe("number");   // all three terminal
@@ -1337,8 +1342,18 @@ describe("Task 8 cancellation money", () => {
       // Two partial refunds off the shared intent — the forfeited slice stays put.
       expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS * 2);
       const rows = await ledgerRows(bookingId);
-      expect(rows.filter((r) => r.kind === "refund")).toHaveLength(2);
-      expect(rows.filter((r) => r.kind === "forfeit_transfer")).toHaveLength(1);
+      const refundRows = rows.filter((r) => r.kind === "refund");
+      expect(refundRows).toHaveLength(2);
+      // The two refunds are DISTINCT Stripe objects, one per occurrence —
+      // the deterministic ledger id is `refund:{stripeId}`, so a shared id
+      // would silently collapse them into a single audit row (and would mean
+      // one date's money was never actually sent back).
+      expect(new Set(refundRows.map((r) => r.stripeId)).size).toBe(2);
+      expect(new Set(refundRows.map((r) => r.gigId))).toEqual(new Set([mid, later]));
+      expect(refundRows.every((r) => r.amountCents === CHARGE_CENTS)).toBe(true);
+      const forfeitRows = rows.filter((r) => r.kind === "forfeit_transfer");
+      expect(forfeitRows).toHaveLength(1);
+      expect(forfeitRows[0].gigId).toBe(next);
 
       const booking = await getBooking(bookingId);
       expect(booking.paymentSummary?.heldCents).toBe(0);
@@ -1476,6 +1491,69 @@ describe("Task 8 cancellation money", () => {
     expect(second.updatedAt).toBe(first.updatedAt);                     // not rewritten at all
     expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
     expect((await ledgerRows(bookingId)).filter((r) => r.kind === "refund")).toHaveLength(refundRowsBefore);
+  });
+
+  it("forfeit with no payout account: the doc is LEFT forfeit_pending for the sweep, and no money moves", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8noa");
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+    // Unreachable in normal flow (accept is gated on a payout-ready
+    // musician) — the realistic route is Stripe disabling the account after
+    // the accept. The executor must NOT flip the doc terminal: that would
+    // silently swallow money the musician is owed.
+    await adb.doc(`profiles/${musician.profileId}/private/stripe`).set({ accountId: null }, { merge: true });
+
+    await setGigStartsAt(gigId, 10);
+    await ageConfirmedAt(bookingId);
+    // The cancellation itself still succeeds — a failed money move must never
+    // surface as an error on an already-committed cancellation.
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+
+    const [p] = await getPaymentDocs(bookingId);
+    // Stuck pending IS the design: it's the handle Task 9's sweep retries by.
+    expect(p.deposit.status).toBe("forfeit_pending");
+    expect(p.deposit.forfeitTransferId).toBeNull();
+    expect(p.deposit.resolvedAt).toBeNull();
+    expect(p.settlement.status).toBe("waived");
+    expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "forfeit_transfer")).toBe(false);
+
+    const booking = await getBooking(bookingId);
+    expect(booking.status).toBe("cancelled_by_curator");
+    expect(booking.cancellation?.outcome).toBe("deposit_forfeited");
+    // forfeit_pending still counts as curator-paid (the money left the card
+    // and has not come back) but is no longer "held" escrow.
+    expect(booking.paymentSummary?.heldCents).toBe(0);
+    expect(booking.paymentSummary?.paidCents).toBe(CHARGE_CENTS);
+    expect(booking.paymentSummary?.transferredCents).toBe(0);
+  });
+
+  it("resolveDepositPending is idempotent on the FORFEIT side too: a second run transfers nothing more", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8fcas");
+    const accountId = await musicianAccountId(musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    await setGigStartsAt(gigId, 10);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+
+    const first = (await getPaymentDocs(bookingId))[0];
+    expect(first.deposit.status).toBe("forfeited");
+    expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+    const forfeitRowsBefore = (await ledgerRows(bookingId)).filter((r) => r.kind === "forfeit_transfer").length;
+
+    // A second transfer would be real money out the door, twice — the doc
+    // CAS has to stop this before any Stripe call is made.
+    await resolveDepositPending(bookingId, gigId);
+
+    const second = (await getPaymentDocs(bookingId))[0];
+    expect(second.deposit.status).toBe("forfeited");
+    expect(second.deposit.forfeitTransferId).toBe(first.deposit.forfeitTransferId);
+    expect(second.deposit.resolvedAt).toBe(first.deposit.resolvedAt);
+    expect(second.updatedAt).toBe(first.updatedAt);   // not rewritten at all
+    expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
+    expect((await ledgerRows(bookingId)).filter((r) => r.kind === "forfeit_transfer"))
+      .toHaveLength(forfeitRowsBefore);
   });
 
   it("forfeit with no recorded chargeId: the transfer still lands, drawing on the platform balance instead", async () => {

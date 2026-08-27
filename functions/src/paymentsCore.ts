@@ -178,9 +178,15 @@ function isAlreadyExists(e: unknown): boolean {
 // id), but a caller that legitimately needs two DISTINCT rows of the SAME
 // kind for the same underlying object must invent its own more specific
 // deterministic id — passing the same (kind, stripeId) pair for two
-// intentionally-separate rows silently collapses them into one. None of this
-// task's call sites need that; a future one that does must not reuse
-// stripeId bare. An empty string is treated the same as null (falls back to
+// intentionally-separate rows silently collapses them into one. No call site
+// through Task 8 needs that: every one keys off an id that is already unique
+// per intended row (the PaymentIntent for `deposit_charged`, and — since
+// Stripe mints a fresh object per call — the refund id for `refund` and the
+// transfer id for `forfeit_transfer`, which is what makes the whole-run case
+// safe, where several occurrences refund off ONE shared intent but each gets
+// its own refund object). A future caller that would reuse a (kind, stripeId)
+// pair across two intended rows must not pass stripeId bare.
+// An empty string is treated the same as null (falls back to
 // a random id) — Stripe never issues empty-string ids, so an empty string
 // here only ever means "the caller doesn't have one yet."
 export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number }): Promise<void> {
@@ -275,9 +281,24 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
 //   - the doc CAS below (act only on `refund_pending`/`forfeit_pending`)
 //     makes a second runner a no-op — Task 9's sweep re-runs exactly the
 //     docs still stuck pending after a crash between commit and executor;
-//   - the Stripe idempotency keys are per-(booking,gig,purpose), so even a
-//     genuine double-execute (executor and sweep overlapping) replays the
-//     SAME refund/transfer object rather than moving money twice.
+//   - the Stripe idempotency keys are per-(booking,gig,purpose), so a
+//     double-execute that happens INSIDE Stripe's key window (executor and
+//     sweep overlapping) replays the SAME refund/transfer object rather
+//     than moving money twice.
+//
+// LIMIT OF THAT SECOND GUARANTEE (do not overstate it): real Stripe expires
+// idempotency keys after 24h (as-built contract #5 — FakeStripe's never
+// expire, so the emulator cannot surface this). A doc still `*_pending` more
+// than 24h after its first attempt is therefore NOT safe to re-run blindly:
+// the same key would be treated as brand new and mint a SECOND refund or a
+// SECOND transfer. Task 9's sweep must, for such a doc, first look up the
+// existing object by the `{bookingId, gigId, purpose}` metadata stamped on
+// every call below (that metadata is the recovery handle, and is why it is
+// written) and adopt it if found — or else refuse and log for admin
+// attention, exactly as the sweep's >24h `depositChargePending`
+// reconciliation guard already does. This function itself is only ever safe
+// to call freely within that window.
+//
 // Never throws for a missing/already-terminal doc — callers log and continue.
 export async function resolveDepositPending(bookingId: string, gigId: string): Promise<void> {
   const db = getFirestore();
@@ -331,6 +352,14 @@ export async function resolveDepositPending(bookingId: string, gigId: string): P
       // the account exists again, and the musician's money is never silently
       // dropped by flipping to a terminal state here.
       console.error(`resolveDepositPending: no Stripe account for forfeit ${bookingId}/${gigId} — left pending for the sweep`);
+      // Recompute anyway before bailing: the CALLER'S transaction already
+      // moved this doc to `forfeit_pending`, so the booking aggregate is
+      // stale whether or not the transfer happened — and the summary counts
+      // the `*_pending` states explicitly (see recomputePaymentSummary's
+      // per-status table). Skipping it here would leave the deposit
+      // reading as still-held escrow for as long as the doc stays stuck.
+      await recomputePaymentSummary(bookingId)
+        .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
       return;
     }
     const t = await getStripe().transferToAccount({
@@ -383,6 +412,29 @@ export async function resolveDepositPending(bookingId: string, gigId: string): P
 //
 // Returns the touched gig ids so the caller can run resolveDepositPending on
 // each, post-commit.
+//
+// CALLER OBLIGATIONS (all three are load-bearing):
+//  1. WRITE PHASE ONLY. This issues tx.update()s, so every read the caller's
+//     transaction needs — including the `paymentDocs` snapshots themselves —
+//     must already have happened. Calling it before a later tx.get() makes
+//     Firestore reject the whole transaction.
+//  2. SAME BOOKING ONLY. The returned ids are bare gig ids, and the caller
+//     pairs them back with ITS OWN bookingId to build the
+//     `bookings/{bookingId}/payments/{gigId}` path. Passing docs from two
+//     different bookings would hand back ids the caller then resolves under
+//     the wrong booking — every caller reads its docs from one booking's
+//     subcollection, and that is a requirement, not a coincidence.
+//  3. A SKIPPED DOC GETS NO SETTLEMENT WAIVE EITHER. The deposit guard gates
+//     BOTH writes — a doc whose deposit isn't `held`/`unpaid` keeps its
+//     settlement untouched. That coupling is safe here because: a
+//     future-dated doc can't be `applied` (a deposit is only applied by
+//     settlement, which never runs before the occurrence happens); an
+//     already-`*_pending`/terminal doc had its settlement waived by whichever
+//     call set it pending; and `paid`/`past_due` settlements must never be
+//     erased regardless. A caller that needs the waive DECOUPLED from the
+//     deposit decision must do it itself — reportNoShow deliberately does,
+//     for the REPORTED (past-dated, possibly already-`applied`) doc, whose
+//     show is known not to have happened.
 export function markDepositsPendingInTx(
   tx: FirebaseFirestore.Transaction, paymentDocs: FirebaseFirestore.DocumentSnapshot[],
   forfeitGigId: string | null, now: number,

@@ -467,6 +467,25 @@ export interface FeePolicy {
   lateFeePct: number; lateFeeMusicianPct: number;
 }
 
+// The deposit state machine. `unpaid` is the birth state; `applied`,
+// `refunded` and `forfeited` are terminal (only Task 12's clawback ever
+// re-opens one, and only from `applied`). Legal transitions — nothing else
+// is a valid write:
+//   unpaid  -> held             accept saga's batch charge, or the sweep's
+//                               per-birth charge for a materialized date
+//   unpaid  -> refund_pending   no-show reported on a never-charged date
+//                               (resolves terminal with no Stripe call)
+//   held    -> applied          settlement consumed the escrow for its date
+//   held    -> refund_pending   cancellation / no-show, refund outcome
+//   held    -> forfeit_pending  curator late-cancel of THAT date only
+//   *_pending -> refunded/forfeited   the post-commit executor, or the
+//                               sweep re-running a doc stuck pending
+//   applied -> (clawback)       Task 12 ONLY — needs a transfer reversal,
+//                               never a refund; no cancellation path may
+//                               touch an applied deposit
+// The two `*_pending` states are the transactional intent-to-move-money:
+// written in the same transaction as the cancellation itself, so a crash
+// before the money moves always leaves a doc the sweep can find and finish.
 export type DepositStatus = "unpaid" | "held" | "applied"
   | "refund_pending" | "refunded" | "forfeit_pending" | "forfeited";
 export type SettlementStatus = "not_due" | "pending" | "past_due" | "paid" | "waived";
