@@ -122,24 +122,33 @@ async function setGigStartsAt(gigId: string, hoursFromNow: number): Promise<void
   await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() + hoursFromNow * 3_600_000 });
 }
 
-// SP5 Task 7: pushes a booking's confirmedAt safely outside CANCEL_GRACE_MS
-// (1h) — called immediately before the boundary-sensitive callable under
-// test (same ordering rationale as setGigStartsAt above), for every
-// pre-existing SP4 forfeit/mark-window test in this file. Without this,
-// makeConfirmedBooking's real accept -> immediate cancel chain leaves
-// confirmedAt fresh, so the new 1h grace would neutralize the very
-// penalty branch these tests exist to exercise; SP4 behavior is only
-// "intact" once the fixture is aged past grace like a real, non-flash
-// booking would be by the time anyone cancels it.
-async function ageConfirmedAt(bookingId: string): Promise<void> {
-  await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
+// SP5 Task 7: pushes a booking's confirmedAt `msAgo` milliseconds into the
+// past — called immediately before the boundary-sensitive callable under
+// test (same ordering rationale as setGigStartsAt above).
+async function setConfirmedAtAgo(bookingId: string, msAgo: number): Promise<void> {
+  await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - msAgo });
+}
+
+// The common case: safely outside CANCEL_GRACE_MS (1h). Every SP4 window
+// test in this file (forfeit AND refund/no-mark alike — see
+// makeConfirmedBooking's own comment on why refund-side assertions need
+// this too) calls this immediately before its cancel/cancelOccurrence call.
+function ageConfirmedAt(bookingId: string): Promise<void> {
+  return setConfirmedAtAgo(bookingId, 2 * 3_600_000);
 }
 
 // Builds a real, fully confirmed single-gig booking (through the actual
 // applyToGig -> acceptBooking chain, so membership docs/deposit/acceptedTerms
 // are all genuine) — the shared starting point for the single-gig
 // cancelBooking/reportNoShow tests below. Callers then use setGigStartsAt to
-// control timing precisely right before the callable under test.
+// control timing precisely right before the callable under test, and pass
+// { startsAt: ... } via gigOverrides for a fixed offset from the start.
+//
+// IMPORTANT: the returned booking's confirmedAt is fresh (acceptBooking just
+// ran) — i.e. inside CANCEL_GRACE_MS. ANY assertion that depends on the SP4
+// forfeit/mark window — including a REFUND/no-mark one — must call
+// ageConfirmedAt(bookingId) first, or it silently passes for the wrong
+// reason (grace, not the window) instead of testing what it claims to.
 async function makeConfirmedBooking(prefix: string, gigOverrides: Record<string, unknown> = {}) {
   const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile(`${prefix}c`);
   const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile(`${prefix}m`);
@@ -151,29 +160,13 @@ async function makeConfirmedBooking(prefix: string, gigOverrides: Record<string,
   return { curator, musician, curatorProfileId, musicianProfileId, gigId, bookingId };
 }
 
-// SP5 Task 7 fixture: a real confirmed single-gig booking whose gig starts
-// `startsAtHoursFromNow` hours out — the offset is pushed via the admin SDK
-// BEFORE applyToGig creates the first thread entry, never after (an
-// admin-SDK edit AFTER the offer would trip the F2 accept guard —
-// gig.updatedAt > lastEntry.at — see bookings.ts's acceptBooking). Callers
-// then backdate the resulting booking's confirmedAt via the admin SDK to
-// land inside or outside CANCEL_GRACE_MS right before the cancel call.
-async function makeConfirmedBookingWithStart(prefix: string, startsAtHoursFromNow: number) {
-  const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile(`${prefix}c`);
-  const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile(`${prefix}m`);
-  await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
-  const gigId = await createOpenGig(curatorProfileId, curator.user);
-  await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() + startsAtHoursFromNow * 3_600_000 });
-  const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-    "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
-  await callFn("acceptBooking", { bookingId }, curator.user);
-  return { curator, musician, curatorProfileId, musicianProfileId, gigId, bookingId };
-}
-
 describe("recomputeReliability / cancelBooking", () => {
   it("curator cancels at 80h before start: refund, forfeitedTo stays null", async () => {
     const { curator, bookingId, gigId } = await makeConfirmedBooking("cb80");
     await setGigStartsAt(gigId, 80);
+    // Ages confirmedAt past CANCEL_GRACE_MS so this refund is proven by the
+    // 80h window, not merely by a fresh accept riding grace instead.
+    await ageConfirmedAt(bookingId);
 
     await callFn("cancelBooking", { bookingId, reason: "Double-booked the venue." }, curator.user);
 
@@ -253,6 +246,9 @@ describe("recomputeReliability / cancelBooking", () => {
   it("musician cancels at 30h before start: refund, no mark", async () => {
     const { musician, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("mb30");
     await setGigStartsAt(gigId, 30);
+    // Ages confirmedAt past CANCEL_GRACE_MS so this no-mark result is proven
+    // by the 30h window, not merely by a fresh accept riding grace instead.
+    await ageConfirmedAt(bookingId);
 
     await callFn("cancelBooking", { bookingId, reason: "Illness." }, musician.user);
 
@@ -470,8 +466,8 @@ describe("SP5 Task 7: flash-booking grace period (1h, both sides)", () => {
   // land on the penalty branch. confirmedAt is backdated 10 minutes,
   // comfortably inside CANCEL_GRACE_MS (1h).
   it("curator cancel within the grace window: refunded, graceApplied true, no forfeitedTo", async () => {
-    const { curator, bookingId, gigId } = await makeConfirmedBookingWithStart("g7cc", 2);
-    await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 10 * 60_000 });
+    const { curator, bookingId, gigId } = await makeConfirmedBooking("g7cc", { startsAt: Date.now() + 2 * 3_600_000 });
+    await setConfirmedAtAgo(bookingId, 10 * 60_000);
 
     await callFn("cancelBooking", { bookingId, reason: "Changed my mind right after accepting." }, curator.user);
 
@@ -485,8 +481,9 @@ describe("SP5 Task 7: flash-booking grace period (1h, both sides)", () => {
   });
 
   it("musician cancel within the grace window: refunded, graceApplied true, no reliability mark", async () => {
-    const { musician, musicianProfileId, bookingId } = await makeConfirmedBookingWithStart("g7cm", 2);
-    await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 10 * 60_000 });
+    const { musician, musicianProfileId, bookingId } =
+      await makeConfirmedBooking("g7cm", { startsAt: Date.now() + 2 * 3_600_000 });
+    await setConfirmedAtAgo(bookingId, 10 * 60_000);
 
     await callFn("cancelBooking", { bookingId, reason: "Changed my mind right after accepting." }, musician.user);
 
@@ -499,12 +496,12 @@ describe("SP5 Task 7: flash-booking grace period (1h, both sides)", () => {
     expect(reliability).toBeUndefined();
   });
 
-  // Same 2h-out gig, but confirmedAt is backdated 2h — outside
-  // CANCEL_GRACE_MS — so SP4 behavior applies unmodified: the curator cancel
-  // still lands inside the 72h forfeit window and forfeits.
+  // Same 2h-out gig, but confirmedAt is aged past CANCEL_GRACE_MS — so SP4
+  // behavior applies unmodified: the curator cancel still lands inside the
+  // 72h forfeit window and forfeits.
   it("curator cancel after the grace window has elapsed: SP4 behavior intact, forfeited, graceApplied false", async () => {
-    const { curator, bookingId } = await makeConfirmedBookingWithStart("g7go", 2);
-    await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
+    const { curator, bookingId } = await makeConfirmedBooking("g7go", { startsAt: Date.now() + 2 * 3_600_000 });
+    await ageConfirmedAt(bookingId);
 
     await callFn("cancelBooking", { bookingId, reason: "Too late for grace now." }, curator.user);
 
@@ -520,18 +517,14 @@ describe("SP5 Task 7: flash-booking grace period (1h, both sides)", () => {
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedSeries(curatorProfileId);
     try {
-      const gigId1 = await createOpenGig(curatorProfileId, curator.user);
+      const gigId1 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 2 * 3_600_000 });
       const gigId2 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 200 * 3_600_000 });
-      // Both occurrences' startsAt are set via the admin SDK BEFORE the
-      // offer exists — see makeConfirmedBookingWithStart's identical
-      // rationale on the F2 accept guard.
-      await adb.doc(`gigs/${gigId1}`).update({ seriesId: series.id, startsAt: Date.now() + 2 * 3_600_000 });
-      await adb.doc(`gigs/${gigId2}`).update({ seriesId: series.id });
+      await Promise.all([gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
 
       const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
         "applyToGig", { gigId: gigId1, musicianProfileId, offer: offerPayload() }, musician.user);
       await callFn("acceptBooking", { bookingId }, curator.user);
-      await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 10 * 60_000 });
+      await setConfirmedAtAgo(bookingId, 10 * 60_000);
 
       await callFn("cancelOccurrence",
         { bookingId, gigId: gigId1, reason: "Right after accepting, changed plans." }, curator.user);

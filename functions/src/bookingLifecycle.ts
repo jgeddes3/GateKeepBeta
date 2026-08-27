@@ -322,7 +322,11 @@ export async function executeCancellation(
     // SP5: 1h post-accept grace (both sides) — a flash booking accepted
     // already inside the penalty windows can be undone penalty-free for
     // CANCEL_GRACE_MS after the accept. Capped at gig start implicitly: the
-    // already-started guards above make now < nextStartsAt.
+    // already-started guards above make now < nextStartsAt. Requires
+    // confirmedAt != null: with no timestamp there is nothing to bound the
+    // exception against, so treating an unknown confirmedAt as "in grace"
+    // would grant unbounded, permanent grace instead of a genuine 1h
+    // window — silently disabling forfeiture/marks for that booking forever.
     const graceApplied = freshBooking.confirmedAt != null && (now - freshBooking.confirmedAt) < CANCEL_GRACE_MS;
     let outcome: CancelOutcome;
     let markApplied = false;
@@ -508,7 +512,10 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
     const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
     const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
     // SP5: 1h post-accept grace (both sides) — see executeCancellation's
-    // identical rationale above.
+    // identical rationale above (including why a null confirmedAt must NOT
+    // count as in-grace). Capped at gig start implicitly here via this
+    // function's own `gig.startsAt <= now` guard above (not
+    // executeCancellation's nextStartsAt, which doesn't exist in this scope).
     const graceApplied = freshBooking.confirmedAt != null && (now - freshBooking.confirmedAt) < CANCEL_GRACE_MS;
     let outcome: CancelOutcome;
     let markApplied = false;

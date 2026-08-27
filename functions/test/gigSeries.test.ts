@@ -521,13 +521,19 @@ describe("endSeries", () => {
       const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
         "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
       await callFn("acceptBooking", { bookingId }, curator.user);
+      // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h) — without
+      // this, a fresh accept -> immediate endSeries would refund via grace
+      // regardless of the window, silently defeating the assertion below.
+      await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
 
       await callFn("endSeries", { seriesId }, curator.user);
 
       const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(bookingAfter.status).toBe("cancelled_by_curator");
       expect(bookingAfter.cancellation?.reason).toBe("Series ended by curator");
-      expect(bookingAfter.cancellation?.outcome).toBe("deposit_refunded"); // well outside the 72h forfeit window
+      // 100h out is well outside the 72h forfeit window — refunded on the
+      // window itself, not merely because grace (aged above) also would.
+      expect(bookingAfter.cancellation?.outcome).toBe("deposit_refunded");
 
       const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
       expect(seriesAfter?.status).toBe("ended");
