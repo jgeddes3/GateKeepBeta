@@ -331,13 +331,14 @@ export interface OfferEntry {
 }
 export interface AcceptedTerms { amountCents: number; expectedQuantity: number | null; expectedTotalCents: number; }
 export interface BookingDeposit {
-  amountCents: number; status: "unpaid";               // sub-5 adds "held" | "refunded" | "forfeited"
+  amountCents: number; status: DepositStatus;
   forfeitedTo: "musician" | null;                       // set by cancellation outcome; money moves in sub-5
   policy: { percent: number; curatorForfeitHours: number; musicianMarkHours: number }; // snapshot, never re-read from constants
 }
 export interface BookingCancellation {
   by: BookingSide; reason: string; at: number; hoursBeforeStart: number;
   outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
+  graceApplied?: boolean;   // SP5: 1h post-accept grace neutralized the penalty
 }
 // Task 6: one entry per cancelOccurrence call against a whole-run booking —
 // unlike BookingCancellation (the run-level outcome, which also moves
@@ -347,6 +348,7 @@ export interface BookingCancellation {
 export interface OccurrenceCancellation {
   gigId: string; by: BookingSide; at: number; hoursBeforeStart: number;
   outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
+  graceApplied?: boolean;   // SP5: 1h post-accept grace neutralized the penalty
 }
 // Named BookingRequestDoc (not BookingDoc) because SP2's BookingDoc (the
 // rates+prefs subdoc at profiles/{id}/private/booking, above) already owns
@@ -382,6 +384,13 @@ export interface BookingRequestDoc {
   // — absent on every pre-existing booking and on any booking accepted
   // before this fix landed, treated identically to false.
   selfDeal?: boolean;
+  // SP5: fee snapshot + aggregate payment state. Optional so every pre-SP5
+  // booking/fixture stays valid; acceptBooking writes both going forward.
+  feePolicy?: FeePolicy;
+  paymentSummary?: PaymentSummary;
+  // SP5: accept-saga crash marker — true between the staging transaction and
+  // the post-charge commit; the hourly payments sweep reconciles stuck ones.
+  depositChargePending?: boolean;
 }
 
 // visibility + projections + reliability
@@ -413,3 +422,87 @@ export const MUSICIAN_MARK_WINDOW_HOURS = 24;
 export const MAX_RELIABILITY_MARKS = 200;
 export const NO_SHOW_REPORT_WINDOW_DAYS = 14;
 export const MAX_OCCURRENCE_CANCELLATIONS = 100;
+
+// ---------- Sub-project 5: payments ----------
+
+export const CURATOR_FEE_PCT = 11;
+export const MUSICIAN_FEE_PCT = 2;
+export const INSTANT_FEE_PCT = 4;
+export const INSTANT_FEE_MIN_CENTS = 100;
+export const LATE_FEE_PCT = 10;
+export const LATE_FEE_MUSICIAN_PCT = 7;   // of the 10 points, 7 go to the musician
+export const SETTLEMENT_DELAY_MS = 3 * 24 * 3_600_000;   // T+3 window after gig END
+export const CANCEL_GRACE_MS = 60 * 60_000;              // 1h post-accept grace, both sides
+export const SETTLEMENT_RETRY_OFFSETS_MS = [86_400_000, 2 * 86_400_000, 2 * 86_400_000] as const; // +1d, +2d, +2d
+export const MAX_TRUE_UP_EXTRA_MINUTES = 720;
+export const MAX_TRUE_UP_EXTRA_SONGS = 500;
+
+// Snapshotted onto the booking at accept (alongside SP4's deposit.policy) —
+// later fee-constant changes never touch an accepted booking.
+export interface FeePolicy {
+  curatorFeePct: number; musicianFeePct: number; instantFeePct: number;
+  lateFeePct: number; lateFeeMusicianPct: number;
+}
+
+export type DepositStatus = "unpaid" | "held" | "applied"
+  | "refund_pending" | "refunded" | "forfeit_pending" | "forfeited";
+export type SettlementStatus = "not_due" | "pending" | "past_due" | "paid" | "waived";
+export type TransferStatus = "none" | "pending" | "transferred" | "reversed";
+
+// bookings/{bookingId}/payments/{gigId} — one doc per occurrence, the money
+// truth for that date. Server-written only; readable by both booking sides.
+export interface PaymentDoc {
+  bookingId: string; gigId: string; occurrenceStartsAt: number;
+  curatorProfileId: string; musicianProfileId: string; selfDeal: boolean;
+  baseCents: number;                       // this occurrence's expected total (frozen terms, ITS OWN duration for perHour)
+  deposit: {
+    sliceCents: number;                    // ceil(35% of baseCents)
+    feeShareCents: number;                 // ceil(sliceCents * curatorFeePct / 100)
+    intentId: string | null;               // shared for the accept batch; per-birth otherwise
+    status: DepositStatus;
+    chargedAt: number | null; resolvedAt: number | null;
+    forfeitTransferId: string | null;
+  };
+  settlement: {
+    status: SettlementStatus;
+    settleAfter: number | null;            // gig END + SETTLEMENT_DELAY_MS, set when the gig ends
+    computedCents: number | null;          // final base − deposit slice (>= 0), set at charge time
+    feeShareCents: number | null;
+    trueUp: { extraMinutes: number; extraSongs: number; reportedAt: number } | null;
+    intentId: string | null;
+    attempts: number; nextRetryAt: number | null;
+    lateFeeCents: number | null; lateFeeMusicianCents: number | null;
+  };
+  transfer: {                              // musician earnings for this occurrence
+    status: TransferStatus;
+    id: string | null; amountCents: number | null; transferredAt: number | null;
+  };
+  createdAt: number; updatedAt: number;
+}
+
+export type PaymentSummaryState = "current" | "past_due" | "delinquent";
+export interface PaymentSummary {
+  state: PaymentSummaryState; heldCents: number; paidCents: number; transferredCents: number;
+}
+
+// profiles/{profileId}/private/stripe — members + admins read, server-write.
+// One profile can hold both halves (a curator that also performs).
+export interface StripeProfileDoc {
+  customerId: string | null;               // curator half
+  defaultPaymentMethodId: string | null; cardBrand: string | null; cardLast4: string | null;
+  accountId: string | null;                // musician half (Express)
+  transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
+  onboardingStartedAt: number | null; onboardedAt: number | null;
+  delinquent: boolean; delinquentSince: number | null;
+  updatedAt: number;
+}
+
+export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
+  | "forfeit_transfer" | "earnings_transfer" | "late_fee" | "payout_standard"
+  | "payout_instant" | "transfer_reversal" | "account_debit";
+export interface LedgerEntry {
+  kind: LedgerKind; amountCents: number;
+  bookingId: string | null; gigId: string | null; profileId: string | null;
+  stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
+  detail: string; at: number;
+}
