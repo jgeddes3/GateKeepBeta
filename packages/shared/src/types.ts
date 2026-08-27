@@ -331,7 +331,7 @@ export interface OfferEntry {
 }
 export interface AcceptedTerms { amountCents: number; expectedQuantity: number | null; expectedTotalCents: number; }
 export interface BookingDeposit {
-  amountCents: number; status: DepositStatus;
+  amountCents: number; status: DepositStatus;           // see DepositStatus in the SP5 section below
   forfeitedTo: "musician" | null;                       // set by cancellation outcome; money moves in sub-5
   policy: { percent: number; curatorForfeitHours: number; musicianMarkHours: number }; // snapshot, never re-read from constants
 }
@@ -430,10 +430,14 @@ export const MUSICIAN_FEE_PCT = 2;
 export const INSTANT_FEE_PCT = 4;
 export const INSTANT_FEE_MIN_CENTS = 100;
 export const LATE_FEE_PCT = 10;
-export const LATE_FEE_MUSICIAN_PCT = 7;   // of the 10 points, 7 go to the musician
-export const SETTLEMENT_DELAY_MS = 3 * 24 * 3_600_000;   // T+3 window after gig END
-export const CANCEL_GRACE_MS = 60 * 60_000;              // 1h post-accept grace, both sides
-export const SETTLEMENT_RETRY_OFFSETS_MS = [86_400_000, 2 * 86_400_000, 2 * 86_400_000] as const; // +1d, +2d, +2d
+// Percentage-POINTS of the outstanding amount, not "7% of the late fee" —
+// meaningful only relative to LATE_FEE_PCT: 7 of LATE_FEE_PCT's 10 points go
+// to the musician, the remaining 3 to the platform.
+export const LATE_FEE_MUSICIAN_PCT = 7;
+export const SETTLEMENT_DELAY_MS = 3 * 24 * 60 * 60 * 1000;   // T+3 window after gig END
+export const CANCEL_GRACE_MS = 60 * 60 * 1000;                // 1h post-accept grace, both sides
+export const SETTLEMENT_RETRY_OFFSETS_MS =
+  [24 * 60 * 60 * 1000, 2 * 24 * 60 * 60 * 1000, 2 * 24 * 60 * 60 * 1000] as const; // +1d, +2d, +2d
 export const MAX_TRUE_UP_EXTRA_MINUTES = 720;
 export const MAX_TRUE_UP_EXTRA_SONGS = 500;
 
@@ -449,34 +453,42 @@ export type DepositStatus = "unpaid" | "held" | "applied"
 export type SettlementStatus = "not_due" | "pending" | "past_due" | "paid" | "waived";
 export type TransferStatus = "none" | "pending" | "transferred" | "reversed";
 
+export interface DepositState {
+  sliceCents: number;                    // ceil(the booking's deposit.policy.percent% of baseCents) — the accepted booking's frozen snapshot, never a live constant
+  feeShareCents: number;                 // ceil(sliceCents * curatorFeePct / 100)
+  intentId: string | null;               // shared for the accept batch; per-birth otherwise
+  status: DepositStatus;
+  chargedAt: number | null; resolvedAt: number | null;
+  forfeitTransferId: string | null;
+}
+export interface SettlementState {
+  status: SettlementStatus;
+  settleAfter: number | null;            // gig END + SETTLEMENT_DELAY_MS, set when the gig ends
+  computedCents: number | null;          // final base − deposit slice (>= 0), set at charge time
+  feeShareCents: number | null;
+  trueUp: { extraMinutes: number; extraSongs: number; reportedAt: number } | null;
+  intentId: string | null;
+  attempts: number; nextRetryAt: number | null;
+  lateFeeCents: number | null; lateFeeMusicianCents: number | null;
+  // Explicit delinquency marker, set once (never cleared) when delinquency
+  // is declared. lateFeeCents is the MONEY, never the flag — a legitimately
+  // -zero late fee (e.g. a 0-pct policy snapshot) must not read as
+  // "not delinquent" just because the cents happen to be 0.
+  delinquentAt: number | null;
+}
+export interface TransferState {         // musician earnings for this occurrence
+  status: TransferStatus;
+  id: string | null; amountCents: number | null; transferredAt: number | null;
+}
 // bookings/{bookingId}/payments/{gigId} — one doc per occurrence, the money
 // truth for that date. Server-written only; readable by both booking sides.
 export interface PaymentDoc {
   bookingId: string; gigId: string; occurrenceStartsAt: number;
   curatorProfileId: string; musicianProfileId: string; selfDeal: boolean;
   baseCents: number;                       // this occurrence's expected total (frozen terms, ITS OWN duration for perHour)
-  deposit: {
-    sliceCents: number;                    // ceil(35% of baseCents)
-    feeShareCents: number;                 // ceil(sliceCents * curatorFeePct / 100)
-    intentId: string | null;               // shared for the accept batch; per-birth otherwise
-    status: DepositStatus;
-    chargedAt: number | null; resolvedAt: number | null;
-    forfeitTransferId: string | null;
-  };
-  settlement: {
-    status: SettlementStatus;
-    settleAfter: number | null;            // gig END + SETTLEMENT_DELAY_MS, set when the gig ends
-    computedCents: number | null;          // final base − deposit slice (>= 0), set at charge time
-    feeShareCents: number | null;
-    trueUp: { extraMinutes: number; extraSongs: number; reportedAt: number } | null;
-    intentId: string | null;
-    attempts: number; nextRetryAt: number | null;
-    lateFeeCents: number | null; lateFeeMusicianCents: number | null;
-  };
-  transfer: {                              // musician earnings for this occurrence
-    status: TransferStatus;
-    id: string | null; amountCents: number | null; transferredAt: number | null;
-  };
+  deposit: DepositState;
+  settlement: SettlementState;
+  transfer: TransferState;
   createdAt: number; updatedAt: number;
 }
 
@@ -501,7 +513,8 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   | "forfeit_transfer" | "earnings_transfer" | "late_fee" | "payout_standard"
   | "payout_instant" | "transfer_reversal" | "account_debit";
 export interface LedgerEntry {
-  kind: LedgerKind; amountCents: number;
+  kind: LedgerKind;
+  amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign
   bookingId: string | null; gigId: string | null; profileId: string | null;
   stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
   detail: string; at: number;
