@@ -107,8 +107,12 @@ export interface StripeLike {
     accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
   }): Promise<{ id: string }>;
   // Webhook verification. Real: stripe.webhooks.constructEvent (throws on bad
-  // signature). Fake: JSON.parse, signature ignored (emulator only).
-  constructWebhookEvent(rawBody: string, signature: string): { id: string; type: string; data: { object: Record<string, unknown> } };
+  // signature). Fake: JSON.parse, signature ignored (emulator only). rawBody
+  // is `string | Buffer` so callers can hand req.rawBody straight through —
+  // Stripe's own SDK accepts either directly (constructEvent hashes the raw
+  // bytes; converting to a string first is a needless extra step, and for a
+  // real request rawBody is already a Buffer).
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; data: { object: Record<string, unknown> } };
 }
 
 function isAlreadyExists(e: unknown): boolean {
@@ -454,9 +458,9 @@ export class FakeStripe implements StripeLike {
       return { id };
     }, `${p.accountId}:${p.amountCents}`);
   }
-  constructWebhookEvent(rawBody: string, signature: string): { id: string; type: string; data: { object: Record<string, unknown> } } {
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; data: { object: Record<string, unknown> } } {
     void signature; // Signature verification is a RealStripe-only concern — the emulator's fake webhook calls are same-process and already trusted.
-    return JSON.parse(rawBody);
+    return JSON.parse(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8"));
   }
 }
 
@@ -634,7 +638,7 @@ export class RealStripe implements StripeLike {
       { idempotencyKey: p.idempotencyKey });
     return { id: c.id };
   }
-  constructWebhookEvent(rawBody: string, signature: string) {
+  constructWebhookEvent(rawBody: string | Buffer, signature: string) {
     const evt = this.s.webhooks.constructEvent(rawBody, signature, stripeWebhookSecret.value() || process.env.STRIPE_WEBHOOK_SECRET || "");
     return evt as unknown as { id: string; type: string; data: { object: Record<string, unknown> } };
   }
