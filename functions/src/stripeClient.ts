@@ -58,14 +58,55 @@ export class StripePaymentPendingError extends Error {
   }
 }
 
+// Review round 1 (I2): the Connect account behind a cached accountId was
+// deleted (or never existed) on Stripe's side. Distinguishes "the account is
+// gone" from any other transient/infra failure reading account state, so
+// syncStripeAccountFlags can fail CLOSED (zero the gate flags) instead of
+// either 500ing or silently defaulting to false with no signal.
+export class StripeAccountMissingError extends Error {
+  accountId: string;
+  constructor(accountId: string) {
+    super(`Stripe account ${accountId} not found (deleted or never existed)`);
+    this.name = "StripeAccountMissingError";
+    this.accountId = accountId;
+  }
+}
+
+// Review round 1 (I1): a SetupIntent id supplied by the client to
+// refreshPaymentMethod does not belong to the caller's own Stripe customer.
+// Thrown instead of silently resolving a stranger's card — the callable
+// translates this to failed-precondition.
+export class StripeSetupIntentMismatchError extends Error {
+  setupIntentId: string;
+  constructor(setupIntentId: string, expectedCustomerId: string, actualCustomerId: string | null) {
+    super(`SetupIntent ${setupIntentId} belongs to customer ${actualCustomerId ?? "(none)"}, not ${expectedCustomerId}`);
+    this.name = "StripeSetupIntentMismatchError";
+    this.setupIntentId = setupIntentId;
+  }
+}
+
 // The ONLY Stripe surface SP5 code may touch. Everything takes integer cents.
 export interface StripeLike {
   createCustomer(meta: Record<string, string>): Promise<{ id: string }>;
   createSetupIntent(customerId: string): Promise<{ id: string; clientSecret: string }>;
   getDefaultPaymentMethod(customerId: string): Promise<{ id: string; brand: string; last4: string } | null>;
   setDefaultPaymentMethod(customerId: string, paymentMethodId: string): Promise<void>;
+  // Resolves the payment method attached to a SPECIFIC SetupIntent — unlike
+  // getDefaultPaymentMethod, this does not read the customer's current
+  // default, so it's the right call right after Elements confirms a NEW
+  // SetupIntent (the customer's default hasn't been repointed at it yet;
+  // reading "default" here would re-resolve the OLD card — review round 1,
+  // I1). Throws StripeSetupIntentMismatchError if the SetupIntent's customer
+  // isn't `expectedCustomerId`. Returns null if the SetupIntent (or its
+  // payment method) doesn't exist, or has no card attached.
+  getSetupIntentPaymentMethod(
+    setupIntentId: string, expectedCustomerId: string,
+  ): Promise<{ id: string; brand: string; last4: string } | null>;
   createExpressAccount(meta: Record<string, string>): Promise<{ id: string }>;
   createOnboardingLink(accountId: string, returnUrl: string, refreshUrl: string): Promise<{ url: string }>;
+  // Throws StripeAccountMissingError when the account was deleted (or never
+  // existed) on Stripe's side — callers must not treat that the same as an
+  // account that simply hasn't finished onboarding.
   getAccountState(accountId: string): Promise<StripeAccountState>;
   // Off-session charge with a saved payment method. THROWS on every
   // non-succeeded outcome — callers can never ignore a failure:
@@ -292,6 +333,23 @@ export class FakeStripe implements StripeLike {
     void paymentMethodId; // The fake only ever fabricates one card (pm_fake_4242) — nothing to switch between.
     await this.cardRef(customerId).set({ saved: true }, { merge: true });
   }
+  async getSetupIntentPaymentMethod(setupIntentId: string, expectedCustomerId: string) {
+    const snap = await this.objRef(setupIntentId).get();
+    // Unknown (or wrong-kind) SetupIntent id — no card to resolve, and
+    // nothing to check ownership against, so this is "no card" rather than
+    // a mismatch.
+    if (!snap.exists || snap.data()?.kind !== "setup_intent") return null;
+    const customerId = snap.data()?.customerId as string;
+    if (customerId !== expectedCustomerId) {
+      throw new StripeSetupIntentMismatchError(setupIntentId, expectedCustomerId, customerId ?? null);
+    }
+    // Deterministic contract, same marker getDefaultPaymentMethod reads: the
+    // fake only ever fabricates one card, keyed off the customer, not the
+    // SetupIntent — so "does THIS SetupIntent's customer have a saved card"
+    // is exactly the same lookup.
+    const marker = await this.cardRef(customerId).get();
+    return marker.exists ? { id: "pm_fake_4242", brand: "visa", last4: "4242" } : null;
+  }
   // Test/webhook hook: the web SaveCardModal can't run against the fake, so
   // createSetupIntent's CALLER (payments.ts) immediately marks the card saved
   // when running on the fake — see payments.ts Task 4.
@@ -311,6 +369,12 @@ export class FakeStripe implements StripeLike {
   }
   async getAccountState(accountId: string): Promise<StripeAccountState> {
     const snap = await this.objRef(accountId).get();
+    // createExpressAccount ALWAYS writes the object doc (with explicit false
+    // flags) — so a fresh, never-onboarded account still has a doc. Absent
+    // means the doc was deleted out from under a cached accountId, i.e. the
+    // Connect account itself is gone (review round 1, I2's fake model of a
+    // deleted account).
+    if (!snap.exists) throw new StripeAccountMissingError(accountId);
     const d = snap.data();
     return {
       id: accountId,
@@ -535,6 +599,19 @@ export class RealStripe implements StripeLike {
   async setDefaultPaymentMethod(customerId: string, paymentMethodId: string): Promise<void> {
     await this.s.customers.update(customerId, { invoice_settings: { default_payment_method: paymentMethodId } });
   }
+  async getSetupIntentPaymentMethod(setupIntentId: string, expectedCustomerId: string) {
+    const si = await this.s.setupIntents.retrieve(setupIntentId, { expand: ["payment_method"] });
+    const customerId = typeof si.customer === "string" ? si.customer : (si.customer?.id ?? null);
+    if (customerId !== expectedCustomerId) {
+      throw new StripeSetupIntentMismatchError(setupIntentId, expectedCustomerId, customerId);
+    }
+    if (!si.payment_method) return null;
+    const pm = typeof si.payment_method === "string"
+      ? await this.s.paymentMethods.retrieve(si.payment_method)
+      : si.payment_method;
+    if (!pm.card) return null;
+    return { id: pm.id, brand: pm.card.brand, last4: pm.card.last4 };
+  }
   async createExpressAccount(meta: Record<string, string>) {
     const a = await this.s.accounts.create({
       type: "express", metadata: meta,
@@ -550,7 +627,21 @@ export class RealStripe implements StripeLike {
     return { url: l.url };
   }
   async getAccountState(accountId: string) {
-    const a = await this.s.accounts.retrieve(accountId);
+    let a: Stripe.Account;
+    try {
+      a = await this.s.accounts.retrieve(accountId);
+    } catch (e) {
+      // resource_missing (or a bare 404) means the Connect account was
+      // deleted (or the id never existed) — distinguish that from any other
+      // failure so callers can fail closed instead of either 500ing or
+      // silently treating "can't reach Stripe" the same as "never
+      // onboarded" (review round 1, I2).
+      if (e instanceof Stripe.errors.StripeInvalidRequestError
+        && (e.code === "resource_missing" || e.statusCode === 404)) {
+        throw new StripeAccountMissingError(accountId);
+      }
+      throw e;
+    }
     return {
       id: accountId,
       transfersEnabled: a.capabilities?.transfers === "active",

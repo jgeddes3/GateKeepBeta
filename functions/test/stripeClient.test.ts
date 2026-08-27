@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import { FakeStripe, StripeCardDeclinedError, StripePaymentPendingError } from "../src/stripeClient.js";
+import {
+  FakeStripe, StripeCardDeclinedError, StripePaymentPendingError,
+  StripeAccountMissingError, StripeSetupIntentMismatchError,
+} from "../src/stripeClient.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -155,5 +158,31 @@ describe("FakeStripe", () => {
     expect(await fake.getAccountState(acct)).toEqual({
       id: acct, transfersEnabled: false, payoutsEnabled: false, instantEligible: false,
     });
+  });
+
+  it("getAccountState throws StripeAccountMissingError for an id with no object doc (review round 1, I2)", async () => {
+    await expect(fake.getAccountState(`acct_never_existed_${Date.now()}`))
+      .rejects.toBeInstanceOf(StripeAccountMissingError);
+  });
+
+  it("getSetupIntentPaymentMethod resolves the owning customer's card, is null before the card is saved, and throws on a customer mismatch", async () => {
+    const customerId = `cus_seti_${Date.now()}`;
+    const otherCustomerId = `cus_seti_other_${Date.now()}`;
+    const { id: setupIntentId } = await fake.createSetupIntent(customerId);
+
+    // No card saved yet for this customer.
+    expect(await fake.getSetupIntentPaymentMethod(setupIntentId, customerId)).toBeNull();
+
+    await fake.markCardSaved(customerId);
+    expect(await fake.getSetupIntentPaymentMethod(setupIntentId, customerId))
+      .toEqual({ id: "pm_fake_4242", brand: "visa", last4: "4242" });
+
+    // A caller asserting this SetupIntent belongs to some OTHER customer is refused.
+    await expect(fake.getSetupIntentPaymentMethod(setupIntentId, otherCustomerId))
+      .rejects.toBeInstanceOf(StripeSetupIntentMismatchError);
+  });
+
+  it("getSetupIntentPaymentMethod returns null for an unknown setup intent id", async () => {
+    expect(await fake.getSetupIntentPaymentMethod(`seti_never_existed_${Date.now()}`, "cus_x")).toBeNull();
   });
 });
