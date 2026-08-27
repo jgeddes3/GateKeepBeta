@@ -104,7 +104,7 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
 
   if (applied) return <p style={{ color: "#16a34a" }}>Application sent! The curator has been notified.</p>;
   if (alreadyApplied) {
-    return <p style={{ color: "#666" }}>You already have an open application for this gig with the selected profile.</p>;
+    return <p style={{ color: "#666" }}>There&apos;s already an open booking between this act and this gig.</p>;
   }
 
   return (
@@ -132,6 +132,7 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
   const [gig, setGig] = useState<GigDoc | null | "loading" | "unavailable">("loading");
   const [curatorName, setCuratorName] = useState<string | null>(null);
   const fillMode = useSeriesFillMode(gig !== "loading" && gig !== "unavailable" && gig ? gig.seriesId : null);
+  const curatorProfileId = gig !== "loading" && gig !== "unavailable" && gig ? gig.curatorProfileId : null;
 
   // No synchronous setGig("loading") reset at the top — gigId is fixed for
   // this route's whole lifetime under this app's plain-<a>/full-navigation
@@ -158,14 +159,18 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
     return () => { cancelled = true; unsub(); };
   }, [gigId]);
 
+  // Depends on curatorProfileId alone (not the whole `gig` object) — `gig`
+  // gets a new reference on every onSnapshot update (e.g. status flipping
+  // open -> filled), which would otherwise re-run this fetch on every such
+  // update even though the curator never changes for a given gig.
   useEffect(() => {
-    if (gig === "loading" || gig === "unavailable" || !gig) return;
+    if (!curatorProfileId) return;
     let cancelled = false;
-    getDoc(doc(getFirebase().db, "profiles", gig.curatorProfileId))
+    getDoc(doc(getFirebase().db, "profiles", curatorProfileId))
       .then((s) => { if (!cancelled) setCuratorName(s.exists() ? (s.data() as ProfileDoc).name : null); })
       .catch(() => { if (!cancelled) setCuratorName(null); });
     return () => { cancelled = true; };
-  }, [gig]);
+  }, [curatorProfileId]);
 
   if (gig === "loading") return <main style={{ maxWidth: 640, margin: "40px auto" }}><p>Loading…</p></main>;
   if (gig === "unavailable" || !gig) {

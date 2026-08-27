@@ -3,11 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import { collection, getDocs, orderBy, query, where, type QueryConstraint } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { GENRES, type GigDoc, type BudgetStructure } from "@gatekeep/shared";
-import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL, badge, chip, endDateInputToUtcMs } from "../gigs/GigForms";
-import { formatDuration, gigLocationLabel } from "./BookingForms";
+import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL, badge, chip } from "../gigs/GigForms";
+import { formatDuration, gigLocationLabel, launchTzDayStartMs, launchTzNextDayStartMs } from "./BookingForms";
 
 type GigRow = GigDoc & { id: string };
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 function GigCard({ gig }: { gig: GigRow }) {
   return (
@@ -66,10 +65,16 @@ export function GigBrowse() {
     let cancelled = false;
     const { db } = getFirebase();
     const constraints: QueryConstraint[] = [where("status", "==", "open")];
-    const fromMs = endDateInputToUtcMs(fromDate);
-    const toMs = endDateInputToUtcMs(toDate);
+    // LAUNCH_TIMEZONE-aware boundaries (not UTC midnight) — every gig time on
+    // this app displays in LAUNCH_TIMEZONE (formatGigDateTime), so bucketing
+    // the "From"/"To" filter by UTC midnight instead would mis-bucket an
+    // evening gig near either boundary by the zone's offset (4-5h for
+    // LAUNCH_TIMEZONE). See BookingForms.tsx's launchTzDayStartMs/
+    // launchTzNextDayStartMs for the DST-aware derivation.
+    const fromMs = launchTzDayStartMs(fromDate);
+    const toMs = launchTzNextDayStartMs(toDate);
     if (fromMs != null) constraints.push(where("startsAt", ">=", fromMs));
-    if (toMs != null) constraints.push(where("startsAt", "<", toMs + ONE_DAY_MS));
+    if (toMs != null) constraints.push(where("startsAt", "<", toMs));
     constraints.push(orderBy("startsAt"));
     getDocs(query(collection(db, "gigs"), ...constraints))
       .then((snap) => {
