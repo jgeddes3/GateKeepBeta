@@ -27,7 +27,7 @@ export function TrueUpForm({
   onDone: () => void; onCancel: () => void;
 }) {
   const isPerHour = structure === "perHour";
-  // Review round 1 (low #7, web): empty by default, never "0" — a booking
+  // Review round 1 (low #7): empty by default, never "0" — a booking
   // with no prior report has current == null, and confirmOccurrenceActuals'
   // own SHAPE check refuses extraMinutes===0 && extraSongs===0 outright. A
   // "0" pre-fill would let a curator submit the empty state UNCHANGED
@@ -51,7 +51,7 @@ export function TrueUpForm({
 
   const nextExtraMinutes = isPerHour ? (inputShapeOk ? parsedValue : (currentAxisValue ?? 0)) : (current?.extraMinutes ?? 0);
   const nextExtraSongs = isPerHour ? (current?.extraSongs ?? 0) : (inputShapeOk ? parsedValue : (currentAxisValue ?? 0));
-  // Review round 1 (low #7, web): mirrors confirmOccurrenceActuals' own
+  // Review round 1 (low #7): mirrors confirmOccurrenceActuals' own
   // SHAPE check exactly — server-side this is folded into ONE
   // `(extraMinutes===0 && extraSongs===0)` clause alongside the integer/
   // non-negative checks, not a separate rule. A booking that's never had
@@ -116,7 +116,7 @@ export function TrueUpForm({
           <Text style={{ color: "#fff" }}>{busy ? "Saving…" : "Save actuals"}</Text>
         </Pressable>
         <Pressable onPress={onCancel} disabled={busy}
-          style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, paddingVertical: 10, paddingHorizontal: 14 }}>
+          style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, paddingVertical: 10, paddingHorizontal: 14, opacity: busy ? 0.6 : 1 }}>
           <Text>Cancel</Text>
         </Pressable>
       </View>

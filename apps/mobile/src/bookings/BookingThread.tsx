@@ -107,12 +107,9 @@ function useGig(gigId: string | undefined): GigDoc | null | "loading" | "unavail
 // this list's LAST entry is what the completed-view no-show report window
 // is computed from.
 //
-// Exported (SP5b Task 5): PaymentStatus.tsx needs the SAME per-occurrence
-// durationMinutes true-up previews key off, and web already exports its
-// identical hook from the equivalent file for the equivalent consumer
-// (apps/web/src/payments/PaymentsPanel.tsx imports useOccurrences from
-// src/bookings/BookingThread.tsx) — a second hand-rolled copy of this on
-// mobile would be free to drift from the server's own "filled" query.
+// Exported (SP5b Task 5): PaymentStatus's true-up mount needs per-occurrence
+// durationMinutes — same reason web's BookingThread exports useOccurrences
+// for its PaymentsPanel.
 export function useOccurrences(bookingId: string): Occurrence[] {
   const [rows, setRows] = useState<Occurrence[]>([]);
   useEffect(() => {
