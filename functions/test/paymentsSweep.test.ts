@@ -473,6 +473,33 @@ describe("payments sweep — birth deposits (step 3)", () => {
   // (every non-`*_pending` outcome is logged and counted) and audited by
   // inspection: it never writes `deposit.status`, and the ledger row is
   // written on both paths.
+  it("skips a birth deposit whose booking carries a staged charge, CONFIRMED or not (rule 3)", async () => {
+    const { bookingId } = await makeConfirmedSingleBooking("swrule3b");
+    const bornGigId = `swrule3born${Date.now()}`;
+    await seedBirthDeposit(bookingId, bornGigId, Date.now() + 14 * DAY_MS);
+    // A confirmed booking CAN be mid-saga (a second accept attempt after an
+    // unstage), and the marker — not the status — is what says whose money
+    // this doc's is. Charging it here would put a charge on a doc step 1 is
+    // about to account for under a completely different key.
+    await adb.doc(`bookings/${bookingId}`).update({ depositChargePending: true });
+
+    try {
+      await runPaymentsSweep(Date.now());
+
+      const after = await getPayment(bookingId, bornGigId);
+      expect(after?.deposit.status).toBe("unpaid");
+      expect(after?.deposit.intentId).toBeNull();
+      // The guard sits BEFORE the attempt-counter persist, so not even that
+      // write happened — the doc is bit-for-bit as the materializer left it.
+      expect(after?.deposit.depositAttempts).toBeUndefined();
+      expect(await idemUsed(`${bookingId}:${bornGigId}:deposit:0`)).toBe(false);
+    } finally {
+      // Don't leave a permanently-alerting fixture behind for later sweeps.
+      await adb.doc(`bookings/${bookingId}`).update({ depositChargePending: false });
+      await adb.doc(`bookings/${bookingId}/payments/${bornGigId}`).delete();
+    }
+  });
+
   it("a birth deposit left `processing` records its intent and is NEVER re-charged", async () => {
     const { curator, bookingId } = await makeConfirmedSingleBooking("swpend");
     const customerId = await curatorCustomerId(curator.profileId);
@@ -727,11 +754,17 @@ describe("payments sweep — accept-saga reconciliation (step 1)", () => {
   // net. They are NOT step 7's to refund: a charge may be in flight against
   // exactly that set, and step 1's commit accounts the charge against exactly
   // that set.
-  it("an EXPIRED booking's staged saga docs are left untouched by the refund backstop (rule 3)", async () => {
+  it("an EXPIRED booking's staged saga docs are left untouched by steps 4 AND 7 (rule 3)", async () => {
     const curator = await makeApprovedCuratorProfile("swrule3c");
     const musician = await makeApprovedMusicianProfile("swrule3m");
     await makeMoneyReady(curator, musician);
     const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    // PAST-dated before staging, so the staged doc's own occurrenceStartsAt is
+    // past too (it is stamped at staging time). That is what puts this doc in
+    // step 4's due-occurrence net as well as step 7's expired-booking net —
+    // one fixture then exercises all three guards, and the `not_due`
+    // assertion below becomes load-bearing rather than incidental.
+    await setGigStartsAt(gigId, -5);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     await stageAcceptManually(bookingId, gigId, 1);
@@ -749,7 +782,11 @@ describe("payments sweep — accept-saga reconciliation (step 1)", () => {
     const staged = await getPayment(bookingId, gigId);
     expect(staged?.deposit.status).toBe("unpaid");          // not refunded, not refund_pending
     expect(staged?.deposit.resolvedAt).toBeNull();
-    expect(staged?.settlement.status).toBe("not_due");      // not waived either
+    // Step 4 saw this doc (its date has passed and its gig never filled, so
+    // the waive branch was reached) and backed off at the rule-3 guard: a
+    // waive here would have deleted this occurrence from the staged set the
+    // in-flight charge was sized against.
+    expect(staged?.settlement.status).toBe("not_due");
     expect((await getBooking(bookingId)).depositChargePending).toBe(true);
     expect((await ledgerRows(bookingId)).some((r) => r.kind === "refund")).toBe(false);
 

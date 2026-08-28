@@ -10,7 +10,10 @@ import {
   type BookingRequestDoc, type LedgerEntry, type PaymentDoc, type ProfileDraftInput,
   type StripeProfileDoc,
 } from "@gatekeep/shared";
-import type { RefreshPaymentMethodInput } from "../src/payments.js";
+import {
+  SAGA_NOT_ABANDONED_MESSAGE, SAGA_NOT_STAGED_MESSAGE, SAGA_WEBHOOK_OWNED_MESSAGE,
+  type RefreshPaymentMethodInput,
+} from "../src/payments.js";
 import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
@@ -1126,7 +1129,7 @@ describe("Task 6 accept saga", () => {
   // 24h idempotency window, whose charge key can no longer be replayed, so
   // nothing automatic can determine whether the curator was charged. The
   // operator settles that in the Stripe dashboard and then calls this.
-  it("releaseStuckSaga: an admin frees a staged booking (and neither booking side can)", async () => {
+  it("releaseStuckSaga: refuses while the webhook or the sweep still owns the saga, then frees it (and neither booking side can)", async () => {
     const curator = await makeApprovedCuratorProfile("t6relc");
     const musician = await makeApprovedMusicianProfile("t6relm");
     await makeMoneyReady(curator, musician);
@@ -1145,6 +1148,31 @@ describe("Task 6 accept saga", () => {
     expect((await getBooking(bookingId)).depositChargePending).toBe(true);
 
     const operator = await makeAdminUser("t6relop");
+    // REFUSAL 1 — the intent is still settling, so payment_intent.succeeded
+    // owns this saga and will complete it against the very docs a release
+    // would delete.
+    await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: SAGA_WEBHOOK_OWNED_MESSAGE,
+      });
+
+    // The operator cancels the intent in Stripe; the crash-window shape is
+    // what's left — staged, no recorded intent, nothing in flight.
+    await adb.doc(`bookings/${bookingId}`).update({ depositChargeIntentId: null });
+
+    // REFUSAL 2 — but the sweep hasn't given up on it: inside the idempotency
+    // window it will replay the persisted key on its next hourly run, and that
+    // replay can still succeed. Releasing now would strand that charge.
+    await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: SAGA_NOT_ABANDONED_MESSAGE,
+      });
+    expect(await getPaymentDocs(bookingId)).toHaveLength(1);   // nothing deleted by a refused call
+
+    // Aged past the window: the key is no longer a replay handle, the sweep
+    // refuses it too, and only a human can say what happened in Stripe.
+    await adb.doc(`bookings/${bookingId}`).update({ updatedAt: Date.now() - 25 * 3_600_000 });
+
     const res = await callFn<{ bookingId: string }, { ok: boolean; deletedStagedDocs: number }>(
       "releaseStuckSaga", { bookingId }, operator.user);
     expect(res.deletedStagedDocs).toBe(1);
@@ -1163,7 +1191,46 @@ describe("Task 6 accept saga", () => {
     // Fails closed on a booking that isn't actually stuck — a no-op write an
     // operator could mistake for a fix is worse than an error.
     await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
-      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: SAGA_NOT_STAGED_MESSAGE,
+      });
+  });
+
+  // The OTHER "the sweep gave up" signal. A booking stranded by something that
+  // bumped its updatedAt (an expiry cascade landing on a staged saga) can be
+  // freshly-timestamped and still be one the sweep has definitively refused —
+  // its alert row says so, and that row is what an operator is working from.
+  it("releaseStuckSaga: an unresolved adminAlerts row authorises a release the 24h clock alone would refuse", async () => {
+    const curator = await makeApprovedCuratorProfile("t6relac");
+    const musician = await makeApprovedMusicianProfile("t6relam");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await stageViaPendingCharge(curator, bookingId);
+    await adb.doc(`bookings/${bookingId}`).update({ depositChargeIntentId: null });
+
+    const operator = await makeAdminUser("t6relaop");
+    await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
+      .rejects.toMatchObject({ message: SAGA_NOT_ABANDONED_MESSAGE });
+
+    // Exactly what the sweep writes when it refuses a booking (deterministic
+    // id — that id IS the naming contract this callable looks up).
+    const now = Date.now();
+    await adb.doc(`adminAlerts/stuck-saga:${bookingId}`).set({
+      kind: "stuck_saga_marker", detail: "seeded by test",
+      bookingId, gigId: null, firstSeenAt: now, lastSeenAt: now, runCount: 1, resolvedAt: null,
+    });
+
+    const res = await callFn<{ bookingId: string }, { ok: boolean; deletedStagedDocs: number }>(
+      "releaseStuckSaga", { bookingId }, operator.user);
+    expect(res.deletedStagedDocs).toBe(1);
+    expect((await getBooking(bookingId)).depositChargePending).toBe(false);
+
+    // ...and the release closes the alert, so it drops out of the queue.
+    const alert = (await adb.doc(`adminAlerts/stuck-saga:${bookingId}`).get()).data();
+    expect(typeof alert?.resolvedAt).toBe("number");
+    expect(alert?.firstSeenAt).toBe(now);   // the episode's start survives the close
   });
 });
 

@@ -1,7 +1,8 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, type BookingRequestDoc, type PaymentDoc, type StripeProfileDoc,
+  isValidDocId,
+  type AdminAlertDoc, type BookingRequestDoc, type PaymentDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
@@ -9,7 +10,7 @@ import {
   getStripe, isFakeStripe, stripeSecretKey,
   StripeAccountMissingError, StripeSetupIntentMismatchError, type StripeAccountState,
 } from "./stripeClient.js";
-import { getStripeProfileDoc } from "./paymentsCore.js";
+import { getStripeProfileDoc, IDEMPOTENCY_WINDOW_MS } from "./paymentsCore.js";
 import { webhookHandlers } from "./paymentsWebhook.js";
 
 export function emptyStripeProfile(now: number): StripeProfileDoc {
@@ -314,6 +315,17 @@ webhookHandlers["account.updated"] = async (object) => {
 // `depositChargeAttempt` is left in place on purpose, exactly as every unstage
 // path does: the counter must only ever go up, so the next accept attempt
 // mints a key that has never been used.
+//
+// The three refusals below are what keep this from becoming a foot-gun: an
+// operator reaching for it on a saga that is still moving would undo work in
+// flight. Exported so the test asserts WHICH refusal fired, not merely that
+// one did — they are three different situations with three different fixes.
+export const SAGA_NOT_STAGED_MESSAGE = "This booking has no staged deposit charge to release.";
+export const SAGA_WEBHOOK_OWNED_MESSAGE =
+  "This booking's payment is still settling — cancel or refund the intent in Stripe first, then release it.";
+export const SAGA_NOT_ABANDONED_MESSAGE =
+  "The sweep is still reconciling this booking — release is only for a saga it has given up on.";
+
 export const releaseStuckSaga = onCall<{ bookingId: string }>(
   { region: "us-central1" }, async (req) => {
     const actorUid = requireAdmin(req);
@@ -329,7 +341,41 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
     // there is no saga to release, and "clearing" one would be a no-op write
     // that an operator could mistake for a fix.
     if (booking.depositChargePending !== true) {
-      throw new HttpsError("failed-precondition", "This booking has no staged deposit charge to release.");
+      throw new HttpsError("failed-precondition", SAGA_NOT_STAGED_MESSAGE);
+    }
+    // A recorded pending intent means the charge is still SETTLING and the
+    // payment_intent.succeeded webhook owns this saga: it will complete the
+    // accept out-of-band, against exactly the staged docs this callable would
+    // delete. Releasing here races a charge that can still succeed — the
+    // curator ends up paid for a booking that is no longer confirmed. The
+    // operator's move for a genuinely stalled intent is to cancel or refund it
+    // in Stripe first; that stops the webhook, and the saga then ages into the
+    // window below.
+    if (booking.depositChargeIntentId != null) {
+      throw new HttpsError("failed-precondition", SAGA_WEBHOOK_OWNED_MESSAGE);
+    }
+    // ...and the sweep must have GIVEN UP on it. Inside the idempotency
+    // window the sweep reconciles this booking automatically on its next
+    // hourly run — replaying the persisted key, which returns the original
+    // intent rather than charging again — so releasing here would delete the
+    // staged set out from under a charge that is about to be replayed and
+    // could still succeed. That is precisely the hazard rule 3 exists for.
+    //
+    // Two independent signals, either sufficient:
+    //  - `updatedAt` older than the window: the sweep's own staleness test,
+    //    evaluated the same way it evaluates it;
+    //  - an UNRESOLVED `adminAlerts/stuck-saga:{bookingId}` row: the sweep's
+    //    durable record that it already refused this booking. Looked up by
+    //    deterministic id (no query, no index) because that id IS the sweep's
+    //    naming contract for this exact problem. It covers the cases the clock
+    //    alone misses — a `stuck_saga_marker` on a booking whose `updatedAt`
+    //    was recently bumped by the write that stranded it (e.g. an expiry
+    //    cascade), which the sweep has still definitively given up on.
+    const alert = (await db.doc(`adminAlerts/stuck-saga:${bookingId}`).get()).data() as AdminAlertDoc | undefined;
+    const sweepGaveUp = booking.updatedAt < Date.now() - IDEMPOTENCY_WINDOW_MS
+      || (alert != null && alert.resolvedAt == null);
+    if (!sweepGaveUp) {
+      throw new HttpsError("failed-precondition", SAGA_NOT_ABANDONED_MESSAGE);
     }
 
     // Only `unpaid` docs — the staging. A doc that reached `held` (or any
@@ -338,16 +384,27 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
     const paymentsSnap = await db.collection(`bookings/${bookingId}/payments`).get();
     const removed: string[] = [];
     const kept: string[] = [];
+    // ONE batch for the deletes AND the marker clear: a partial release is the
+    // worst outcome available here — staged docs gone but the marker still set
+    // leaves a booking the sweep will now "release" as empty, while a cleared
+    // marker with docs still present leaves an acceptable-looking booking
+    // carrying a previous attempt's staging. Bounded by occurrences-per-booking
+    // (+1), so far under Firestore's 500-op limit; no chunking needed.
+    const batch = db.batch();
     for (const doc of paymentsSnap.docs) {
       const p = doc.data() as PaymentDoc;
       if (p.deposit.status !== "unpaid") { kept.push(`${doc.id}:${p.deposit.status}`); continue; }
-      await doc.ref.delete();
+      batch.delete(doc.ref);
       removed.push(doc.id);
     }
-
-    await bookingRef.update({
+    // Belt-and-braces precondition on the read this whole decision was made
+    // from: if ANY writer touched the booking since (the sweep completing the
+    // saga, a webhook, a second operator), this release is acting on a world
+    // that no longer exists and must fail rather than clobber it.
+    batch.update(bookingRef, {
       depositChargePending: false, depositChargeIntentId: null, updatedAt: Date.now(),
-    });
+    }, { lastUpdateTime: snap.updateTime! });
+    await batch.commit();
 
     await writeAudit({
       actorUid, action: "booking_saga_released", targetId: bookingId,

@@ -492,6 +492,19 @@ export function markDepositsPendingInTx(
 
 // ---------- Task 9: sweep-shared helpers ----------
 
+// How long a Stripe idempotency key stays a REPLAY handle (as-built contract
+// #5). Inside this window, re-issuing a call with the same key replays the
+// original object — which is what makes every recovery path in SP5 safe to
+// re-run. Past it, Stripe treats the key as brand new and the "recovery" would
+// mint a SECOND charge/refund/transfer.
+//
+// Lives here rather than in paymentsSweep.ts because it is a property of the
+// Stripe contract, not of the sweep: the sweep measures its two staleness
+// guards against it, and releaseStuckSaga (payments.ts) uses the same window
+// to decide whether a stuck saga is still the sweep's to fix or an operator's.
+// FakeStripe's keys never expire, so the emulator cannot surface any of this.
+export const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 // Flags a curator profile delinquent — the one place that stamps
 // `private/stripe.delinquent`, so every declaring path (Task 9's birth-deposit
 // dunning, Task 11's settlement dunning) writes the identical shape.

@@ -77,7 +77,7 @@ export interface AuditLogDoc {
     // SP5 Task 9: an operator manually released a stuck accept saga
     // (releaseStuckSaga) after reconciling the Stripe side by hand.
     | "booking_saga_released";
-  targetId: string;          // profileId or uid
+  targetId: string;          // profileId, uid, or bookingId (booking_saga_released)
   detail: string;
   at: number;
 }
@@ -609,6 +609,12 @@ export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
   bookingId: string; gigId: string | null;
+  // The start of the ORIGINAL episode, preserved across reopens: a sweep that
+  // observes this condition again after an operator set `resolvedAt` clears
+  // that field but never re-stamps this one, so "how long has this money been
+  // stuck" keeps measuring from when it first got stuck — not from the last
+  // time someone tried to close the ticket. A genuinely new episode gets a new
+  // row only when the underlying problem is a different (bookingId, gigId).
   firstSeenAt: number;
   lastSeenAt: number;
   // How many times a sweep has OBSERVED this condition — not how many runs it

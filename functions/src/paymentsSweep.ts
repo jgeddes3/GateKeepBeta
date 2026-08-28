@@ -60,7 +60,7 @@ import {
 } from "./stripeClient.js";
 import {
   chargeSettlement, declareCuratorDelinquent, getStripeProfileDoc, recomputePaymentSummary,
-  resolveDepositPending, writeLedger,
+  resolveDepositPending, writeLedger, IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
 import {
   abortAcceptAfterFailedCommit, commitAcceptAfterCharge, detectSelfDeal, runAcceptPostCommit,
@@ -72,8 +72,9 @@ import { paginate } from "./scheduled.js";
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Real Stripe expires an idempotency key 24h after its first use. Both
-// staleness guards below measure against the doc's own `updatedAt`: every
+// IDEMPOTENCY_WINDOW_MS (paymentsCore.ts) is the Stripe contract; what follows
+// is how THIS file measures against it. Both staleness guards below use the
+// doc's own `updatedAt` as the "first seen in this state" clock: every
 // transition INTO the state being recovered bumps it (transaction A's marker
 // write for a saga; the cancellation transaction's `*_pending` write for a
 // deposit), so it is a good enough "first seen in this state" proxy without
@@ -95,7 +96,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //    there is no key in flight for the window to protect, and extending it
 //    is correct rather than merely benign. (Birth dunning also bumps
 //    updatedAt, but only ever on `unpaid` docs, which this guard never sees.)
-const IDEMPOTENCY_WINDOW_MS = DAY_MS;
 
 // Step 7's scan bound. An unwind older than this was either already refunded
 // by an earlier run of this step or needs a human — either way, re-scanning
@@ -224,12 +224,20 @@ async function recordAdminAlert(a: {
     }
     // `resolvedAt: null` on every recurrence: an operator marking this
     // resolved while the condition still exists must not silence it forever —
-    // the next observation reopens the row.
+    // the next observation reopens the row. `firstSeenAt` is deliberately NOT
+    // re-stamped (see AdminAlertDoc): it measures the episode, not the ticket.
     await ref.update({
       kind: a.kind, detail: a.detail, lastSeenAt: a.now,
       runCount: FieldValue.increment(1), resolvedAt: null,
     });
-    return Math.floor(existing.lastSeenAt / DAY_MS) !== Math.floor(a.now / DAY_MS);
+    // Log once per UTC day — OR whenever the KIND changes, however recently we
+    // logged. A booking moving from `stuck_saga_marker` to
+    // `expired_booking_saga_marker` (or a staged saga aging into
+    // `stale_accept_saga`) is the condition genuinely changing shape, which is
+    // exactly the transition an operator reading logs needs to see; throttling
+    // it away would leave the last line they saw describing the wrong problem.
+    return existing.kind !== a.kind
+      || Math.floor(existing.lastSeenAt / DAY_MS) !== Math.floor(a.now / DAY_MS);
   } catch (e) {
     // The escalation itself failed. Log UNTHROTTLED — losing the durable row
     // is exactly when the noisy log is worth having.
@@ -935,8 +943,8 @@ async function resolveDueOccurrences(
       try {
         await resolveDueOccurrence(db, doc, at, now, report);
       } catch (e) {
-        console.error(`paymentsSweep: settlement scheduling failed for ${at.bookingId}/${at.gigId}`, e);
-        bumpError(report, "scheduleSettlement");
+        console.error(`paymentsSweep: due-occurrence resolution failed for ${at.bookingId}/${at.gigId}`, e);
+        bumpError(report, "dueOccurrence");
       }
     }
   }
