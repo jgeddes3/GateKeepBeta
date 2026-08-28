@@ -1104,6 +1104,11 @@ describe("settlement — the post-transfer no-show clawback", () => {
     const alert = await adminAlert(alertId);
     expect(alert?.kind).toBe("clawback_failed");
     expect(alert?.detail).toContain("already been reversed");
+    // The step report says the sequence never got past its first leg, so an
+    // operator knows nothing has been refunded yet.
+    expect(alert?.detail).toContain(`reversal (${FLAT_EARNINGS_CENTS}c) ✗`);
+    expect(alert?.detail).toContain(`settlement refund (${FLAT_CHARGE_CENTS}c) ✗`);
+    expect(alert?.detail).toContain("doc write ✗");
     expect(alert?.bookingId).toBe(bookingId);
     expect(alert?.gigId).toBe(gigId);
     expect(alert?.resolvedAt).toBeNull();
@@ -1114,6 +1119,56 @@ describe("settlement — the post-transfer no-show clawback", () => {
     expect(await accountBalanceCents(accountId)).toBe(0);
     expect(await fakeObject(paid.settlement.intentId!).then((i) => i?.refundedCents)).toBe(FLAT_CHARGE_CENTS);
     expect(await fakeObject(paid.deposit.intentId!).then((i) => i?.refundedCents)).toBe(DEPOSIT_CHARGE_CENTS);
+  });
+
+  it("keeps the audit trail for the legs that DID move when one of them is refused mid-sequence", async () => {
+    const { gigId, bookingId, paid, accountId } = await settleFully("clawpart");
+    const settleIntentId = paid.settlement.intentId!;
+    const depositIntentId = paid.deposit.intentId!;
+
+    // THE TRIGGER, deterministic and honest: this deposit's charge has already
+    // been refunded in full by something else (an operator in the dashboard, a
+    // whole-run sibling's own unwind), so the clawback's slice+fee refund would
+    // take that intent past what it still holds — FakeStripe's "refund exceeds
+    // charge" guard, and real Stripe's 400. Seeded on the fake's intent OBJECT
+    // rather than by poisoning an idempotency key, so the refusal comes from
+    // the money rule under test rather than from test plumbing. It is also the
+    // exact shape the R8 (below-deposit) interaction produces in the wild.
+    const depositCharged = (await fakeObject(depositIntentId))!.amountCents as number;
+    expect(depositCharged).toBe(DEPOSIT_CHARGE_CENTS);
+    await adb.doc(`stripeFake/state/objects/${depositIntentId}`).update({ refundedCents: depositCharged });
+
+    await clawbackSettledOccurrence(bookingId, gigId, Date.now());
+
+    // The two legs that SUCCEEDED both moved money AND left their audit row —
+    // the whole point of writing each row as its call returns rather than
+    // batching them after the terminal write that never happens.
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await fakeObject(paid.transfer.id!).then((t) => t?.reversed)).toBe(true);
+    expect(await fakeObject(settleIntentId).then((i) => i?.refundedCents)).toBe(FLAT_CHARGE_CENTS);
+    const rows = await ledgerRows(bookingId);
+    expect(rows.find((r) => r.kind === "transfer_reversal")?.amountCents).toBe(FLAT_EARNINGS_CENTS);
+    const refunds = rows.filter((r) => r.kind === "refund");
+    expect(refunds.length).toBe(1);                        // the deposit's row is absent, correctly
+    expect(refunds[0].amountCents).toBe(FLAT_CHARGE_CENTS);
+
+    // ...and the ticket names every leg's outcome, with BOTH intent handles.
+    const alert = await adminAlert(clawbackAlertId(bookingId, gigId));
+    expect(alert?.kind).toBe("clawback_failed");
+    expect(alert?.detail).toContain(`reversal (${FLAT_EARNINGS_CENTS}c) ✓`);
+    expect(alert?.detail).toContain(`settlement refund (${FLAT_CHARGE_CENTS}c) ✓`);
+    expect(alert?.detail).toContain(`deposit refund (${DEPOSIT_CHARGE_CENTS}c) ✗`);
+    expect(alert?.detail).toContain("doc write ✗");
+    expect(alert?.detail).toContain(`settlement intent ${settleIntentId}`);
+    expect(alert?.detail).toContain(`deposit intent ${depositIntentId}`);
+    expect(alert?.resolvedAt).toBeNull();
+
+    // NO terminal write: the doc still reads paid/transferred/applied, which is
+    // what stops anything downstream from believing the unwind completed.
+    const after = await getPayment(bookingId, gigId);
+    expect(after?.settlement.status).toBe("paid");
+    expect(after?.transfer.status).toBe("transferred");
+    expect(after?.deposit.status).toBe("applied");
   });
 
   it("records a FOREIGN transfer.reversed as a ledger row only, and dedupes every replay of it", async () => {

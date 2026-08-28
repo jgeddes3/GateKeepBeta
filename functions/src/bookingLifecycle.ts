@@ -9,7 +9,9 @@ import {
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { markDepositsPendingInTx, resolveDepositPending } from "./paymentsCore.js";
+import {
+  clawbackAlertId, markDepositsPendingInTx, recordAdminAlert, resolveDepositPending,
+} from "./paymentsCore.js";
 // SP5 Task 12. The two settlement transitions a no-show report and its reversal
 // drive — see paymentsSettlement.ts's header for why this leg of the import
 // graph exists and why it is only these two symbols.
@@ -1003,13 +1005,35 @@ async function restoreFalselyReportedBooking(
         `restoreFalselyReportedBooking: re-opened the settlement for ${bookingId}/${reportedGigId} — the next sweep run will re-charge and re-transfer it`);
     }
   } catch (e) {
-    // The booking is already restored, so throwing here would abort the
-    // audit row and both notifications for work that DID happen. Logged with
-    // the exact recovery instead: the doc is one field-set away from correct.
-    console.error(
-      `restoreFalselyReportedBooking: failed to re-open the settlement for ${bookingId}/${reportedGigId} — the booking is`
-      + " restored but the date will NOT re-settle; set settlement.status=pending, settleAfter=now, intentId=null and bump"
-      + " settlement.attempts on that payment doc to hand it back to the sweep", e);
+    // The booking is already restored, so throwing here would abort the audit
+    // row and both notifications for work that DID happen. It gets a DURABLE
+    // TICKET rather than a log line (review round 1, M2) for one reason: THERE
+    // IS NO RE-DRIVE. Nothing retries this — the sweep never looks at a `waived`
+    // settlement, and removeReliabilityMark cannot be called again for this mark
+    // (its own transaction only matches a mark that is not yet `removedByAdmin`,
+    // so a second call throws not-found). A lost log here means a musician who
+    // is never paid for a show the platform has formally re-affirmed, and
+    // nobody ever finds out. Shares the clawback's alert id: same occurrence,
+    // same "this date's money is in the wrong place" problem, one operator.
+    const detail = `an admin reversed a false no-show report and the booking was restored to "completed", but its`
+      + ` settlement could NOT be re-opened: ${e instanceof Error ? e.message : String(e)}. The date will not re-charge`
+      + " and the musician stays unpaid for it, and NOTHING will retry this — re-open it by hand on"
+      + ` bookings/${bookingId}/payments/${reportedGigId}: settlement.status="pending", settlement.settleAfter=<now>,`
+      + " settlement.intentId=null, settlement.attempts=<current+1>, settlement.nextRetryAt=null,"
+      + " settlement.chargingSince=null, settlement.lateFeeCents=null, settlement.lateFeeMusicianCents=null,"
+      + " settlement.delinquentAt=null (leave deposit.status alone — a refunded deposit is what makes the re-run charge"
+      + " the full base)";
+    const alertId = clawbackAlertId(bookingId, reportedGigId);
+    const shouldLog = await recordAdminAlert({
+      alertId, kind: "clawback_failed", detail, bookingId, gigId: reportedGigId, now,
+    }).catch((ae) => {
+      console.error(`restoreFalselyReportedBooking: failed to record the restore alert for ${bookingId}/${reportedGigId}`, ae);
+      return true;
+    });
+    if (shouldLog) {
+      console.error(
+        `restoreFalselyReportedBooking: ${bookingId}/${reportedGigId} — ${detail} (see adminAlerts/${alertId})`, e);
+    }
   }
 
   return { restored: true, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };

@@ -770,12 +770,19 @@ export function settlementPendingAlertId(bookingId: string, gigId: string): stri
 export function settlementPayoutAlertId(bookingId: string, gigId: string): string {
   return `settlement-payout:${bookingId}:${gigId}`;
 }
-// Task 12: a post-transfer no-show clawback that could not complete. SHARED by
-// the clawback's own three failure routes (a Stripe refusal, a lost terminal
-// write, a `paid` occurrence with no transfer to reverse) and by reportNoShow's
-// defensive catch around the call — all four mean "this occurrence's money did
-// not come back and a human must finish it", which is one problem for one
-// operator, not four rows.
+// Task 12: this occurrence's money could not be moved back where it belongs.
+// FOUR raisers, and deliberately one id, because they are all "the money for
+// this date is in the wrong place and a human must finish moving it":
+//   1-3. clawbackSettledOccurrence's three failure routes — a Stripe refusal
+//        part way through the sequence, a terminal write that lost its race
+//        after the money came back, and a `paid` occurrence with no transfer to
+//        reverse at all;
+//   4.   restoreFalselyReportedBooking's money leg, the mirror image: the
+//        booking was restored but its settlement could not be re-opened, so the
+//        date will never re-charge. There is no re-drive for that one — see its
+//        own comment — which is exactly why it needs a durable row.
+// reportNoShow's defensive catch around the clawback raises nothing: the
+// clawback never throws, so that catch only ever logs.
 export function clawbackAlertId(bookingId: string, gigId: string): string {
   return `clawback:${bookingId}:${gigId}`;
 }

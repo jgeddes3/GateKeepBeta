@@ -35,8 +35,12 @@
  * nothing here imports bookingLifecycle, directly or transitively.
  *
  * LOAD-BEARING SIDE EFFECT: the bottom of this file REGISTERS the
- * `payment_intent.succeeded` handlers for the "settlement" and "paydue"
- * purposes. Those registrations only exist if this module is actually loaded,
+ * `payment_intent.succeeded` handlers for the "settlement", "paydue" and
+ * "paydue_deposit" purposes, AND (Task 12) the `transfer.reversed` handler —
+ * which is the only SP5 webhook handler whose loss would be SILENT, since it
+ * writes no document state and nothing downstream waits on it: a reversal made
+ * outside our own flow would simply never be recorded anywhere.
+ * Those registrations only exist if this module is actually loaded,
  * and nothing imports it for its side effect alone — it is reached from
  * index.ts transitively, via BOTH `paymentsSweep.ts` (which imports
  * chargeSettlement) and `payments.ts` (which imports settlementMath and
@@ -1124,7 +1128,9 @@ export async function chargeSettlement(
 // ---------- Task 12: the post-transfer clawback and its re-run ----------
 
 // ONE ticket for every way the clawback can fail to bring the money back — see
-// `clawback_failed`'s own note in types.ts for why the three routes share it.
+// clawbackAlertId's own note in paymentsCore.ts for the full raiser list (this
+// file owns three of the four; the restore leg in bookingLifecycle owns the
+// fourth) and why they deliberately share a row.
 async function raiseClawbackAlert(
   bookingId: string, gigId: string, detail: string, now: number,
 ): Promise<void> {
@@ -1169,6 +1175,11 @@ async function raiseClawbackAlert(
 // NEVER THROWS. reportNoShow calls this AFTER its transaction has committed, so
 // there is no caller left to fail: every failure route ends in the durable
 // `clawback_failed` row instead, which is the thing an operator actually works.
+// That row names each leg's outcome individually ("reversal ✓, settlement refund
+// ✓, deposit refund ✗"), and each leg writes its own ledger row the moment its
+// Stripe call returns — so a sequence that stops half way still leaves a
+// complete audit trail for the money that DID move, and the ticket says exactly
+// which part is left (review round 1, M1).
 //
 // IDEMPOTENT twice over: the CAS below acts only on a `paid` + `transferred`
 // doc (so a second run after a successful clawback is a silent no-op), and
@@ -1200,42 +1211,89 @@ export async function clawbackSettledOccurrence(
     return;
   }
 
+  // THE STEP LEDGER, hoisted out of the try below (review round 1, M1). Each
+  // flag is set the instant its Stripe call returns, so the catch can say
+  // EXACTLY how far the unwind got — "reversal ✓, settlement refund ✓, deposit
+  // refund ✗" is the difference between an operator knowing what is still owed
+  // and having to reconstruct it from the Stripe dashboard.
+  const reversedCents = p.transfer.amountCents ?? 0;
+  // Exactly what the settlement charge carried — see finalizeSettlementSuccess's
+  // terminal write, which persists `computedCents`/`feeShareCents` from the same
+  // math the card was charged from, and Task 11's late fee, which rode that
+  // charge too.
+  const refundTotal = (p.settlement.computedCents ?? 0)
+    + (p.settlement.feeShareCents ?? 0) + (p.settlement.lateFeeCents ?? 0);
+  const depositRefundCents = p.deposit.sliceCents + p.deposit.feeShareCents;
+  const refundsSettlement = p.settlement.intentId != null && refundTotal > 0;
+  // ONLY for an `applied` deposit — point 3 of this function's own header.
+  const refundsDeposit = p.deposit.status === "applied"
+    && p.deposit.intentId != null && depositRefundCents > 0;
+  let reversalId: string | null = null;
+  let settlementRefundId: string | null = null;
+  let depositRefundId: string | null = null;
+  let terminalWritten = false;
+  const stepReport = (): string => {
+    const mark = (needed: boolean, done: boolean): string => (needed ? (done ? "✓" : "✗") : "not needed");
+    return `reversal (${reversedCents}c) ${mark(true, reversalId != null)},`
+      + ` settlement refund (${refundTotal}c) ${mark(refundsSettlement, settlementRefundId != null)},`
+      + ` deposit refund (${depositRefundCents}c) ${mark(refundsDeposit, depositRefundId != null)},`
+      + ` doc write ${mark(true, terminalWritten)}`;
+  };
+
   try {
     const stripe = getStripe();
     // FIRST, and on its own key: the musician's side is the half that can fail
     // for a reason outside our control (a reversal Stripe refuses), and
     // discovering that AFTER refunding the curator would leave the platform
     // funding the difference.
-    const rev = await stripe.reverseTransfer({
+    //
+    // EVERY LEG WRITES ITS OWN AUDIT ROW IMMEDIATELY (review round 1, M1). The
+    // rows used to be batched after the terminal write, which meant a refusal
+    // half way through the sequence lost the audit trail for the money that HAD
+    // moved — precisely the case where the trail matters most. The ledger
+    // records what Stripe did, step by step, independently of where the sequence
+    // stopped or what state the doc ended up in.
+    reversalId = (await stripe.reverseTransfer({
       transferId: p.transfer.id, idempotencyKey: `${bookingId}:${gigId}:clawback`,
-    });
-    const reversedCents = p.transfer.amountCents ?? 0;
+    })).id;
+    await writeLedger({
+      kind: "transfer_reversal", amountCents: reversedCents, bookingId, gigId,
+      profileId: p.musicianProfileId, stripeId: reversalId,
+      detail: "no-show clawback — earnings transfer reversed",
+    }).catch((e) => console.error(`clawbackSettledOccurrence: transfer_reversal ledger row failed for ${bookingId}/${gigId}`, e));
 
-    // Exactly what the settlement charge carried — see finalizeSettlementSuccess's
-    // terminal write, which persists `computedCents`/`feeShareCents` from the same
-    // math the card was charged from, and Task 11's late fee, which rode that
-    // charge too.
-    const refundTotal = (p.settlement.computedCents ?? 0)
-      + (p.settlement.feeShareCents ?? 0) + (p.settlement.lateFeeCents ?? 0);
-    let settlementRefundId: string | null = null;
-    if (p.settlement.intentId && refundTotal > 0) {
+    if (refundsSettlement) {
       settlementRefundId = (await stripe.refund({
-        intentId: p.settlement.intentId, amountCents: refundTotal,
+        intentId: p.settlement.intentId!, amountCents: refundTotal,
         idempotencyKey: `${bookingId}:${gigId}:clawback-refund`,
         meta: { bookingId, gigId, purpose: "noshow_clawback" },
       })).id;
+      await writeLedger({
+        kind: "refund", amountCents: refundTotal, bookingId, gigId,
+        profileId: p.curatorProfileId, stripeId: settlementRefundId,
+        detail: "no-show clawback — settlement charge refunded (incl. fee share and any late fee)",
+      }).catch((e) => console.error(`clawbackSettledOccurrence: settlement refund ledger row failed for ${bookingId}/${gigId}`, e));
     }
 
-    // The deposit slice + its fee share, and ONLY for an `applied` deposit —
-    // point 3 of this function's own header.
-    const depositRefundCents = p.deposit.sliceCents + p.deposit.feeShareCents;
-    let depositRefundId: string | null = null;
-    if (p.deposit.status === "applied" && p.deposit.intentId != null && depositRefundCents > 0) {
+    // THE R8 INTERACTION, stated because it is the one shape that reaches here
+    // and legitimately fails: an occurrence that settled BELOW its deposit slice
+    // has already had the excess refunded against this same intent (the
+    // `settle-down` refund), so slice+fee can exceed what that intent still
+    // holds and Stripe refuses. That refusal is FAIL-SAFE by construction —
+    // nothing is over-refunded, the reversal and settlement rows above already
+    // stand, and the alert names the failed step — but such a date's unwind does
+    // finish by hand.
+    if (refundsDeposit) {
       depositRefundId = (await stripe.refund({
-        intentId: p.deposit.intentId, amountCents: depositRefundCents,
+        intentId: p.deposit.intentId!, amountCents: depositRefundCents,
         idempotencyKey: `${bookingId}:${gigId}:clawback-deposit`,
         meta: { bookingId, gigId, purpose: "noshow_clawback_deposit" },
       })).id;
+      await writeLedger({
+        kind: "refund", amountCents: depositRefundCents, bookingId, gigId,
+        profileId: p.curatorProfileId, stripeId: depositRefundId,
+        detail: "no-show clawback — applied deposit refunded (incl. fee share)",
+      }).catch((e) => console.error(`clawbackSettledOccurrence: deposit refund ledger row failed for ${bookingId}/${gigId}`, e));
     }
 
     const updates: Record<string, unknown> = {
@@ -1258,39 +1316,17 @@ export async function clawbackSettledOccurrence(
     let raced = false;
     try {
       await ref.update(updates, { lastUpdateTime: snap.updateTime! });
+      terminalWritten = true;
     } catch (e) {
       if (!isFailedPrecondition(e)) throw e;
       // Money has already come back in both directions but the doc moved under
       // us. Deliberately NOT retried and NOT forced: the racer's decision may
       // itself have been a money decision, and a blind overwrite could bury it.
-      // The ledger rows below still record what Stripe actually did — that is
-      // the whole reason they are written outside this try — and the alert at
-      // the end is what gets the doc reconciled.
+      // Every audit row above is already written — that is the point of writing
+      // them per-step — and the alert at the end is what gets the doc reconciled.
       raced = true;
     }
 
-    // THE AUDIT ROWS, written whether or not the terminal write landed: the
-    // ledger records what STRIPE did, independently of what state the doc ended
-    // up in (the same rule recordRacedSettlement follows).
-    await writeLedger({
-      kind: "transfer_reversal", amountCents: reversedCents, bookingId, gigId,
-      profileId: p.musicianProfileId, stripeId: rev.id,
-      detail: "no-show clawback — earnings transfer reversed",
-    }).catch((e) => console.error(`clawbackSettledOccurrence: transfer_reversal ledger row failed for ${bookingId}/${gigId}`, e));
-    if (settlementRefundId) {
-      await writeLedger({
-        kind: "refund", amountCents: refundTotal, bookingId, gigId,
-        profileId: p.curatorProfileId, stripeId: settlementRefundId,
-        detail: "no-show clawback — settlement charge refunded (incl. fee share and any late fee)",
-      }).catch((e) => console.error(`clawbackSettledOccurrence: settlement refund ledger row failed for ${bookingId}/${gigId}`, e));
-    }
-    if (depositRefundId) {
-      await writeLedger({
-        kind: "refund", amountCents: depositRefundCents, bookingId, gigId,
-        profileId: p.curatorProfileId, stripeId: depositRefundId,
-        detail: "no-show clawback — applied deposit refunded (incl. fee share)",
-      }).catch((e) => console.error(`clawbackSettledOccurrence: deposit refund ledger row failed for ${bookingId}/${gigId}`, e));
-    }
     await recomputePaymentSummary(bookingId)
       .catch((e) => console.error(`clawbackSettledOccurrence: summary recompute failed for ${bookingId}`, e));
     // An extinguished obligation, exactly like a waive or a refund elsewhere —
@@ -1301,21 +1337,24 @@ export async function clawbackSettledOccurrence(
 
     if (raced) {
       await raiseClawbackAlert(bookingId, gigId,
-        `the clawback reversed ${reversedCents}c and refunded ${refundTotal + (depositRefundId ? depositRefundCents : 0)}c,`
-        + " but the occurrence was rewritten concurrently and the terminal write was refused — the money is back and the"
-        + " ledger records it, but the payment doc does not say so; reconcile it against the ledger rows for this occurrence",
-        now);
+        `the clawback's money all moved (${stepReport()}) but the occurrence was rewritten concurrently and the terminal`
+        + " write was refused — the money is back and the ledger records it, but the payment doc does not say so;"
+        + " reconcile it against the ledger rows for this occurrence", now);
     }
   } catch (e) {
     // A Stripe refusal — a transfer already reversed by hand in the dashboard,
     // a refund that exceeds what the intent still holds, an account problem.
     // Nothing partial is rolled back (nothing here CAN be), so the alert states
-    // the position and a human finishes it.
+    // the position STEP BY STEP and a human finishes exactly the part that did
+    // not happen. Both intent ids go in it: the operator needs the deposit's as
+    // much as the settlement's, since the deposit leg is the one that fails.
     console.error(`clawbackSettledOccurrence: ${bookingId}/${gigId} failed`, e);
     await raiseClawbackAlert(bookingId, gigId,
-      `the post-transfer no-show clawback failed: ${e instanceof Error ? e.message : String(e)}. The occurrence is`
-      + " still recorded as paid/transferred; check what Stripe holds for it (transfer"
-      + ` ${String(p.transfer.id)}, settlement intent ${String(p.settlement.intentId)}) and finish the unwind by hand`,
+      `the post-transfer no-show clawback failed: ${e instanceof Error ? e.message : String(e)}. Steps: ${stepReport()}.`
+      + ` Handles: transfer ${String(p.transfer.id)}, settlement intent ${String(p.settlement.intentId)},`
+      + ` deposit intent ${String(p.deposit.intentId)} (deposit "${p.deposit.status}"). Everything marked ✓ has already`
+      + " happened and has its ledger row — finish only the rest by hand; the occurrence is still recorded as"
+      + " paid/transferred either way",
       now).catch((ae) => console.error(`clawbackSettledOccurrence: failed to record the clawback alert for ${bookingId}/${gigId}`, ae));
   }
 }
@@ -1344,6 +1383,16 @@ export async function clawbackSettledOccurrence(
 //    and transfer and no money would move at all. `payDueIntentId` is
 //    deliberately left alone — that guard's note traces why a stale mirror is
 //    inert once `intentId` is null.
+//    THE COST OF INHERITING THE COUNTER, stated: `attempts` is the dunning
+//    ladder's own position, so a re-run starts part way UP it and has
+//    correspondingly fewer retries left. In the worst case — an original that
+//    had already walked the ladder to delinquency — the re-run's very first
+//    decline is its 5th attempt overall, which levies a late fee with no
+//    retries at all in front of it. That is accepted rather than fixed:
+//    resetting the counter to 0 would hand the re-run the CONSUMED
+//    `settle:0`/`earn:0` keys, and a settlement that silently replays a spent
+//    charge is a worse failure than one that duns impatiently. Key freshness
+//    wins.
 //  - `nextRetryAt`/`chargingSince: null` — no ladder rung and no charge in
 //    flight; a marker left over from the pre-clawback attempt would otherwise
 //    make the re-run look like an instance died mid-charge on it.
@@ -1654,8 +1703,13 @@ paymentIntentSucceededHandlers["paydue_deposit"] = async (object) => {
 //    the DEDUPE is what makes that automatic rather than conditional: both
 //    rows key off the REVERSAL's own Stripe id, so writeLedger's deterministic
 //    `{kind}:{stripeId}` doc id collapses the webhook's row into the clawback's
-//    and logs the suppression at info. No branch, no ordering assumption —
-//    whichever of the two runs second is the no-op.
+//    and logs the suppression at info. The LEDGER needs no ordering assumption —
+//    whichever of the two runs second is the no-op. The `transferred` warn
+//    below is a different matter and is BEST-EFFORT ONLY: this event can arrive
+//    inside the clawback's own window (after its reverseTransfer, before its
+//    terminal write), in which case the doc still reads `transferred` and the
+//    warn fires for a reversal that was entirely ours. Treat it as a prompt to
+//    go and look, never as proof of a foreign reversal.
 //  - FOREIGN reversals: an operator reversing a transfer by hand in the Stripe
 //    dashboard. Nothing in this codebase knows those happened, so the ledger
 //    row IS the record, and the payment doc is deliberately left saying
@@ -1708,12 +1762,16 @@ webhookHandlers["transfer.reversed"] = async (object, eventId) => {
 
   if (transferStatus === "transferred") {
     // The doc still records a live transfer for a transfer Stripe says is
-    // reversed: nothing in our own flow did this. The musician's balance has
-    // been debited and the curator has NOT been refunded, so an operator has
-    // half an unwind to finish.
+    // reversed. USUALLY that means nothing in our own flow did this — the
+    // musician's balance has been debited and the curator has NOT been
+    // refunded, so an operator has half an unwind to finish. It can also be a
+    // benign race against our OWN clawback (see this handler's header): the
+    // wording says "check", not "this was foreign", because a warn that
+    // overstates its case gets ignored.
     console.warn(
-      `transfer.reversed: ${bookingId}/${gigId} still records transfer ${transferId} as "transferred" — this reversal`
-      + " originated outside the no-show clawback (a dashboard reversal?); the curator's side of this occurrence is"
-      + " untouched and needs a decision");
+      `transfer.reversed: ${bookingId}/${gigId} still records transfer ${transferId} as "transferred" — either this`
+      + " reversal originated outside the no-show clawback (a dashboard reversal) or it raced our own clawback's"
+      + " terminal write; if the doc is still paid/transferred once things settle, the curator's side of this"
+      + " occurrence is untouched and needs a decision");
   }
 };
