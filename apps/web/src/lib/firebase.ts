@@ -15,7 +15,12 @@ const firebaseConfig = {
   appId: "1:894446689930:web:20531390a23a3804b05773",
 };
 
-const EMU_HOST = "localhost";
+// Follow the hostname the page was loaded from, so opening the dev server
+// from a phone on the same Wi-Fi (http://<LAN-IP>:3000) reaches the
+// emulators on the dev machine too — firebase.json binds them to 0.0.0.0
+// for the same reason. window is absent during SSR/prerender; localhost is
+// the correct fallback there (server-side code runs on the dev machine).
+const EMU_HOST = typeof window !== "undefined" ? window.location.hostname : "localhost";
 
 let cached: { app: FirebaseApp; auth: Auth; db: Firestore; functions: Functions; storage: FirebaseStorage } | null = null;
 
