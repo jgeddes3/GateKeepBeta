@@ -625,12 +625,21 @@ export type AdminAlertKind =
   // reportNoShow is the one path that can do this. Nothing automatic can
   // decide whether to refund it or re-settle it, so it is escalated.
   | "settlement_raced"
-  // SP5 Task 10: a settlement charge came back `processing` and never
-  // resolved. It is NEVER re-charged (the outstanding intent can still
-  // succeed, and past Stripe's 24h key window a "retry" would mint a real
-  // SECOND charge), so it sits here until the webhook finalizes it or an
-  // operator resolves the intent in Stripe.
-  | "settlement_pending_stuck";
+  // SP5 Task 10: a settlement charge whose fate is unknown and which is
+  // therefore NEVER re-charged. Two shapes: an intent left `processing` that
+  // never resolved, and (Task 10 review, I2) a pre-charge claim older than
+  // Stripe's 24h key window that never recorded an intent at all. Either way
+  // a "retry" past that window would mint a real SECOND charge, so the row
+  // sits here until the webhook finalizes it or an operator resolves it in
+  // Stripe.
+  | "settlement_pending_stuck"
+  // SP5 Task 10 review (M1): the settlement is fully priced and the curator's
+  // side is done, but the MUSICIAN has no Stripe payout account, so the
+  // earnings transfer cannot be made and the doc is left unsettled. Distinct
+  // from the two above because nothing is stuck in Stripe and no money is at
+  // risk of moving twice — the fix is the musician finishing (or repairing)
+  // Express onboarding, after which the ordinary sweep settles it.
+  | "settlement_payout_blocked";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;

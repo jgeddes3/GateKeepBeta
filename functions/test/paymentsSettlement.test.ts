@@ -16,7 +16,8 @@ import {
 // (a deposit slice larger than the date is worth). Same direct-invoke style as
 // paymentsSweep.test.ts.
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
-import { chargeSettlement, IDEMPOTENCY_WINDOW_MS } from "../src/paymentsCore.js";
+import { IDEMPOTENCY_WINDOW_MS } from "../src/paymentsCore.js";
+import { chargeSettlement } from "../src/paymentsSettlement.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -341,6 +342,12 @@ describe("settlement — the full T+3 pipeline", () => {
     await paymentRef.update({ "settlement.chargingSince": Date.now() - IDEMPOTENCY_WINDOW_MS - 1000 });
     await callFn("confirmOccurrenceActuals", { bookingId, gigId, extraMinutes: EXTRA_MINUTES }, curator.owner.user);
     expect((await getPayment(bookingId, gigId))?.settlement.trueUp?.extraMinutes).toBe(EXTRA_MINUTES);
+    // ...and the seeded marker is CLEARED before this case goes on to settle
+    // normally. Leaving it set would hand the sweep below a doc that looks
+    // like an instance died mid-charge on it, which chargeSettlement refuses
+    // outright (the stale-claim terminator) — this case is about the ordinary
+    // charge, and the refusal has its own case in the dunning suite.
+    await paymentRef.update({ "settlement.chargingSince": null });
 
     // --- step 5: the charge + the transfer ---
     await makeSettlementDue(bookingId, gigId);

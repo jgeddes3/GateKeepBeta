@@ -428,6 +428,35 @@ export interface ConfirmOccurrenceActualsInput {
   bookingId: string; gigId: string; extraMinutes?: number; extraSongs?: number;
 }
 
+// Caller-facing refusals, exported for the same reason releaseStuckSaga's
+// three are (Task 10 review, M5): they are DIFFERENT situations with
+// DIFFERENT fixes, and a test that only asserts "failed-precondition" cannot
+// tell them apart. One shared string per family was actively misleading here
+// — "report positive whole numbers" is not advice a curator who reported 900
+// minutes can act on, and "the settlement window" is not what a curator whose
+// card is being charged right now is looking at.
+export const TRUE_UP_SHAPE_MESSAGE =
+  "Report extra minutes and/or extra songs as positive whole numbers.";
+// The caps bound the settlement base (spec §4), so the limit is part of the
+// message: a curator who over-reports needs the number, not a restatement of
+// the rule they just broke.
+export const trueUpOverCapMessage = (unit: "minutes" | "songs", limit: number): string =>
+  `Report at most ${limit} extra ${unit} for one date — contact support if a date really ran longer than that.`;
+// The settlement window closed for good: this date is paid, waived, or has
+// not been performed yet. Nothing the curator does re-opens it.
+export const TRUE_UP_WINDOW_CLOSED_MESSAGE =
+  "Actuals can only be reported during the settlement window for a date that's already been played.";
+// A charge EXISTS for this date (one left processing, or one that succeeded
+// against a doc a racer moved). Reporting more now would settle the doc for an
+// amount that was never charged.
+export const TRUE_UP_PAYMENT_STARTED_MESSAGE =
+  "A payment for this date has already started — actuals can no longer be changed.";
+// A charge is IN FLIGHT this second (the one-write-wide gap between the amount
+// being computed and the intent id being recorded). Unlike the two above this
+// one is genuinely transient, so the copy invites a retry.
+export const TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE =
+  "This date is being charged right now — try reporting actuals again in a few minutes.";
+
 // Curator-only, INCREASE-ONLY true-up of what actually happened on one booked
 // date, reported during the T+3 settlement window.
 //
@@ -465,10 +494,19 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
     // inside their caps (which also bound the settlement base — spec §4).
     const extraMinutes = rawMinutes ?? 0;
     const extraSongs = rawSongs ?? 0;
-    if (!Number.isInteger(extraMinutes) || extraMinutes < 0 || extraMinutes > MAX_TRUE_UP_EXTRA_MINUTES
-      || !Number.isInteger(extraSongs) || extraSongs < 0 || extraSongs > MAX_TRUE_UP_EXTRA_SONGS
+    // SHAPE first (a non-integer/negative/empty report is malformed), then the
+    // CAPS, which are a different complaint with a different fix — see the
+    // message constants above.
+    if (!Number.isInteger(extraMinutes) || extraMinutes < 0
+      || !Number.isInteger(extraSongs) || extraSongs < 0
       || (extraMinutes === 0 && extraSongs === 0)) {
-      throw new HttpsError("invalid-argument", "Report extra minutes and/or extra songs as positive whole numbers.");
+      throw new HttpsError("invalid-argument", TRUE_UP_SHAPE_MESSAGE);
+    }
+    if (extraMinutes > MAX_TRUE_UP_EXTRA_MINUTES) {
+      throw new HttpsError("invalid-argument", trueUpOverCapMessage("minutes", MAX_TRUE_UP_EXTRA_MINUTES));
+    }
+    if (extraSongs > MAX_TRUE_UP_EXTRA_SONGS) {
+      throw new HttpsError("invalid-argument", trueUpOverCapMessage("songs", MAX_TRUE_UP_EXTRA_SONGS));
     }
 
     const db = getFirestore();
@@ -509,8 +547,16 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
       // guard measures against.
       const charging = p.settlement.chargingSince != null
         && now - p.settlement.chargingSince < IDEMPOTENCY_WINDOW_MS;
-      if (p.settlement.status !== "pending" || p.settlement.intentId != null || charging) {
-        throw new HttpsError("failed-precondition", "Actuals can only be reported during the settlement window.");
+      // Three distinct refusals, checked in order of how permanent they are
+      // (M5). All three were one message before; the fixes differ.
+      if (p.settlement.status !== "pending") {
+        throw new HttpsError("failed-precondition", TRUE_UP_WINDOW_CLOSED_MESSAGE);
+      }
+      if (p.settlement.intentId != null) {
+        throw new HttpsError("failed-precondition", TRUE_UP_PAYMENT_STARTED_MESSAGE);
+      }
+      if (charging) {
+        throw new HttpsError("failed-precondition", TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE);
       }
       const prev = p.settlement.trueUp;
       if (prev && (extraMinutes < prev.extraMinutes || extraSongs < prev.extraSongs)) {

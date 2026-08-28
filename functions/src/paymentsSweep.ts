@@ -9,7 +9,7 @@
  * MONEY MOVES IN EVERY STEP — step 4 is easy to misread as bookkeeping
  * because its headline job is scheduling, but its waive branch refunds a
  * deposit outright, and steps 5/6 charge the settlement and transfer the
- * musician's earnings (inside `chargeSettlement`, paymentsCore.ts).
+ * musician's earnings (inside `chargeSettlement`, paymentsSettlement.ts).
  *
  * Shape follows `runDailySweep`'s philosophy exactly (see scheduled.ts):
  *  - all behavior lives in the exported, clock-injected `runPaymentsSweep`, so
@@ -58,10 +58,14 @@ import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
 } from "./stripeClient.js";
 import {
-  chargeSettlement, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
+  declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
   recomputePaymentSummary, recordAdminAlert, resolveDepositPending, writeLedger,
   IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
+// Steps 5/6's whole job. Importing it here is ALSO what loads
+// paymentsSettlement's `payment_intent.succeeded` registrations from index.ts
+// (see that file's header) — do not drop this edge for a lazy import.
+import { chargeSettlement } from "./paymentsSettlement.js";
 import {
   abortAcceptAfterFailedCommit, commitAcceptAfterCharge, detectSelfDeal, runAcceptPostCommit,
   unstageAccept, type AcceptCommitResult,
@@ -101,6 +105,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //    `settlement.chargingSince` alone (it carries its own timestamp, and its
 //    CAS baseline is the write result). Keeping it out of `updatedAt` is what
 //    lets the enumeration above stay exhaustive.
+//  - PAYMENT-DOC side, the one CALLABLE writer (Task 10 review, M2):
+//    `confirmOccurrenceActuals` bumps `updatedAt` on a payment doc every time
+//    a curator reports actuals. It is safe for BOTH guards, and not by luck:
+//    the callable refuses unless `settlement.status === "pending"`, which is
+//    disjoint from every state either guard measures. The deposit guard only
+//    ever looks at `refund_pending`/`forfeit_pending` docs, and a doc whose
+//    deposit is `*_pending` has had its settlement waived by whatever set it
+//    pending (markDepositsPendingInTx / step 4 / step 7 all do), so it can
+//    never also be settlement-`pending`; the saga guard reads BOOKINGS, not
+//    payment docs, and a staged saga's docs are settlement-`not_due` anyway.
+//    A true-up therefore cannot reset the clock on any refund/transfer key
+//    this sweep is deciding whether to replay.
 
 // Step 7's scan bound. An unwind older than this was either already refunded
 // by an earlier run of this step or needs a human — either way, re-scanning
@@ -135,6 +151,14 @@ export interface PaymentsSweepReport {
   settlementsCharged: number;
   settlementsDeclined: number;
   settlementsPending: number;      // charge left `processing` — the webhook finalizes it, not us
+  // Occurrences whose settlement was RACED — a concurrent writer (a no-show
+  // waive, another finalizer) moved the doc mid-run. Reported as `skipped`
+  // outcomes, so this is the only place the sweep looks at
+  // SettlementRunResult.reason: a race is invisible in the outcome counters
+  // (nothing was achieved this run) yet it is precisely the number an
+  // operator wants to see trending, because the post-transfer shape of it
+  // parks money in `adminAlerts` (Task 10 review, M4).
+  settlementsRaced: number;
   transfersMade: number;           // earnings transfers (one per charged settlement)
   retriesAttempted: number;        // past_due docs handed to chargeSettlement this run
   // --- shared ---
@@ -155,7 +179,7 @@ function emptyReport(): PaymentsSweepReport {
     pendingDepositsResolved: 0, pendingDepositsStale: 0,
     birthDepositsCharged: 0, birthDepositsDeclined: 0, birthDepositsPending: 0,
     settlementsScheduled: 0, settlementsWaived: 0,
-    settlementsCharged: 0, settlementsDeclined: 0, settlementsPending: 0,
+    settlementsCharged: 0, settlementsDeclined: 0, settlementsPending: 0, settlementsRaced: 0,
     transfersMade: 0, retriesAttempted: 0,
     delinquenciesDeclared: 0, expiredRefunds: 0,
     errors: {},
@@ -917,7 +941,7 @@ async function resolveDueOccurrences(
 // ---------------------------------------------------------------------------
 // Steps 5 & 6 — CHARGE due settlements, RETRY past_due ones
 // ---------------------------------------------------------------------------
-// MONEY MOVES HERE. `chargeSettlement` (paymentsCore.ts) owns everything about
+// MONEY MOVES HERE. `chargeSettlement` (paymentsSettlement.ts) owns everything about
 // one occurrence's settlement — the true-up read, the T+3 charge, the earnings
 // transfer, and all of the attempts/nextRetryAt/delinquency bookkeeping. These
 // loops only find the due docs, isolate per-doc failures, and count outcomes.
@@ -941,11 +965,15 @@ async function runSettlementCharges(
       if (!at) continue;
       try {
         if (spec.countRetry) report.retriesAttempted++;
-        const { outcome, transferred } = await chargeSettlement({ bookingId: at.bookingId, gigId: at.gigId, now });
+        const { outcome, transferred, reason } = await chargeSettlement({ bookingId: at.bookingId, gigId: at.gigId, now });
         if (outcome === "charged") report.settlementsCharged++;
         else if (outcome === "declined") report.settlementsDeclined++;
         else if (outcome === "pending") report.settlementsPending++;
         else if (outcome === "waived") report.settlementsWaived++;
+        // Orthogonal to the outcome bucket above, not an alternative to it: a
+        // race that landed mid-transfer reports `skipped` WITH `transferred`
+        // true, and both facts matter. See settlementsRaced's own note.
+        if (reason === "raced") report.settlementsRaced++;
         // Counted off what actually FIRED, not off the outcome: the earnings
         // transfer happens inside chargeSettlement (it needs the settlement
         // charge's own charge id as its sourceChargeId), and it can both be

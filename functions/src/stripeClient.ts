@@ -12,6 +12,14 @@
  * key is a configuration bug (a handler forgot `secrets: [stripeSecretKey]`)
  * and must throw, never silently fall back to fake money against real
  * Firestore data.
+ *
+ * CITATION KEY: "as-built contract #N" throughout SP5 (this file and every
+ * payments* module) refers to the NUMBERED list in
+ * `docs/superpowers/plans/2026-08-27-payments.md`, section "As-built contract
+ * changes from Task 2's review (BINDING on later tasks)" — the rulings that
+ * hardened this Stripe layer and override the plan's earlier task snippets
+ * wherever they conflict. They are not spec section numbers (those are cited
+ * as "spec §N").
  */
 
 import { getFirestore } from "firebase-admin/firestore";
