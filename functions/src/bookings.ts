@@ -429,7 +429,12 @@ export const withdrawBooking = onCall<{ bookingId: string }>({ region: "us-centr
 // accept time (nothing in this codebase changes membership as a side effect
 // of a booking action), so a non-transactional read here carries no TOCTOU
 // risk the way the booking/gig/series state itself does.
-async function detectSelfDeal(
+//
+// EXPORTED (Task 9) for the same reason commitAcceptAfterCharge is: the sweep's
+// accept-saga reconciliation completes the identical saga out of band and must
+// stamp the identical `selfDeal` verdict — a second hand-rolled overlap check
+// is how the callable's answer and the sweep's drift apart.
+export async function detectSelfDeal(
   db: FirebaseFirestore.Firestore, curatorProfileId: string, musicianProfileId: string,
 ): Promise<boolean> {
   const [curatorMembersSnap, musicianMembersSnap] = await Promise.all([
@@ -945,8 +950,19 @@ async function clearStagedMarker(db: FirebaseFirestore.Firestore, bookingId: str
 //     a real signal: a doc that is no longer `unpaid` means a racer is
 //     mid-commit, possibly against money we just refunded. Hold the marker so
 //     the booking stays visible to reconciliation.
-async function unstageAccept(
-  db: FirebaseFirestore.Firestore, bookingId: string, occurrences: StagedOccurrence[],
+//
+// EXPORTED (Task 9): the sweep's reconciliation hits the same DECLINE branch
+// acceptBooking does — a declined replay moved no money, so the staged docs
+// must go and the marker must be released — and that is exactly this
+// function, not a hand-rolled three-step copy of it.
+//
+// `occurrences` is typed `{ gigId }[]`, not StagedOccurrence[]: only the gig
+// id is ever read (each doc is re-read from its own path before deletion), and
+// the sweep reconstructs its list from PAYMENT DOCS, which carry no
+// durationMinutes. Narrowing the parameter is what stops a caller from having
+// to fabricate a fake duration just to satisfy the type.
+export async function unstageAccept(
+  db: FirebaseFirestore.Firestore, bookingId: string, occurrences: { gigId: string }[],
   chargeOutstanding: boolean,
 ): Promise<void> {
   let fullyUnstaged = true;
@@ -998,7 +1014,9 @@ async function unstageAccept(
 // accept's deposit is the worst failure mode in this file.
 export async function abortAcceptAfterFailedCommit(params: {
   bookingId: string; intentId: string | null; attempt: number; amountCents: number;
-  occurrences: StagedOccurrence[]; curatorProfileId: string;
+  // `{ gigId }[]`, not StagedOccurrence[] — see unstageAccept, which is the
+  // only consumer of this list and reads nothing else off it.
+  occurrences: { gigId: string }[]; curatorProfileId: string;
 }): Promise<{ refunded: boolean }> {
   const { bookingId, intentId, attempt, amountCents, occurrences, curatorProfileId } = params;
   const db = getFirestore();
@@ -1027,8 +1045,10 @@ export async function abortAcceptAfterFailedCommit(params: {
 }
 
 // ---- POST-COMMIT TAIL (deliberately outside any transaction) ----
-// Shared by acceptBooking and the payment_intent.succeeded recovery path, so
-// a webhook-completed accept fans out exactly like a callable-completed one.
+// Shared by acceptBooking, the payment_intent.succeeded recovery path and
+// (Task 9) the sweep's saga reconciliation, so an out-of-band-completed accept
+// fans out exactly like a callable-completed one — EXPORTED for that third
+// caller.
 // Every step is best-effort and failure-isolated: the accept and its charge
 // have already committed by the time this runs, so nothing here may surface
 // as a failure to whoever is waiting.
@@ -1036,7 +1056,7 @@ export async function abortAcceptAfterFailedCommit(params: {
 // records the CHARGE, so it is written the moment the charge succeeds (before
 // transaction B), not after a commit that might never happen. See
 // acceptBooking's charge block and the webhook handler.
-async function runAcceptPostCommit(
+export async function runAcceptPostCommit(
   db: FirebaseFirestore.Firestore, bookingId: string, commit: AcceptCommitResult, now: number,
 ): Promise<void> {
   try {

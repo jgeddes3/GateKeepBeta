@@ -8,6 +8,7 @@ import { INVITE_MAX_AGE_MS } from "./members.js";
 import { syncCuratorAccess } from "./curator.js";
 import { recomputeReliability } from "./bookingLifecycle.js";
 import { notifyProfileMembers } from "./notifications.js";
+import { buildPaymentDoc } from "./paymentsCore.js";
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -174,7 +175,11 @@ function createChunkedWriter(db: FirebaseFirestore.Firestore) {
 // how much of that data the sweep actually needs to touch that day. The
 // caller's query MUST already carry an explicit `.orderBy(...)` (matching
 // its own filters) so `.startAfter(cursor)` cursors correctly between pages.
-async function* paginate(
+//
+// EXPORTED (SP5 Task 9): the hourly payments sweep pages its own queries with
+// the identical contract — one shared generator rather than a second copy that
+// could drift on the cursor/short-page edge cases this one already gets right.
+export async function* paginate(
   baseQuery: FirebaseFirestore.Query, pageSize: number,
 ): AsyncGenerator<FirebaseFirestore.QueryDocumentSnapshot[]> {
   let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
@@ -352,6 +357,11 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           // (filled) work or fresh open slots.
           let birthAs: { status: "filled"; bookingId: string; bookedMusicianProfileId: string } | { status: "open" } =
             { status: "open" };
+          // SP5 Task 9: the booking behind a FILLED birth, kept from the
+          // re-read below so the payment-doc staging further down reuses that
+          // one read rather than fetching the same doc a second time. Only ever
+          // set when `birthAs.status === "filled"`.
+          let bookedBooking: BookingRequestDoc | undefined;
           let selfHeal = false;
           if (freshSeries.activeBookingId) {
             const bookingSnap = await db.doc(`bookings/${freshSeries.activeBookingId}`).get();
@@ -361,6 +371,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
                 status: "filled", bookingId: freshSeries.activeBookingId,
                 bookedMusicianProfileId: freshSeries.bookedMusicianProfileId ?? booking.musicianProfileId,
               };
+              bookedBooking = booking;
             } else {
               // Stale linkage — the booking this series still names is no
               // longer confirmed (expired/cancelled/completed through some
@@ -423,7 +434,42 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             // both halves of the template (public content + the exact private
             // address/geo) land on every occurrence.
             pendingWrites.push({ ref: db.doc(`gigs/${gigRef.id}/private/location`), data: series.templatePrivateLocation });
-            if (birthAs.status === "filled") pendingBornFilled++;
+            if (birthAs.status === "filled") {
+              pendingBornFilled++;
+              // SP5 Task 9: a booked run's newly-born occurrence owes its own
+              // deposit. Staged `unpaid` HERE, with no Stripe call — the
+              // materializer's whole write path is one deferred batch, and a
+              // charge inside it would be a non-transactional side effect that
+              // a later batch failure could not undo. The hourly payments
+              // sweep's birth-deposit step charges it (and duns it) instead.
+              //
+              // Terms come from the booking's FROZEN acceptedTerms + feePolicy
+              // snapshot, never from live constants — this date is priced
+              // exactly as the run was accepted. Its duration is the series
+              // template's (a newly-born occurrence cannot yet have detached
+              // from the template with an edited duration).
+              //
+              // A pre-SP5 booking carries neither field: it births its
+              // occurrence with NO payment doc at all, matching the
+              // "absent = pre-SP5, tolerate it" posture everywhere else in
+              // SP5 rather than inventing terms it was never accepted under.
+              if (bookedBooking?.acceptedTerms && bookedBooking.feePolicy) {
+                pendingWrites.push({
+                  ref: db.doc(`bookings/${birthAs.bookingId}/payments/${gigRef.id}`),
+                  data: buildPaymentDoc({
+                    booking: bookedBooking, bookingId: birthAs.bookingId,
+                    occ: { gigId: gigRef.id, startsAt, durationMinutes: series.template.durationMinutes },
+                    amountCents: bookedBooking.acceptedTerms.amountCents,
+                    expectedQuantity: bookedBooking.acceptedTerms.expectedQuantity,
+                    structure: bookedBooking.structure, feePolicy: bookedBooking.feePolicy,
+                    selfDeal: bookedBooking.selfDeal === true, now,
+                  }),
+                });
+              } else {
+                console.warn(
+                  `dailySweep: occurrence ${gigRef.id} born filled for pre-SP5 booking ${birthAs.bookingId} — no payment doc staged`);
+              }
+            }
           }
           const validationBatch = db.batch();
           for (const w of pendingWrites) validationBatch.set(w.ref, w.data); // throws here — never committed

@@ -460,3 +460,56 @@ export function markDepositsPendingInTx(
   }
   return touched;
 }
+
+// ---------- Task 9: sweep-shared helpers ----------
+
+// Flags a curator profile delinquent — the one place that stamps
+// `private/stripe.delinquent`, so every declaring path (Task 9's birth-deposit
+// dunning, Task 11's settlement dunning) writes the identical shape.
+//
+// `delinquentSince` is stamped ONCE and never re-stamped: it is the "how long
+// has this profile been overdue" clock an operator reads, and a second
+// declaration (a different occurrence's deposit failing next week) must not
+// silently reset it to look freshly delinquent. Returns whether THIS call is
+// what declared it, so the caller only counts/notifies on the transition.
+//
+// `{ merge: true }` (not update): a curator that has never had a
+// private/stripe doc written can still be flagged — the doc is created with
+// just these fields, and every reader of it fails CLOSED on partial docs
+// (see requireCuratorChargeable's copy-hazard note), so a partial doc here
+// gates MORE, never less.
+//
+// Clearing is deliberately NOT here: Task 11 owns `clearDelinquencyIfSettled`
+// (a profile stops being delinquent only once EVERY outstanding obligation is
+// settled, which is a query this function has no business running).
+export async function declareCuratorDelinquent(profileId: string, now: number): Promise<boolean> {
+  const ref = getFirestore().doc(`profiles/${profileId}/private/stripe`);
+  const existing = (await ref.get()).data() as StripeProfileDoc | undefined;
+  if (existing?.delinquent === true) return false;
+  await ref.set({ delinquent: true, delinquentSince: now, updatedAt: now }, { merge: true });
+  return true;
+}
+
+// What a settlement charge attempt did, from the sweep's point of view.
+// "skipped" covers every "nothing to do / not chargeable yet" outcome so the
+// sweep's counters stay honest about what actually moved.
+export type SettlementChargeOutcome = "skipped" | "charged" | "declined";
+
+// STUB — Task 10 implements the body (true-ups, the T+3 charge, the earnings
+// transfer, the past_due/attempts/delinquency bookkeeping). It exists NOW,
+// with this signature, because Task 9 lands the two sweep loops that call it
+// (due settlements + past_due retries): landing the loops against a no-op
+// keeps the sweep's step structure, pagination, error isolation and counters
+// under test from the start, so Task 10 only has to fill in this function
+// rather than also inventing where it gets called from.
+//
+// Contract for Task 10: must be safe to call zero, one or many times for the
+// same (bookingId, gigId) — the sweep re-runs whatever is still due — and must
+// own its own attempts/nextRetryAt/delinquency writes (the sweep never touches
+// settlement dunning fields itself).
+export async function chargeSettlement(
+  params: { bookingId: string; gigId: string; now: number },
+): Promise<SettlementChargeOutcome> {
+  void params;
+  return "skipped";
+}

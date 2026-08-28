@@ -471,6 +471,10 @@ export interface FeePolicy {
 // `refunded` and `forfeited` are terminal (only Task 12's clawback ever
 // re-opens one, and only from `applied`). Legal transitions — nothing else
 // is a valid write:
+//   unpaid  -> unpaid           SP5 Task 9: a DECLINED birth-deposit charge
+//                               stays unpaid and bumps depositAttempts +
+//                               depositNextRetryAt (see DepositState below) —
+//                               a decline is a retry, never a state change
 //   unpaid  -> held             accept saga's batch charge, or the sweep's
 //                               per-birth charge for a materialized date
 //   unpaid  -> refund_pending   no-show reported on a never-charged date
@@ -507,6 +511,32 @@ export interface DepositState {
   status: DepositStatus;
   chargedAt: number | null; resolvedAt: number | null;
   forfeitTransferId: string | null;
+  // SP5 Task 9 — BIRTH-deposit dunning only (a date materialized onto an
+  // already-booked whole run, charged individually by the hourly payments
+  // sweep; the accept saga's own batch charge duns through the BOOKING's
+  // `depositChargeAttempt` instead, never these).
+  //
+  // `depositAttempts` is load-bearing for money safety, not diagnostics —
+  // exactly like BookingRequestDoc.depositChargeAttempt: both real Stripe and
+  // FakeStripe CACHE a decline under its idempotency key, so a retry after a
+  // decline must carry a different key or it replays the decline forever. The
+  // birth charge key is `{bookingId}:{gigId}:deposit:{depositAttempts}`, and
+  // the counter is PERSISTED before the attempt it names, so a crash between
+  // the charge and recording its outcome replays the SAME key (Stripe hands
+  // back the original intent) rather than charging twice. It increments ONLY
+  // on a decline.
+  //
+  // `depositNextRetryAt` is when the next attempt becomes due (offsets from
+  // SETTLEMENT_RETRY_OFFSETS_MS); null/absent means "no retry pending" —
+  // either it has never been attempted, or the retry schedule is exhausted
+  // (at which point the curator profile is flagged delinquent instead; there
+  // is deliberately NO late fee on a deposit — late fees are a settlement
+  // concept, spec §4).
+  //
+  // Both optional so every pre-Task-9 payment doc stays type-valid; readers
+  // must treat absent as 0 / null respectively.
+  depositAttempts?: number;
+  depositNextRetryAt?: number | null;
 }
 export interface SettlementState {
   status: SettlementStatus;

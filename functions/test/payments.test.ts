@@ -948,14 +948,17 @@ describe("Task 6 accept saga", () => {
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     const intentId = await stageViaPendingCharge(curator, bookingId);
-    const staged = (await getPaymentDocs(bookingId))[0];
 
     // Exactly what acceptBooking runs when transaction B refuses to commit
     // after the money moved — the routine is exported so this path (and Task
     // 9's reconciliation) can drive it directly rather than re-implementing it.
+    // `occurrences` carries gig ids ONLY: nothing downstream reads a staged
+    // occurrence's startsAt/duration (Task 9 narrowed the parameter to say so,
+    // because the sweep rebuilds this list from payment docs, which have no
+    // duration to hand).
     const { refunded } = await abortAcceptAfterFailedCommit({
       bookingId, intentId, attempt: 1, amountCents: 8742,
-      occurrences: [{ gigId, startsAt: staged.occurrenceStartsAt, durationMinutes: 90 }],
+      occurrences: [{ gigId }],
       curatorProfileId: curator.profileId,
     });
     expect(refunded).toBe(true);
