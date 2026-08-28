@@ -12,6 +12,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getFirestore, connectFirestoreEmulator, type Firestore } from "firebase/firestore";
 import { getFunctions, connectFunctionsEmulator, type Functions } from "firebase/functions";
 import { getStorage, connectStorageEmulator, type FirebaseStorage } from "firebase/storage";
+import { Platform } from "react-native";
+import Constants from "expo-constants";
 
 // Public web-app config from Firebase console → Project settings → Your apps.
 // These values are NOT secrets; security comes from rules + App Check.
@@ -23,9 +25,15 @@ const firebaseConfig = {
   appId: "1:894446689930:web:20531390a23a3804b05773",
 };
 
-// Android emulator reaches the host machine at 10.0.2.2, not localhost.
-import { Platform } from "react-native";
-const EMU_HOST = Platform.OS === "android" ? "10.0.2.2" : "localhost";
+// Where do the Firebase emulators live, from this device's point of view?
+// A PHYSICAL phone must use the dev machine's LAN IP — which is exactly the
+// host Metro served the bundle from (Constants.expoConfig.hostUri, e.g.
+// "192.168.4.27:8081") whenever the app runs under `expo start`. When that's
+// absent, fall back to the old per-platform loopbacks: the Android emulator
+// reaches the host at 10.0.2.2, everything else at localhost. Dev-only code
+// path either way (__DEV__ guard below).
+const metroHost = Constants.expoConfig?.hostUri?.split(":")[0];
+const EMU_HOST = metroHost ?? (Platform.OS === "android" ? "10.0.2.2" : "localhost");
 
 let cached: { app: FirebaseApp; auth: Auth; db: Firestore; functions: Functions; storage: FirebaseStorage } | null = null;
 

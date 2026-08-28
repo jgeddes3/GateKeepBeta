@@ -37,7 +37,17 @@ function Gate() {
     if (!user && !inAuthGroup) router.replace("/(auth)/sign-in");
     if (user && inAuthGroup) router.replace("/");
   }, [user, loading, segments, router]);
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      {/* Detail screens pushed over the tab groups get a native header whose
+          automatic back arrow is the back affordance. booking/[bookingId]
+          keeps its own custom back control instead — it also handles the
+          no-history deep-link case (canGoBack ? back : replace("/")), which
+          a native header's auto-hidden back arrow would not. */}
+      <Stack.Screen name="join" options={{ headerShown: true, title: "Create a profile" }} />
+      <Stack.Screen name="artist/[handle]" options={{ headerShown: true, title: "Artist" }} />
+    </Stack>
+  );
 }
 
 export default function RootLayout() {
