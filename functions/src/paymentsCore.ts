@@ -1,14 +1,26 @@
 /**
- * SP5 money PRIMITIVES — the layer every other payments file builds on: the
- * booking gates, the caller-facing gate/saga copy, the payment-doc factory,
- * the ledger, the booking-level aggregate, the deposit executor, and the
- * admin-alert escalation queue.
+ * SP5 money PRIMITIVES — the layer every other payments file builds on:
+ *  - the booking money gates and their caller-facing copy;
+ *  - the payment-doc factory and the fee-policy snapshot;
+ *  - the append-only ledger and the booking-level `paymentSummary` aggregate;
+ *  - the DEPOSIT executor (`resolveDepositPending`) and the transactional
+ *    intent-to-move-money marker that pairs with it;
+ *  - the profile-level delinquency pair — `declareCuratorDelinquent` and
+ *    `clearDelinquencyIfSettled`, which is the one place that knows what
+ *    "this curator owes nothing" means;
+ *  - the adminAlerts escalation queue, INCLUDING the id vocabulary every
+ *    raiser and reader shares;
+ *  - the small shared predicates the money paths must agree on to the letter
+ *    (`isDepositScheduleExhausted`, `isUnconfirmedPayDueDeposit`,
+ *    `isFailedPrecondition`) and the Stripe idempotency window they measure
+ *    against.
  *
  * Deliberately does NOT own the settlement state machine (the T+3 charge, the
- * dunning ladder, delinquency): that lives in `paymentsSettlement.ts`, which
- * imports THIS file. Keep the arrow pointing that way — bookings.ts,
- * bookingLifecycle.ts and scheduled.ts all import this module, and none of
- * them has any business pulling in the settlement machine.
+ * dunning ladder, delinquency declaration, payPastDue's finalizers): that
+ * lives in `paymentsSettlement.ts`, which imports THIS file. Keep the arrow
+ * pointing that way — bookings.ts, bookingLifecycle.ts and scheduled.ts all
+ * import this module, and none of them has any business pulling in the
+ * settlement machine.
  */
 
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
@@ -18,8 +30,8 @@ import {
   DEFAULT_FEE_POLICY, SETTLEMENT_RETRY_OFFSETS_MS,
 } from "@gatekeep/shared";
 import type {
-  AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositStatus, FeePolicy,
-  LedgerEntry, PaymentDoc, PaymentSummary, StripeProfileDoc,
+  AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositState, DepositStatus,
+  FeePolicy, LedgerEntry, PaymentDoc, PaymentSummary, StripeProfileDoc,
 } from "@gatekeep/shared";
 import { getStripe } from "./stripeClient.js";
 
@@ -206,14 +218,21 @@ function isAlreadyExists(e: unknown): boolean {
 // id), but a caller that legitimately needs two DISTINCT rows of the SAME
 // kind for the same underlying object must invent its own more specific
 // deterministic id — passing the same (kind, stripeId) pair for two
-// intentionally-separate rows silently collapses them into one. No call site
-// through Task 8 needs that: every one keys off an id that is already unique
-// per intended row (the PaymentIntent for `deposit_charged`, and — since
-// Stripe mints a fresh object per call — the refund id for `refund` and the
-// transfer id for `forfeit_transfer`, which is what makes the whole-run case
-// safe, where several occurrences refund off ONE shared intent but each gets
-// its own refund object). A future caller that would reuse a (kind, stripeId)
-// pair across two intended rows must not pass stripeId bare.
+// intentionally-separate rows silently collapses them into one. NO CALL SITE
+// THROUGH TASK 11 needs that, and each one is safe for a specific reason:
+//  - `deposit_charged` / `settlement_charged` key off the PaymentIntent, which
+//    is unique per charge (and per pay-now attempt, since those keys are
+//    attempt-scoped);
+//  - `refund`, `forfeit_transfer` and `earnings_transfer` key off an object
+//    Stripe mints fresh per call, which is what makes the whole-run case safe:
+//    several occurrences refund off ONE shared deposit intent, but each gets
+//    its own refund object;
+//  - `late_fee` (Task 11) has NO Stripe object at all and would otherwise fall
+//    back to a random id on every re-entry of the declaring path, so it invents
+//    the deterministic `latefee:{bookingId}:{gigId}` — exactly the "more
+//    specific id" this note prescribes, and the one example of it so far.
+// A future caller that would reuse a (kind, stripeId) pair across two intended
+// rows must not pass stripeId bare.
 // An empty string is treated the same as null (falls back to
 // a random id) — Stripe never issues empty-string ids, so an empty string
 // here only ever means "the caller doesn't have one yet."
@@ -356,28 +375,29 @@ export async function resolveDepositPending(
     // (spec §1) — the platform only ever keeps it on a FORFEIT, and there by
     // simply not refunding it.
     const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
-    // AN UNCONFIRMED PAY-NOW INTENT IS NOT A CHARGE (review round 2, D2).
-    // payPastDue's deposit mode records its on-session intent id BEFORE the
-    // curator confirms it in the browser, so an `unpaid` doc can carry an
-    // intent against which nothing was ever captured — `chargedAt` is the
-    // discriminator, written only by a path that knows money moved
-    // (finalizeDepositPayDue, or the sweep's own birth charge). Refunding it
-    // would be a refund of nothing: FakeStripe throws "refund of unknown
-    // intent"/"refund exceeds charge", and real Stripe 400s on a PaymentIntent
-    // with no successful charge — either way the doc would be stranded
-    // `refund_pending` forever by an error that can never resolve.
+    // AN UNCONFIRMED PAY-NOW INTENT IS NOT A CHARGE (review round 2, D2) —
+    // see isUnconfirmedPayDueDeposit for what makes `chargedAt` the sound
+    // discriminator. Refunding one would be a refund of nothing: FakeStripe
+    // throws "refund of unknown intent"/"refund exceeds charge", and real
+    // Stripe 400s on a PaymentIntent with no successful charge, so the doc
+    // would be stranded `refund_pending` forever by an error that can never
+    // resolve.
     //
     // So this resolves terminally with NO Stripe call, exactly as a
     // never-charged deposit does. The intent itself is left dangling; the
     // proper unwind is cancelling it, which needs the same future
     // `StripeLike.cancelIntent` the abandoned-settlement path is waiting on.
-    // Harmless meanwhile: it is on-session, so it can only ever be confirmed by
-    // a browser holding its clientSecret, and the webhook's finalizer refuses a
-    // doc that is no longer `unpaid`.
-    const unconfirmedPayDue = p.deposit.intentId != null
-      && p.deposit.intentId === p.deposit.payDueIntentId
-      && p.deposit.chargedAt == null;
-    if (p.deposit.intentId && !unconfirmedPayDue) {
+    //
+    // THE RESIDUAL RISK, stated honestly: that intent CAN still be confirmed
+    // by a browser holding its clientSecret, minting a charge for a deposit
+    // that has just been refunded away. The webhook finalizer refusing a
+    // no-longer-`unpaid` doc is the HAZARD, not the mitigation — a refusal
+    // alone would leave captured money with nothing recording it. What makes
+    // it safe is that the refusal is not silent: finalizeDepositPayDue reports
+    // `not_unpaid`, and the handler treats attested money on that path as a
+    // race — ledger row plus a `deposit_raced` alert — so an operator sees the
+    // charge and refunds it.
+    if (p.deposit.intentId && !isUnconfirmedPayDueDeposit(p.deposit)) {
       // PARTIAL refund against the accept batch's shared intent: a whole-run
       // booking's occurrences all point at ONE intent, and each doc refunds
       // only its own slice+fee of it. Keyed per-(booking,gig) so the
@@ -558,6 +578,45 @@ export function markDepositsPendingInTx(
 // FakeStripe's keys never expire, so the emulator cannot surface any of this.
 export const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// The first `deposit.depositAttempts` value that means "this birth deposit's
+// retry schedule is over". SETTLEMENT_RETRY_OFFSETS_MS is the schedule (+1d,
+// +2d, +2d — three retries after the initial attempt), so the count runs 1..3
+// while retries remain and hits this on the failure that exhausts it.
+//
+// Named because FOUR places need the same terminator and were each spelling it
+// out (review round 3, M5): the sweep's step-3 gate, its dunning writer,
+// payPastDue's deposit-mode predicate, and clearDelinquencyIfSettled's debt
+// query — which needs the CONSTANT rather than the predicate, because it asks
+// Firestore the question as a range filter.
+export const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
+
+// Absent means zero: the counter is written lazily (persist-before-charge), so
+// a doc that has never been attempted simply has no field.
+export function isDepositScheduleExhausted(depositAttempts: number | null | undefined): boolean {
+  return (depositAttempts ?? 0) >= DEPOSIT_EXHAUSTED_ATTEMPTS;
+}
+
+// A deposit carrying ONLY an on-session intent that was never confirmed.
+//
+// payPastDue's deposit mode records its intent id BEFORE the curator confirms
+// it in the browser, so an `unpaid` doc can reference an intent that nothing
+// was ever captured against. `chargedAt` is the discriminator, and it is a
+// sound one because it is written ONLY by paths that know money moved (the
+// sweep's birth charge, finalizeDepositPayDue) — never by the callable that
+// merely creates the intent.
+//
+// Two callers depend on this being the SAME test (review round 3, I1):
+// resolveDepositPending must not issue a refund against it (there is no charge
+// to refund — real Stripe 400s), and finalizeSettlementSuccess must be able to
+// retire such a deposit when a settlement absorbs it, exactly as it retires one
+// with no intent at all. A second, hand-rolled copy of the condition that drifts
+// from this one turns either of those into a money bug.
+export function isUnconfirmedPayDueDeposit(deposit: DepositState): boolean {
+  return deposit.intentId != null
+    && deposit.intentId === deposit.payDueIntentId
+    && deposit.chargedAt == null;
+}
+
 // Flags a curator profile delinquent — the one place that stamps
 // `private/stripe.delinquent`, so every declaring path (Task 9's birth-deposit
 // dunning, Task 11's settlement dunning) writes the identical shape.
@@ -596,10 +655,9 @@ export async function declareCuratorDelinquent(profileId: string, now: number): 
 //     `past_due` (rungs 1-3 of the ladder count, not just delinquency itself —
 //     an unpaid debt is an unpaid debt).
 //  2. DEPOSIT debt: any doc whose birth deposit is still `unpaid` after its
-//     retry schedule ran out. `depositAttempts` counts ATTEMPTS, and the
-//     schedule is exhausted once it runs past the end of
-//     SETTLEMENT_RETRY_OFFSETS_MS — the same terminator the sweep's step 3
-//     uses, expressed as a range filter.
+//     retry schedule ran out — DEPOSIT_EXHAUSTED_ATTEMPTS, the same terminator
+//     every other site uses, asked of Firestore as a range filter rather than
+//     through isDepositScheduleExhausted (a query cannot call a predicate).
 //
 // THE RANGE FILTER IS LOAD-BEARING, not a convenience: Firestore indexes only
 // documents that HAVE the field, so `depositAttempts >= n` cannot match a doc
@@ -635,7 +693,7 @@ export async function clearDelinquencyIfSettled(curatorProfileId: string, now: n
   const openDeposit = await db.collectionGroup("payments")
     .where("curatorProfileId", "==", curatorProfileId)
     .where("deposit.status", "==", "unpaid")
-    .where("deposit.depositAttempts", ">=", SETTLEMENT_RETRY_OFFSETS_MS.length + 1)
+    .where("deposit.depositAttempts", ">=", DEPOSIT_EXHAUSTED_ATTEMPTS)
     .limit(1).get();
   if (!openDeposit.empty) return;
   await db.doc(`profiles/${curatorProfileId}/private/stripe`).set(
@@ -656,6 +714,62 @@ export function isFailedPrecondition(e: unknown): boolean {
 }
 
 const ALERT_LOG_THROTTLE_MS = 24 * 60 * 60 * 1000;
+
+// ---------- the adminAlerts id vocabulary ----------
+//
+// EVERY alert id in SP5 is built by one of these seven functions, and they all
+// live here rather than beside their raisers (review round 3, I3). Three
+// reasons, and the third is the one that bites:
+//  - the ids are DETERMINISTIC per underlying problem, so an hourly sweep
+//    updates one row instead of minting 24 a day — which only holds if every
+//    raiser of a given problem agrees on the string;
+//  - READERS need them too. releaseStuckSaga looks up `stuck-saga:{bookingId}`
+//    by id to decide whether the sweep has given up on a booking, and then
+//    resolves that same row; a hand-written literal there is a silent coupling
+//    to a format defined in another file.
+//  - two of these ids are SHARED by more than one raiser on purpose (see the
+//    per-id notes), which is a decision that has to be visible in one place to
+//    survive.
+// Format is `{problem}-{scope}:{ids}`, hyphenated, with the booking id first.
+
+// Step 1's accept-saga problems. ONE id for all three kinds
+// (`stuck_saga_marker`, `stale_accept_saga`, `expired_booking_saga_marker`):
+// they are the same stuck booking seen from different angles, an operator
+// resolves them the same way (releaseStuckSaga), and recordAdminAlert
+// deliberately re-logs when the KIND changes on an existing row so the
+// transition is still visible.
+export function stuckSagaAlertId(bookingId: string): string { return `stuck-saga:${bookingId}`; }
+// Step 2: a `*_pending` deposit older than Stripe's key window.
+export function stalePendingAlertId(bookingId: string, gigId: string): string {
+  return `stale-pending:${bookingId}:${gigId}`;
+}
+// Step 3: an `unpaid` deposit carrying an unresolved intent.
+export function depositPendingAlertId(bookingId: string, gigId: string): string {
+  return `deposit-pending:${bookingId}:${gigId}`;
+}
+// A pay-now deposit whose money was captured against a doc a racer had already
+// claimed — escrow that does not exist for a charge that does.
+export function depositRacedAlertId(bookingId: string, gigId: string): string {
+  return `deposit-raced:${bookingId}:${gigId}`;
+}
+// A settlement whose money moved but whose terminal write lost a race. SHARED
+// with finalizeSettlementSuccess's "can no longer be priced" escalation: both
+// mean "money moved against this occurrence and no state records it", which is
+// one problem for one operator, not two rows.
+export function settlementRacedAlertId(bookingId: string, gigId: string): string {
+  return `settlement-raced:${bookingId}:${gigId}`;
+}
+// A settlement charge whose fate is unknown — an intent left `processing`, an
+// abandoned pay-now intent, or a pre-charge claim stale past the key window.
+export function settlementPendingAlertId(bookingId: string, gigId: string): string {
+  return `settlement-pending:${bookingId}:${gigId}`;
+}
+// A settlement that cannot pay the musician because they have no payout
+// account. Deliberately NOT the pending id: nothing is stuck in Stripe and the
+// fix is Express onboarding, not an intent.
+export function settlementPayoutAlertId(bookingId: string, gigId: string): string {
+  return `settlement-payout:${bookingId}:${gigId}`;
+}
 
 // The durable "a human has to look at this" queue (adminAlerts/{alertId}).
 // Every SP5 path that deliberately REFUSES to move money — because moving it

@@ -478,10 +478,28 @@ export interface FeePolicy {
 //                               stays unpaid and bumps depositAttempts +
 //                               depositNextRetryAt (see DepositState below) —
 //                               a decline is a retry, never a state change
-//   unpaid  -> held             accept saga's batch charge, or the sweep's
-//                               per-birth charge for a materialized date
-//   unpaid  -> refund_pending   no-show reported on a never-charged date
-//                               (resolves terminal with no Stripe call)
+//   unpaid  -> held             THREE writers: the accept saga's batch charge,
+//                               the sweep's per-birth charge for a materialized
+//                               date, and (Task 11) finalizeDepositPayDue, when
+//                               a curator pays an exhausted birth deposit
+//                               on-session through payPastDue
+//   unpaid  -> refund_pending   a cancellation/no-show/waive landing on a
+//                               never-charged date. Only when a charge might
+//                               still be outstanding against it (an intent is
+//                               recorded); the executor then resolves it with
+//                               NO Stripe call in two shapes — a birth charge
+//                               left `processing`, and an UNCONFIRMED pay-now
+//                               intent (isUnconfirmedPayDueDeposit), neither of
+//                               which has a charge to refund
+//   unpaid  -> refunded         DIRECT, no executor and no money: the deposit
+//                               obligation is discharged without ever having
+//                               been collected. Three writers, all Task 11 —
+//                               the two waive branches' no-executor path (the
+//                               date is owed nothing), finalizeSettlementSuccess
+//                               when a settlement charged the FULL base and so
+//                               ABSORBED the deposit, and the same function
+//                               retiring a deposit whose only intent was an
+//                               unconfirmed pay-now one
 //   held    -> applied          settlement consumed the escrow for its date
 //   held    -> refund_pending   cancellation / no-show, refund outcome
 //   held    -> forfeit_pending  curator late-cancel of THAT date only
@@ -493,6 +511,18 @@ export interface FeePolicy {
 // The two `*_pending` states are the transactional intent-to-move-money:
 // written in the same transaction as the cancellation itself, so a crash
 // before the money moves always leaves a doc the sweep can find and finish.
+//
+// THE CLOSING INVARIANT, and the reason the `unpaid -> refunded` edges above
+// exist at all: `unpaid` IS A DEBT-QUERY ANSWER, NOT A RESTING STATE. Once its
+// retry schedule is exhausted, an `unpaid` doc is precisely what
+// clearDelinquencyIfSettled counts as outstanding deposit debt — the thing that
+// gates the curator out of booking. So no path may leave a doc there once the
+// obligation has been DISCHARGED, by any route: paid, waived, cancelled, or
+// absorbed into a settlement that charged the full base. Leaving it `unpaid`
+// out of tidiness ("no money moved, so nothing to record") is how a curator
+// ends up permanently gated over a date they demonstrably owe nothing on.
+// `refunded` is the terminal state for "no escrow of ours is outstanding",
+// whether or not anything was ever collected.
 export type DepositStatus = "unpaid" | "held" | "applied"
   | "refund_pending" | "refunded" | "forfeit_pending" | "forfeited";
 export type SettlementStatus = "not_due" | "pending" | "past_due" | "paid" | "waived";
@@ -627,17 +657,34 @@ export interface StripeProfileDoc {
   updatedAt: number;
 }
 
-// adminAlerts/{alertId} — SP5 Task 9. The hourly payments sweep has four
-// ABSORBING states: conditions it deliberately refuses to act on (a charge it
-// must not replay on an expired idempotency key, a marker it must not clear)
-// and can only escalate. A console.error alone is not an escalation — nobody
-// is reading logs at 3am — so each one also upserts a doc here, which is the
-// durable "a human has to look at this" queue. Server-written only; admins
-// read it. Cleared by an operator tool (releaseStuckSaga) setting resolvedAt.
+// adminAlerts/{alertId} — SP5 Task 9, extended through Task 11. The money
+// paths have ABSORBING states: conditions they deliberately refuse to act on
+// (a charge that must not be replayed on an expired idempotency key, a marker
+// that must not be cleared, an intent that might still capture) and can only
+// escalate. A console.error alone is not an escalation — nobody is reading logs
+// at 3am — so each one also upserts a doc here, which is the durable "a human
+// has to look at this" queue. Server-written only; admins read it. Cleared by
+// an operator tool (releaseStuckSaga) setting resolvedAt.
 //
-// Ids are DETERMINISTIC per underlying problem (`stuck-saga:{bookingId}`,
-// `stale-pending:{bookingId}:{gigId}`), so an hourly sweep updates one row
-// rather than minting 24 a day.
+// RAISED BY (the eight kinds below, and where from):
+//   paymentsSweep.ts    step 1 -> stuck_saga_marker / stale_accept_saga
+//                       step 2 -> stale_pending_deposit
+//                       step 3 -> deposit_pending_stuck
+//                       step 7 -> expired_booking_saga_marker
+//   paymentsSettlement.ts  chargeSettlement           -> settlement_pending_stuck
+//                          finalizeSettlementSuccess  -> settlement_raced,
+//                                                        settlement_payout_blocked
+//                          finalizeDepositPayDue's
+//                            webhook caller           -> deposit_raced
+//
+// Ids are DETERMINISTIC per underlying problem and are built ONLY by
+// paymentsCore.ts's id vocabulary (`stuckSagaAlertId` and friends), so an
+// hourly sweep updates one row rather than minting 24 a day. TWO ids are
+// deliberately SHARED by more than one kind — `stuck-saga:{bookingId}` covers
+// all three saga kinds, and `settlement-raced:{...}` covers both shapes of
+// "money moved and no state records it" — because each shared set is one
+// problem for one operator. recordAdminAlert re-logs whenever the KIND changes
+// on an existing row, so a condition changing shape is still visible.
 export type AdminAlertKind =
   | "stuck_saga_marker"            // marker set on a booking that is no longer `open`
   | "stale_accept_saga"            // staged >24h — its charge key can no longer be replayed
@@ -664,12 +711,19 @@ export type AdminAlertKind =
   // Express onboarding, after which the ordinary sweep settles it.
   | "settlement_payout_blocked"
   // SP5 Task 9/11: a BIRTH deposit left `unpaid` while carrying an intent — a
-  // charge that came back `processing` and never resolved. The deposit twin of
+  // charge that came back `processing` and never resolved, or an on-session
+  // pay-now intent the curator never confirmed. The deposit twin of
   // `settlement_pending_stuck`, and refused for the identical reason: that
   // intent can still succeed, so a fresh-key retry past Stripe's 24h window
   // would be a real second charge. Sits here until an operator resolves the
   // intent in Stripe (there is no birth-deposit webhook finalizer).
-  | "deposit_pending_stuck";
+  | "deposit_pending_stuck"
+  // SP5 Task 11: a pay-now deposit whose intent Stripe confirmed AFTER a racer
+  // (a cancellation, a waive) had already claimed the doc — money captured,
+  // escrow that does not exist. The deposit twin of `settlement_raced`: the
+  // ledger row is written from Stripe's own attested amount so the charge is
+  // never invisible, and the unwind (refund it) is an operator's call.
+  | "deposit_raced";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -682,9 +736,11 @@ export interface AdminAlertDoc {
   // row only when the underlying problem is a different (bookingId, gigId).
   firstSeenAt: number;
   lastSeenAt: number;
-  // How many times a sweep has OBSERVED this condition — not how many runs it
-  // has survived: one run can observe the same stuck booking from two
-  // different steps (step 1's marker guard and step 7's), and both count.
+  // How many times this condition has been OBSERVED — not how many runs it has
+  // survived, and not a sweep-only counter: one sweep run can observe the same
+  // stuck booking from two different steps (step 1's marker guard and step 7's)
+  // and both count, and the callable/webhook raisers (a raced settlement, a
+  // raced pay-now deposit) increment it the same way.
   runCount: number;
   resolvedAt: number | null;
 }

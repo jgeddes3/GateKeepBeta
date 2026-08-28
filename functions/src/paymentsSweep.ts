@@ -59,7 +59,8 @@ import {
 } from "./stripeClient.js";
 import {
   clearDelinquencyIfSettled, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
-  recomputePaymentSummary, recordAdminAlert, resolveDepositPending, writeLedger,
+  isDepositScheduleExhausted, recomputePaymentSummary, recordAdminAlert, resolveDepositPending,
+  writeLedger, depositPendingAlertId, stalePendingAlertId, stuckSagaAlertId,
   IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
 // Steps 5/6's whole job. Importing it here is ALSO what loads
@@ -248,13 +249,9 @@ async function notifySafely(
 // the same way and paymentsCore cannot import this file). The ids below are
 // this file's half of that naming contract.
 
-function stuckSagaAlertId(bookingId: string): string { return `stuck-saga:${bookingId}`; }
-function stalePendingAlertId(bookingId: string, gigId: string): string {
-  return `stale-pending:${bookingId}:${gigId}`;
-}
-function depositPendingAlertId(bookingId: string, gigId: string): string {
-  return `deposit-pending:${bookingId}:${gigId}`;
-}
+// The id builders live in paymentsCore beside recordAdminAlert (review round 3,
+// I3) — every raiser AND every reader shares one vocabulary. See that block for
+// why two of the ids are deliberately shared across kinds.
 
 // ---------------------------------------------------------------------------
 // Step 1 — RECONCILE stuck accept sagas
@@ -609,8 +606,8 @@ async function dunBirthDeposit(
   const nextAttempts = attempts + 1;
   // SETTLEMENT_RETRY_OFFSETS_MS is +1d, +2d, +2d — three retries after the
   // initial attempt. `nextAttempts` indexes the retry it schedules, so the
-  // schedule is exhausted once it runs past the end of that list.
-  const exhausted = nextAttempts > SETTLEMENT_RETRY_OFFSETS_MS.length;
+  // schedule is exhausted once it reaches DEPOSIT_EXHAUSTED_ATTEMPTS.
+  const exhausted = isDepositScheduleExhausted(nextAttempts);
   try {
     // Under the SAME precondition the success path uses: a cancellation can
     // land during the (non-transactional) charge attempt on a declined card
@@ -706,7 +703,7 @@ async function chargeOneBirthDeposit(
   // forever, minting a fresh key and a fresh decline each time. Dunning stops
   // here; the curator's delinquency flag is the standing signal, and Task 11's
   // payPastDue is the way out.
-  if (attempts > SETTLEMENT_RETRY_OFFSETS_MS.length) return;
+  if (isDepositScheduleExhausted(attempts)) return;
 
   // Dunning backoff. Filtered in application code rather than by a second
   // composite index: the candidate set is bounded by "future booked dates

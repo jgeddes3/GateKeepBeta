@@ -1,17 +1,19 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS, SETTLEMENT_RETRY_OFFSETS_MS,
+  isValidDocId, MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS,
   type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type PaymentDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import {
   getStripe, isFakeStripe, stripeSecretKey,
-  StripeAccountMissingError, StripeSetupIntentMismatchError, type StripeAccountState,
+  StripeAccountMissingError, StripeSetupIntentMismatchError,
+  type StripeAccountState, type StripeLike,
 } from "./stripeClient.js";
 import {
-  clearDelinquencyIfSettled, getStripeProfileDoc, isFailedPrecondition, IDEMPOTENCY_WINDOW_MS,
+  clearDelinquencyIfSettled, getStripeProfileDoc, isDepositScheduleExhausted, isFailedPrecondition,
+  stuckSagaAlertId, IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
 // payPastDue prices and finalizes through the settlement module's own
 // functions, never a second copy of that math. This import is also one of the
@@ -382,14 +384,14 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
     // Two independent signals, either sufficient:
     //  - `updatedAt` older than the window: the sweep's own staleness test,
     //    evaluated the same way it evaluates it;
-    //  - an UNRESOLVED `adminAlerts/stuck-saga:{bookingId}` row: the sweep's
+    //  - an UNRESOLVED `stuckSagaAlertId(bookingId)` row: the sweep's
     //    durable record that it already refused this booking. Looked up by
     //    deterministic id (no query, no index) because that id IS the sweep's
     //    naming contract for this exact problem. It covers the cases the clock
     //    alone misses — a `stuck_saga_marker` on a booking whose `updatedAt`
     //    was recently bumped by the write that stranded it (e.g. an expiry
     //    cascade), which the sweep has still definitively given up on.
-    const alert = (await db.doc(`adminAlerts/stuck-saga:${bookingId}`).get()).data() as AdminAlertDoc | undefined;
+    const alert = (await db.doc(`adminAlerts/${stuckSagaAlertId(bookingId)}`).get()).data() as AdminAlertDoc | undefined;
     const sweepGaveUp = booking.updatedAt < Date.now() - IDEMPOTENCY_WINDOW_MS
       || (alert != null && alert.resolvedAt == null);
     if (!sweepGaveUp) {
@@ -432,7 +434,7 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
 
     // Best-effort: the alert doc is a queue entry, not a money record — a
     // failure to close it must not fail a release that already committed.
-    await db.doc(`adminAlerts/stuck-saga:${bookingId}`)
+    await db.doc(`adminAlerts/${stuckSagaAlertId(bookingId)}`)
       .update({ resolvedAt: Date.now() })
       .catch(() => { /* no alert row (released before a sweep ever saw it) — nothing to resolve */ });
 
@@ -661,166 +663,148 @@ export const PAY_PAST_DUE_DATE_CANCELLED_MESSAGE =
 // second mode a curator whose only debt is a deposit had NO way to clear the
 // gate at all. That mode charges `sliceCents + feeShareCents` (both frozen at
 // staging) for a FUTURE occurrence and finalizes into held escrow.
-export const payPastDue = onCall<PayPastDueInput>(
-  { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
-    const uid = requireAuthUid(req);
-    requireVerifiedEmail(req);
-    const { bookingId, gigId } = req.data ?? ({} as PayPastDueInput);
-    if (!isValidDocId(bookingId) || !isValidDocId(gigId)) {
-      throw new HttpsError("invalid-argument", "Booking and gig ids are required.");
-    }
+// What the callable hands back, in the two shapes it actually has. Exported so
+// the web (and a test) binds the same contract the server returns, rather than
+// re-describing it (review round 3, M9).
+export type PayPastDueResult =
+  // FAKE STRIPE ONLY: the emulator has no Elements flow, so the callable
+  // finalizes inline and the debt is settled by the time it returns.
+  | { done: true; amountCents: number }
+  // REAL: `clientSecret` is what the browser confirms with Elements, after
+  // which the payment_intent.succeeded webhook finalizes. `clientSecret` is
+  // absent only on the fake path's own non-success exits.
+  | { done: false; amountCents: number; clientSecret?: string };
 
-    const db = getFirestore();
-    const bookingSnap = await db.doc(`bookings/${bookingId}`).get();
-    if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
-    const booking = bookingSnap.data() as BookingRequestDoc;
-    // Side-DEPENDENT money action ⇒ the strict resolver (a member of BOTH
-    // profiles is refused rather than silently resolved to one side).
-    // Deliberately NOT gated on booking.status: a cancelled or expired booking
-    // can still own a performed date whose settlement went past_due, and that
-    // debt is exactly what this pays.
-    const side = await resolveBookingSideStrict(booking, uid);
-    if (side !== "curator") throw new HttpsError("permission-denied", "Only the curator side can pay a settlement.");
+// Everything both branches resolved before the fork. Passed as one object so
+// neither branch re-reads a doc the dispatcher already has — every field here
+// is the read the decision was made from, and the CAS preconditions below are
+// held to `pSnap.updateTime` for exactly that reason.
+interface PayDueContext {
+  bookingId: string; gigId: string;
+  booking: BookingRequestDoc;
+  gig: GigDoc | undefined;
+  p: PaymentDoc;
+  pSnap: FirebaseFirestore.DocumentSnapshot;
+  ref: FirebaseFirestore.DocumentReference;
+  stripe: StripeLike;
+  now: number;
+}
 
-    const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
-    const [pSnap, gigSnap] = await Promise.all([ref.get(), db.doc(`gigs/${gigId}`).get()]);
-    const p = pSnap.data() as PaymentDoc | undefined;
-    const gig = gigSnap.data() as GigDoc | undefined;
-    if (!p) throw new HttpsError("not-found", "No payment record for that date.");
+// ===================== THE DEPOSIT DEBT =========================
+// An exhausted birth deposit on a date that has not settled yet.
+async function payDueDeposit(ctx: PayDueContext): Promise<PayPastDueResult> {
+  const { bookingId, gigId, booking, p, pSnap, ref, stripe, now } = ctx;
+  // RULE 3 (paymentsSweep.ts's header): an `unpaid` doc under a booking
+  // carrying the accept-saga marker belongs to step 1 alone — a charge is in
+  // flight against exactly that staged set, and charging one of its docs here,
+  // on a key that saga knows nothing about, is how one accept becomes two
+  // charges.
+  if (booking.depositChargePending === true) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
+  }
+  // Same only-mine-replaceable rule as the settlement side: an `unpaid`
+  // deposit that already carries an intent is a birth charge left `processing`
+  // (sweep step 3's own pending path), and that intent can still capture.
+  if (p.deposit.intentId != null && p.deposit.intentId !== p.deposit.payDueIntentId) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
+  }
+  // Both figures were frozen when the doc was staged (buildPaymentDoc) and no
+  // path rewrites them, so this amount is as stable as the settlement side's —
+  // the same property that makes the deterministic key safe.
+  const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
+  if (amountCents <= 0) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOTHING_OWED_MESSAGE);
+  }
+  const curatorStripe = await getStripeProfileDoc(p.curatorProfileId);
+  if (!curatorStripe?.customerId) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_NO_CUSTOMER_MESSAGE);
+  }
+  const intent = await stripe.createOnSessionIntent({
+    customerId: curatorStripe.customerId, amountCents,
+    // Scoped to the ATTEMPT counter, exactly like the sweep's own
+    // `deposit:{depositAttempts}` key — and distinct from it, so a pay-now
+    // intent can never collide with (or replay) an off-session attempt.
+    idempotencyKey: `${bookingId}:${gigId}:paydue_deposit:${p.deposit.depositAttempts ?? 0}`,
+    meta: { bookingId, gigId, purpose: "paydue_deposit" },
+  });
+  try {
+    // Records the intent WITHOUT moving the doc off `unpaid`: the money has not
+    // been captured yet. Note that an `unpaid` doc carrying an intent is
+    // already meaningful elsewhere — both waive branches route such a doc
+    // through `refund_pending` rather than straight to `refunded`, which is
+    // exactly the handling an in-flight on-session intent needs.
+    await ref.update({
+      "deposit.intentId": intent.id,
+      "deposit.payDueIntentId": intent.id,
+      updatedAt: now,
+    }, { lastUpdateTime: pSnap.updateTime! });
+  } catch (e) {
+    if (!isFailedPrecondition(e)) throw e;
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_RACED_MESSAGE);
+  }
+  if (isFakeStripe(stripe)) {
+    // Emulator contract (see payDueSettlement's): "called" means "confirmed".
+    // The real path's equivalent is the "paydue_deposit" webhook purpose, which
+    // runs this same finalizer.
+    const { outcome } = await finalizeDepositPayDue({
+      bookingId, gigId, intentId: intent.id, chargedCents: amountCents, now,
+    });
+    if (outcome === "raced") {
+      // The money moved but no escrow exists: a cancellation claimed this doc
+      // mid-call and its executor will send the charge back. Reporting
+      // `done: true` here would tell the curator their date is secured at the
+      // exact moment it was cancelled out from under them.
+      throw new HttpsError("failed-precondition", PAY_PAST_DUE_DATE_CANCELLED_MESSAGE);
+    }
+    return outcome === "held" ? { done: true, amountCents } : { done: false, amountCents };
+  }
+  return { done: false, clientSecret: intent.clientSecret, amountCents };
+}
 
-    // WHICH DEBT? Settlement first: it is a date that was actually performed,
-    // and it is the only one that can carry a late fee. A deposit debt is
-    // second, and only once its own retry schedule has run out — before that
-    // the sweep is still trying, and a manual charge would race it.
-    const settlementDue = p.settlement.status === "past_due";
-    const depositExhausted = p.deposit.status === "unpaid"
-      && (p.deposit.depositAttempts ?? 0) > SETTLEMENT_RETRY_OFFSETS_MS.length
-      // ...for a date that has NOT been settled yet — which is what the deposit
-      // branch's own "future occurrence" framing already assumes, made explicit
-      // (review round 2, D1). A settlement that charged with no slice credit
-      // took the FULL base, deposit included, and finalizeSettlementSuccess
-      // resolves such a deposit `refunded` for exactly that reason; charging it
-      // here would bill the curator a second time for money already collected.
-      // `waived` is excluded on the same logic (nothing is owed for the date at
-      // all) and `past_due` is the settlement branch's business, not this one.
-      && (p.settlement.status === "not_due" || p.settlement.status === "pending");
-    if (!settlementDue && !depositExhausted) {
-      throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOT_OVERDUE_MESSAGE);
-    }
+// ===================== THE SETTLEMENT DEBT ========================
+// A performed date whose charge failed — the only debt that can carry a late
+// fee, and the only one the dunning ladder produces.
+async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
+  const { bookingId, gigId, booking, gig, p, pSnap, ref, stripe, now } = ctx;
+  // Both are needed to PRICE the date; without them there is no honest
+  // amount to charge, and inventing one is not an option for money.
+  if (!gig || !booking.acceptedTerms) {
+    throw new HttpsError("failed-precondition", "This date can no longer be priced — contact support.");
+  }
+  // DEFECT 3a — A CHARGE IS IN FLIGHT RIGHT NOW. `chargingSince` is
+  // chargeSettlement's pre-charge claim: a sweep run has computed an amount
+  // and is inside its `chargeOffSession` call. Minting an on-session intent
+  // beside it would let the curator confirm one charge while the card is
+  // being charged for the same debt off-session.
+  //
+  // WINDOW-BOUNDED DELIBERATELY, and the bound is the whole point: past
+  // IDEMPOTENCY_WINDOW_MS a stale claim is chargeSettlement's PERMANENT
+  // refusal (its stale-claim terminator), so treating it as permanent here
+  // too would leave the curator with no way to pay at all — gated by a debt
+  // the system has also stopped trying to collect. Inside the window the
+  // sweep is still the owner; past it, the operator route is the alert
+  // chargeSettlement raises, and the curator may still pay.
+  const charging = p.settlement.chargingSince;
+  if (charging != null && now - charging < IDEMPOTENCY_WINDOW_MS) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
+  }
+  // The double-charge guard. See the header note: only an intent this
+  // callable itself minted may be replaced.
+  if (p.settlement.intentId != null && p.settlement.intentId !== p.settlement.payDueIntentId) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
+  }
 
-    const stripe = getStripe();
-    const now = Date.now();
-
-    if (!settlementDue) {
-      // ===================== THE DEPOSIT DEBT =========================
-      // RULE 3 (paymentsSweep.ts's header): an `unpaid` doc under a booking
-      // carrying the accept-saga marker belongs to step 1 alone — a charge is
-      // in flight against exactly that staged set, and charging one of its docs
-      // here, on a key that saga knows nothing about, is how one accept becomes
-      // two charges.
-      if (booking.depositChargePending === true) {
-        throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
-      }
-      // Same only-mine-replaceable rule as the settlement side: an `unpaid`
-      // deposit that already carries an intent is a birth charge left
-      // `processing` (sweep step 3's own pending path), and that intent can
-      // still capture.
-      if (p.deposit.intentId != null && p.deposit.intentId !== p.deposit.payDueIntentId) {
-        throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
-      }
-      // Both figures were frozen when the doc was staged (buildPaymentDoc) and
-      // no path rewrites them, so this amount is as stable as the settlement
-      // side's — the same property that makes the deterministic key safe.
-      const depositAmount = p.deposit.sliceCents + p.deposit.feeShareCents;
-      if (depositAmount <= 0) {
-        throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOTHING_OWED_MESSAGE);
-      }
-      const depositStripe = await getStripeProfileDoc(p.curatorProfileId);
-      if (!depositStripe?.customerId) {
-        throw new HttpsError("failed-precondition", PAY_PAST_DUE_NO_CUSTOMER_MESSAGE);
-      }
-      const depositIntent = await stripe.createOnSessionIntent({
-        customerId: depositStripe.customerId, amountCents: depositAmount,
-        // Scoped to the ATTEMPT counter, exactly like the sweep's own
-        // `deposit:{depositAttempts}` key — and distinct from it, so a pay-now
-        // intent can never collide with (or replay) an off-session attempt.
-        idempotencyKey: `${bookingId}:${gigId}:paydue-deposit:${p.deposit.depositAttempts ?? 0}`,
-        meta: { bookingId, gigId, purpose: "paydue-deposit" },
-      });
-      try {
-        // Records the intent WITHOUT moving the doc off `unpaid`: the money has
-        // not been captured yet. Note that an `unpaid` doc carrying an intent
-        // is already meaningful elsewhere — both waive branches route such a
-        // doc through `refund_pending` rather than straight to `refunded`,
-        // which is exactly the handling an in-flight on-session intent needs.
-        await ref.update({
-          "deposit.intentId": depositIntent.id,
-          "deposit.payDueIntentId": depositIntent.id,
-          updatedAt: now,
-        }, { lastUpdateTime: pSnap.updateTime! });
-      } catch (e) {
-        if (!isFailedPrecondition(e)) throw e;
-        throw new HttpsError("failed-precondition", PAY_PAST_DUE_RACED_MESSAGE);
-      }
-      if (isFakeStripe(stripe)) {
-        // Emulator contract (see the settlement branch below): "called" means
-        // "confirmed". The real path's equivalent is the "paydue-deposit"
-        // webhook purpose, which runs this same finalizer.
-        const outcome = await finalizeDepositPayDue({
-          bookingId, gigId, intentId: depositIntent.id, chargedCents: depositAmount, now,
-        });
-        if (outcome === "raced") {
-          // The money moved but no escrow exists: a cancellation claimed this
-          // doc mid-call and its executor will send the charge back. Reporting
-          // `done: true` here would tell the curator their date is secured at
-          // the exact moment it was cancelled out from under them.
-          throw new HttpsError("failed-precondition", PAY_PAST_DUE_DATE_CANCELLED_MESSAGE);
-        }
-        return { done: outcome === "held", amountCents: depositAmount };
-      }
-      return { done: false, clientSecret: depositIntent.clientSecret, amountCents: depositAmount };
-    }
-
-    // ===================== THE SETTLEMENT DEBT ========================
-    // Both are needed to PRICE the date; without them there is no honest
-    // amount to charge, and inventing one is not an option for money.
-    if (!gig || !booking.acceptedTerms) {
-      throw new HttpsError("failed-precondition", "This date can no longer be priced — contact support.");
-    }
-    // DEFECT 3a — A CHARGE IS IN FLIGHT RIGHT NOW. `chargingSince` is
-    // chargeSettlement's pre-charge claim: a sweep run has computed an amount
-    // and is inside its `chargeOffSession` call. Minting an on-session intent
-    // beside it would let the curator confirm one charge while the card is
-    // being charged for the same debt off-session.
-    //
-    // WINDOW-BOUNDED DELIBERATELY, and the bound is the whole point: past
-    // IDEMPOTENCY_WINDOW_MS a stale claim is chargeSettlement's PERMANENT
-    // refusal (its stale-claim terminator), so treating it as permanent here
-    // too would leave the curator with no way to pay at all — gated by a debt
-    // the system has also stopped trying to collect. Inside the window the
-    // sweep is still the owner; past it, the operator route is the alert
-    // chargeSettlement raises, and the curator may still pay.
-    const charging = p.settlement.chargingSince;
-    if (charging != null && now - charging < IDEMPOTENCY_WINDOW_MS) {
-      throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
-    }
-    // The double-charge guard. See the header note: only an intent this
-    // callable itself minted may be replaced.
-    if (p.settlement.intentId != null && p.settlement.intentId !== p.settlement.payDueIntentId) {
-      throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
-    }
-
-    const math = settlementMath(p, booking, gig);
-    if (math.chargeTotal <= 0) {
-      // A `past_due` doc with nothing owed is a contradiction (a decline needs
-      // something to have been charged), so this is a fail-closed refusal
-      // rather than a silent zero-amount intent Stripe would reject anyway.
-      throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOTHING_OWED_MESSAGE);
-    }
-    const curatorStripe = await getStripeProfileDoc(p.curatorProfileId);
-    if (!curatorStripe?.customerId) {
-      throw new HttpsError("failed-precondition", PAY_PAST_DUE_NO_CUSTOMER_MESSAGE);
-    }
+  const math = settlementMath(p, booking, gig);
+  if (math.chargeTotal <= 0) {
+    // A `past_due` doc with nothing owed is a contradiction (a decline needs
+    // something to have been charged), so this is a fail-closed refusal
+    // rather than a silent zero-amount intent Stripe would reject anyway.
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOTHING_OWED_MESSAGE);
+  }
+  const curatorStripe = await getStripeProfileDoc(p.curatorProfileId);
+  if (!curatorStripe?.customerId) {
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_NO_CUSTOMER_MESSAGE);
+  }
 
     // ATTEMPT-SCOPED, like every other SP5 key (as-built contract #2) — and
     // here the replay is a FEATURE: a repeat call for the same attempt hands
@@ -845,59 +829,119 @@ export const payPastDue = onCall<PayPastDueInput>(
     // recordSettlementFailure's re-entry guard. `attempts` itself only moves on
     // a decline, and the ladder that produces declines is over — so if the
     // amount ever COULD change, the key would change with it.
-    const intent = await stripe.createOnSessionIntent({
-      customerId: curatorStripe.customerId, amountCents: math.chargeTotal,
-      idempotencyKey: `${bookingId}:${gigId}:paydue:${p.settlement.attempts}`,
-      meta: { bookingId, gigId, purpose: "paydue" },
+  const intent = await stripe.createOnSessionIntent({
+    customerId: curatorStripe.customerId, amountCents: math.chargeTotal,
+    idempotencyKey: `${bookingId}:${gigId}:paydue:${p.settlement.attempts}`,
+    meta: { bookingId, gigId, purpose: "paydue" },
+  });
+
+  // CAS on the read this whole decision came from: an intent must never be
+  // stamped onto a doc a racer has just waived or settled. Creating the
+  // intent BEFORE this write is safe — an on-session intent captures nothing
+  // until the client confirms it, so a lost race leaves an unconfirmed,
+  // unreferenced intent and no money anywhere.
+  let baseline: FirebaseFirestore.Timestamp;
+  try {
+    const wr = await ref.update({
+      "settlement.intentId": intent.id,
+      "settlement.payDueIntentId": intent.id,
+      // PARKED, never nulled (defect 3b). One confirmation window of quiet
+      // is all the browser needs, and it is what stops the sweep from also
+      // charging the card off-session in the meantime — but the doc STAYS in
+      // step 6's query, so an attempt the curator abandons comes back to
+      // chargeSettlement an hour from now and is escalated as an abandoned
+      // pay-now intent instead of vanishing from the dunning system. Written
+      // unconditionally: a curator paying EARLY (on rung 1, 2 or 3) gets the
+      // same protection as a delinquent one, whose clock was already null.
+      "settlement.nextRetryAt": now + PAYDUE_CONFIRM_WINDOW_MS,
+      updatedAt: now,
+    }, { lastUpdateTime: pSnap.updateTime! });
+    baseline = wr.writeTime;
+  } catch (e) {
+    if (!isFailedPrecondition(e)) throw e;
+    throw new HttpsError("failed-precondition", PAY_PAST_DUE_RACED_MESSAGE);
+  }
+
+  if (isFakeStripe(stripe)) {
+    // EMULATOR CONTRACT, mirroring createSetupIntent's: there is no Elements
+    // flow against a fake, so "payPastDue called" means "the curator paid".
+    // The real path's equivalent step is the payment_intent.succeeded webhook
+    // for this same intent — which, on the fake, also fires and finds the doc
+    // already `paid` (a clean no-op, logged at info).
+    //
+    // `baseline` is the write above, per finalizeSettlementSuccess's own
+    // contract: it spans everything from our claim on this doc to the
+    // terminal write.
+    const result = await finalizeSettlementSuccess({
+      bookingId, gigId, intentId: intent.id, chargedCents: math.chargeTotal, now, baseline,
     });
+    // Defensive re-run of the lift: finalizeSettlementSuccess already clears
+    // the delinquency on its success path, but not on an exceptional exit
+    // (a racer). Calling again is a no-op in every case — the query still
+    // sees this doc as `past_due` when the settlement did not actually land.
+    await clearDelinquencyIfSettled(p.curatorProfileId, now)
+      .catch((e) => console.error(`payPastDue: delinquency clear failed for ${p.curatorProfileId}`, e));
+    return result.outcome === "charged"
+      ? { done: true, amountCents: math.chargeTotal }
+      : { done: false, amountCents: math.chargeTotal };
+  }
+  return { done: false, clientSecret: intent.clientSecret, amountCents: math.chargeTotal };
+}
 
-    // CAS on the read this whole decision came from: an intent must never be
-    // stamped onto a doc a racer has just waived or settled. Creating the
-    // intent BEFORE this write is safe — an on-session intent captures nothing
-    // until the client confirms it, so a lost race leaves an unconfirmed,
-    // unreferenced intent and no money anywhere.
-    let baseline: FirebaseFirestore.Timestamp;
-    try {
-      const wr = await ref.update({
-        "settlement.intentId": intent.id,
-        "settlement.payDueIntentId": intent.id,
-        // PARKED, never nulled (defect 3b). One confirmation window of quiet
-        // is all the browser needs, and it is what stops the sweep from also
-        // charging the card off-session in the meantime — but the doc STAYS in
-        // step 6's query, so an attempt the curator abandons comes back to
-        // chargeSettlement an hour from now and is escalated as an abandoned
-        // pay-now intent instead of vanishing from the dunning system. Written
-        // unconditionally: a curator paying EARLY (on rung 1, 2 or 3) gets the
-        // same protection as a delinquent one, whose clock was already null.
-        "settlement.nextRetryAt": now + PAYDUE_CONFIRM_WINDOW_MS,
-        updatedAt: now,
-      }, { lastUpdateTime: pSnap.updateTime! });
-      baseline = wr.writeTime;
-    } catch (e) {
-      if (!isFailedPrecondition(e)) throw e;
-      throw new HttpsError("failed-precondition", PAY_PAST_DUE_RACED_MESSAGE);
+// THE DISPATCHER. Auth, ids, side, the reads both branches share, and the one
+// decision that picks a branch — deliberately nothing else (review round 3,
+// M6): the two debts have almost disjoint guards, amounts, keys and finalizers,
+// and interleaving them in one body made it hard to see which rule applied to
+// which kind of money.
+export const payPastDue = onCall<PayPastDueInput>(
+  { region: "us-central1", secrets: [stripeSecretKey] }, async (req): Promise<PayPastDueResult> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { bookingId, gigId } = req.data ?? ({} as PayPastDueInput);
+    if (!isValidDocId(bookingId) || !isValidDocId(gigId)) {
+      throw new HttpsError("invalid-argument", "Booking and gig ids are required.");
     }
 
-    if (isFakeStripe(stripe)) {
-      // EMULATOR CONTRACT, mirroring createSetupIntent's: there is no Elements
-      // flow against a fake, so "payPastDue called" means "the curator paid".
-      // The real path's equivalent step is the payment_intent.succeeded webhook
-      // for this same intent — which, on the fake, also fires and finds the doc
-      // already `paid` (a clean no-op, logged at info).
-      //
-      // `baseline` is the write above, per finalizeSettlementSuccess's own
-      // contract: it spans everything from our claim on this doc to the
-      // terminal write.
-      const result = await finalizeSettlementSuccess({
-        bookingId, gigId, intentId: intent.id, chargedCents: math.chargeTotal, now, baseline,
-      });
-      // Defensive re-run of the lift: finalizeSettlementSuccess already clears
-      // the delinquency on its success path, but not on an exceptional exit
-      // (a racer). Calling again is a no-op in every case — the query still
-      // sees this doc as `past_due` when the settlement did not actually land.
-      await clearDelinquencyIfSettled(p.curatorProfileId, now)
-        .catch((e) => console.error(`payPastDue: delinquency clear failed for ${p.curatorProfileId}`, e));
-      return { done: result.outcome === "charged", amountCents: math.chargeTotal };
+    const db = getFirestore();
+    const bookingSnap = await db.doc(`bookings/${bookingId}`).get();
+    if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const booking = bookingSnap.data() as BookingRequestDoc;
+    // Side-DEPENDENT money action ⇒ the strict resolver (a member of BOTH
+    // profiles is refused rather than silently resolved to one side).
+    // Deliberately NOT gated on booking.status: a cancelled or expired booking
+    // can still own a performed date whose settlement went past_due, and that
+    // debt is exactly what this pays.
+    const side = await resolveBookingSideStrict(booking, uid);
+    if (side !== "curator") throw new HttpsError("permission-denied", "Only the curator side can pay a settlement.");
+
+    const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
+    const [pSnap, gigSnap] = await Promise.all([ref.get(), db.doc(`gigs/${gigId}`).get()]);
+    const p = pSnap.data() as PaymentDoc | undefined;
+    if (!p) throw new HttpsError("not-found", "No payment record for that date.");
+
+    // WHICH DEBT? Settlement first: it is a date that was actually performed,
+    // and it is the only one that can carry a late fee. A deposit debt is
+    // second, and only once its own retry schedule has run out — before that
+    // the sweep is still trying, and a manual charge would race it.
+    const settlementDue = p.settlement.status === "past_due";
+    const depositDue = isDepositScheduleExhausted(p.deposit.depositAttempts)
+      && p.deposit.status === "unpaid"
+      // ...for a date that has NOT been settled yet — which is what the deposit
+      // branch's own "future occurrence" framing already assumes, made explicit
+      // (review round 2, D1). A settlement that charged with no slice credit
+      // took the FULL base, deposit included, and finalizeSettlementSuccess
+      // resolves such a deposit `refunded` for exactly that reason; charging it
+      // here would bill the curator a second time for money already collected.
+      // `waived` is excluded on the same logic (nothing is owed for the date at
+      // all) and `past_due` is the settlement branch's business, not this one.
+      && (p.settlement.status === "not_due" || p.settlement.status === "pending");
+    if (!settlementDue && !depositDue) {
+      throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOT_OVERDUE_MESSAGE);
     }
-    return { done: false, clientSecret: intent.clientSecret, amountCents: math.chargeTotal };
+
+    const ctx: PayDueContext = {
+      bookingId, gigId, booking, gig: gigSnap.data() as GigDoc | undefined,
+      p, pSnap, ref, stripe: getStripe(), now: Date.now(),
+    };
+    return settlementDue ? payDueSettlement(ctx) : payDueDeposit(ctx);
   });

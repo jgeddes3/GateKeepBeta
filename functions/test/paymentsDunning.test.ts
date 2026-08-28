@@ -695,7 +695,7 @@ describe("payPastDue — an exhausted birth deposit", () => {
     expect(await fakeObject(intentId).then((i) => i?.amountCents)).toBe(DEPOSIT_CHARGE_CENTS);
     // A key of its own: a pay-now deposit must never collide with — or replay —
     // one of the sweep's off-session `deposit:` attempts.
-    expect(await idemUsed(`${bookingId}:${gigId}:paydue-deposit:${EXHAUSTED_DEPOSIT_ATTEMPTS}`)).toBe(true);
+    expect(await idemUsed(`${bookingId}:${gigId}:paydue_deposit:${EXHAUSTED_DEPOSIT_ATTEMPTS}`)).toBe(true);
     // The settlement is untouched: a deposit paid late is still just a deposit.
     expect(held?.settlement.status).toBe("not_due");
 
@@ -716,7 +716,7 @@ describe("payPastDue — an exhausted birth deposit", () => {
     await seedExhaustedBirthDeposit(bookingId, gigId);
     const bookingRef = adb.doc(`bookings/${bookingId}`);
     const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
-    const payDueKey = `${bookingId}:${gigId}:paydue-deposit:${EXHAUSTED_DEPOSIT_ATTEMPTS}`;
+    const payDueKey = `${bookingId}:${gigId}:paydue_deposit:${EXHAUSTED_DEPOSIT_ATTEMPTS}`;
 
     // RULE 3: an `unpaid` doc under a booking carrying the accept-saga marker
     // belongs to step 1 alone — a charge is in flight against exactly that
@@ -764,6 +764,59 @@ describe("payPastDue — an exhausted birth deposit", () => {
     const openGig = await createOpenGig(curator.profileId, curator.owner.user);
     await callFn("offerGig",
       { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
+  });
+
+  // The absorption has to tell two intent-carrying docs apart, and the
+  // difference is whether any money was ever captured. An UNCONFIRMED pay-now
+  // intent — created by payPastDue, never confirmed in the browser — is not a
+  // charge, so it is no reason to leave a phantom debt standing. An intent of
+  // UNKNOWN outcome is, and the curator must not be left gated with no ticket
+  // explaining why.
+  it("retires an absorbed deposit whose only intent was an unconfirmed pay-now one, and escalates one whose intent is live", async () => {
+    const abandoned = await makeEndedBooking("dunabsp");
+    const unknown = await makeEndedBooking("dunabsu");
+    for (const f of [abandoned, unknown]) {
+      await seedExhaustedBirthDeposit(f.bookingId, f.gigId);
+      await seedDelinquent(f.curator.profileId);
+    }
+    // A: payPastDue minted an on-session intent for the deposit; the curator
+    // never confirmed it, so `chargedAt` was never written.
+    await adb.doc(`bookings/${abandoned.bookingId}/payments/${abandoned.gigId}`).update({
+      "deposit.intentId": "pi_unconfirmed_paydue", "deposit.payDueIntentId": "pi_unconfirmed_paydue",
+      "deposit.chargedAt": null,
+    });
+    // B: a birth charge the sweep left `processing` — it can still capture, so
+    // nothing here may declare the deposit resolved.
+    await adb.doc(`bookings/${unknown.bookingId}/payments/${unknown.gigId}`).update({
+      "deposit.intentId": "pi_still_processing", "deposit.payDueIntentId": null,
+    });
+
+    // Both dates performed; one sweep schedules both, the next settles them.
+    await runPaymentsSweep(Date.now());
+    for (const f of [abandoned, unknown]) await makeSettlementDue(f.bookingId, f.gigId);
+    await runPaymentsSweep(Date.now());
+
+    // A: the settlement charged the full base, and the deposit is retired —
+    // an unconfirmed intent counts as no intent.
+    const settledA = await getPayment(abandoned.bookingId, abandoned.gigId);
+    expect(settledA?.settlement.status).toBe("paid");
+    expect(settledA?.settlement.computedCents).toBe(ABSORBED_DUE_CENTS);
+    expect(settledA?.deposit.status).toBe("refunded");
+    expect(settledA?.deposit.depositNextRetryAt).toBeNull();
+    expect((await getStripeDoc(abandoned.curator.profileId))?.delinquent).toBe(false);
+
+    // B: the deposit is deliberately LEFT ALONE — but not left silent. The doc
+    // still reads as outstanding debt, so the curator stays gated, and there is
+    // now a durable ticket saying exactly what an operator must do about it.
+    const settledB = await getPayment(unknown.bookingId, unknown.gigId);
+    expect(settledB?.settlement.status).toBe("paid");
+    expect(settledB?.deposit.status).toBe("unpaid");
+    expect(settledB?.deposit.intentId).toBe("pi_still_processing");
+    expect((await getStripeDoc(unknown.curator.profileId))?.delinquent).toBe(true);
+    const alert = await adminAlert(`deposit-pending:${unknown.bookingId}:${unknown.gigId}`);
+    expect(alert?.kind).toBe("deposit_pending_stuck");
+    expect(alert?.detail).toContain("absorbing this date's deposit");
+    expect(alert?.resolvedAt).toBeNull();
   });
 
   // The third way the debt goes away, and the one that used to strand a curator

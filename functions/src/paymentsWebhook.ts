@@ -16,7 +16,7 @@ import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.
 //  - account.updated        -> Task 4 (cached gate flags)
 //  - payment_intent.succeeded -> dispatched by metadata.purpose (see
 //    paymentIntentSucceededHandlers below): "deposit" -> Task 6 (accept saga
-//    completion), "settlement" -> Task 10, "paydue" / "paydue-deposit" ->
+//    completion), "settlement" -> Task 10, "paydue" / "paydue_deposit" ->
 //    Task 11
 //  - payment_intent.payment_failed -> recorded no-op (see below)
 //  - payout.paid/payout.failed -> Task 13
@@ -32,8 +32,31 @@ export const webhookHandlers: Record<string, WebhookHandler> = {};
 // `metadata.purpose`, which every SP5 charge stamps. A single registry keyed
 // by purpose keeps those additive: each task registers its own purpose
 // instead of overwriting a shared `webhookHandlers["payment_intent.succeeded"]`
-// (last import wins, silently). Registered by purpose in the task that owns
-// it — "deposit" in bookings.ts.
+// (last import wins, silently).
+//
+// THE FULL PURPOSE VOCABULARY (every `meta.purpose` SP5 stamps, and where its
+// handler — if any — is registered):
+//   HANDLED, because the money is a saga that can finish out-of-band:
+//     "deposit"        -> bookings.ts            (accept saga, transaction B)
+//     "settlement"     -> paymentsSettlement.ts  (the T+3 charge's tail)
+//     "paydue"         -> paymentsSettlement.ts  (payPastDue, settlement debt)
+//     "paydue_deposit" -> paymentsSettlement.ts  (payPastDue, deposit debt)
+//   METADATA-ONLY, with NO handler BY DESIGN — these five are not charges a
+//   saga waits on, they are outbound moves that either completed synchronously
+//   or have no follow-up state to write. The metadata exists as a RECOVERY
+//   HANDLE (Task 8's note: look an object up by {bookingId, gigId, purpose}
+//   when a key has expired) and for dashboard filtering, not for dispatch:
+//     "earnings", "forfeit"                  (transferToAccount)
+//     "deposit_refund", "below_deposit_refund", "accept_abort"  (refund)
+//   A payment_intent.succeeded carrying one of these would be a bug elsewhere
+//   (none of them creates a PaymentIntent), and the dispatcher's no-handler
+//   branch logs it rather than throwing.
+//
+// NAMING: purposes are snake_case, one word or two. `paydue_deposit` was
+// briefly hyphenated and was renamed while nothing was deployed — the tag is
+// persisted on Stripe objects, so a rename after go-live would strand every
+// in-flight intent whose metadata still carried the old spelling, with no
+// handler to finalize it. Add new purposes in snake_case.
 export const paymentIntentSucceededHandlers: Record<string, WebhookHandler> = {};
 
 webhookHandlers["payment_intent.succeeded"] = async (object, eventId) => {
