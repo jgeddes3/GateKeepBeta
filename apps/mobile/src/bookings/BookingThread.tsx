@@ -53,7 +53,15 @@ export function useNow(): number | null {
 // GET is resolved independently (own .catch -> false), not a single
 // Promise.all().catch(): a permission-denied on the side you're NOT a
 // member of is a legitimate, expected outcome.
-function useRole(musicianProfileId: string | undefined, curatorProfileId: string | undefined, uid: string): Role {
+//
+// Exported (SP5 Task 16): PaymentStatus.tsx needs the SAME musician/curator
+// side resolution to frame its payment chips, and web already exports its
+// identical hook from the equivalent file for the equivalent consumer
+// (apps/web/src/payments/PaymentsPanel.tsx imports useRole from
+// src/bookings/BookingThread.tsx) — a second hand-rolled copy of this on
+// mobile would be free to drift from the server's own musician-first
+// tie-break.
+export function useRole(musicianProfileId: string | undefined, curatorProfileId: string | undefined, uid: string): Role {
   const [role, setRole] = useState<Role>("loading");
   useEffect(() => {
     if (!musicianProfileId || !curatorProfileId) return;

@@ -286,6 +286,102 @@ identified during Task 8/13's review rounds):
   `seedSeries` rather than sharing them from `functions/test/helpers.ts` — worth consolidating the
   next time one of those files is touched.
 
+## Payments (sub-project 5)
+
+**Architecture.** A full **Stripe Connect Express marketplace** on the "separate charges &
+transfers" model. The platform account is the escrow: a curator's card is charged into it, and the
+musician's share is transferred out to their connected account afterwards — because a deposit's
+fate (apply / refund / forfeit) is unknown at charge time. Every Stripe mutation is server-side
+(callables, the webhook, and the hourly `paymentsSweep`); **clients never write money data**, and
+no client-supplied amount ever drives what is charged. USD only. **Stripe test mode throughout** —
+live mode is a secrets swap plus Connect activation, never a code change.
+
+**Fees** (`packages/shared/src/types.ts`, snapshotted per booking as `feePolicy` at accept so a
+later constant change never re-prices a live booking):
+
+| Fee | Rate | Who pays |
+|---|---|---|
+| Curator service fee | **+11%** on top of every charge | curator (deposit and settlement each carry their proportional share) |
+| Musician commission | **−2%** of everything transferred as earnings | musician |
+| Instant cash-out | **−4%** of the payout (min $1) | musician; standard payouts are free (1–3 business days) |
+| Late fee | one-time **10%** of the outstanding settlement | curator, when the settlement goes delinquent — split **7 points to the musician, 3 to the platform** |
+
+Integer cents everywhere: fees charged to the curator round **up** (`Math.ceil`), shares paid out
+round **down** (`Math.floor`), remainders go to the platform. Worked example on a $1,000 gig —
+curator pays $1,110 all-in ($388.50 at accept, $721.50 at settlement); musician receives $980;
+platform keeps $130.
+
+**Deposit machine.** SP4's 35% deposit stops being data and starts being money: `acceptBooking`
+charges it off-session against the curator's saved card inside a two-transaction saga (stage →
+charge → commit), and `DepositStatus` runs `unpaid → held → applied` with `refund_pending`/
+`forfeit_pending` as the transactional intent-to-move-money written in the same transaction as a
+cancellation, so a crash before the money moves always leaves a doc the sweep can find and finish.
+Curator cancels < 72h before start → the deposit **forfeits to the musician at 100% of the base**
+(no commission on forfeits); ≥72h, musician cancels, expiry, and admin unwinds → **refund
+including the curator's fee share** (we eat Stripe's processing cost). A **1-hour grace period
+after accept** (capped at gig start) lets either side back out penalty-free. Whole-run bookings get
+one payment doc per occurrence; dates materialized onto an already-booked run are charged
+individually by the sweep ("birth deposits").
+
+**Settlement (T+3).** Three days after each occurrence *ends*, the remaining 65% + its fee share is
+auto-charged off-session and the musician's 98% is transferred to their connected account. The
+curator may `confirmOccurrenceActuals` (a "true-up": extra minutes for `perHour`, extra songs for
+`perSong` — increase-only, and the window closes the moment a charge starts). `selfDeal` bookings
+settle normally **with full fees** (paying real fees to move your own money removes any farming
+incentive). A booking-linked `taken_down` date settles as not-performed.
+
+**Dunning.** A declined settlement retries at **+1d, +2d, +2d**; when that schedule is exhausted the
+occurrence goes `past_due`, the 10% late fee is added (7 points to the musician), and the curator's
+profile is flagged **delinquent** — which gates it out of sending offers or accepting applications
+until it clears. `payPastDue` mints an on-session PaymentIntent so the curator can clear the debt
+with 3DS/SCA in the browser; an exhausted **deposit** retry schedule is the second, separate debt
+shape it handles (no late fee ever applies to a deposit). Both clients surface these states per
+occurrence.
+
+**Payouts.** Musicians onboard through a Stripe-hosted Express flow (`createOnboardingLink`) and
+cash out from the web Earnings page — standard (free, 1–3 business days) or instant (4%, min $1,
+debit-card-backed accounts only). **Any member of a profile can trigger its payouts** — that is a
+deliberate product decision, recorded in the launch checklist below, not an oversight.
+
+**Gates.** A curator needs a saved card before sending an offer or accepting an application; a
+musician must be payout-ready before applying to a gig or having a booking accepted. Both are
+enforced server-side, mirrored in the UI as inline prompts keyed off exact message constants
+(`packages/shared/src/messages.ts` — the single source of truth for every string a client branches
+on).
+
+**Surfaces.** Web is the full experience: `apps/web/src/payments/` (save-card modal, onboarding,
+the booking `PaymentsPanel` with true-ups and pay-past-due, the `EarningsPanel` with cash-out, the
+delinquency banner). **Mobile is read-only this sub-project** —
+`apps/mobile/src/bookings/PaymentStatus.tsx` renders the same per-occurrence status chips (mirroring
+web's row-state mapping exactly, so a date never reads differently on the two platforms) plus an
+Earnings card on the musician dashboard showing the balance headline and pointing at the web for
+anything actionable. Native payment sheets are **sub-5b**: they need
+`@stripe/stripe-react-native` and a new EAS dev build.
+
+**Data & boundaries.** `bookings/{id}/payments/{gigId}` (one doc per occurrence, the money truth for
+that date) reads to both sides' members + admins and is server-write only;
+`profiles/{id}/private/stripe` (payment identity + cached gate flags) is member/admin only and is
+**not** a curator-shopping surface (a `curatorAccess` marker grants nothing here);
+`stripeEvents` (webhook idempotency), `ledger` (append-only money audit) and `adminAlerts` (the
+sweep's escalation queue) are **admin-read, server-write**; `stripeFake/**` (the emulator's fake
+Stripe state) is unreachable for everyone. `tests-rules/payments.rules.test.ts` proves the full
+matrix.
+
+**The webhook is the codebase's only non-callable HTTPS entry point** (`stripeWebhook`) — signature
+verified, idempotent via `stripeEvents/{eventId}` claim documents, and App-Check-exempt by nature.
+It is also the recovery path for a charge Stripe leaves `processing`: a same-key retry is impossible
+(Stripe replays the cached response), so the caller persists the intent id and lets
+`payment_intent.succeeded` finalize.
+
+**`paymentsSweep`** runs hourly and owns everything time-based: opening settlement windows, charging
+birth deposits, running the dunning schedule, finishing `*_pending` money moves a crash interrupted,
+and escalating states it deliberately refuses to act on into `adminAlerts` for a human
+(`releaseStuckSaga` is the admin callable that resolves one).
+
+**Not in sub-project 5**: mobile payment sheets (sub-5b), dispute/chargeback flows beyond Stripe's
+dashboard defaults, tax forms/1099s, statements/exports, multi-currency, live-mode activation, and
+platform payout accounting/reporting.
+
 ## Environment variables
 
 None are required for local development against the emulators — everything below is unset (empty
@@ -299,6 +395,10 @@ string / no-op) by default and only matters for a production deploy.
 | `NEXT_PUBLIC_SITE_URL` | web | absolute base URL for the public portfolio page's canonical link + OpenGraph `og:url`/images (`apps/web/app/layout.tsx`'s `metadataBase`) | falls back to Vercel's own `VERCEL_PROJECT_PRODUCTION_URL` if present; if neither is set, `metadataBase` is omitted and those URLs render relative instead of absolute (never a hardcoded localhost fallback) |
 | `GEOCODER_PROVIDER` | functions | set to `google` to geocode gig/curator addresses via the real Google Geocoding API (`functions/src/geocode.ts`'s `getGeocoder()`) | unset/any other value → `StubGeocoder`, a deterministic dev/test-only hash-based geocoder with a US-centric bounding box — **launch item**, see checklist below |
 | `GEOCODER_API_KEY` | functions | Google Geocoding API key; required (throws at call time) when `GEOCODER_PROVIDER=google` | n/a while `GEOCODER_PROVIDER` is unset |
+| `STRIPE_SECRET_KEY` | functions | Stripe secret key (`sk_test_…` / `sk_live_…`), a `defineSecret()` param — its presence is what selects the REAL Stripe client | unset → `FakeStripe`, but **only inside the emulator**; a deployed function without it throws rather than moving fake money (`functions/src/stripeClient.ts`'s `getStripe()` fails closed) |
+| `STRIPE_WEBHOOK_SECRET` | functions | Stripe webhook signing secret (`whsec_…`), a `defineSecret()` param — `stripeWebhook` verifies every request against it | unset → signature verification runs against an empty secret and every real Stripe delivery is rejected; harmless in the emulator (FakeStripe's webhook calls are same-process and already trusted) |
+| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | Stripe publishable key (`pk_test_…` / `pk_live_…`) for Stripe.js — **public, not a secret**; the secret key must NEVER appear in `apps/web` | Stripe.js never loads, so the save-card modal and `payPastDue`'s confirmation step can't run |
+| `APP_ORIGIN` | functions | absolute origin (`https://…`) used to build Stripe Connect onboarding return/refresh URLs | `http://localhost:3000` **in the emulator only**; in production `createOnboardingLink` throws rather than build a redirect to an unknown origin |
 
 Web App Check only initializes when `NODE_ENV === "production"` **and** the site key is set
 (`apps/web/src/lib/firebase.ts`). Mobile Sentry is additionally gated on `!__DEV__`
@@ -331,6 +431,40 @@ ceiling. A caller re-submitting the exact same address/city it already resolved 
 again (the geocoded location is reused as-is via the stored `geocodedFrom` string) — only a
 genuinely new query consumes the budget. `geocodeBudgets/{uid}` is internal bookkeeping,
 `allow read, write: if false` in `firestore.rules` for every client including the owner.
+
+### Stripe key setup (emulator, local real-mode, production)
+
+There are three ways to run the payments code, and they need different amounts of configuration:
+
+1. **Emulator suite — zero configuration.** `pnpm emu:test`, `pnpm emu:rules` and a local
+   `firebase emulators:start` need **no Stripe keys at all** and must never be given any. With
+   `STRIPE_SECRET_KEY` unset, `getStripe()` returns **`FakeStripe`** — an in-Firestore fake
+   (`stripeFake/**`, a collection that simply never exists in production) that models charges,
+   refunds, transfers, payouts, idempotency-key replay and decline caching well enough to exercise
+   every saga. Its decline/pending knobs are scopable per customer (`stripeFake/config`), which is
+   how the test suite exercises card declines without a network. The selection **fails closed**: the
+   fake is only allowed when the process can prove it is in the emulator, so a deployed function
+   that forgot `secrets: [stripeSecretKey]` throws instead of silently moving fake money against
+   production data.
+2. **Local against REAL Stripe test mode.** Put `STRIPE_SECRET_KEY=sk_test_…` (and, if you are
+   forwarding webhooks with the Stripe CLI, `STRIPE_WEBHOOK_SECRET=whsec_…`) in a **`functions/.env`**
+   file — the Functions emulator does not provision Secret Manager secrets, so `defineSecret().value()`
+   legitimately resolves to `""` there and the code falls back to a plain `process.env` read (same
+   pattern as `GEOCODER_API_KEY` above). `functions/.env` is git-ignored; **never commit a key, and
+   never put one in test code.** For the web half, set `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_…`
+   in `apps/web/.env.local`.
+3. **Production.** `firebase functions:secrets:set STRIPE_SECRET_KEY` and
+   `firebase functions:secrets:set STRIPE_WEBHOOK_SECRET` (Secret Manager-backed, not plain env
+   vars), then deploy. Every payments function already declares `secrets: [stripeSecretKey]` (and
+   the webhook additionally `stripeWebhookSecret`) in its options, which is what makes Cloud
+   Functions inject them at invocation time — **a new payments function that omits the declaration
+   will resolve to an empty key and throw**. Set `APP_ORIGIN` on the functions deployment to the
+   real web origin, or Connect onboarding refuses to build its return URL.
+
+`NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` is **baked into the web bundle at build time** (it is a
+`NEXT_PUBLIC_` var read at module scope in `apps/web/src/payments/stripeLoader.ts`) — setting it on a
+running deployment changes nothing until the app is **rebuilt and redeployed**. Publishable keys are
+not secrets; the corresponding secret key must never appear anywhere under `apps/web`.
 
 Set `FIREBASE_EMULATORS=1` to run a production build of the web app (`next build && next start`)
 against the local emulators instead of real Firebase — `apps/web/src/lib/firebase-server.ts`'s
@@ -511,6 +645,117 @@ before a real launch:
   for "Enabled") before the booking thread/inbox/Shows/directory queries that depend on them will
   work in production.
 
+### Sub-project 5 launch checklist (payments)
+
+- **Register the webhook endpoint in the Stripe dashboard** (Developers → Webhooks → Add endpoint).
+  The URL is the deployed `stripeWebhook` function's HTTPS trigger URL (`firebase deploy` prints it;
+  it also appears in the Firebase console under Functions). Subscribe at minimum to
+  `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `account.updated`,
+  `payout.paid` and `payout.failed`. Then copy the endpoint's **signing secret** and store it with
+  `firebase functions:secrets:set STRIPE_WEBHOOK_SECRET` — **the endpoint is useless until this is
+  done**: `stripeWebhook` verifies every request's signature and rejects all of them against an
+  empty secret, which silently breaks the recovery path for charges Stripe leaves `processing`
+  (they are finalized by `payment_intent.succeeded`, not by the callable that started them). Register
+  a **separate** endpoint with its own signing secret when flipping to live mode.
+- **Enable a Firestore TTL policy on `stripeEvents.expireAt`** (Firebase console → Firestore → TTL,
+  or `gcloud firestore fields ttls update expireAt --collection-group=stripeEvents`). Every webhook
+  claim document is stamped with a 30-day `expireAt`, but **the field alone expires nothing** — the
+  code stamps it, the policy deletes it. Without the policy `stripeEvents` grows forever; the
+  replay protection still works, it just never garbage-collects.
+- **Re-verify `debitConnectedAccount` against current Stripe Connect documentation BEFORE live
+  mode.** Pulling funds from a connected account's balance back to the platform (how the 4% instant
+  fee is collected) is implemented as `charges.create({ source: accountId })` — Stripe's legacy,
+  pre-Treasury account-debit mechanism, thin on current Connect docs
+  (`functions/src/stripeClient.ts`, `RealStripe.debitConnectedAccount`). It is exercised only
+  against `FakeStripe` today. Confirm the current supported call shape and adjust before any real
+  money runs through it.
+- **Re-verify the instant-payout fee rate before live mode.** We charge the musician **4%** (min $1,
+  `INSTANT_FEE_PCT`); Stripe's own instant-payout cost to us was ~1.5% at design time. Confirm
+  Stripe's current rate and decide whether 4% is still the right retail number — it is a shared
+  constant (`packages/shared/src/types.ts`) snapshotted per booking, so changing it does not
+  re-price already-accepted bookings.
+- **Connect activation + live-mode flip**: activate Stripe Connect on the platform account
+  (business entity, Express onboarding branding, payout schedule), then swap `STRIPE_SECRET_KEY`
+  and `STRIPE_WEBHOOK_SECRET` to their live values, set `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` to the
+  live publishable key and **rebuild the web app** (it is baked in at build time — see "Stripe key
+  setup" above), and set `APP_ORIGIN` to the real web origin. No code change is involved in the
+  flip; if one seems necessary, something is wrong.
+- **`paymentsSweep` deploys with the functions** — like `dailySweep`, its Cloud Scheduler job is
+  provisioned by `firebase deploy`, so there is nothing to enable by hand, but the first production
+  deploy should be followed by a Cloud Console check (Cloud Scheduler → the hourly job exists, next
+  run looks right). This one is money-critical, not just housekeeping: settlement windows, birth
+  deposits, the dunning schedule and every crash-recovery path live in it, so a silently unprovisioned
+  job means nothing ever settles. Check `adminAlerts` periodically too — that is where the sweep
+  escalates money states it refuses to act on.
+- **Product decision recorded: ANY member of a profile can trigger its payouts** (`requestPayout`
+  calls `requireProfileMember`, not a profile-admin check — same posture as `getStripeStatus` and
+  the rest of the payments callables). For a multi-member band profile this means any member can
+  cash the whole balance out to the profile's connected account. Deliberate for v1 (the money can
+  only ever land in that profile's own Stripe account, never a member's), but revisit if
+  multi-member profiles turn out to need an admin-only payout role.
+- **New composite indexes deploy with `firebase deploy`**: sub-project 5 adds 7 (one `bookings`
+  composite plus six `payments` **collection-group** composites the sweep's due/retry/delinquency
+  scans depend on). Same caveat as the sub-project 3/4 indexes: the emulator does not enforce
+  composite indexes, so a green `pnpm emu:test` proves nothing about them — confirm they build on
+  the real project (Firebase console → Firestore → Indexes) after the first deploy. A missing
+  `payments` collection-group index means the sweep throws instead of settling.
+- **Do not enable App Check enforcement in a way that covers `stripeWebhook`** — it is the only
+  non-callable HTTPS entry point in the codebase and is App-Check-exempt by nature (Stripe cannot
+  attest). Its protection is signature verification plus event idempotency.
+
+### Manual smoke walkthrough (real Stripe test mode)
+
+The emulator suite covers the sagas against `FakeStripe`; this walkthrough is the one thing it
+cannot prove — that the **real** Stripe API, Stripe.js, Connect onboarding and webhook delivery are
+wired correctly. Run it against **test mode** after the first deploy to a real project (or locally
+per option 2 of "Stripe key setup" above, with `stripe listen --forward-to <stripeWebhook URL>`
+forwarding events). Nothing here uses real money, but everything here is real Stripe.
+
+1. **Set up.** Confirm `STRIPE_SECRET_KEY` (`sk_test_…`) and `STRIPE_WEBHOOK_SECRET` (`whsec_…`) are
+   in place, the web app was built with `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` (`pk_test_…`), and
+   `APP_ORIGIN` points at the web origin you will actually browse. Keep the Stripe dashboard's
+   test-mode **Payments** and **Events** views open alongside — every step below should produce a
+   visible object there, and "nothing appeared in Stripe" is itself the finding.
+2. **Save a card.** As a curator profile member, open a booking (or the curator dashboard) and add a
+   card with **4242 4242 4242 4242**, any future expiry, any CVC, any ZIP. Expect: the card row
+   renders "Card on file: visa •••• 4242", and a Customer with an attached PaymentMethod exists in
+   Stripe. This card is now the profile's default payment method.
+3. **Accept a booking → deposit charge.** With a payout-ready musician on the other side, accept an
+   offer. Expect: a **succeeded PaymentIntent for 35% of the total plus its 11% fee share**
+   (a $1,000 gig → $388.50), the booking flips to `confirmed`, and the booking's Payments panel
+   shows "Deposit held" for the date. The musician's phone should show the same date chipped
+   "Deposit held in escrow".
+4. **Decline after save.** Add **4000 0000 0000 0341** as the card (it attaches successfully but
+   **fails when charged**) and accept another booking. Expect: the accept is refused with "Your card
+   was declined — update your payment method and try again", the booking stays `open`, and **no
+   payment docs are left staged**. Then switch back to 4242 and accept again — expect a clean
+   success. This is the one path that proves declines do not strand a booking: the retry uses a new
+   attempt-scoped idempotency key, so it must NOT replay the cached decline.
+5. **Musician onboarding.** As a musician profile member, hit "Set up payouts" on the Earnings page.
+   Expect a redirect to Stripe's hosted Express onboarding; complete it with Stripe's test values
+   (test SSN `000-00-0000`, test routing/account numbers, `000 000 0000` phone, any test address).
+   On return, the page should re-sync and show a balance instead of the setup prompt — that
+   round-trip is `APP_ORIGIN` plus the `account.updated` webhook both working.
+6. **Settlement (T+3).** Real settlement waits three days after the gig ends, which no smoke test
+   should sit through. Either let a past-dated occurrence come due naturally, or fast-forward the
+   date's `settlement.settleAfter` to a past timestamp in the Firestore console (server-written
+   field; the hourly `paymentsSweep` is its only reader) and wait for the next sweep run. Expect: a
+   second succeeded PaymentIntent for the remaining 65% + fee, a **Transfer to the connected
+   account for 98% of the base**, and both clients flipping the date to "Paid".
+7. **Instant-payout simulation.** Instant payouts need a debit card as the connected account's
+   external account — in test mode, attach Stripe's instant-payout-eligible test debit card
+   (**4000 0566 5566 5556**) to the Express account. Expect the Earnings page's Instant button to
+   become enabled with a live "fee $X" preview (4%, min $1), and a cash-out to produce a Payout plus
+   a separate **account-debit charge for the fee** in the dashboard. If the button stays disabled,
+   `instantEligible` is false — that is Stripe's own eligibility answer, not a UI bug.
+8. **Past-due rescue.** Force a settlement failure (set the card to 4000 0000 0000 0341 before a
+   settlement comes due) and let the dunning schedule exhaust — or set `settlement.nextRetryAt` back
+   to hurry it. Expect: the occurrence goes `past_due`, the **10% late fee** appears, the curator
+   profile is flagged delinquent, and sending a new offer is refused with "This profile has an
+   overdue payment…". Then use **Pay now** on the panel with a good card: expect an on-session
+   PaymentIntent (3DS challenge if you use **4000 0025 0000 3155**), the date flipping to "Paid",
+   and the delinquency gate clearing on the next attempt to book.
+
 ### Sub-project 2 polish follow-ups (non-blocking)
 
 Smaller items from the sub-project 2 quality-review rounds — recorded in full in
@@ -564,4 +809,11 @@ task-by-task implementation plan. Durable rulings/handoff record: `docs/superpow
 the full design spec and `docs/superpowers/plans/2026-08-26-booking-flow.md` for the task-by-task
 implementation plan. Builds on and resolves obligations recorded in `docs/superpowers/sp3-rulings.md`
 (rulings 23/24 and the M-12/M-13 + booking-widening obligation bullets, annotated
-"RESOLVED (SP4)" in place).
+"RESOLVED (SP4)" in place). Durable rulings/handoff record: `docs/superpowers/sp4-rulings.md`.
+
+**Sub-project 5: Payments** — `docs/superpowers/specs/2026-08-27-payments-design.md` for the full
+design spec and `docs/superpowers/plans/2026-08-27-payments.md` for the task-by-task implementation
+plan (its "as-built contract changes" blocks record where the shipped Stripe layer deliberately
+diverges from the original task snippets). Discharges the deposit-machine, settlement-math and
+`selfDeal`-settlement obligations recorded in `docs/superpowers/sp4-rulings.md`, annotated
+"RESOLVED (SP5)" in place.
