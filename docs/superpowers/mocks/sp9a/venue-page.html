@@ -1,0 +1,93 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Sora:wght@400;500;600&display=swap');
+
+.dircard { border-radius: 12px; overflow: hidden; cursor: pointer; border: 2px solid transparent; }
+.dircard.selected { border-color: #6ea8fe; }
+.stage { background: linear-gradient(165deg, #0E0B13 0%, #150F20 55%, #1D1229 100%); color: #F5F1F8; font-family: 'Sora', sans-serif; min-height: 340px; font-size: 12px; position: relative; }
+.syne { font-family: 'Syne', sans-serif; }
+.ph1 { background: linear-gradient(15deg, #241521, #58303C 45%, #B96A50); }
+.ph2 { background: linear-gradient(200deg, #1E1A2E, #3E3358 55%, #7A5A8A); }
+.ph3 { background: linear-gradient(70deg, #2A1A16, #6A4030 55%, #C08858); }
+.ph4 { background: linear-gradient(140deg, #17202A, #2E4A54 55%, #5A8A92); }
+.muted { opacity: .62; }
+.chip { font-size: 10px; padding: 3px 9px; border: 1px solid #2C2438; border-radius: 6px; background: #1A1424; }
+.cta { background: #FF6B4A; color: #2A0F0A; border-radius: 999px; padding: 7px 15px; font-weight: 600; font-size: 11.5px; display: inline-block; }
+.infocard { background: #1A1424; border: 1px solid #2C2438; border-radius: 10px; padding: 12px 14px; }
+.note { font-size: 11px; opacity: .55; padding: 10px 16px 12px; }
+</style>
+
+<h2>The venue page: three skeletons</h2>
+<p class="subtitle">The page a venue uses to advertise itself to musicians. Unlike artists, venues carry a photo GALLERY plus hard facts (capacity, PA, backline, address). CTA is "See open gigs" everywhere. The colored blocks stand in for gallery photos.</p>
+
+<div class="cards">
+  <div class="card dircard" data-choice="airbnb-collage" onclick="toggleSelect(this)">
+    <div class="stage">
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;grid-template-rows:60px 60px;gap:4px;padding:10px 10px 0">
+        <div class="ph1" style="grid-row:span 2;border-radius:10px 0 0 10px"></div>
+        <div class="ph2"></div><div class="ph3" style="border-radius:0 10px 0 0"></div>
+        <div class="ph4"></div><div class="ph2" style="border-radius:0 0 10px 0;opacity:.8"></div>
+      </div>
+      <div style="padding:12px 16px">
+        <div class="syne" style="font-size:20px;font-weight:800">The Velvet Room</div>
+        <div class="muted" style="margin:3px 0 8px">Venue · Northside · Cap 80 · PA yes</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px"><span class="chip">books indie</span><span class="chip">folk</span><span class="chip">solo &amp; duo</span></div>
+        <span class="cta">See open gigs (3)</span>
+      </div>
+      <div class="note">Airbnb-listing header: one anchor photo plus a collage, facts immediately below. Then: about, open gigs, amenities, map/address.</div>
+    </div>
+    <div class="card-body">
+      <h3>A. Collage header</h3>
+      <p>The gallery leads as an Airbnb-style photo grid. Instantly says "real place you can stand in." Needs 3+ decent photos (approval already requires at least one).</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="cover-inforail" onclick="toggleSelect(this)">
+    <div class="stage">
+      <div class="ph1" style="height:150px;position:relative">
+        <div style="position:absolute;inset:0;background:linear-gradient(to top,#0E0B13 4%,rgba(14,11,19,.3) 60%,transparent)"></div>
+        <div style="position:absolute;left:16px;bottom:10px">
+          <div class="syne" style="font-size:22px;font-weight:800">The Velvet Room</div>
+          <div style="display:flex;gap:6px;margin-top:5px"><span class="chip">venue</span><span class="chip">Northside</span><span class="chip">cap 80</span></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;padding:12px 16px">
+        <div style="flex:1.4">
+          <div class="muted">A 80-cap listening room with a proper PA and a crowd that actually listens. Booking indie, folk and jazz most weekends.</div>
+          <div style="margin-top:10px"><span class="cta">See open gigs (3)</span></div>
+        </div>
+        <div class="infocard" style="flex:1;font-size:11px">
+          <div><strong>Capacity</strong> 80</div>
+          <div><strong>PA</strong> Yes · <strong>Backline</strong> No</div>
+          <div><strong>Stage</strong> Indoor</div>
+          <div style="margin-top:6px" class="muted">123 Test St, Northside</div>
+        </div>
+      </div>
+      <div class="note">Artist-page sibling: full-bleed cover like musicians get, plus a hard-facts card musicians actually check before applying.</div>
+    </div>
+    <div class="card-body">
+      <h3>B. Cover + facts card</h3>
+      <p>Matches the artist hero for family resemblance, with a venue-specific info card carrying the specs. Gallery lives one scroll down.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="filmstrip" onclick="toggleSelect(this)">
+    <div class="stage">
+      <div style="padding:14px 16px 8px">
+        <div class="syne" style="font-size:22px;font-weight:800">The Velvet Room</div>
+        <div class="muted" style="margin:3px 0 8px">Venue · Northside · Cap 80</div>
+        <div style="display:flex;gap:6px"><span class="chip">books indie</span><span class="chip">folk</span><span class="chip">solo &amp; duo</span></div>
+      </div>
+      <div style="display:flex;gap:6px;padding:6px 0 6px 16px;overflow:hidden">
+        <div class="ph1" style="min-width:150px;height:100px;border-radius:10px"></div>
+        <div class="ph3" style="min-width:150px;height:100px;border-radius:10px"></div>
+        <div class="ph2" style="min-width:80px;height:100px;border-radius:10px 0 0 10px"></div>
+      </div>
+      <div style="padding:10px 16px"><span class="cta">See open gigs (3)</span></div>
+      <div class="note">Text first, then a horizontally scrolling filmstrip of the gallery bleeding off the right edge. Most editorial; photos feel like a reel, not a grid.</div>
+    </div>
+    <div class="card-body">
+      <h3>C. Filmstrip</h3>
+      <p>Name and facts up top, gallery as a swipeable strip below. Scales from one photo to twenty without layout changes.</p>
+    </div>
+  </div>
+</div>

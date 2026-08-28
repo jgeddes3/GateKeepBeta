@@ -1,0 +1,82 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Sora:wght@400;500;600&display=swap');
+
+.dircard { border-radius: 12px; overflow: hidden; cursor: pointer; border: 2px solid transparent; }
+.dircard.selected { border-color: #6ea8fe; }
+.hero { height: 300px; position: relative; color: #F5F1F8; font-family: 'Sora', sans-serif; overflow: hidden; }
+.syne { font-family: 'Syne', sans-serif; }
+.photo { position: absolute; inset: 0; background: linear-gradient(15deg, #1E1118 0%, #4A2A38 35%, #8A4A48 65%, #D08858 100%); }
+.cta { background: #FF6B4A; color: #2A0F0A; border-radius: 999px; padding: 9px 18px; font-weight: 600; font-size: 12.5px; display: inline-block; }
+.ghost { border: 1px solid rgba(245,241,248,.4); border-radius: 999px; padding: 9px 18px; font-size: 12.5px; display: inline-block; }
+.dots { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; }
+.dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(245,241,248,.35); }
+.dot.on { background: #FF6B4A; width: 16px; border-radius: 3px; }
+.brandbar { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; font-size: 12px; z-index: 2; }
+</style>
+
+<h2>Landing hero: the photo treatment</h2>
+<p class="subtitle">Same carousel mechanics in all three (full-bleed concert photos, slide left every ~15s). What differs is the wash over the photo and where the words live. The warm gradient stands in for your photos.</p>
+
+<div class="cards">
+  <div class="card dircard" data-choice="night-scrim" onclick="toggleSelect(this)">
+    <div class="hero">
+      <div class="photo"></div>
+      <div style="position:absolute;inset:0;background:linear-gradient(to top, #0E0B13 0%, rgba(14,11,19,.55) 40%, rgba(14,11,19,.25) 100%)"></div>
+      <div class="brandbar"><span class="syne" style="color:#FF6B4A;font-weight:800;font-size:16px">GateKeep</span><span class="ghost" style="padding:6px 14px">Sign in</span></div>
+      <div style="position:absolute;left:20px;bottom:34px;z-index:2">
+        <div class="syne" style="font-size:30px;font-weight:800;line-height:1.05">Find the music.<br>Book the night.</div>
+        <div style="opacity:.75;margin:8px 0 12px;font-size:12.5px">Where this city's musicians and venues find each other.</div>
+        <span class="cta">I'm a musician</span>&nbsp;<span class="ghost">I book talent</span>
+      </div>
+      <div class="dots"><span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    </div>
+    <div class="card-body">
+      <h3>A. Night scrim, bottom-left</h3>
+      <p>Photos keep their true color; a dark gradient rises from the bottom so the words always sit on solid night. The photo melts into the page background below. Most photographic honesty.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="plum-duotone" onclick="toggleSelect(this)">
+    <div class="hero">
+      <div class="photo" style="filter:saturate(.4)"></div>
+      <div style="position:absolute;inset:0;background:linear-gradient(165deg, rgba(21,15,32,.82), rgba(29,18,41,.6));mix-blend-mode:multiply"></div>
+      <div style="position:absolute;inset:0;background:rgba(255,107,74,.08)"></div>
+      <div class="brandbar"><span class="syne" style="color:#FF6B4A;font-weight:800;font-size:16px">GateKeep</span><span class="ghost" style="padding:6px 14px">Sign in</span></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;z-index:2">
+        <div class="syne" style="font-size:32px;font-weight:800;line-height:1.05">Find the music.<br>Book the night.</div>
+        <div style="opacity:.75;margin:8px 0 12px;font-size:12.5px">Where this city's musicians and venues find each other.</div>
+        <div><span class="cta">I'm a musician</span>&nbsp;<span class="ghost">I book talent</span></div>
+      </div>
+      <div class="dots"><span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    </div>
+    <div class="card-body">
+      <h3>B. Plum wash, centered</h3>
+      <p>Every photo gets pulled into the brand: desaturated, washed in plum with a whisper of ember. The carousel feels like one continuous world; centered poster text. Most branded, least photographic.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="split-panel" onclick="toggleSelect(this)">
+    <div class="hero" style="display:flex">
+      <div style="width:44%;background:linear-gradient(165deg,#0E0B13,#1D1229);display:flex;flex-direction:column;justify-content:center;padding:0 18px;z-index:2">
+        <div class="syne" style="color:#FF6B4A;font-weight:800;font-size:15px;margin-bottom:14px">GateKeep</div>
+        <div class="syne" style="font-size:26px;font-weight:800;line-height:1.08">Find the music.<br>Book the night.</div>
+        <div style="opacity:.7;margin:8px 0 12px;font-size:12px">Where this city's musicians and venues find each other.</div>
+        <div><span class="cta" style="font-size:11.5px">I'm a musician</span></div>
+        <div style="margin-top:8px"><span class="ghost" style="font-size:11.5px">I book talent</span></div>
+      </div>
+      <div style="flex:1;position:relative">
+        <div class="photo"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(to right, #0E0B13 0%, transparent 35%)"></div>
+        <div class="dots" style="left:auto;right:16px;transform:none"><span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Split panel</h3>
+      <p>Words live on a solid night panel; photos slide in their own right-side stage, bleeding into the panel edge. Text never fights the image; photos can be anything.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <p class="subtitle">All three keep the two-audience CTAs (musician and curator). Transition is a slow slide left with a soft cross-dim; the pause is ~15s per photo.</p>
+</div>

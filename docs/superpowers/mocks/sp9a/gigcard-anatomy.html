@@ -1,0 +1,98 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Sora:wght@400;500;600&display=swap');
+
+.dircard { border-radius: 12px; overflow: hidden; cursor: pointer; border: 2px solid transparent; }
+.dircard.selected { border-color: #6ea8fe; }
+.stage { background: linear-gradient(165deg, #0E0B13 0%, #150F20 55%, #1D1229 100%); color: #F5F1F8; font-family: 'Sora', sans-serif; padding: 22px; min-height: 330px; font-size: 12.5px; }
+.syne { font-family: 'Syne', sans-serif; }
+.solid { background: #1A1424; border: 1px solid #2C2438; border-radius: 10px; overflow: hidden; }
+.photo { height: 110px; background: linear-gradient(20deg, #3A2430 0%, #6B3A4A 45%, #C46A52 100%); position: relative; }
+.photo .scrim { position: absolute; inset: 0; background: linear-gradient(to top, rgba(14,11,19,.85), transparent 60%); }
+.photo .over { position: absolute; left: 12px; bottom: 8px; }
+.datechip { background: #241D30; border: 1px solid #2C2438; border-radius: 8px; width: 46px; text-align: center; padding: 6px 0; }
+.datechip .mo { font-size: 10px; letter-spacing: .5px; color: #FF6B4A; font-weight: 600; }
+.datechip .day { font-family: 'Syne', sans-serif; font-size: 19px; font-weight: 700; line-height: 1.1; }
+.badge { font-size: 10px; padding: 3px 8px; border-radius: 6px; background: rgba(255,107,74,.14); color: #FF9B82; font-weight: 600; }
+.muted { opacity: .62; }
+.price { color: #FF6B4A; font-weight: 600; }
+.note { font-size: 11px; opacity: .55; margin-top: 12px; }
+</style>
+
+<h2>The gig card: pick its skeleton</h2>
+<p class="subtitle">This is the most repeated element in the product (browse, dashboards, bookings, artist Shows). Three anatomies, same data. After you pick the skeleton, I'll ask about each element inside it: price, genres, badges, hover.</p>
+
+<div class="cards">
+  <div class="card dircard" data-choice="photo-forward" onclick="toggleSelect(this)">
+    <div class="stage">
+      <div class="solid" style="max-width:270px;margin:0 auto">
+        <div class="photo"><div class="scrim"></div>
+          <div class="over"><span class="badge">Open for applications</span></div>
+        </div>
+        <div style="padding:12px 14px">
+          <div class="syne" style="font-size:15px;font-weight:700">Friday Night Live</div>
+          <div class="muted" style="margin:2px 0 8px">The Velvet Room · Northside</div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span class="muted">Fri Sep 12 · 9 PM</span><span class="price">$600 / set</span>
+          </div>
+        </div>
+      </div>
+      <div class="note">Venue photo leads with a dark scrim; the photo IS the vibe check. Best when curators upload good shots (they must, to get approved). DICE-like.</div>
+    </div>
+    <div class="card-body">
+      <h3>A. Photo-forward</h3>
+      <p>Image on top, scrim overlay, badge floating on the photo. Strongest browse appeal, tallest card.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="date-block-row" onclick="toggleSelect(this)">
+    <div class="stage" style="display:flex;flex-direction:column;justify-content:center">
+      <div class="solid" style="display:flex;gap:12px;align-items:center;padding:12px 14px;margin-bottom:8px">
+        <div class="datechip"><div class="mo">SEP</div><div class="day">12</div></div>
+        <div style="flex:1">
+          <div class="syne" style="font-size:14px;font-weight:700">Friday Night Live</div>
+          <div class="muted">The Velvet Room · 9 PM · Northside</div>
+        </div>
+        <div style="text-align:right"><div class="price">$600</div><div class="muted" style="font-size:10.5px">per set</div></div>
+      </div>
+      <div class="solid" style="display:flex;gap:12px;align-items:center;padding:12px 14px">
+        <div class="datechip"><div class="mo">SEP</div><div class="day">19</div></div>
+        <div style="flex:1">
+          <div class="syne" style="font-size:14px;font-weight:700">Jazz Thursdays</div>
+          <div class="muted">Beacon Lounge · 8 PM · Riverside</div>
+        </div>
+        <div style="text-align:right"><div class="price">$85</div><div class="muted" style="font-size:10.5px">per hour</div></div>
+      </div>
+      <div class="note">Calendar-first list rows, Resident Advisor style. Dense: a night's options at a glance. No photos on the card; the detail page carries them.</div>
+    </div>
+    <div class="card-body">
+      <h3>B. Date-block rows</h3>
+      <p>Big date chip, one row per gig, price right-aligned. Fastest to scan many gigs, most information per screen.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="hybrid-context" onclick="toggleSelect(this)">
+    <div class="stage" style="display:flex;flex-direction:column;justify-content:center">
+      <div class="solid" style="max-width:280px;margin:0 auto">
+        <div style="display:flex;gap:12px;align-items:center;padding:12px 14px">
+          <div style="width:44px;height:44px;border-radius:8px;background:linear-gradient(20deg,#3A2430,#C46A52);flex-shrink:0"></div>
+          <div style="flex:1">
+            <div class="syne" style="font-size:14px;font-weight:700">Friday Night Live</div>
+            <div class="muted">The Velvet Room · Fri Sep 12 · 9 PM</div>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid #241D30;padding:9px 14px">
+          <span class="badge">Open for applications</span><span class="price">$600 / set</span>
+        </div>
+      </div>
+      <div class="note">Photo thumbnail, split footer for status and money. One card works in EVERY context: browse grid, dashboard list, booking reference.</div>
+    </div>
+    <div class="card-body">
+      <h3>C. Thumb + footer</h3>
+      <p>Small photo square, two-deck layout with a status/price footer. The most versatile; scales from list to grid without redesign.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <p class="subtitle">Also fine: "A for browse, B for dashboards" (context-dependent pairing). Say it in the terminal if you want a split.</p>
+</div>

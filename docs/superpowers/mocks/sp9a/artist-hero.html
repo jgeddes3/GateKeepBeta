@@ -1,0 +1,81 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Sora:wght@400;500;600&display=swap');
+
+.dircard { border-radius: 12px; overflow: hidden; cursor: pointer; border: 2px solid transparent; }
+.dircard.selected { border-color: #6ea8fe; }
+.stage { background: linear-gradient(165deg, #0E0B13 0%, #150F20 55%, #1D1229 100%); color: #F5F1F8; font-family: 'Sora', sans-serif; min-height: 330px; font-size: 12px; }
+.syne { font-family: 'Syne', sans-serif; }
+.coverA { height: 180px; background: linear-gradient(15deg, #241521 0%, #58303C 45%, #B96A50 100%); position: relative; }
+.coverA .scrim { position: absolute; inset: 0; background: linear-gradient(to top, #0E0B13 4%, rgba(14,11,19,.35) 55%, transparent); }
+.playbtn { width: 34px; height: 34px; border-radius: 50%; background: #FF6B4A; color: #2A0F0A; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; }
+.muted { opacity: .62; }
+.chip { font-size: 10px; padding: 3px 9px; border: 1px solid #2C2438; border-radius: 6px; background: #1A1424; }
+.cta { background: #FF6B4A; color: #2A0F0A; border-radius: 999px; padding: 7px 15px; font-weight: 600; font-size: 11.5px; }
+.ghost { border: 1px solid #3A3048; border-radius: 999px; padding: 7px 15px; font-size: 11.5px; }
+.note { font-size: 11px; opacity: .55; margin-top: 10px; padding: 0 16px 12px; }
+.avatar { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(15deg,#58303C,#B96A50); border: 3px solid #0E0B13; }
+</style>
+
+<h2>The artist page hero</h2>
+<p class="subtitle">The page musicians share and curators judge in five seconds. Three skeletons, same artist. Per-element questions follow the pick.</p>
+
+<div class="cards">
+  <div class="card dircard" data-choice="fullbleed" onclick="toggleSelect(this)">
+    <div class="stage">
+      <div class="coverA"><div class="scrim"></div>
+        <div style="position:absolute;left:16px;bottom:10px">
+          <div class="syne" style="font-size:26px;font-weight:800;line-height:1">Mara &amp; The Low Lights</div>
+          <div class="muted" style="margin-top:4px">indie · folk · Solo act · Northside</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;padding:12px 16px">
+        <span class="playbtn">▶</span><span class="cta">Offer a gig</span><span class="ghost">Shows</span>
+      </div>
+      <div class="note">Spotify-style: the cover photo IS the hero, name sits on the image above a scrim that melts into the page. Feels big and established.</div>
+    </div>
+    <div class="card-body">
+      <h3>A. Full-bleed cover</h3>
+      <p>Photo edge to edge, name overlaid, actions directly beneath. Maximum stage presence; depends on decent cover photos.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="poster-split" onclick="toggleSelect(this)">
+    <div class="stage" style="display:flex;align-items:center;padding:18px 16px;gap:16px">
+      <div style="flex:1.2">
+        <div class="syne" style="font-size:24px;font-weight:800;line-height:1.05">Mara &amp;<br>The Low Lights</div>
+        <div class="muted" style="margin:8px 0 10px">Warm-voiced indie folk for rooms that listen. Solo act, Northside.</div>
+        <div style="display:flex;gap:6px;margin-bottom:12px"><span class="chip">indie</span><span class="chip">folk</span><span class="chip">singer-songwriter</span></div>
+        <div style="display:flex;gap:8px;align-items:center"><span class="playbtn">▶</span><span class="cta">Offer a gig</span></div>
+      </div>
+      <div style="flex:1;height:230px;border-radius:12px;background:linear-gradient(15deg,#241521,#58303C 45%,#B96A50);"></div>
+      <div class="note" style="position:absolute"></div>
+    </div>
+    <div class="card-body">
+      <h3>B. Poster split</h3>
+      <p>Editorial half-and-half: big Syne name and one-line pitch on the left, framed photo right. The most magazine-like, works even with mediocre photos.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="banner-avatar" onclick="toggleSelect(this)">
+    <div class="stage">
+      <div style="height:110px;background:linear-gradient(15deg,#241521,#58303C 45%,#B96A50)"></div>
+      <div style="padding:0 16px;margin-top:-28px">
+        <div style="display:flex;align-items:flex-end;gap:12px">
+          <div class="avatar"></div>
+          <div style="padding-bottom:4px">
+            <div class="syne" style="font-size:19px;font-weight:800">Mara &amp; The Low Lights</div>
+            <div class="muted" style="font-size:11px">indie · folk · Solo act · Northside</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <span class="playbtn">▶</span><span class="cta">Offer a gig</span><span class="ghost">Shows</span>
+        </div>
+      </div>
+      <div class="note">Classic profile: cover banner with the round avatar breaking the edge. Familiar to every user; least dramatic of the three.</div>
+    </div>
+    <div class="card-body">
+      <h3>C. Banner + avatar</h3>
+      <p>SoundCloud-style banner and overlapping avatar. Safe, compact, instantly readable as a profile page.</p>
+    </div>
+  </div>
+</div>

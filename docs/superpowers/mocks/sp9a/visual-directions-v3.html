@@ -1,0 +1,105 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Figtree:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600&family=Sora:wght@400;500;600&display=swap');
+
+.dircard { border-radius: 14px; overflow: hidden; cursor: pointer; border: 2px solid transparent; }
+.dircard.selected { border-color: #6ea8fe; }
+.mini { padding: 22px; min-height: 340px; }
+.mini .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; font-size: 13px; }
+.mini .navlinks { display: flex; gap: 14px; opacity: .75; }
+.mini .hero { margin: 0 0 6px; line-height: 1.08; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 29px; }
+.mini .brand { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 17px; }
+.mini .tag { font-size: 12.5px; opacity: .7; margin-bottom: 18px; }
+.gigcard { border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); }
+.gigcard .who { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+.gigcard .meta { font-size: 12px; opacity: .65; margin-bottom: 10px; }
+.gigcard .row { display: flex; justify-content: space-between; align-items: center; }
+.gigcard .price { font-size: 13px; font-weight: 600; }
+.btn { display: inline-block; padding: 9px 18px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+.chips { display: flex; gap: 6px; margin-top: 14px; }
+.chip { width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(255,255,255,.25); }
+.fontnote { font-size: 12px; opacity: .6; margin-top: 10px; }
+
+/* Shared background: A's plum night (your pick) */
+.plum { background: linear-gradient(160deg, #17111F 0%, #1B1230 60%, #241335 100%); color: #F6F1FA; }
+
+/* A — Guest List anchor: coral, Figtree */
+.dirA { font-family: 'Figtree', sans-serif; }
+.dirA .brand, .dirA .price { color: #FF8E72; }
+.dirA .btn { background: #FF8E72; color: #2A1420; }
+
+/* B — Ember on the same plum: C's red, Plus Jakarta Sans */
+.dirB { font-family: 'Plus Jakarta Sans', sans-serif; }
+.dirB .brand, .dirB .price { color: #FF6B4A; }
+.dirB .btn { background: #FF6B4A; color: #2A0F0A; }
+
+/* C — Ember on a deeper night: darker plum-black, C's red, Sora */
+.dirC { background: linear-gradient(165deg, #0E0B13 0%, #150F20 55%, #1D1229 100%); color: #F5F1F8; font-family: 'Sora', sans-serif; }
+.dirC .brand, .dirC .price { color: #FF6B4A; }
+.dirC .btn { background: #FF6B4A; color: #2A0F0A; }
+</style>
+
+<h2>Locking the room — coral vs. ember, and body fonts</h2>
+<p class="subtitle">A is your Guest List anchor, untouched. B is the SAME plum background with C's ember red swapped in. C tries the ember red on a deeper, darker night. Body fonts rotate across all three — watch the gig-card text, not just the colors.</p>
+
+<div class="cards">
+  <div class="card dircard" data-choice="A-coral-figtree" onclick="toggleSelect(this)">
+    <div class="mini plum dirA">
+      <div class="nav"><span class="brand">GateKeep</span><span class="navlinks"><span>Gigs</span><span>Artists</span><span>Sign in</span></span></div>
+      <h1 class="hero">Find the music.<br>Book the night.</h1>
+      <div class="tag">Your name's on the list.</div>
+      <div class="gigcard">
+        <div class="who">Mara &amp; The Low Lights</div>
+        <div class="meta">Fri Sep 12 · 9:00 PM · The Velvet Room</div>
+        <div class="row"><span class="price">$600 / set</span><span class="btn">Request to book</span></div>
+      </div>
+      <div class="chips"><span class="chip" style="background:#17111F"></span><span class="chip" style="background:#241335"></span><span class="chip" style="background:#FF8E72"></span><span class="chip" style="background:#F6F1FA"></span></div>
+      <div class="fontnote">Plum night · Coral #FF8E72 · Body: Figtree</div>
+    </div>
+    <div class="card-body">
+      <h3>A — Guest List (anchor)</h3>
+      <p>Your pick as-is: plum night, coral, Figtree. Softest and friendliest of the three.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="B-ember-jakarta" onclick="toggleSelect(this)">
+    <div class="mini plum dirB">
+      <div class="nav"><span class="brand">GateKeep</span><span class="navlinks"><span>Gigs</span><span>Artists</span><span>Sign in</span></span></div>
+      <h1 class="hero">Find the music.<br>Book the night.</h1>
+      <div class="tag">Your name's on the list.</div>
+      <div class="gigcard">
+        <div class="who">Mara &amp; The Low Lights</div>
+        <div class="meta">Fri Sep 12 · 9:00 PM · The Velvet Room</div>
+        <div class="row"><span class="price">$600 / set</span><span class="btn">Request to book</span></div>
+      </div>
+      <div class="chips"><span class="chip" style="background:#17111F"></span><span class="chip" style="background:#241335"></span><span class="chip" style="background:#FF6B4A"></span><span class="chip" style="background:#F6F1FA"></span></div>
+      <div class="fontnote">Plum night · Ember #FF6B4A · Body: Plus Jakarta Sans</div>
+    </div>
+    <div class="card-body">
+      <h3>B — Guest List, Ember</h3>
+      <p>Exactly A's background with the ember red you liked from Last Call. Hotter, a touch more urgent than coral.</p>
+    </div>
+  </div>
+
+  <div class="card dircard" data-choice="C-ember-deep-sora" onclick="toggleSelect(this)">
+    <div class="mini dirC">
+      <div class="nav"><span class="brand">GateKeep</span><span class="navlinks"><span>Gigs</span><span>Artists</span><span>Sign in</span></span></div>
+      <h1 class="hero">Find the music.<br>Book the night.</h1>
+      <div class="tag">Your name's on the list.</div>
+      <div class="gigcard">
+        <div class="who">Mara &amp; The Low Lights</div>
+        <div class="meta">Fri Sep 12 · 9:00 PM · The Velvet Room</div>
+        <div class="row"><span class="price">$600 / set</span><span class="btn">Request to book</span></div>
+      </div>
+      <div class="chips"><span class="chip" style="background:#0E0B13"></span><span class="chip" style="background:#1D1229"></span><span class="chip" style="background:#FF6B4A"></span><span class="chip" style="background:#F5F1F8"></span></div>
+      <div class="fontnote">Deeper night · Ember #FF6B4A · Body: Sora</div>
+    </div>
+    <div class="card-body">
+      <h3>C — Ember, Deeper Night</h3>
+      <p>The ember red on a darker, more blackened plum — closer to Spotify-dark. The red pops hardest here.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <p class="subtitle">Body font is the quiet variable: Figtree (friendly-round) vs Plus Jakarta Sans (geometric-warm) vs Sora (techy-crisp). You can pair any font with any color call.</p>
+</div>
