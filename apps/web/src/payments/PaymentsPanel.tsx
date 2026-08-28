@@ -10,8 +10,8 @@ import { TrueUpForm } from "./TrueUpForm";
 import { PayPastDueButton } from "./PayPastDueButton";
 import type { StripeStatusResult } from "./types";
 import {
-  paymentRowKind, resolveFeePolicy,
-  type BookingRequestDoc, type DepositStatus, type PaymentDoc, type PaymentRowKind,
+  PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
+  type BookingRequestDoc, type PaymentDoc, type PaymentRowKind,
 } from "@gatekeep/shared";
 
 // SP5 Task 15 — the booking detail page's money surface: subscribes to
@@ -20,19 +20,6 @@ import {
 // plus a card-on-file row and a totals footer. Curator-side (and dual
 // "both") members get the actions (report actuals, pay past due, update the
 // card); musicians see the same rows read-only, musician-framed.
-
-// Review round 1 (medium #2): mirrors functions/src/paymentsCore.ts's
-// PAID_DEPOSIT_STATUSES exactly (a functions-only Set, not exported to
-// shared — kept in sync by hand). Every deposit status where the curator's
-// card was actually charged and the money hasn't come back to them yet:
-// held/applied (escrow, then released into a settlement),
-// forfeit_pending/forfeited (forfeiture in flight or done — the curator
-// still paid; only the DESTINATION changed), and refund_pending (charged,
-// the refund just hasn't completed). See recomputePaymentSummary's own
-// per-status table for the authoritative definition this must track.
-const PAID_DEPOSIT_STATUSES = new Set<DepositStatus>([
-  "held", "applied", "forfeit_pending", "forfeited", "refund_pending",
-]);
 
 type Row = PaymentDoc & { id: string };
 

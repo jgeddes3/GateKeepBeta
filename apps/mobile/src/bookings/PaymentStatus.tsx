@@ -6,18 +6,20 @@ import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
 import { useRole } from "./BookingThread";
 import {
-  paymentRowKind,
-  type BookingRequestDoc, type DepositStatus, type PaymentDoc, type PaymentRowKind,
+  PAID_DEPOSIT_STATUSES, paymentRowKind,
+  type BookingRequestDoc, type PaymentDoc, type PaymentRowKind,
 } from "@gatekeep/shared";
 
 // SP5 Task 16 — mobile's READ-ONLY money surfaces. Two components:
 //
 //  * PaymentStatus — the per-occurrence status chips for one booking,
 //    mounted under BookingThread by app/booking/[bookingId].tsx. An RN port
-//    of apps/web/src/payments/PaymentsPanel.tsx: the row-state ladder is
-//    literally the same code (@gatekeep/shared's `paymentRowKind`), and the
-//    totals accounting mirrors that panel's field-for-field, INCLUDING its
-//    review-round fixes. Every ACTION is stripped: no save-card row, no
+//    of apps/web/src/payments/PaymentsPanel.tsx: the row-state ladder and
+//    the paidCents membership test are literally the same code
+//    (@gatekeep/shared's `paymentRowKind` / `PAID_DEPOSIT_STATUSES`), and
+//    the surrounding totals arithmetic mirrors that panel's field-for-field,
+//    INCLUDING its review-round fixes. Every ACTION is stripped: no
+//    save-card row, no
 //    "Report actuals", no "Pay now". Mobile ships read-only this
 //    sub-project (spec §1, "Platforms") — native payment sheets need
 //    @stripe/stripe-react-native and a new EAS dev build, which is sub-5b.
@@ -40,17 +42,6 @@ import {
 // Both live in this one file because the plan's Task 16 file list creates
 // exactly one mobile source file, and they are the same thing from the two
 // sides: what SP5's money engine looks like when you can only LOOK at it.
-
-// Byte-identical to PaymentsPanel's own set (which in turn mirrors
-// paymentsCore.ts's functions-only PAID_DEPOSIT_STATUSES): every deposit
-// status where the curator's card was actually charged and the money hasn't
-// come back to them — held/applied (escrow, then released into a
-// settlement), forfeit_pending/forfeited (the curator still paid; only the
-// DESTINATION changed) and refund_pending (charged, refund not yet
-// completed).
-const PAID_DEPOSIT_STATUSES = new Set<DepositStatus>([
-  "held", "applied", "forfeit_pending", "forfeited", "refund_pending",
-]);
 
 type Row = PaymentDoc & { id: string };
 

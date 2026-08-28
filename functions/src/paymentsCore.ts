@@ -27,13 +27,13 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   computeDepositCents, computeExpectedTotalCents, computeFeeShareCents,
-  DEFAULT_FEE_POLICY, DEPOSIT_EXHAUSTED_ATTEMPTS,
+  DEFAULT_FEE_POLICY, DEPOSIT_EXHAUSTED_ATTEMPTS, PAID_DEPOSIT_STATUSES,
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
   DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE,
 } from "@gatekeep/shared";
 import type {
-  AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositState, DepositStatus,
+  AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositState,
   FeePolicy, LedgerEntry, PaymentDoc, PaymentSummary, StripeProfileDoc,
 } from "@gatekeep/shared";
 import { getStripe } from "./stripeClient.js";
@@ -227,10 +227,14 @@ export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number
 }
 
 // Deposit statuses under which the curator's money is still out (charged and
-// not yet refunded) — see the per-status table on recomputePaymentSummary.
-const PAID_DEPOSIT_STATUSES = new Set<DepositStatus>([
-  "held", "applied", "forfeit_pending", "forfeited", "refund_pending",
-]);
+// not yet refunded) — the per-status table on recomputePaymentSummary below
+// remains the authoritative statement of WHY each one counts.
+//
+// Defined in @gatekeep/shared (paymentDisplay.ts) and re-exported here, same
+// as DEPOSIT_EXHAUSTED_ATTEMPTS: both clients compute the same `paidCents`
+// total for display and were each carrying their own copy of this set, kept
+// in step by comment alone (Task 16 review round 1).
+export { PAID_DEPOSIT_STATUSES };
 
 // Recomputes bookings/{id}.paymentSummary from the payments subcollection.
 // Non-transactional, self-healing aggregate (recompute-from-truth, like
