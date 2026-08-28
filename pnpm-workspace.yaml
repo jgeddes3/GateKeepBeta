@@ -9,6 +9,7 @@ allowBuilds:
   esbuild: true
   ffmpeg-static: true
   protobufjs: true
+  re2: false
   unrs-resolver: true
 minimumReleaseAgeExclude:
   - '@expo/cli@57.0.18'
