@@ -10,6 +10,7 @@ import {
   formatDuration, gigLocationLabel, launchTzDayStartMs, launchTzNextDayStartMs, type OfferState,
 } from "./BookingForms";
 import { useProfileContext } from "../shell/ProfileContext";
+import { GatePrompt } from "../payments/GatePrompt";
 
 // RN port of ../../../web/src/bookings/GigBrowse.tsx (+ the gig detail
 // page's ApplyPanel, app/gigs/[gigId]/page.tsx) — SP4 Task 12. Mounted as
@@ -87,7 +88,7 @@ function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
         ))}
       </View>
       <OfferFields structure={gig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />
-      {error && <ErrorBox message={error} />}
+      {error && <GatePrompt message={error} viewerIsMusician onRetry={() => void submit()} />}
       <Pressable onPress={() => void submit()} disabled={busy}
         style={{ backgroundColor: "#111", paddingVertical: 12, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
         <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Applying…" : "Apply"}</Text>

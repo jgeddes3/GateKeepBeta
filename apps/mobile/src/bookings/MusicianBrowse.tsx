@@ -7,6 +7,7 @@ import { getFirebase } from "../lib/firebase";
 import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type GigDoc } from "@gatekeep/shared";
 import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL, Chip } from "../gigs/GigForms";
 import { DEPOSIT_HONESTY_LINE, ErrorBox, OfferFields, buildOfferPayload, emptyOffer, errorCode, type OfferState } from "./BookingForms";
+import { GatePrompt } from "../payments/GatePrompt";
 
 // RN port of ../../../web/src/bookings/MusicianBrowse.tsx (+ OfferComposer.tsx)
 // — SP4 Task 12. Mounted as the curator "Find musicians" tab
@@ -123,7 +124,7 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
             ))}
           </View>
           {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
-          {error && <ErrorBox message={error} />}
+          {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={() => void submit()} />}
           <Text style={{ color: "#666", fontSize: 12 }}>{DEPOSIT_HONESTY_LINE}</Text>
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Pressable onPress={() => void submit()} disabled={busy} style={[primaryBtn, { opacity: busy ? 0.6 : 1 }]}>

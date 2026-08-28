@@ -8,6 +8,7 @@ import { formatDuration, ErrorBox, type OfferPayload } from "./BookingForms";
 import { bookingHistoryLabel, depositLine } from "./BookingInbox";
 import { OfferForm } from "./OfferForm";
 import { CancelDialog } from "./CancelDialog";
+import { GatePrompt } from "../payments/GatePrompt";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
   NO_SHOW_REPORT_WINDOW_DAYS,
@@ -395,7 +396,10 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                   <Text style={dangerText}>{actionBusy === "decline" ? "Declining…" : "Decline"}</Text>
                 </Pressable>
               </View>
-              {actionError && <ErrorBox message={actionError} />}
+              {actionError && (
+                <GatePrompt message={actionError} curatorProfileId={booking.curatorProfileId}
+                  viewerIsMusician={mySide === "musician"} onRetry={() => void accept()} />
+              )}
               {showAcceptConfirm && (
                 <View style={{ borderWidth: 1, borderColor: "#111", borderRadius: 8, padding: 12, gap: 8 }}>
                   <Text style={{ fontWeight: "700" }}>Confirm accept</Text>
