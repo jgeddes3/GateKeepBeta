@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
-  FakeStripe, StripeCardDeclinedError, StripePaymentPendingError,
+  FakeStripe, getStripe, isFakeStripe, StripeCardDeclinedError, StripePaymentPendingError,
   StripeAccountMissingError, StripeSetupIntentMismatchError,
 } from "../src/stripeClient.js";
 
@@ -188,5 +188,51 @@ describe("FakeStripe", () => {
 
   it("getSetupIntentPaymentMethod returns null for an unknown setup intent id", async () => {
     expect(await fake.getSetupIntentPaymentMethod(`seti_never_existed_${Date.now()}`, "cus_x")).toBeNull();
+  });
+});
+
+// L8 (branch audit): getStripe()'s selection must FAIL CLOSED — a deployed
+// handler that forgot `secrets: [stripeSecretKey]` (so process.env has no key)
+// and is NOT in the emulator must THROW rather than silently move FakeStripe's
+// pretend money against real Firestore data. This is the runtime backstop behind
+// the H1 secret-declaration guard (stripeSecrets.test.ts).
+describe("getStripe() selection (fail-closed)", () => {
+  // Save/restore the three env vars getStripe() reads, exactly (a var that was
+  // unset must go back to unset, not to "undefined").
+  function withEnv(mutate: () => void, body: () => void): void {
+    const saved: Record<string, string | undefined> = {
+      STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
+      FUNCTIONS_EMULATOR: process.env.FUNCTIONS_EMULATOR,
+      FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST,
+    };
+    try {
+      mutate();
+      body();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  }
+
+  it("throws OUTSIDE the emulator with no STRIPE_SECRET_KEY — never a silent FakeStripe fallback", () => {
+    withEnv(() => {
+      delete process.env.STRIPE_SECRET_KEY;
+      delete process.env.FUNCTIONS_EMULATOR;
+      delete process.env.FIRESTORE_EMULATOR_HOST;
+    }, () => {
+      expect(() => getStripe()).toThrow(/STRIPE_SECRET_KEY is not configured/);
+    });
+  });
+
+  it("selects FakeStripe inside the emulator (FIRESTORE_EMULATOR_HOST set, no key) rather than throwing", () => {
+    withEnv(() => {
+      delete process.env.STRIPE_SECRET_KEY;
+      delete process.env.FUNCTIONS_EMULATOR;
+      process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
+    }, () => {
+      expect(isFakeStripe(getStripe())).toBe(true);
+    });
   });
 });

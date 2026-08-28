@@ -66,8 +66,16 @@ const fail = (reason: string): Result => ({ ok: false, reason });
 // strings, path traversal ("a/b"), and absurdly long values before they reach
 // a doc() call — Firestore would throw on "/" in an id, and we want a clean
 // validation failure from an onCall handler, not an uncaught exception.
+//
+// L2 (branch audit): also reject Firestore's own reserved `__…__` ids
+// (`__proto__`, `__name__`, …). These pass the character-class check above
+// (underscores are allowed), but Firestore reserves the `__.*__` pattern and
+// throws INVALID_ARGUMENT deep in a doc()/query — a 500 to the caller — rather
+// than a clean invalid-argument. Rejecting them here turns that into the same
+// tidy validation failure every other bad id gets, and closes the small
+// prototype-pollution-flavoured surface of a `__proto__` id reaching a path.
 export const isValidDocId = (s: unknown): s is string =>
-  typeof s === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(s);
+  typeof s === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(s) && !/^__.*__$/.test(s);
 
 // Domain allowlists per link kind. Regex-based host extraction (not `new URL`)
 // so behavior is identical on Node and React Native/Hermes.

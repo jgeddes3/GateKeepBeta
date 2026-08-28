@@ -113,11 +113,37 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
   // other branch below is read-only.
   onRetry: () => void;
 }) {
-  if (message === CURATOR_CARD_REQUIRED_MESSAGE && curatorProfileId) {
+  // L11 (branch audit): the curator-card and delinquent recovery UIs are the
+  // CURATOR side's to act on — CuratorCardGate fires createSetupIntent against
+  // curatorProfileId, and the delinquent-booking links go to the curator's own
+  // bookings. But acceptBooking checks the curator's card/delinquency WHICHEVER
+  // side clicks accept, so a MUSICIAN-side accepter can trip these exact
+  // messages. Showing them a live "Save a card" button on a profile they are not
+  // a member of is a dead action (the createSetupIntent call would fail on the
+  // curator's profileId) — the same confused-deputy shape the payouts branch
+  // below already guards with viewerIsMusician. So gate these two on the viewer
+  // being the curator side; a musician-side accepter gets a neutral, informative
+  // notice instead (BOOKING_NOT_CONFIRMABLE-style), never the curator's own
+  // recovery action.
+  const viewerIsCurator = !viewerIsMusician;
+  if (message === CURATOR_CARD_REQUIRED_MESSAGE && curatorProfileId && viewerIsCurator) {
     return <CuratorCardGate message={message} curatorProfileId={curatorProfileId} onRetry={onRetry} />;
   }
-  if (message === CURATOR_DELINQUENT_MESSAGE && curatorProfileId) {
+  if (message === CURATOR_DELINQUENT_MESSAGE && curatorProfileId && viewerIsCurator) {
     return <CuratorDelinquentGate message={message} curatorProfileId={curatorProfileId} />;
+  }
+  if (message === CURATOR_CARD_REQUIRED_MESSAGE || message === CURATOR_DELINQUENT_MESSAGE) {
+    // Reached only by a musician-side accepter (viewerIsMusician), or a call
+    // site with no curatorProfileId to act on. Neutral notice, never the
+    // curator's recovery UI — mirrors the non-musician branch of
+    // MUSICIAN_PAYOUTS_REQUIRED_MESSAGE below.
+    return (
+      <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+        {message === CURATOR_DELINQUENT_MESSAGE
+          ? "The curator has an overdue payment to resolve before this booking can be confirmed — they've been notified."
+          : "The curator needs to finish payment setup before this booking can be confirmed — they've been notified."}
+      </p>
+    );
   }
   if (message === MUSICIAN_PAYOUTS_REQUIRED_MESSAGE) {
     return viewerIsMusician ? (

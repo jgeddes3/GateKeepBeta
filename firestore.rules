@@ -210,9 +210,15 @@ service cloud.firestore {
       // Same audience as the parent booking: either side's members + admins.
       // The parent get()s pin to the bookingId path segment, so a list query
       // scoped under one booking is provable for members of either side.
+      // signedIn() guard (branch audit): short-circuits BEFORE the billed parent
+      // get()s so an anonymous caller does not pay a document read to be denied —
+      // matches the private/curatorBooking read rule's `signedIn() && exists()`
+      // idiom above. isMember() already re-checks signedIn(), so this only moves
+      // the cost, never the outcome.
       allow read: if isAdmin()
-        || isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.curatorProfileId)
-        || isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.musicianProfileId);
+        || (signedIn() && (
+          isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.curatorProfileId)
+          || isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.musicianProfileId)));
       allow write: if false; // Cloud Functions only
     }
     // Webhook idempotency + append-only money audit — server/admin surfaces.

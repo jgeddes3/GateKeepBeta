@@ -3,7 +3,9 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc } from "firebase/firestore";
+import {
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collectionGroup, query, where, orderBy,
+} from "firebase/firestore";
 
 // Sub-project 5 (payments) rules matrix — the money collections
 // firestore.rules gained in its "Sub-project 5: payments" section:
@@ -139,6 +141,27 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
     await assertFails(getDocs(collection(anon, "bookings/bk1/payments")));
   });
 
+  it("L8: a side member (not a platform admin) cannot run collectionGroup('payments') — the cross-booking read is admin-only", async () => {
+    await seedCast();
+    await seedBooking("bk1");
+    await seedPayment("bk1", "g1");
+
+    const alice = env.authenticatedContext("alice").firestore();   // curator-side member of THIS booking
+    const bob = env.authenticatedContext("bob").firestore();       // musician-side member of THIS booking
+    const anon = env.unauthenticatedContext().firestore();
+
+    // The per-booking list is provable (the parent get() pins to the {bookingId}
+    // path segment), but a collectionGroup query spans EVERY booking's payments
+    // at once — there is no single path to pin the parent get() to, so the
+    // membership disjuncts can never be proven query-wide and the rule denies for
+    // any non-admin. Mirrors rules.test.ts's "cannot run collectionGroup('tracks')".
+    // The platform's own cross-booking payment reads go through the Admin SDK,
+    // which bypasses these rules entirely.
+    await assertFails(getDocs(query(collectionGroup(alice, "payments"), where("curatorProfileId", "==", "prof1"))));
+    await assertFails(getDocs(query(collectionGroup(bob, "payments"), where("musicianProfileId", "==", "prof2"))));
+    await assertFails(getDocs(collectionGroup(anon, "payments")));
+  });
+
   it("no client writes payment docs — not either side, not an admin, not create/update/delete", async () => {
     await seedCast();
     await seedBooking("bk1");
@@ -159,6 +182,60 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
     await assertFails(setDoc(doc(root, "bookings/bk1/payments/g2"), { baseCents: 0 }));
     await assertFails(deleteDoc(doc(alice, "bookings/bk1/payments/g1")));
     await assertFails(deleteDoc(doc(root, "bookings/bk1/payments/g1")));
+  });
+});
+
+// The two SP5 CLIENT list queries over the top-level bookings collection (the
+// bookings read rule lives in firestore.rules' SP4 section, but these queries
+// are SP5's — a musician's booking inbox and the curator's delinquent-booking
+// lookup GatePrompt ships). Both are provable ONLY because they pin a
+// profileId the rule can evaluate isMember() against as a query-wide constant.
+describe("bookings list queries (SP5 client)", () => {
+  it("a musician-side member lists their bookings by (musicianProfileId, updatedAt); an outsider, anon, and an unpinned list cannot", async () => {
+    await seedCast();
+    await seedBooking("bk1");
+    await seedBooking("bk2", { updatedAt: 2 });
+
+    const bob = env.authenticatedContext("bob").firestore();     // member of prof2 (musician side)
+    const carol = env.authenticatedContext("carol").firestore(); // member of an unrelated profile
+    const anon = env.unauthenticatedContext().firestore();
+
+    // Pinning musicianProfileId == <own profile> makes
+    // isMember(resource.data.musicianProfileId) a query-wide constant, so the
+    // bookings read rule proves. This is the shape the musician-side inbox ships.
+    await assertSucceeds(getDocs(query(
+      collection(bob, "bookings"), where("musicianProfileId", "==", "prof2"), orderBy("updatedAt"))));
+    await assertFails(getDocs(query(
+      collection(carol, "bookings"), where("musicianProfileId", "==", "prof2"), orderBy("updatedAt"))));
+    await assertFails(getDocs(query(
+      collection(anon, "bookings"), where("musicianProfileId", "==", "prof2"), orderBy("updatedAt"))));
+    // Unpinned (no profile filter): the membership disjuncts can't be evaluated
+    // query-wide, so even a real member is denied the whole-collection list.
+    await assertFails(getDocs(query(collection(bob, "bookings"), orderBy("updatedAt"))));
+  });
+
+  it("a curator-side member lists their delinquent bookings by (curatorProfileId, paymentSummary.state); the musician side, an outsider, and anon cannot", async () => {
+    await seedCast();
+    await seedBooking("bkdelinq", {
+      paymentSummary: { state: "delinquent", heldCents: 0, paidCents: 0, transferredCents: 0 },
+    });
+
+    const alice = env.authenticatedContext("alice").firestore(); // member of prof1 (curator side)
+    const bob = env.authenticatedContext("bob").firestore();     // musician side — not the curator
+    const anon = env.unauthenticatedContext().firestore();
+
+    // The exact query GatePrompt's fetchDelinquentBookingIds ships: pinning
+    // curatorProfileId == <own profile> proves isMember(resource.data.
+    // curatorProfileId) query-wide.
+    await assertSucceeds(getDocs(query(
+      collection(alice, "bookings"),
+      where("curatorProfileId", "==", "prof1"), where("paymentSummary.state", "==", "delinquent"))));
+    await assertFails(getDocs(query(
+      collection(bob, "bookings"),
+      where("curatorProfileId", "==", "prof1"), where("paymentSummary.state", "==", "delinquent"))));
+    await assertFails(getDocs(query(
+      collection(anon, "bookings"),
+      where("curatorProfileId", "==", "prof1"), where("paymentSummary.state", "==", "delinquent"))));
   });
 });
 

@@ -222,7 +222,10 @@ describe("account.updated webhook", () => {
     await adb.doc(`stripeFake/state/objects/${accountId}`).set(
       { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
 
-    const evt = fakeEvent("account.updated", { id: accountId, metadata: { profileId } });
+    // M1 (branch audit): a real account.updated is a connected-account event, so
+    // Stripe stamps the top-level `account` with the connected account id — the
+    // handler now requires it to pin to the cached account.
+    const evt = { ...fakeEvent("account.updated", { id: accountId, metadata: { profileId } }), account: accountId };
     const res = await postWebhook(evt);
     expect(res.status).toBe(200);
 
@@ -252,6 +255,30 @@ describe("account.updated webhook", () => {
     expect(otherAfter?.transfersEnabled).toBe(false);
     expect(otherAfter?.payoutsEnabled).toBe(false);
     expect(otherAfter?.instantEligible).toBe(false);
+  });
+
+  it("M1 (branch audit): a matching accountId whose TOP-LEVEL event.account is a foreign account is ignored — flags are NOT synced", async () => {
+    const { owner, profileId } = await makeApprovedMusicianProfile("whforgn");
+    await callFn("createOnboardingLink", { profileId }, owner.user);
+    const sp = await getStripeDoc(profileId);
+    const accountId = sp!.accountId!;
+    // The account's own fake flags are true, so ONLY a correct account-pin bail
+    // leaves the cached flags false — syncStripeAccountFlags reads the account by
+    // the profile's OWN cached id, so a handler that skipped the event.account
+    // check would still pick these up.
+    await adb.doc(`stripeFake/state/objects/${accountId}`).set(
+      { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
+
+    // object.id pins to the cached account (so the older accountId check passes),
+    // but the top-level event.account is a DIFFERENT, attacker-controlled
+    // connected account — the confused/forged connected-account event M1 closes.
+    const evt = { ...fakeEvent("account.updated", { id: accountId, metadata: { profileId } }), account: "acct_evil_forged" };
+    expect((await postWebhook(evt)).status).toBe(200);
+
+    const after = await getStripeDoc(profileId);
+    expect(after?.transfersEnabled).toBe(false);
+    expect(after?.payoutsEnabled).toBe(false);
+    expect(after?.instantEligible).toBe(false);
   });
 
   it("an event with no metadata.profileId is a 200 no-op (nothing to write)", async () => {

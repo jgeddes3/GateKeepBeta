@@ -15,6 +15,11 @@ import {
 } from "./gigs.js";
 import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
 import { executeCancellation, ALREADY_STARTED_MESSAGE, NO_UPCOMING_DATES_MESSAGE } from "./bookingLifecycle.js";
+// H1 (branch audit): pauseSeries / endSeries cancel the series' active run
+// booking via executeCancellation, which reaches getStripe() (the deposit
+// refund/forfeit executor) — so both MUST declare this secret or getStripe()
+// fails CLOSED in production. See the regression guard in stripeSecrets.test.ts.
+import { stripeSecretKey } from "./stripeClient.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
@@ -313,7 +318,7 @@ async function cancelActiveRunBookingTolerant(
   }
 }
 
-export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1" }, async (req) => {
+export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { seriesId } = req.data;
@@ -399,7 +404,7 @@ async function attemptEndSeries(
   await batch.commit();
 }
 
-export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1" }, async (req) => {
+export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { seriesId } = req.data;

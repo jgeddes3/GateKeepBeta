@@ -9,6 +9,13 @@ import {
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
+// H1 (branch audit): cancelBooking / cancelOccurrence / reportNoShow all
+// transitively reach getStripe() — via resolveDepositPending (the deposit
+// refund/forfeit executor) and, for reportNoShow, additionally
+// clawbackSettledOccurrence — so every one of their onCall options MUST declare
+// this secret, or getStripe() fails CLOSED in production. See stripeClient.ts's
+// getStripe() note and the regression guard in stripeSecrets.test.ts.
+import { stripeSecretKey } from "./stripeClient.js";
 import {
   clawbackAlertId, markDepositsPendingInTx, recordAdminAlert, resolveDepositPending,
 } from "./paymentsCore.js";
@@ -447,7 +454,7 @@ export async function executeCancellation(
   return result;
 }
 
-export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" }, async (req) => {
+export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { bookingId, reason } = req.data ?? ({} as CancelBookingInput);
@@ -481,7 +488,7 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
 
 interface CancelOccurrenceInput { bookingId: string; gigId: string; reason: string; }
 
-export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-central1" }, async (req) => {
+export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { bookingId, gigId, reason } = req.data ?? ({} as CancelOccurrenceInput);
@@ -650,7 +657,7 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
 
 interface ReportNoShowInput { bookingId: string; reason: string; }
 
-export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" }, async (req) => {
+export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { bookingId, reason } = req.data ?? ({} as ReportNoShowInput);

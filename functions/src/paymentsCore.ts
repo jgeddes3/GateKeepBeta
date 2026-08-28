@@ -207,10 +207,23 @@ function isAlreadyExists(e: unknown): boolean {
 // An empty string is treated the same as null (falls back to
 // a random id) — Stripe never issues empty-string ids, so an empty string
 // here only ever means "the caller doesn't have one yet."
+// L1 (branch audit): a stripeId is about to become a Firestore doc-id segment
+// (`ledger/{kind}:{stripeId}`). Reject the two shapes that would make that path
+// ILLEGAL rather than merely ugly: a "/" (which Firestore reads as extra path
+// segments — an odd-depth path it throws on) and its reserved `__…__` form.
+// Deliberately NOT isValidDocId / `^[A-Za-z0-9_]+$`: SP5's own synthetic ledger
+// ids carry colons (e.g. `latefee:{bookingId}:{gigId}`), which are a LEGAL
+// doc-id character and must keep their deterministic-dedup id. The length cap is
+// generous — real Stripe ids are ~30 chars and the longest synthetic id is a
+// pair of doc-id-bounded ids.
+function isSafeLedgerStripeId(s: string): boolean {
+  return s.length > 0 && s.length <= 256 && !s.includes("/") && !/^__.*__$/.test(s);
+}
+
 export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number }): Promise<void> {
   const db = getFirestore();
   const full: LedgerEntry = { ...entry, at: entry.at ?? Date.now() };
-  if (full.stripeId) {
+  if (full.stripeId && isSafeLedgerStripeId(full.stripeId)) {
     const ref = db.doc(`ledger/${full.kind}:${full.stripeId}`);
     try {
       await ref.create(full);
@@ -222,6 +235,17 @@ export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number
       console.info(`writeLedger: duplicate suppressed for ${full.kind}:${full.stripeId}`);
     }
     return;
+  }
+  // L1 (branch audit): a PRESENT-but-unsafe stripeId falls back to a random
+  // .add() id (and logs) rather than throwing `INVALID_ARGUMENT` out of what is
+  // a best-effort, post-commit audit write at almost every call site. Losing the
+  // deterministic dedup for that one malformed row is an audit gap at worst — a
+  // duplicated or missing audit ROW is never a money bug — whereas an uncaught
+  // throw from a money tail could be. An empty stripeId ("the caller has none
+  // yet") takes the same random-id path, silently, exactly as before.
+  if (full.stripeId) {
+    console.warn(
+      `writeLedger: stripeId ${JSON.stringify(full.stripeId)} is not a safe doc-id segment for a "${full.kind}" row — using a random ledger id (dedup not guaranteed for this row)`);
   }
   await db.collection("ledger").add(full);
 }
@@ -400,6 +424,13 @@ export async function resolveDepositPending(
       });
     }
   } else {
+    // SECURITY RULING PENDING (H2/M3/M4) — branch audit M3 (a velocity limit /
+    // hold on self-deal forfeits, where the same uid sits on both sides and the
+    // deposit forfeits from the curator to the musician who is themselves) is
+    // withheld for an owner product ruling; this forfeit executes with no such
+    // hold, deliberately, pending that decision. `p.selfDeal` is the flag a
+    // future hold would read.
+    //
     // 100% of the deposit BASE to the musician — no commission is taken on a
     // forfeit; the platform keeps the curator's fee share by simply not
     // refunding it (see the refund branch above).

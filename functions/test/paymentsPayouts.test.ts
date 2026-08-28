@@ -350,11 +350,13 @@ describe("payout webhooks", () => {
     const result = await payout(
       { profileId, amountCents: 3_000, method: "standard", requestId: freshRequestId() }, owner.user);
 
-    const res = await postWebhook(fakeEvent("payout.failed", {
+    // M1 (branch audit): a payout is a connected-account event, so it carries a
+    // top-level `account` — the handler pins it to the profile's cached account.
+    const res = await postWebhook({ ...fakeEvent("payout.failed", {
       id: result.payoutId, amount: 3_000, currency: "usd", status: "failed",
       failure_code: "account_closed", failure_message: "The bank account has been closed.",
       metadata: { profileId, purpose: "payout" },
-    }));
+    }), account: accountId });
     expect(res.status).toBe(200);
 
     const row = await adb.doc(`ledger/payout_failed:${result.payoutId}`).get();
@@ -376,10 +378,10 @@ describe("payout webhooks", () => {
       { profileId, amountCents: 3_000, method: "standard", requestId: freshRequestId() }, owner.user);
     const before = (await ledgerRowsFor(profileId)).length;
 
-    const res = await postWebhook(fakeEvent("payout.paid", {
+    const res = await postWebhook({ ...fakeEvent("payout.paid", {
       id: result.payoutId, amount: 3_000, currency: "usd", status: "paid",
       metadata: { profileId, purpose: "payout" },
-    }));
+    }), account: accountId });
     expect(res.status).toBe(200);
     expect((await ledgerRowsFor(profileId)).length).toBe(before);
     expect((await notificationsFor(owner.uid)).some((n) => n.title === "Payout failed")).toBe(false);

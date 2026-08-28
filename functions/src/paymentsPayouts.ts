@@ -190,6 +190,9 @@ export const requestPayout = onCall<RequestPayoutInput>(
     if (typeof requestId !== "string" || !REQUEST_ID_RE.test(requestId)) {
       throw new HttpsError("invalid-argument", "A request id is required (8-64 characters, letters/digits/-/_).");
     }
+    // SECURITY RULING PENDING (H2/M3/M4) — branch audit H2 (member-vs-admin
+    // gating on createOnboardingLink/requestPayout) is withheld for an owner
+    // product ruling; requireProfileMember is deliberately left as-is here.
     await requireProfileMember(profileId, uid);
 
     const sp = await getStripeProfileDoc(profileId);
@@ -246,6 +249,10 @@ export const requestPayout = onCall<RequestPayoutInput>(
       return { payoutId: po.id, feeCents: 0, netCents: amountCents, replayed: false };
     }
 
+    // SECURITY RULING PENDING (H2/M3/M4) — branch audit M4 (an instant-payout
+    // minimum amount) is withheld for an owner product ruling; no minimum is
+    // enforced on the instant path here, deliberately, pending that decision.
+    //
     // Instant: the fee comes out of the requested amount (the musician asks for
     // X and receives X - fee), and the fee itself moves platform-ward as a
     // separate account debit.
@@ -336,14 +343,36 @@ function readPayoutEvent(object: Record<string, unknown>): {
   };
 }
 
+// M1 (branch audit): a payout is created with `stripeAccount`, so payout.paid/
+// payout.failed are CONNECTED-ACCOUNT events and Stripe stamps `event.account`
+// with the connected account id. Before trusting one to record money (or notify)
+// against the profile its metadata names, pin that top-level account to the
+// profile's CACHED connected account. Without it, a forged payout event carrying
+// a real profileId but a foreign account could write a money-came-back ledger row
+// (or fire a notification) for a profile it does not own. Returns false when the
+// account is absent or does not match — the caller then no-ops.
+async function eventAccountMatchesProfile(account: string | undefined, profileId: string): Promise<boolean> {
+  const sp = await getStripeProfileDoc(profileId);
+  return account != null && account === sp?.accountId;
+}
+
 // NO LEDGER ROW BY DESIGN. `payout.paid` is the expected outcome of a payout
 // this file already wrote a `payout_standard`/`payout_instant` row for at
 // request time, so a second row here would double-count every successful
 // cash-out in any total derived from the ledger. Registered (rather than left
 // to the "unknown type" branch) so the event is visibly accounted for and lands
 // its `stripeEvents` audit doc.
-webhookHandlers["payout.paid"] = async (object, eventId) => {
+webhookHandlers["payout.paid"] = async (object, eventId, account) => {
   const { payoutId, profileId, amountCents } = readPayoutEvent(object);
+  // M1: pin the connected account when the event names a profile (see
+  // eventAccountMatchesProfile). payout.paid only logs, so a mismatch is a
+  // logged no-op — but the same threat model as payout.failed applies, and
+  // keeping the guard uniform is what stops it drifting.
+  if (profileId && !(await eventAccountMatchesProfile(account, profileId))) {
+    console.warn(
+      `payout.paid: event.account ${account ?? "none"} does not match the cached account for profile ${profileId} — ignored (event ${eventId})`);
+    return;
+  }
   console.info(
     `payout.paid: payout ${String(payoutId)} (${amountCents}c) for profile ${String(profileId)} completed — already recorded at request time (event ${eventId})`);
 };
@@ -363,10 +392,20 @@ webhookHandlers["payout.paid"] = async (object, eventId) => {
 // Stripe's own instant-payout fee behaves the same way, the amount is bounded
 // by INSTANT_FEE_MIN_CENTS at the low end, and an automatic refund here would
 // need a credit path to the connected account that SP5 does not have.
-webhookHandlers["payout.failed"] = async (object, eventId) => {
+webhookHandlers["payout.failed"] = async (object, eventId, account) => {
   const { payoutId, profileId, amountCents } = readPayoutEvent(object);
   if (!payoutId) {
     console.warn(`payout.failed: payload carries no payout id (event ${eventId})`);
+    return;
+  }
+  // M1 (branch audit): when the event names a profile, pin the connected account
+  // BEFORE writing a money-came-back row or notifying — see
+  // eventAccountMatchesProfile. A payout with NO usable profileId (an operator's
+  // own dashboard payout) has no profile to pin to and still records below with
+  // profileId:null, exactly as before.
+  if (profileId && !(await eventAccountMatchesProfile(account, profileId))) {
+    console.warn(
+      `payout.failed: event.account ${account ?? "none"} does not match the cached account for profile ${profileId} — ignored, no ledger row written (event ${eventId})`);
     return;
   }
   const failureCode = typeof object.failure_code === "string" ? object.failure_code : null;

@@ -598,6 +598,64 @@ export async function finalizeSettlementSuccess(args: {
     return ran("skipped", false, "raced");
   }
 
+  // M2 (branch audit): close the settlement double-PAY window on the paths that
+  // do NOT already hold this doc under a pre-charge claim. chargeSettlement's
+  // synchronous path — and the fake-Stripe payPastDue path — stamp their own
+  // claim and pass its write time as `baseline`, so the earnings transfer below
+  // is spanned by that claim and a redelivery INSIDE Stripe's key window replays
+  // the ORIGINAL `earn:{attempts}` transfer rather than making a second one. The
+  // WEBHOOK (and real, non-fake payPastDue) path holds NO such claim: left
+  // unguarded, a redelivery that lands more than IDEMPOTENCY_WINDOW_MS after the
+  // original transfer re-derives the SAME attempt-scoped key past 24h — which
+  // Stripe treats as brand new — and pays the musician a SECOND time. So this
+  // whole block is gated on `!args.baseline`: only the claim-less caller needs
+  // it, and a baseline-passing caller can legitimately arrive with a STALE
+  // chargingSince left over from an earlier in-flight charge it is now paying
+  // past the window (payPastDue's own past-window rescue) — its own fresh
+  // baseline governs, and applying the stale terminator to it would wrongly
+  // refuse a legitimate pay-now.
+  let terminalBaseline = args.baseline;
+  if (!args.baseline) {
+    const finalizeCharging = p.settlement.chargingSince;
+    if (finalizeCharging != null && now - finalizeCharging >= IDEMPOTENCY_WINDOW_MS) {
+      // The STALE-CLAIM TERMINATOR, verbatim from chargeSettlement: a claim older
+      // than Stripe's window means the original attempt's replay handle is gone,
+      // so re-transferring would be a genuine second payout. Refuse + escalate —
+      // money may already have moved on the original attempt, which is exactly
+      // what `settlement_raced` records. Only ever fires on a late (>24h) webhook
+      // redelivery whose original finalize never wrote its terminal state.
+      const detail = `settlement finalize for intent ${String(intentId)} arrived under a chargingSince claim from `
+        + `${new Date(finalizeCharging).toISOString()}, older than Stripe's idempotency window — the original earnings `
+        + "transfer can no longer be replayed by its key, so this delivery was NOT re-transferred (that would pay the "
+        + "musician twice); reconcile the transfer in Stripe, then clear settlement.chargingSince";
+      const alertId = settlementRacedAlertId(bookingId, gigId);
+      const shouldLog = await recordAdminAlert({ alertId, kind: "settlement_raced", detail, bookingId, gigId, now });
+      if (shouldLog) {
+        console.error(`finalizeSettlementSuccess: ${bookingId}/${gigId} — ${detail} (see adminAlerts/${alertId})`);
+      }
+      return ran("skipped", false, "raced");
+    }
+    if (finalizeCharging == null) {
+      // No claim holds this doc yet (the webhook path, whose caller already did
+      // its own fresh read — that read IS pSnap). Stamp one via CAS on that read
+      // so the transfer below is spanned exactly as the synchronous path's is,
+      // and so the terminal write is held to THIS claim rather than to a
+      // pSnap.updateTime that predates it.
+      try {
+        const wr = await ref.update({ "settlement.chargingSince": now }, { lastUpdateTime: pSnap.updateTime! });
+        terminalBaseline = wr.writeTime;
+      } catch (e) {
+        if (!isFailedPrecondition(e)) throw e;
+        console.warn(
+          `finalizeSettlementSuccess: ${bookingId}/${gigId} changed before its finalize claim could be stamped — left for the next delivery`);
+        return ran("skipped", false, "raced");
+      }
+    }
+    // else: chargingSince set but still within the window (the processing-route
+    // webhook's original charge claim) — proceed, terminalBaseline stays
+    // undefined so the terminal write uses pSnap.updateTime, exactly as before.
+  }
+
   const math = settlementMath(p, booking, gig);
   const musicianStripe = await getStripeProfileDoc(p.musicianProfileId);
   if (math.earnings > 0 && !musicianStripe?.accountId) {
@@ -724,7 +782,11 @@ export async function finalizeSettlementSuccess(args: {
     updates["transfer.transferredAt"] = now;
   }
   try {
-    await ref.update(updates, { lastUpdateTime: args.baseline ?? pSnap.updateTime! });
+    // M2 (branch audit): held to `terminalBaseline` — args.baseline for a
+    // caller that supplied one, else the write time of the chargingSince claim
+    // this function just stamped (so the precondition spans the transfer above),
+    // falling back to pSnap.updateTime only when neither applies.
+    await ref.update(updates, { lastUpdateTime: terminalBaseline ?? pSnap.updateTime! });
   } catch (e) {
     if (!isFailedPrecondition(e)) throw e;
     // The residual window the pre-transfer check above cannot close: a racer
@@ -996,6 +1058,18 @@ export async function chargeSettlement(
     // waives a vanished gig BEFORE scheduling, so reaching here means the doc
     // disappeared afterwards, which is an anomaly worth a log every run.
     console.error(`chargeSettlement: ${bookingId}/${gigId} — the gig doc is gone; cannot price the settlement, left for an operator`);
+    // M5 (branch audit): a DURABLE row, not only a per-run log — SP5's "never
+    // refuse silently" rule. An unpriceable settlement retried every hour behind
+    // nothing but a console line is a musician owed money nobody is told about.
+    // Reuses settlementPendingAlertId (one row per occurrence, updated in place);
+    // the detail names the real condition, since the kind vocabulary has no
+    // "gig vanished" member.
+    const gigMissingDetail = "the gig doc has vanished, so this settlement can no longer be priced and is left"
+      + ` unresolved, retried every run — decide the unwind by hand (waive it, or restore the gig) on`
+      + ` bookings/${bookingId}/payments/${gigId}`;
+    const gigMissingAlertId = settlementPendingAlertId(bookingId, gigId);
+    await recordAdminAlert({ alertId: gigMissingAlertId, kind: "settlement_pending_stuck", detail: gigMissingDetail, bookingId, gigId, now })
+      .catch((ae) => console.error(`chargeSettlement: failed to record gig-missing alert for ${bookingId}/${gigId}`, ae));
     return ran("skipped", false, "gig_missing");
   }
   // Defense in depth (spec §4): a date that no longer belongs to this booking
@@ -1080,6 +1154,18 @@ export async function chargeSettlement(
       // re-open rather than stay shut until the marker ages out.
       await ref.update({ "settlement.chargingSince": null, updatedAt: now })
         .catch((we) => console.error(`chargeSettlement: failed to clear chargingSince on ${bookingId}/${gigId}`, we));
+      // M5 (branch audit): durable escalation, same rule as the gig-missing
+      // branch above — a settlement that can never charge (the curator profile
+      // has no Stripe customer at all — normally unreachable, since accept is
+      // gated on a chargeable curator) must surface as a row an operator works,
+      // not just an hourly log line. Reuses settlementPendingAlertId; the detail
+      // states the real "no customer to charge" condition.
+      const noCustomerDetail = `the curator profile ${p.curatorProfileId} has no Stripe customer, so this settlement`
+        + " cannot be charged and is left unresolved, retried every run — the fix is the curator (re)saving a card;"
+        + " normally unreachable because accept is gated on a chargeable curator, so this is a genuine anomaly";
+      const noCustomerAlertId = settlementPendingAlertId(bookingId, gigId);
+      await recordAdminAlert({ alertId: noCustomerAlertId, kind: "settlement_pending_stuck", detail: noCustomerDetail, bookingId, gigId, now })
+        .catch((ae) => console.error(`chargeSettlement: failed to record no-customer alert for ${bookingId}/${gigId}`, ae));
       return ran("skipped", false, "no_customer");
     }
     try {

@@ -664,6 +664,34 @@ describe("settlement — defenses", () => {
     expect(refundRow?.amountCents).toBe(excess);
     expect(refundRow?.detail).toBe("below-deposit settlement refund");
   });
+
+  // M5 (branch audit): the no_customer / gig_missing refusals used to be
+  // console-only. SP5's rule is "never refuse silently" — both must leave a
+  // durable row an operator works. Testing the no_customer branch here.
+  it("M5: chargeSettlement with no curator Stripe customer refuses AND raises a durable alert — not a silent console-only refusal", async () => {
+    const { curator, gigId, bookingId } = await makeEndedBooking("m5nocust");
+    await scheduleSettlement(bookingId, gigId);
+    await makeSettlementDue(bookingId, gigId);
+
+    // Strip the curator's cached customerId — the "nothing to charge against"
+    // anomaly (normally unreachable, since accept gates on a chargeable curator,
+    // which is exactly why a silent refusal here would never be seen).
+    await adb.doc(`profiles/${curator.profileId}/private/stripe`).update({ customerId: FieldValue.delete() });
+
+    const result = await chargeSettlement({ bookingId, gigId, now: Date.now() });
+    expect(result.reason).toBe("no_customer");
+    // Nothing charged, and the true-up window re-opened (chargingSince cleared).
+    const after = await getPayment(bookingId, gigId);
+    expect(after?.settlement.status).toBe("pending");
+    expect(after?.settlement.chargingSince).toBeNull();
+
+    const alert = await adminAlert(`settlement-pending:${bookingId}:${gigId}`);
+    expect(alert?.kind).toBe("settlement_pending_stuck");
+    expect(alert?.detail).toContain("no Stripe customer");
+    expect(alert?.bookingId).toBe(bookingId);
+    expect(alert?.gigId).toBe(gigId);
+    expect(alert?.resolvedAt).toBeNull();
+  });
 });
 
 describe("settlement — a charge left processing", () => {
@@ -827,6 +855,65 @@ describe("settlement — a charge left processing", () => {
     expect(alert?.kind).toBe("settlement_raced");
     expect(alert?.detail).toContain("NO transfer was made");
     expect(alert?.resolvedAt).toBeNull();
+  });
+
+  // M2 (branch audit): the LAST pay-the-musician-twice path. The webhook finalize
+  // holds no pre-charge claim of its own, so a redelivery that lands past Stripe's
+  // idempotency window would re-derive the SAME attempt-scoped `earn:{attempts}`
+  // key on a now-stale key and transfer a SECOND time. The finalize path must
+  // refuse (and escalate) instead of re-transferring.
+  it("M2: a >24h webhook redelivery finalizing under a STALE chargingSince claim does NOT re-transfer — it refuses and escalates", async () => {
+    const { curator, musician, gigId, bookingId } = await makeEndedBooking("m2stale");
+    const customerId = await curatorCustomerId(curator.profileId);
+    const accountId = await musicianAccountId(musician.profileId);
+
+    await scheduleSettlement(bookingId, gigId);
+    await makeSettlementDue(bookingId, gigId);
+
+    // Leave the settlement "processing": the charge is outstanding, its intent is
+    // recorded, and chargingSince stays set from the pre-charge claim. Nothing has
+    // been transferred.
+    try {
+      await setChargeKnob("pendingCustomerIds", customerId, true);
+      await runPaymentsSweep(Date.now());
+    } finally {
+      await setChargeKnob("pendingCustomerIds", customerId, false);
+    }
+    const pending = await getPayment(bookingId, gigId);
+    expect(pending?.settlement.status).toBe("pending");
+    const intentId = pending!.settlement.intentId!;
+    expect(intentId).toBeTruthy();
+    expect(await accountBalanceCents(accountId)).toBe(0);
+
+    // Simulate the dangerous shape: the FIRST finalize's terminal write never
+    // landed (the doc is still pending), and the redelivery arrives with its
+    // pre-charge claim already older than Stripe's key window — so the
+    // `earn:{attempts}` key can no longer replay the original transfer, and
+    // re-deriving it would be a genuine SECOND payout.
+    const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
+    await paymentRef.update({ "settlement.chargingSince": Date.now() - IDEMPOTENCY_WINDOW_MS - 1000 });
+
+    const evt = fakeEvent("payment_intent.succeeded", {
+      id: intentId, amount: FLAT_CHARGE_CENTS, amount_received: FLAT_CHARGE_CENTS,
+      metadata: { bookingId, gigId, purpose: "settlement" },
+    });
+    expect((await postWebhook(evt)).status).toBe(200);
+
+    // THE assertion: no second transfer. The musician's balance never moved on
+    // this delivery, the earn:0 key was never used, no earnings ledger row, and
+    // the settlement is left for a human rather than flipped `paid` off an
+    // un-spanned transfer.
+    const after = await getPayment(bookingId, gigId);
+    expect(after?.settlement.status).toBe("pending");
+    expect(after?.transfer.status).toBe("none");
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await idemUsed(`${bookingId}:${gigId}:earn:0`)).toBe(false);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "earnings_transfer")).toBe(false);
+
+    // Refusing is correct; refusing silently is not.
+    const raced = await adminAlert(`settlement-raced:${bookingId}:${gigId}`);
+    expect(raced?.kind).toBe("settlement_raced");
+    expect(raced?.resolvedAt).toBeNull();
   });
 });
 

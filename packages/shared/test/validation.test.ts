@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  validateHandle, validateProfileDraft, RESERVED_HANDLES,
+  validateHandle, validateProfileDraft, RESERVED_HANDLES, isValidDocId,
   validatePortfolioUpdate, validateBookingUpdate, validateTrackCreate,
   validateLookingFor, validateGigContent, validateBudget, validateRecurrence,
   computeExpectedTotalCents, computeDepositCents, validateOfferInput, validateBookingVisibility,
@@ -727,5 +727,29 @@ describe("sub-4 booking constants", () => {
     expect(MUSICIAN_MARK_WINDOW_HOURS).toBe(24);
     expect(MAX_RELIABILITY_MARKS).toBe(200);
     expect(NO_SHOW_REPORT_WINDOW_DAYS).toBe(14);
+  });
+});
+
+describe("isValidDocId", () => {
+  it("accepts ordinary doc-id-shaped strings", () => {
+    expect(isValidDocId("abc123")).toBe(true);
+    expect(isValidDocId("A_b-C")).toBe(true);
+    expect(isValidDocId("x".repeat(64))).toBe(true);
+  });
+  it("rejects empty, overlong, non-string, and path-traversal values", () => {
+    expect(isValidDocId("")).toBe(false);
+    expect(isValidDocId("x".repeat(65))).toBe(false);
+    expect(isValidDocId("a/b")).toBe(false);
+    expect(isValidDocId(123 as unknown)).toBe(false);
+    expect(isValidDocId(null)).toBe(false);
+    expect(isValidDocId(undefined)).toBe(false);
+  });
+  it("L2 (branch audit): rejects Firestore's reserved __…__ ids (they pass the char class but 500 in a doc()/query)", () => {
+    expect(isValidDocId("__proto__")).toBe(false);
+    expect(isValidDocId("__name__")).toBe(false);
+    expect(isValidDocId("__x__")).toBe(false);
+    // A single-underscore-bounded value is NOT reserved and stays valid.
+    expect(isValidDocId("_proto_")).toBe(true);
+    expect(isValidDocId("__proto")).toBe(true);
   });
 });

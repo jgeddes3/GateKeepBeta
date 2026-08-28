@@ -95,6 +95,18 @@ export class StripeSetupIntentMismatchError extends Error {
   }
 }
 
+// H3 (branch audit): the webhook signing secret is not configured. Thrown by
+// constructWebhookEvent BEFORE it verifies anything, so the webhook handler can
+// tell a MISCONFIGURED endpoint (respond 500, loud — an operator must fix the
+// secret) apart from a genuine forged/bad signature (respond 400). Never let a
+// missing secret degrade into an empty-string signature check.
+export class StripeWebhookSecretMissingError extends Error {
+  constructor() {
+    super("STRIPE_WEBHOOK_SECRET is not configured — refusing to verify webhook signatures.");
+    this.name = "StripeWebhookSecretMissingError";
+  }
+}
+
 // The ONLY Stripe surface SP5 code may touch. Everything takes integer cents.
 export interface StripeLike {
   createCustomer(meta: Record<string, string>): Promise<{ id: string }>;
@@ -166,7 +178,14 @@ export interface StripeLike {
   // Stripe's own SDK accepts either directly (constructEvent hashes the raw
   // bytes; converting to a string first is a needless extra step, and for a
   // real request rawBody is already a Buffer).
-  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; data: { object: Record<string, unknown> } };
+  //
+  // `account` (M1, branch audit): Stripe stamps the connected account id on the
+  // top-level `account` field of a CONNECTED-ACCOUNT (Connect) event and leaves
+  // it absent on a PLATFORM event. The dispatcher uses its presence/value to
+  // refuse to finalize a connected account's PaymentIntent as if it were the
+  // platform's, and to pin account.updated/payout.* to the profile's cached
+  // account.
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; account?: string; data: { object: Record<string, unknown> } };
 }
 
 function isAlreadyExists(e: unknown): boolean {
@@ -546,9 +565,18 @@ export class FakeStripe implements StripeLike {
       return { id };
     }, `${p.accountId}:${p.amountCents}`);
   }
-  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; data: { object: Record<string, unknown> } } {
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; account?: string; data: { object: Record<string, unknown> } } {
     void signature; // Signature verification is a RealStripe-only concern — the emulator's fake webhook calls are same-process and already trusted.
-    return JSON.parse(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8"));
+    const evt = JSON.parse(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8")) as
+      { id: string; type: string; account?: unknown; data: { object: Record<string, unknown> } };
+    // M1 (branch audit): mirror the real SDK's top-level connected-account
+    // marker. A fake event with no `account` is a PLATFORM event (undefined),
+    // exactly as a platform delivery arrives from Stripe; a test that needs a
+    // connected-account event sets `account` on the event JSON it posts.
+    return {
+      id: evt.id, type: evt.type, data: evt.data,
+      account: typeof evt.account === "string" ? evt.account : undefined,
+    };
   }
 }
 
@@ -787,8 +815,27 @@ export class RealStripe implements StripeLike {
     return { id: c.id };
   }
   constructWebhookEvent(rawBody: string | Buffer, signature: string) {
-    const evt = this.s.webhooks.constructEvent(rawBody, signature, stripeWebhookSecret.value() || process.env.STRIPE_WEBHOOK_SECRET || "");
-    return evt as unknown as { id: string; type: string; data: { object: Record<string, unknown> } };
+    // H3 (branch audit): resolve the signing secret and FAIL CLOSED when it is
+    // absent. Passing `|| ""` to constructEvent (the old behavior) turns a
+    // MISCONFIGURED endpoint — no STRIPE_WEBHOOK_SECRET provisioned — into a
+    // signature check against the empty string. That is not a bad-signature
+    // rejection: it is verification silently degraded to a constant an attacker
+    // knows, so it must throw its OWN configuration error BEFORE constructEvent
+    // is ever called. The webhook handler distinguishes this (a loud 500) from a
+    // genuine forged signature (a 400).
+    const secret = stripeWebhookSecret.value() || process.env.STRIPE_WEBHOOK_SECRET;
+    if (!secret) {
+      throw new StripeWebhookSecretMissingError();
+    }
+    const evt = this.s.webhooks.constructEvent(rawBody, signature, secret);
+    // M1 (branch audit): carry the event's top-level connected-account marker
+    // (`evt.account`) through to the dispatcher — present on a Connect event,
+    // absent on a platform event.
+    const e = evt as unknown as { id: string; type: string; account?: unknown; data: { object: Record<string, unknown> } };
+    return {
+      id: e.id, type: e.type, data: e.data,
+      account: typeof e.account === "string" ? e.account : undefined,
+    };
   }
 }
 

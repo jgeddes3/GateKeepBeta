@@ -1,7 +1,7 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { isValidDocId } from "@gatekeep/shared";
-import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.js";
+import { getStripe, stripeSecretKey, stripeWebhookSecret, StripeWebhookSecretMissingError } from "./stripeClient.js";
 
 // The codebase's ONLY non-callable HTTPS entry point. Contract:
 //  - raw-body signature verification (RealStripe.constructWebhookEvent throws
@@ -28,7 +28,12 @@ import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.
 //    it writes no document state)
 // Unknown/unhandled types: record the event doc, 200 OK (Stripe requires 2xx
 // or it retries forever).
-export type WebhookHandler = (object: Record<string, unknown>, eventId: string) => Promise<void>;
+//
+// `account` (M1, branch audit): the event's top-level connected-account marker
+// (present on a Connect event, absent on a platform event), threaded through by
+// the dispatcher. Handlers that must be platform-only (payment_intent.succeeded)
+// or account-pinned (account.updated / payout.*) read it; the rest ignore it.
+export type WebhookHandler = (object: Record<string, unknown>, eventId: string, account?: string) => Promise<void>;
 export const webhookHandlers: Record<string, WebhookHandler> = {};
 
 // payment_intent.succeeded is the ONE event type several unrelated SP5 sagas
@@ -68,9 +73,29 @@ export const webhookHandlers: Record<string, WebhookHandler> = {};
 // handler to finalize it. Add new purposes in snake_case.
 export const paymentIntentSucceededHandlers: Record<string, WebhookHandler> = {};
 
-webhookHandlers["payment_intent.succeeded"] = async (object, eventId) => {
+webhookHandlers["payment_intent.succeeded"] = async (object, eventId, account) => {
+  // M1 (branch audit): a payment_intent.succeeded carrying a top-level `account`
+  // is a CONNECTED ACCOUNT's PaymentIntent — never one of ours to finalize.
+  // Every SP5 charge (deposit / settlement / pay-now) is a PLATFORM charge,
+  // created without `stripeAccount`, so its success event carries no `account`.
+  // Finalizing a connected-account intent by its `metadata.purpose` would let a
+  // connected account (Express today; a future Standard or otherwise
+  // metadata-bearing account is the real threat) forge a settlement/earnings
+  // move by minting a PI we would then act on. Not an error — log it, and return
+  // so the outer handler records the event processed (leaving it unprocessed
+  // would have Stripe redeliver it forever).
+  if (account) {
+    console.warn(
+      `payment_intent.succeeded: ignoring connected-account intent ${String(object.id)} on account ${account} (event ${eventId})`);
+    return;
+  }
   const purpose = (object.metadata as Record<string, string> | undefined)?.purpose;
-  const handler = purpose ? paymentIntentSucceededHandlers[purpose] : undefined;
+  // L7 (branch audit): hasOwnProperty, not a bare index — a metadata.purpose of
+  // "constructor"/"toString" must resolve to "no handler", never to an inherited
+  // Object.prototype function. Same idiom validation.ts documents for its own
+  // lookups.
+  const handler = purpose && Object.prototype.hasOwnProperty.call(paymentIntentSucceededHandlers, purpose)
+    ? paymentIntentSucceededHandlers[purpose] : undefined;
   if (!handler) {
     // Not an error: Stripe sends this event for every intent we create, and
     // some (e.g. an on-session intent whose callable already finalized it)
@@ -140,10 +165,20 @@ export const stripeWebhook = onRequest(
     if (typeof sigHeader !== "string") { res.status(400).send("missing signature"); return; }
 
     const stripe = getStripe();
-    let event: { id: string; type: string; data: { object: Record<string, unknown> } };
+    let event: { id: string; type: string; account?: string; data: { object: Record<string, unknown> } };
     try {
       event = stripe.constructWebhookEvent(req.rawBody, sigHeader);
-    } catch {
+    } catch (e) {
+      // H3 (branch audit): a MISCONFIGURED endpoint (no signing secret) is not a
+      // bad signature — it is our own operational fault, and it must be LOUD (a
+      // 500 an operator sees) rather than indistinguishable from an attacker's
+      // forged request. Stripe retries a 500, so a genuine delivery is not lost
+      // once the secret is fixed; a forged one still gets the flat 400 below.
+      if (e instanceof StripeWebhookSecretMissingError) {
+        console.error("stripeWebhook: STRIPE_WEBHOOK_SECRET is not configured — cannot verify signatures; refusing", e);
+        res.status(500).send("webhook misconfigured");
+        return;
+      }
       res.status(400).send("bad signature");
       return;
     }
@@ -195,11 +230,17 @@ export const stripeWebhook = onRequest(
       });
       if (!claimed) { res.status(200).send("duplicate"); return; }
 
-      const handler = webhookHandlers[event.type];
+      // L7 (branch audit): hasOwnProperty, not a bare index — an event.type of
+      // "constructor"/"toString"/"__proto__" must resolve to the "no handler"
+      // (unknown type) path, never to an inherited Object.prototype function.
+      const handler = Object.prototype.hasOwnProperty.call(webhookHandlers, event.type)
+        ? webhookHandlers[event.type] : undefined;
       let handlerFailed = false;
       if (handler) {
         try {
-          await handler(event.data.object, event.id);
+          // M1 (branch audit): thread the connected-account marker so the
+          // platform-only / account-pinned handlers can enforce it.
+          await handler(event.data.object, event.id, event.account);
         } catch (e) {
           handlerFailed = true;
           console.error(`stripeWebhook: handler for ${event.type} failed (event ${event.id})`, e);
