@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { View, Text, Pressable } from "react-native";
 import { collection, doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
+import { useRouter } from "expo-router";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
 import { useRole, useOccurrences } from "./BookingThread";
@@ -13,37 +14,36 @@ import {
   type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
 
-// SP5 Task 16 — mobile's money surfaces. Two components:
+// SP5 Task 16 — mobile's money surfaces. PaymentStatus is the per-occurrence
+// status chips for one booking, mounted under BookingThread by
+// app/booking/[bookingId].tsx. An RN port of
+// apps/web/src/payments/PaymentsPanel.tsx: the row-state ladder and the
+// paidCents membership test are literally the same code (@gatekeep/shared's
+// `paymentRowKind` / `PAID_DEPOSIT_STATUSES`), and the surrounding totals
+// arithmetic mirrors that panel's field-for-field, INCLUDING its
+// review-round fixes. SP5 shipped this read-only (spec §1, "Platforms" —
+// native payment sheets needed @stripe/stripe-react-native and a new EAS dev
+// build, which was sub-5b); SP5b wires the curator actions up: a
+// card-on-file row (SaveCardSheet), a native pay-past-due button
+// (PayPastDueButton) beside the two past-due rows, and (Task 5) a "Report
+// actuals" true-up mount (TrueUpForm) beside the settlementPending row,
+// mirroring PaymentsPanel.tsx's own row-map placement exactly.
 //
-//  * PaymentStatus — the per-occurrence status chips for one booking,
-//    mounted under BookingThread by app/booking/[bookingId].tsx. An RN port
-//    of apps/web/src/payments/PaymentsPanel.tsx: the row-state ladder and
-//    the paidCents membership test are literally the same code
-//    (@gatekeep/shared's `paymentRowKind` / `PAID_DEPOSIT_STATUSES`), and
-//    the surrounding totals arithmetic mirrors that panel's field-for-field,
-//    INCLUDING its review-round fixes. SP5 shipped this read-only (spec §1,
-//    "Platforms" — native payment sheets needed @stripe/stripe-react-native
-//    and a new EAS dev build, which was sub-5b); SP5b now wires the curator
-//    actions up: a card-on-file row (SaveCardSheet), a native pay-past-due
-//    button (PayPastDueButton) beside the two past-due rows, and (Task 5) a
-//    "Report actuals" true-up mount (TrueUpForm) beside the settlementPending
-//    row, mirroring PaymentsPanel.tsx's own row-map placement exactly.
+// ONE DELIBERATE DIVERGENCE from web's copy remains: the totals footer is
+// side-gated differently. Web shows both lines to the curator side only (it
+// renders inside a curator-gated block); mobile reaches the musician side
+// too, so it shows the escrow line to both and the "total paid, including
+// service fees" line only to the curator, whose bill that is. (SP5's other
+// divergence — the two past-due labels reading "pay on the web" — is
+// REMOVED by SP5b: the curator labels now match web's action-bearing copy,
+// since there's a button to press again.)
 //
-//    ONE DELIBERATE DIVERGENCE from web's copy remains: the totals footer is
-//    side-gated differently. Web shows both lines to the curator side only
-//    (it renders inside a curator-gated block); mobile reaches the musician
-//    side too, so it shows the escrow line to both and the "total paid,
-//    including service fees" line only to the curator, whose bill that is.
-//    (SP5's other divergence — the two past-due labels reading "pay on the
-//    web" — is REMOVED by SP5b: the curator labels now match web's
-//    action-bearing copy, since there's a button to press again.)
-//  * EarningsCard — the musician dashboard's balance headline
-//    (getStripeStatus), a strict subset of web's EarningsPanel with the
-//    cash-out/onboarding controls replaced by "manage payouts on the web".
-//
-// Both live in this one file because the plan's Task 16 file list created
-// exactly one mobile source file — EarningsCard stays untouched and
-// read-only this sub-project (a later SP5b task removes it).
+// This file used to also hold EarningsCard, the musician dashboard's
+// read-only balance headline. SP5b Task 7 replaced it with the full
+// EarningsPanel (Stripe onboarding + cash-out) at
+// src/payments/EarningsPanel.tsx, so it's gone from here — the musician
+// footer line below now links out to that panel instead of describing a
+// web-only workflow.
 
 type Row = PaymentDoc & { id: string };
 
@@ -143,6 +143,7 @@ const rowStyle = { borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding
 // and one extra doc listener per booking screen is not worth coupling them
 // through a shared parent context.
 export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: string }) {
+  const router = useRouter();
   const [booking, setBooking] = useState<BookingRequestDoc | "loading" | "unavailable">("loading");
   const [openTrueUpFor, setOpenTrueUpFor] = useState<string | null>(null);
   const [showSaveCard, setShowSaveCard] = useState(false);
@@ -292,108 +293,14 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
         )}
         {/* Curator-side line removed in SP5b: the card-on-file row above and
             the Pay Now buttons beside each past-due row now cover that
-            surface natively. The musician line stays — payout setup and
-            cash-outs remain web-only until Task 7. */}
+            surface natively. The musician line now links to the dashboard's
+            EarningsPanel (Task 7) instead of pointing to the web app. */}
         {!isCuratorSide && (
-          <Text style={{ color: "#666", fontSize: 13 }}>Payout setup and cash-outs are managed on the web.</Text>
+          <Pressable onPress={() => router.push("/(musician)/dashboard")}>
+            <Text style={{ color: "#111", fontSize: 13, textDecorationLine: "underline" }}>Manage payouts →</Text>
+          </Pressable>
         )}
       </View>
-    </View>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// EarningsCard — the musician dashboard's read-only payouts summary.
-// ---------------------------------------------------------------------------
-
-// The subset of getStripeStatus's result this card renders. Web keeps the
-// full shape in apps/web/src/payments/types.ts; mobile declares only what it
-// USES so the card can never accidentally start depending on a field it
-// doesn't display (there is no shared client type package, and copying the
-// full interface would invite exactly that).
-interface StripeStatusSummary {
-  hasAccount: boolean;
-  payoutsEnabled: boolean;
-  delinquent: boolean;
-  // 0 means "asked, nothing there"; null means "Stripe couldn't be read just
-  // now" and MUST render as unavailable, never as $0.00 — a musician
-  // deciding whether to chase a curator over an unpaid gig must not be shown
-  // a fabricated zero balance.
-  availableBalanceCents: number | null;
-}
-
-export function EarningsCard({ profileId }: { profileId: string }) {
-  const [status, setStatus] = useState<StripeStatusSummary | "loading" | "error">("loading");
-  const [reloadKey, setReloadKey] = useState(0);
-
-  // No synchronous setStatus("loading") on reload — same idiom as web's
-  // EarningsPanel: the initial useState covers first mount, and a retry
-  // leaves the previous state on screen until the new one resolves rather
-  // than flashing back through "Loading…".
-  useEffect(() => {
-    let cancelled = false;
-    httpsCallable<{ profileId: string }, StripeStatusSummary>(getFirebase().functions, "getStripeStatus")({ profileId })
-      .then((res) => { if (!cancelled) setStatus(res.data); })
-      .catch(() => { if (!cancelled) setStatus("error"); });
-    return () => { cancelled = true; };
-  }, [profileId, reloadKey]);
-
-  return (
-    <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding: 12, gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Earnings</Text>
-
-      {status === "loading" && <Text style={{ color: "#666" }}>Loading…</Text>}
-
-      {status === "error" && (
-        <View style={{ backgroundColor: "#fef3c7", borderRadius: 8, padding: 10, gap: 6 }}>
-          <Text style={{ color: "#92400e" }}>Couldn&apos;t load your payout status.</Text>
-          {/* A READ retry, not a money action — re-running getStripeStatus is
-              idempotent and moves nothing, so it stays on the read-only side
-              of this sub-project's mobile boundary. Mirrors web's Retry on
-              the same failure. */}
-          <Pressable onPress={() => setReloadKey((k) => k + 1)}>
-            <Text style={{ color: "#92400e", textDecorationLine: "underline" }}>Retry</Text>
-          </Pressable>
-        </View>
-      )}
-
-      {typeof status === "object" && (
-        <>
-          {status.delinquent && (
-            <View style={{ backgroundColor: "#fee2e2", borderRadius: 8, padding: 10 }}>
-              <Text style={{ color: "#991b1b" }}>A booking you&apos;re part of has an overdue curator payment.</Text>
-            </View>
-          )}
-          {status.hasAccount && status.payoutsEnabled ? (
-            <View style={{ gap: 2 }}>
-              <Text style={{ color: "#666", fontSize: 13 }}>Available balance</Text>
-              <Text style={{ fontSize: 28, fontWeight: "700" }}>
-                {status.availableBalanceCents == null
-                  ? "Balance unavailable"
-                  : formatCents(status.availableBalanceCents)}
-              </Text>
-              {status.availableBalanceCents == null && (
-                <Text style={{ color: "#666", fontSize: 13 }}>Try again shortly.</Text>
-              )}
-            </View>
-          ) : (
-            <Text>
-              {status.hasAccount
-                ? "Payout setup isn't finished yet — you can't be paid until it is."
-                : "You haven't set up payouts yet — you can't be paid until you do."}
-            </Text>
-          )}
-          {/* No in-app action, by design: cash-outs, Stripe onboarding and
-              card management are web-only this sub-project (spec §1 —
-              native payment sheets are sub-5b). Deliberately plain text
-              rather than a link, matching (musician)/portfolio.tsx's
-              treatment of the still-placeholder public host: there is no
-              real deployed web origin constant in this app to link to yet. */}
-          <Text style={{ color: "#666", fontSize: 13 }}>
-            Manage payouts on the web — set up or update your payout account and cash out there.
-          </Text>
-        </>
-      )}
     </View>
   );
 }

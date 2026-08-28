@@ -1,11 +1,13 @@
 import { ScrollView, View, Text } from "react-native";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
-import { EarningsCard } from "../../src/bookings/PaymentStatus";
+import { EarningsPanel } from "../../src/payments/EarningsPanel";
 
 // Musician "Dashboard" tab. Was a "Coming in a later phase" placeholder
-// through SP4; SP5 Task 16 gives it its first real content — the read-only
-// earnings summary for the ACTIVE musician profile.
+// through SP4; SP5 Task 16 gave it its first real content — a read-only
+// earnings summary for the ACTIVE musician profile. SP5b Task 7 replaces
+// that with the full EarningsPanel (Stripe Express onboarding + cash-out,
+// natively — no more "manage payouts on the web").
 //
 // Gated on the active profile context exactly like the sibling
 // (musician)/bookings.tsx and (musician)/portfolio.tsx tabs: earnings are a
@@ -16,7 +18,7 @@ import { EarningsCard } from "../../src/bookings/PaymentStatus";
 // getStripeStatus itself only requires membership, so fetching the doc just
 // to gate on it would add a listener for no behavior.
 //
-// EarningsCard is keyed by profileId so a context switch REMOUNTS it (back
+// EarningsPanel is keyed by profileId so a context switch REMOUNTS it (back
 // to its own "Loading…") instead of leaving the previous profile's balance
 // on screen while the new request is in flight — the same `key={profileId}`
 // remount idiom (musician)/bookings.tsx uses for BookingInbox, and the
@@ -41,7 +43,7 @@ export default function MusicianDashboard() {
   return (
     <ScrollView contentContainerStyle={{ padding: 16, gap: 16 }}>
       <Text style={{ fontSize: 22, fontWeight: "700" }}>Dashboard</Text>
-      <EarningsCard key={profileId} profileId={profileId} />
+      <EarningsPanel key={profileId} profileId={profileId} />
     </ScrollView>
   );
 }
