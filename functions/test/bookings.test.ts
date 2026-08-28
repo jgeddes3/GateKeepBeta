@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
@@ -11,16 +11,24 @@ import {
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
-// 20s (not the file-wide-standard 15s), matching bookingVisibility.test.ts's
-// own precedent for this suite's other unusually chain-heavy booking file:
-// several tests here run 3-5 chained callables (createProfileDraft x2,
-// submitProfileForReview x2, reviewProfile x2, createGig, publishGig,
-// applyToGig, counterBooking, acceptBooking...) before ever reaching an
-// assertion. Task 5's acceptBooking pushed the "applyToGig happy path" test
-// (already ~14s of the prior 15s budget in isolation) over the edge under
-// full-suite load — one more deployed function measurably adds dispatch
-// overhead across all ~300+ other tests' calls too, not just this file's own.
-vi.setConfig({ testTimeout: 20_000 });
+// 30s (not the file-wide-standard 15s, nor the prior 20s) — the 20s step
+// matched bookingVisibility.test.ts's own precedent for this suite's other
+// unusually chain-heavy booking file; the further bump to 30s matches
+// members.test.ts's own 30s precedent instead (bookingVisibility.test.ts
+// itself stayed at 20s). Several tests here run 3-5 chained callables
+// (createProfileDraft x2, submitProfileForReview x2, reviewProfile x2,
+// createGig, publishGig, applyToGig, counterBooking, acceptBooking...)
+// before ever reaching an assertion. Task 5's acceptBooking gates pushed the
+// "applyToGig happy path" test (already ~14s of the prior 15s budget in
+// isolation) over the edge under full-suite load once — one more deployed
+// function measurably adds dispatch overhead across all ~300+ other tests'
+// calls too, not just this file's own. Task 5's own money-ready fixtures
+// (createSetupIntent/createOnboardingLink, added to nearly every test in
+// this file) pushed it over the 20s mark next — that pair of callables' own
+// process-wide cold start lands on whichever test in this file happens to
+// run first, so the margin needs to absorb a full cold start, not just the
+// warm per-call cost the other ~440 calls to them elsewhere in the suite pay.
+vi.setConfig({ testTimeout: 30_000 });
 
 async function makeApprovedCuratorProfile(emailPrefix: string) {
   const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
@@ -139,6 +147,7 @@ describe("applyToGig", () => {
   it("happy path: creates an open booking with the correct doc shape (perHour quantity server-derived), notifies the curator", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
 
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -176,6 +185,7 @@ describe("applyToGig", () => {
   it("sets seriesId for a whole_run series occurrence, leaves it null for a per_occurrence one", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at2m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
 
     const wholeRunSeries = await seedSeries(curatorProfileId, "whole_run");
     const wholeRunGigId = await createOpenGig(curatorProfileId, curator.user);
@@ -238,6 +248,7 @@ describe("applyToGig", () => {
   it("rejects a duplicate open (gig, musician) pair with already-exists", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at6c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at6m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     await callFn("applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
     await expect(callFn("applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user))
@@ -253,6 +264,7 @@ describe("applyToGig", () => {
   it("enforces MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE with resource-exhausted", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at7c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at7m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const batch = adb.batch();
     for (let i = 0; i < MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE; i++) {
       const ref = adb.collection("bookings").doc();
@@ -285,6 +297,7 @@ describe("applyToGig", () => {
     it("rejects a non-integer (float) amountCents", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at8c");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at8m");
+      await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const gigId = await createOpenGig(curatorProfileId, curator.user);
       await expect(callFn("applyToGig",
         { gigId, musicianProfileId, offer: offerPayload({ amountCents: 150.5 }) }, musician.user))
@@ -294,6 +307,7 @@ describe("applyToGig", () => {
     it("rejects a note over MAX_OFFER_NOTE_LENGTH (281 chars)", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at9c");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at9m");
+      await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const gigId = await createOpenGig(curatorProfileId, curator.user);
       await expect(callFn("applyToGig",
         { gigId, musicianProfileId, offer: offerPayload({ note: "x".repeat(281) }) }, musician.user))
@@ -303,6 +317,7 @@ describe("applyToGig", () => {
     it("rejects a perSet gig offer that supplies an expectedQuantity", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at10c");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at10m");
+      await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const gigId = await createOpenGig(curatorProfileId, curator.user,
         { budget: { minCents: 10_000, maxCents: 50_000, structure: "perSet" } });
       await expect(callFn("applyToGig",
@@ -316,6 +331,7 @@ describe("offerGig", () => {
   it("happy path (mirror): curator initiates, awaitingSide is musician, musician notified", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("og1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("og1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
 
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -345,6 +361,7 @@ describe("counterBooking", () => {
   it("turn-enforced: the non-awaiting side cannot counter (failed-precondition)", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cb1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cb1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -362,6 +379,7 @@ describe("counterBooking", () => {
   it("rejects a stranger to both sides with permission-denied", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cb4c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cb4m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -373,6 +391,7 @@ describe("counterBooking", () => {
   it("flips awaitingSide, appends the correct 'by', bumps updatedAt, notifies the other side", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cb2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cb2m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -425,6 +444,7 @@ describe("declineBooking", () => {
   it("awaiting side declines: open -> declined, resolvedAt set, other side notified", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("db1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("db1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -442,6 +462,7 @@ describe("declineBooking", () => {
   it("rejects the wrong (non-awaiting) side with failed-precondition", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("db2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("db2m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -455,6 +476,7 @@ describe("withdrawBooking", () => {
   it("non-awaiting side withdraws: open -> withdrawn, resolvedAt set, other side notified", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wb1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wb1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -472,6 +494,7 @@ describe("withdrawBooking", () => {
   it("rejects the awaiting side with failed-precondition", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wb2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wb2m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -485,6 +508,7 @@ describe("acceptBooking", () => {
   it("happy path: freezes acceptedTerms from the LAST thread entry (not the first offer), computes deposit with ceil, fills the gig, sets confirmedAt, notifies both winners", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
 
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -502,8 +526,11 @@ describe("acceptBooking", () => {
     expect(booking.status).toBe("confirmed");
     expect(typeof booking.confirmedAt).toBe("number");
     expect(booking.acceptedTerms).toEqual({ amountCents: 10001, expectedQuantity: 1.5, expectedTotalCents: 15002 });
+    // SP5 Task 6: the run-level deposit is still SP4's one-occurrence
+    // summary, but its status now reflects the real deposit charge the
+    // accept saga landed — "held", not the pre-money "unpaid".
     expect(booking.deposit).toEqual({
-      amountCents: 5251, status: "unpaid", forfeitedTo: null,
+      amountCents: 5251, status: "held", forfeitedTo: null,
       policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
     });
     // F5: no membership overlap between the two profiles here — selfDeal
@@ -527,6 +554,7 @@ describe("acceptBooking", () => {
   it("perSong: expectedTotalCents is amount x songCount from the LAST countered songCount (not the first offer), deposit ceils", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab1sc");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab1sm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user,
       { budget: { minCents: 5_000, maxCents: 20_000, structure: "perSong" } });
 
@@ -545,8 +573,9 @@ describe("acceptBooking", () => {
     const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(booking.status).toBe("confirmed");
     expect(booking.acceptedTerms).toEqual({ amountCents: 933, expectedQuantity: 7, expectedTotalCents: 6531 });
+    // "held" for the same reason as the perHour case above (SP5 Task 6).
     expect(booking.deposit).toEqual({
-      amountCents: 2286, status: "unpaid", forfeitedTo: null,
+      amountCents: 2286, status: "held", forfeitedTo: null,
       policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
     });
   });
@@ -554,6 +583,7 @@ describe("acceptBooking", () => {
   it("enforces awaitingSide — the non-awaiting side cannot accept (failed-precondition), booking left open", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab2m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -569,6 +599,7 @@ describe("acceptBooking", () => {
   it("rejects a stranger to both sides with permission-denied", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab3c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab3m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -580,6 +611,7 @@ describe("acceptBooking", () => {
   it("race: gig flipped closed via admin SDK before accept -> failed-precondition, booking left open", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab4c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab4m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -601,6 +633,9 @@ describe("acceptBooking", () => {
     const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab5w");
     const { owner: loser1, profileId: loser1ProfileId } = await makeApprovedMusicianProfile("ab5l1");
     const { owner: loser2, profileId: loser2ProfileId } = await makeApprovedMusicianProfile("ab5l2");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: winner, profileId: winnerProfileId });
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: loser1, profileId: loser1ProfileId });
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: loser2, profileId: loser2ProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
 
     const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
@@ -629,6 +664,8 @@ describe("acceptBooking", () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab6c");
     const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab6w");
     const { owner: rival, profileId: rivalProfileId } = await makeApprovedMusicianProfile("ab6r");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: winner, profileId: winnerProfileId });
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: rival, profileId: rivalProfileId });
 
     const series = await seedSeries(curatorProfileId, "whole_run");
     try {
@@ -670,6 +707,7 @@ describe("acceptBooking", () => {
   it("whole-run: fails with failed-precondition when the series is paused mid-thread, booking left open", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab7c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab7m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
 
     const series = await seedSeries(curatorProfileId, "whole_run");
     const gigId = await createOpenGig(curatorProfileId, curator.user);
@@ -697,6 +735,8 @@ describe("acceptBooking", () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab9c");
     const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab9w");
     const { owner: rival, profileId: rivalProfileId } = await makeApprovedMusicianProfile("ab9r");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: winner, profileId: winnerProfileId });
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: rival, profileId: rivalProfileId });
 
     const series = await seedSeries(curatorProfileId, "whole_run");
     try {
@@ -738,6 +778,7 @@ describe("acceptBooking", () => {
   it("tripwire: rejects a zero expectedTotalCents (a durationMinutes:0 perHour gig) with failed-precondition, never a silent $0 deposit", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab8c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab8m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
     // A forgotten/corrupted duration, seeded directly (bypasses updateGig's
     // own validation, which would otherwise reject durationMinutes:0).
@@ -763,6 +804,7 @@ describe("acceptBooking", () => {
   it("F2: refuses to accept once the gig was edited after the last offer", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab10c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab10m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user, { durationMinutes: 90 });
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
@@ -782,6 +824,7 @@ describe("acceptBooking", () => {
   it("F5: overlapping membership between the two profiles stamps selfDeal:true", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("sd1c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("sd1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     // Overlap: the MUSICIAN's own owner uid is ALSO a member of the
     // CURATOR profile (deliberately this direction, not the reverse —
     // requireBookingSide resolves a dual-member caller "musician"-first, so

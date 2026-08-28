@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent, fetchPendingInviteId, wait,
+  signUpTestUser, callFn, makeAdminUser, seedCuratorGateContent, fetchPendingInviteId, wait, makeMoneyReady,
 } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
@@ -341,6 +341,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     const curatorAdmin = await makeAdminUser("rfm1a");
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfm1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await seedOpenGig(curatorProfileId); // future startsAt (default)
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
@@ -391,6 +392,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     const curatorAdmin = await makeAdminUser("rfm2a");
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfm2m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await seedOpenGig(curatorProfileId);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
@@ -420,6 +422,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     const curatorAdmin = await makeAdminUser("rfc1a");
     await callFn("reviewProfile", { profileId: curatorProfileId, decision: "approved" }, curatorAdmin.user);
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("rfc1m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await seedSeries(curatorProfileId, { fillMode: "whole_run" });
     try {
       const pastGigId = await seedOpenGig(curatorProfileId, { seriesId, startsAt: Date.now() - 3_600_000 });

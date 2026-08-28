@@ -5,6 +5,7 @@ import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, type OfferState } from "./BookingForms";
+import { GatePrompt } from "../payments/GatePrompt";
 import type { GigDoc } from "@gatekeep/shared";
 
 type GigRow = GigDoc & { id: string };
@@ -99,11 +100,13 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
             </select>
           </label>
           {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
-          {error && (
-            <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-              {error}
-            </p>
-          )}
+          {/* SP5 Task 15: offerGig's own gates (requireCuratorChargeable)
+              throw CURATOR_CARD_REQUIRED_MESSAGE/CURATOR_DELINQUENT_MESSAGE
+              verbatim — GatePrompt opens SaveCardModal inline (retrying this
+              same submit once saved) or links to the overdue booking; any
+              other error falls through to the same plain warning line this
+              used to render directly. */}
+          {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={submit} />}
           <p style={{ color: "#666", fontSize: 13, margin: 0 }}>{DEPOSIT_HONESTY_LINE}</p>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={submit} disabled={busy}>{busy ? "Sending…" : "Send offer"}</button>

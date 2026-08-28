@@ -4,6 +4,7 @@ import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, wh
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, badge } from "../gigs/GigForms";
 import {
+  DEPOSIT_PERCENT,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc,
 } from "@gatekeep/shared";
 
@@ -43,8 +44,14 @@ export function bookingHistoryLabel(b: Pick<BookingRequestDoc, "status" | "accep
 // BookingForms.tsx's DEPOSIT_HONESTY_LINE, which is the pre-acceptance
 // "implied, not yet known" phrasing for the apply/offer composers — Task
 // 10's brief calls for this exact "$X" wording once a real number exists.
+// SP5 Task 15 review round 1 (medium #6): same live-payments fix as
+// DEPOSIT_HONESTY_LINE — dropped "will be collected when payments launch"
+// (false as of this sub-project) for present-tense, DEPOSIT_PERCENT-derived
+// copy. Both call sites (this row, BookingThread's Confirmed section) only
+// ever render for an already-confirmed booking, so "charged... at accept"
+// describes something that has, in fact, already happened.
 export function depositLine(amountCents: number): string {
-  return `35% deposit (${formatCents(amountCents)}) will be collected when payments launch.`;
+  return `${DEPOSIT_PERCENT}% deposit (${formatCents(amountCents)}) charged to the curator's card at accept.`;
 }
 
 type BookingRow = BookingRequestDoc & { id: string };

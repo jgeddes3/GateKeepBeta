@@ -8,6 +8,7 @@ import { INVITE_MAX_AGE_MS } from "./members.js";
 import { syncCuratorAccess } from "./curator.js";
 import { recomputeReliability } from "./bookingLifecycle.js";
 import { notifyProfileMembers } from "./notifications.js";
+import { buildPaymentDoc } from "./paymentsCore.js";
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -120,17 +121,18 @@ function computeOccurrences(series: GigSeriesDoc, now: number): MaterializePlan 
   return { startsAtList, newMaterializedThrough: windowEnd };
 }
 
-// Chunked batch writer: commits and starts a fresh batch every 400 ops.
-// Materializing one series occurrence is 2 ops (the gig doc + its private
-// location subdoc), and the sweeps below touch gigs/tracks/invites across
-// every profile — cheap defensive chunking against Firestore's 500-op
-// per-batch limit, even though any single series' per-run occurrence count
-// is small (capped by SERIES_MATERIALIZE_WEEKS).
+// Chunked batch writer: commits and starts a fresh batch every 400 ops. The
+// sweeps below touch gigs/tracks/invites across every profile — cheap
+// defensive chunking against Firestore's 500-op per-batch limit.
 //
-// S3: EACH of the five steps below constructs its OWN writer and commits it
-// at the end of that step's own try/catch, rather than one writer shared
-// across the whole sweep — so a step that throws only ever loses ITS OWN
+// S3: EACH step that uses this constructs its OWN writer and commits it at
+// the end of that step's own try/catch, rather than one writer shared across
+// the whole sweep — so a step that throws only ever loses ITS OWN
 // not-yet-rotated-out batch, never a healthy step's already-queued writes.
+//
+// NOT used by step 1 (SP5 Task 9 review): the materializer needs its
+// occurrences and their watermark to be ATOMIC, which chunking can't give —
+// it writes one plain, unchunked batch per series instead.
 function createChunkedWriter(db: FirebaseFirestore.Firestore) {
   const LIMIT = 400;
   let batch = db.batch();
@@ -174,7 +176,11 @@ function createChunkedWriter(db: FirebaseFirestore.Firestore) {
 // how much of that data the sweep actually needs to touch that day. The
 // caller's query MUST already carry an explicit `.orderBy(...)` (matching
 // its own filters) so `.startAfter(cursor)` cursors correctly between pages.
-async function* paginate(
+//
+// EXPORTED (SP5 Task 9): the hourly payments sweep pages its own queries with
+// the identical contract — one shared generator rather than a second copy that
+// could drift on the cursor/short-page edge cases this one already gets right.
+export async function* paginate(
   baseQuery: FirebaseFirestore.Query, pageSize: number,
 ): AsyncGenerator<FirebaseFirestore.QueryDocumentSnapshot[]> {
   let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
@@ -258,13 +264,14 @@ export interface SweepReport {
 // tests can invoke it directly with an injected clock (`now`) against
 // emulator-seeded data — no scheduler emulator config, no wall-clock races.
 //
-// S3: each of the five steps below is independently wrapped in its own
-// try/catch — a poisoned doc (e.g. a malformed series) that makes ONE step
-// throw is logged and counted in `report.errors`, but never prevents the
-// REMAINING steps from running. Each step also owns its own chunked writer,
-// committed at the end of that step's try block, so one step's failure can
-// only ever lose that step's own not-yet-durable writes, never another
-// step's.
+// S3: each of the steps below is independently wrapped in its own try/catch —
+// a poisoned doc (e.g. a malformed series) that makes ONE step throw is logged
+// and counted in `report.errors`, but never prevents the REMAINING steps from
+// running. Steps 2-6 each own their own chunked writer, committed at the end
+// of that step's try block, so one step's failure can only ever lose that
+// step's own not-yet-durable writes, never another step's. Step 1 goes one
+// better (SP5 Task 9 review): ONE batch per SERIES, so a failure can't even
+// lose a sibling series' writes — see its own comment.
 export async function runDailySweep(now: number): Promise<SweepReport> {
   const db = getFirestore();
   const report: SweepReport = {
@@ -288,7 +295,6 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // re-check right before writing — see below — for the narrower race where
   // a series is paused/ended AFTER this initial scan but before its write.)
   try {
-    const writer = createChunkedWriter(db);
     const seriesQuery = db.collection("gigSeries").where("status", "==", "active").orderBy(FieldPath.documentId());
     for await (const page of paginate(seriesQuery, SERIES_PAGE_SIZE)) {
       for (const seriesDoc of page) {
@@ -352,6 +358,11 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           // (filled) work or fresh open slots.
           let birthAs: { status: "filled"; bookingId: string; bookedMusicianProfileId: string } | { status: "open" } =
             { status: "open" };
+          // SP5 Task 9: the booking behind a FILLED birth, kept from the
+          // re-read below so the payment-doc staging further down reuses that
+          // one read rather than fetching the same doc a second time. Only ever
+          // set when `birthAs.status === "filled"`.
+          let bookedBooking: BookingRequestDoc | undefined;
           let selfHeal = false;
           if (freshSeries.activeBookingId) {
             const bookingSnap = await db.doc(`bookings/${freshSeries.activeBookingId}`).get();
@@ -361,6 +372,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
                 status: "filled", bookingId: freshSeries.activeBookingId,
                 bookedMusicianProfileId: freshSeries.bookedMusicianProfileId ?? booking.musicianProfileId,
               };
+              bookedBooking = booking;
             } else {
               // Stale linkage — the booking this series still names is no
               // longer confirmed (expired/cancelled/completed through some
@@ -381,24 +393,21 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             continue;
           }
 
-          // SP4 (Task 13 review): stage this series' writes locally FIRST,
-          // and validate the whole batch against a throwaway, never-
-          // committed batch before any of it ever touches the step's SHARED
-          // writer/batch. batch.set() validates its `data` argument
-          // SYNCHRONOUSLY and throws for malformed data (e.g. a corrupted
-          // templatePrivateLocation forced via admin SDK) — without this
-          // staging step, a throw partway through a series' occurrences
-          // (e.g. on the private/location write for the FIRST occurrence,
-          // AFTER that same occurrence's gig doc write already succeeded)
-          // would leave that gig doc's write already durably queued on the
-          // shared batch, which then commits it at step-end regardless of
-          // THIS series' own iteration aborting — orphaning a world-
-          // readable gig doc with no private/location subdoc, forever (the
-          // watermark never advances past it, so every future run retries
-          // and re-orphans the same way). The validation batch is a pure
-          // local/CPU-only check (nothing is ever committed on it); the
-          // real writes still land on the shared `writer` afterward, in the
-          // exact same order as before this change.
+          // Stage this series' writes locally FIRST, then validate the whole
+          // set against a throwaway, never-committed batch. batch.set()
+          // validates its `data` argument SYNCHRONOUSLY and throws for
+          // malformed data (e.g. a corrupted templatePrivateLocation forced
+          // via admin SDK), so this is a pure local/CPU-only fail-fast that
+          // aborts THIS series' iteration before any real batch is built.
+          //
+          // SP5 Task 9 (review round 1): belt-and-braces now rather than
+          // load-bearing. It originally existed because these writes landed
+          // on a SHARED cross-series batch, where a throw partway through one
+          // series left that series' earlier writes already durably queued
+          // (orphaning a world-readable gig doc with no private/location
+          // subdoc). The real writes now go on this series' OWN batch, which
+          // is simply never committed if anything throws — but the check is
+          // kept: it costs nothing and keeps the failure shape identical.
           const pendingWrites: { ref: FirebaseFirestore.DocumentReference; data: FirebaseFirestore.DocumentData }[] = [];
           let pendingBornFilled = 0;
           for (const startsAt of startsAtList) {
@@ -423,33 +432,92 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             // both halves of the template (public content + the exact private
             // address/geo) land on every occurrence.
             pendingWrites.push({ ref: db.doc(`gigs/${gigRef.id}/private/location`), data: series.templatePrivateLocation });
-            if (birthAs.status === "filled") pendingBornFilled++;
+            if (birthAs.status === "filled") {
+              pendingBornFilled++;
+              // SP5 Task 9: a booked run's newly-born occurrence owes its own
+              // deposit. Staged `unpaid` HERE, with no Stripe call — the
+              // materializer's whole write path is one deferred batch, and a
+              // charge inside it would be a non-transactional side effect that
+              // a later batch failure could not undo. The hourly payments
+              // sweep's birth-deposit step charges it (and duns it) instead.
+              //
+              // Terms come from the booking's FROZEN acceptedTerms + feePolicy
+              // snapshot, never from live constants — this date is priced
+              // exactly as the run was accepted. Its duration is the series
+              // template's (a newly-born occurrence cannot yet have detached
+              // from the template with an edited duration).
+              //
+              // A pre-SP5 booking carries neither field: it births its
+              // occurrence with NO payment doc at all, matching the
+              // "absent = pre-SP5, tolerate it" posture everywhere else in
+              // SP5 rather than inventing terms it was never accepted under.
+              if (bookedBooking?.acceptedTerms && bookedBooking.feePolicy) {
+                pendingWrites.push({
+                  ref: db.doc(`bookings/${birthAs.bookingId}/payments/${gigRef.id}`),
+                  data: buildPaymentDoc({
+                    booking: bookedBooking, bookingId: birthAs.bookingId,
+                    occ: { gigId: gigRef.id, startsAt, durationMinutes: series.template.durationMinutes },
+                    amountCents: bookedBooking.acceptedTerms.amountCents,
+                    expectedQuantity: bookedBooking.acceptedTerms.expectedQuantity,
+                    structure: bookedBooking.structure, feePolicy: bookedBooking.feePolicy,
+                    selfDeal: bookedBooking.selfDeal === true, now,
+                  }),
+                });
+              } else {
+                console.warn(
+                  `dailySweep: occurrence ${gigRef.id} born filled for pre-SP5 booking ${birthAs.bookingId} — no payment doc staged`);
+              }
+            }
           }
           const validationBatch = db.batch();
           for (const w of pendingWrites) validationBatch.set(w.ref, w.data); // throws here — never committed
-
-          for (const w of pendingWrites) await writer.set(w.ref, w.data);
-          report.occurrencesBornFilled += pendingBornFilled;
 
           const seriesUpdate: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {
             materializedThrough: newMaterializedThrough, updatedAt: now,
           };
           if (selfHeal) {
             // This clear rides the same unguarded batched `seriesUpdate` write
-            // as materializedThrough below — no {lastUpdateTime} precondition
-            // of its own. What closes the otherwise-obvious clobber race (a
-            // fresh whole-run accept lands on this series between the
-            // freshSnap re-read above and this write actually committing) is
-            // a CROSS-FILE guard, not anything in this step: acceptBooking's
+            // as materializedThrough — no {lastUpdateTime} precondition of its
+            // own. What closes the otherwise-obvious clobber race (a fresh
+            // whole-run accept lands on this series between the freshSnap
+            // re-read above and this write actually committing) is a
+            // CROSS-FILE guard, not anything in this step: acceptBooking's
             // in-txn rebooking-door check (bookings.ts) refuses a new accept
             // outright whenever series.activeBookingId already names ANY
             // booking — stale or not — so no fresh accept can be mid-flight
             // to race against while this stale linkage still stands.
             seriesUpdate.activeBookingId = null;
             seriesUpdate.bookedMusicianProfileId = null;
-            report.seriesSelfHealed++;
           }
-          await writer.update(seriesDoc.ref, seriesUpdate);
+
+          // SP5 Task 9 (review round 1): ONE batch per series — its
+          // occurrences (gig doc + private/location + any payment doc) AND
+          // the watermark advance that says they exist, committed atomically
+          // inside this series' own try/catch. Bounded by
+          // SERIES_MATERIALIZE_WEEKS (a weekly run's worst case is ~9
+          // occurrences x 3 writes + 1 = 28 ops, far under Firestore's 500),
+          // so no chunking is needed or wanted here.
+          //
+          // What this retires — all three are the same bug, that occurrences
+          // and their watermark could commit separately:
+          //  - a payment doc committing without its gig (or vice versa): the
+          //    sweep would charge a deposit for an occurrence that does not
+          //    exist, then refund it once the date passed;
+          //  - an orphaned gig doc with no private/location subdoc;
+          //  - occurrences committing while the watermark write is lost,
+          //    so the NEXT run re-materializes the same dates as duplicates.
+          // With one batch per series, a failure leaves that series exactly
+          // as it was and the next run retries it cleanly from the same
+          // watermark.
+          const seriesBatch = db.batch();
+          for (const w of pendingWrites) seriesBatch.set(w.ref, w.data);
+          seriesBatch.update(seriesDoc.ref, seriesUpdate);
+          await seriesBatch.commit();
+
+          // Counters AFTER the commit: the report says what this run actually
+          // durably did, never what it merely queued.
+          report.occurrencesBornFilled += pendingBornFilled;
+          if (selfHeal) report.seriesSelfHealed++;
           report.occurrencesCreated += startsAtList.length;
           report.seriesAdvanced += 1;
         } catch (e) {
@@ -458,7 +526,6 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         }
       }
     }
-    await writer.commit();
   } catch (e) {
     console.error("dailySweep: series materialization step failed", e);
     report.errors.series++;

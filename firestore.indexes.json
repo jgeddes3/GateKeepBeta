@@ -123,6 +123,42 @@
     "fields": [
       { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
       { "fieldPath": "updatedAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "bookings", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "resolvedAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "deposit.status", "order": "ASCENDING" },
+      { "fieldPath": "occurrenceStartsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "settlement.status", "order": "ASCENDING" },
+      { "fieldPath": "occurrenceStartsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "settlement.status", "order": "ASCENDING" },
+      { "fieldPath": "settlement.settleAfter", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "settlement.status", "order": "ASCENDING" },
+      { "fieldPath": "settlement.nextRetryAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "settlement.status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "deposit.status", "order": "ASCENDING" },
+      { "fieldPath": "deposit.depositAttempts", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

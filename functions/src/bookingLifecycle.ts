@@ -2,13 +2,27 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   isValidDocId, MAX_CANCEL_REASON_LENGTH, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
-  MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS,
+  MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS, CANCEL_GRACE_MS,
   type BookingRequestDoc, type BookingSide, type GigDoc, type GigSeriesDoc,
-  type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation,
+  type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation, type PaymentDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
+// H1 (branch audit): cancelBooking / cancelOccurrence / reportNoShow all
+// transitively reach getStripe() — via resolveDepositPending (the deposit
+// refund/forfeit executor) and, for reportNoShow, additionally
+// clawbackSettledOccurrence — so every one of their onCall options MUST declare
+// this secret, or getStripe() fails CLOSED in production. See stripeClient.ts's
+// getStripe() note and the regression guard in stripeSecrets.test.ts.
+import { stripeSecretKey } from "./stripeClient.js";
+import {
+  clawbackAlertId, markDepositsPendingInTx, recordAdminAlert, resolveDepositPending,
+} from "./paymentsCore.js";
+// SP5 Task 12. The two settlement transitions a no-show report and its reversal
+// drive — see paymentsSettlement.ts's header for why this leg of the import
+// graph exists and why it is only these two symbols.
+import { clawbackSettledOccurrence, reopenSettlementForRestore } from "./paymentsSettlement.js";
 
 // Same "already started" message for both the whole-booking and
 // single-occurrence cancel paths — a caller who missed the cancellation
@@ -50,7 +64,12 @@ function validateCancelReason(reason: unknown): string {
 // (curator forfeits, musician gets marked) purely from which side the
 // caller resolves to — silently picking one side for a dual-member would
 // let that member choose their own favorable outcome. Refuse instead.
-async function resolveBookingSideStrict(booking: BookingRequestDoc, uid: string): Promise<BookingSide> {
+//
+// Exported (SP5 Task 10) for `confirmOccurrenceActuals` in payments.ts, which
+// is side-DEPENDENT in exactly the same way — the curator reports the actuals
+// that decide what the curator is charged, so a dual-member must not be able
+// to slip through as "the curator side" by resolution order.
+export async function resolveBookingSideStrict(booking: BookingRequestDoc, uid: string): Promise<BookingSide> {
   const db = getFirestore();
   const [musicianMember, curatorMember] = await Promise.all([
     db.doc(`profiles/${booking.musicianProfileId}/members/${uid}`).get(),
@@ -307,6 +326,27 @@ export async function executeCancellation(
       nextStartsAt = gig.startsAt;
     }
 
+    // SP5 Task 8: every FUTURE-dated payment doc of this booking — the docs
+    // whose money this cancellation decides. Single-field range filter on a
+    // subcollection ⇒ no composite index needed. Last read of the read phase.
+    //
+    // DELIBERATELY future-only: a PAST-start doc (the occurrence already
+    // happened, or is in progress right now) is NOT the cancellation's to
+    // touch. Its show either happened or is happening, so it settles
+    // normally via Task 10 — even on a booking that is being cancelled for
+    // its remaining dates. Waiving it here would silently un-pay a musician
+    // for work already done. (SP4's own occurrence reopen has the exact same
+    // past/future split — see getFutureFilledOccurrences.)
+    //
+    // Two sources of "future" therefore coexist in this transaction: the GIG
+    // docs' `startsAt` (above) and the PAYMENT docs' `occurrenceStartsAt`
+    // (here, stamped at accept). They agree because a filled gig's schedule
+    // is LOCKED — updateGig refuses any edit to a `filled`/`closed` gig
+    // ("its schedule and terms are locked"), so no gig can move between
+    // accept and cancellation while a payment doc exists for it.
+    const paymentsSnap = await tx.get(
+      db.collection(`bookings/${bookingId}/payments`).where("occurrenceStartsAt", ">", now));
+
     const hoursBeforeStart = (nextStartsAt - now) / 3_600_000;
     // F6 (security audit wave): window thresholds are read from THIS
     // booking's OWN frozen deposit.policy snapshot (acceptBooking stamps it
@@ -319,6 +359,15 @@ export async function executeCancellation(
     // deposit's own policy snapshot would be a lie.
     const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
     const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
+    // SP5: 1h post-accept grace (both sides) — a flash booking accepted
+    // already inside the penalty windows can be undone penalty-free for
+    // CANCEL_GRACE_MS after the accept. Capped at gig start implicitly: the
+    // already-started guards above make now < nextStartsAt. Requires
+    // confirmedAt != null: with no timestamp there is nothing to bound the
+    // exception against, so treating an unknown confirmedAt as "in grace"
+    // would grant unbounded, permanent grace instead of a genuine 1h
+    // window — silently disabling forfeiture/marks for that booking forever.
+    const graceApplied = freshBooking.confirmedAt != null && (now - freshBooking.confirmedAt) < CANCEL_GRACE_MS;
     let outcome: CancelOutcome;
     let markApplied = false;
     // { [key]: unknown } rather than a typed literal — the conditional
@@ -331,16 +380,16 @@ export async function executeCancellation(
 
     if (side === "curator") {
       // STRICTLY less-than — exactly curatorForfeitHours refunds.
-      outcome = hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
+      outcome = !graceApplied && hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
       if (outcome === "deposit_forfeited") bookingUpdate["deposit.forfeitedTo"] = "musician";
     } else {
       // Musician side never forfeits the curator's deposit — always refunded.
       outcome = "deposit_refunded";
-      markApplied = hoursBeforeStart < musicianMarkHours;
+      markApplied = !graceApplied && hoursBeforeStart < musicianMarkHours;
     }
 
     bookingUpdate.cancellation = {
-      by: side, reason: trimmedReason, at: now, hoursBeforeStart, outcome, markApplied,
+      by: side, reason: trimmedReason, at: now, hoursBeforeStart, outcome, markApplied, graceApplied,
     };
 
     // ---- WRITES ----
@@ -358,8 +407,26 @@ export async function executeCancellation(
       tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
     }
 
-    return { outcome, markApplied };
+    // SP5 Task 8: the transactional intent-to-move-money. On a run-level
+    // forfeit ONLY the occurrence the window was measured against
+    // (`nextGigId`) forfeits — every other future date refunds, since the
+    // curator was never late on those (plan refinement, binding). A refund
+    // outcome (musician side, grace, or >= the forfeit window) refunds every
+    // future doc.
+    const forfeitGigId = outcome === "deposit_forfeited" ? nextGigId : null;
+    const touchedGigIds = markDepositsPendingInTx(tx, paymentsSnap.docs, forfeitGigId, now);
+
+    return { outcome, markApplied, touchedGigIds };
   });
+
+  // SP5 Task 8: the money itself, post-commit. Per-doc catch: one failed
+  // Stripe call must never abort the others, and must never surface as an
+  // error on an already-committed cancellation — the doc stays `*_pending`,
+  // which is exactly the handle Task 9's sweep retries it by.
+  for (const gigId of result.touchedGigIds) {
+    await resolveDepositPending(bookingId, gigId).catch((e) =>
+      console.error(`executeCancellation: deposit resolution failed for ${bookingId}/${gigId} (sweep will retry)`, e));
+  }
 
   // recomputeReliability stays post-transaction — it's a pure re-derivation
   // from the reliability doc's current marks (self-healing: a failure here
@@ -387,7 +454,7 @@ export async function executeCancellation(
   return result;
 }
 
-export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" }, async (req) => {
+export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { bookingId, reason } = req.data ?? ({} as CancelBookingInput);
@@ -421,7 +488,7 @@ export const cancelBooking = onCall<CancelBookingInput>({ region: "us-central1" 
 
 interface CancelOccurrenceInput { bookingId: string; gigId: string; reason: string; }
 
-export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-central1" }, async (req) => {
+export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { bookingId, gigId, reason } = req.data ?? ({} as CancelOccurrenceInput);
@@ -497,25 +564,40 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
         "Too many individual date cancellations on this booking — cancel the whole run instead.");
     }
 
+    // SP5 Task 8: this date's OWN payment doc — the only money this callable
+    // may touch (the run's other dates are untouched, they're still on).
+    // Read by path rather than by query: exactly one doc, and its id IS the
+    // gigId. A missing doc (a pre-SP5 booking, or an occurrence that was
+    // never staged) silently no-ops downstream.
+    const paymentSnap = await tx.get(db.doc(`bookings/${bookingId}/payments/${gigId}`));
+
     const hoursBeforeStart = (gig.startsAt - now) / 3_600_000;
     // F6 (security audit wave): read from the booking's OWN deposit.policy
     // snapshot — see executeCancellation's identical fix/comment above.
     const curatorForfeitHours = freshBooking.deposit?.policy?.curatorForfeitHours ?? CURATOR_FORFEIT_WINDOW_HOURS;
     const musicianMarkHours = freshBooking.deposit?.policy?.musicianMarkHours ?? MUSICIAN_MARK_WINDOW_HOURS;
+    // SP5: 1h post-accept grace (both sides) — see executeCancellation's
+    // identical rationale above (including why a null confirmedAt must NOT
+    // count as in-grace). Capped at gig start implicitly here via this
+    // function's own `gig.startsAt <= now` guard above (not
+    // executeCancellation's nextStartsAt, which doesn't exist in this scope).
+    const graceApplied = freshBooking.confirmedAt != null && (now - freshBooking.confirmedAt) < CANCEL_GRACE_MS;
     let outcome: CancelOutcome;
     let markApplied = false;
     if (callerSide === "curator") {
-      outcome = hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
+      outcome = !graceApplied && hoursBeforeStart < curatorForfeitHours ? "deposit_forfeited" : "deposit_refunded";
       // Deliberately does NOT touch booking.deposit/deposit.forfeitedTo —
       // that field is the RUN-level outcome (cancelBooking's alone to set).
       // This occurrence's own outcome lives only in the
       // occurrenceCancellations entry below; sub-5 reads it from there.
     } else {
       outcome = "deposit_refunded";
-      markApplied = hoursBeforeStart < musicianMarkHours;
+      markApplied = !graceApplied && hoursBeforeStart < musicianMarkHours;
     }
 
-    const entry: OccurrenceCancellation = { gigId, by: callerSide, at: now, hoursBeforeStart, outcome, markApplied };
+    const entry: OccurrenceCancellation = {
+      gigId, by: callerSide, at: now, hoursBeforeStart, outcome, markApplied, graceApplied,
+    };
     // No cap/drop-oldest here — the check above already refused before this
     // point whenever appending would exceed the cap, so `existing` is always
     // strictly under it and this append can never itself reach the ceiling.
@@ -534,8 +616,21 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
       tx.set(reliabilityRef, { marks, completedCount: reliability?.completedCount ?? 0, updatedAt: now });
     }
 
-    return { outcome, markApplied };
+    // SP5 Task 8: same pending-marker machinery as executeCancellation, scoped
+    // to this ONE date — it forfeits iff THIS date's own outcome forfeited.
+    const touchedGigIds = markDepositsPendingInTx(
+      tx, [paymentSnap], outcome === "deposit_forfeited" ? gigId : null, now);
+
+    return { outcome, markApplied, touchedGigIds };
   });
+
+  // SP5 Task 8: the money, post-commit — see executeCancellation's identical
+  // per-doc catch rationale (a stuck `*_pending` doc is the sweep's retry
+  // handle, never a caller-visible error on a committed cancellation).
+  for (const touchedGigId of result.touchedGigIds) {
+    await resolveDepositPending(bookingId, touchedGigId).catch((e) =>
+      console.error(`cancelOccurrence: deposit resolution failed for ${bookingId}/${touchedGigId} (sweep will retry)`, e));
+  }
 
   // recomputeReliability stays post-transaction — see cancelBooking's
   // identical rationale (a pure, self-healing re-derivation; only the mark
@@ -562,7 +657,7 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
 
 interface ReportNoShowInput { bookingId: string; reason: string; }
 
-export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" }, async (req) => {
+export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { bookingId, reason } = req.data ?? ({} as ReportNoShowInput);
@@ -657,6 +752,13 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       futureOccurrenceDocs = await getFutureFilledOccurrences(tx, db, freshBooking.seriesId, bookingId, now);
     }
 
+    // SP5 Task 8: the REPORTED occurrence's own payment doc, plus every
+    // future-dated one (a no-show ends the whole run — see the unwind above).
+    // Both read here, in the read phase; written below.
+    const reportedPaymentSnap = await tx.get(db.doc(`bookings/${bookingId}/payments/${occurrenceGigId}`));
+    const futurePaymentsSnap = await tx.get(
+      db.collection(`bookings/${bookingId}/payments`).where("occurrenceStartsAt", ">", now));
+
     const daysSinceStart = (now - occurrenceStartsAt) / (24 * 3_600_000);
     if (daysSinceStart > NO_SHOW_REPORT_WINDOW_DAYS) {
       throw new HttpsError("failed-precondition",
@@ -704,8 +806,100 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       reopenSeriesOccurrences(tx, db, freshBooking.seriesId, bookingId, seriesActiveBookingId, futureOccurrenceDocs, now);
     }
 
-    return { occurrenceGigId };
+    // SP5 Task 8: the musician failed to appear, so nothing is forfeited to
+    // them — every touched date refunds. The reported occurrence is excluded
+    // from the future set (it is normally past-dated and so absent anyway;
+    // filtering makes that independent of the two dates' provenance — the
+    // payment doc's occurrenceStartsAt is stamped at accept, the gig's own
+    // startsAt can be edited afterwards) and handled explicitly below.
+    const depositsToResolve = markDepositsPendingInTx(
+      tx, futurePaymentsSnap.docs.filter((d) => d.id !== occurrenceGigId), null, now);
+    // SP5 Task 12: set below when the reported date's money has ALREADY moved
+    // in both directions, so the post-commit clawback has to run. Declared out
+    // here (rather than derived from the returned doc later) because this
+    // transaction's own read is the one that saw the pre-report state — a
+    // re-read after the commit would race the very unwind it is deciding on.
+    let clawbackNeeded = false;
+    const reportedPayment = reportedPaymentSnap.data() as PaymentDoc | undefined;
+    if (reportedPayment) {
+      const reportedUpdate: { [key: string]: unknown } = { updatedAt: now };
+      // The DEPOSIT: `held` (escrowed) and `unpaid` (never charged — a birth
+      // deposit the sweep hadn't reached, or an accept finalized out-of-band)
+      // both refund; the executor's never-charged branch drives an `unpaid`
+      // one straight to terminal `refunded` with no Stripe call at all.
+      // `applied` (the deposit was already released into a settlement that
+      // paid the musician) is deliberately left alone — that's the
+      // POST-TRANSFER CLAWBACK case, which is Task 12's job and needs a
+      // transfer reversal, not a refund. Anything else is already resolved.
+      const flipsDeposit = reportedPayment.deposit.status === "held" || reportedPayment.deposit.status === "unpaid";
+      if (flipsDeposit) reportedUpdate["deposit.status"] = "refund_pending";
+      // The SETTLEMENT waive is DELIBERATELY independent of the deposit
+      // status above (review round 1 — this was a real money leak while it
+      // sat inside the `held` branch). reportNoShow is the ONLY place in the
+      // system that knows this date did not happen: the reported occurrence's
+      // gig stays `filled` and linked (only FUTURE occurrences are reopened
+      // above), so a settlement left `not_due` here is one Task 9's scheduler
+      // will happily schedule and Task 10 will then act on — charging the
+      // curator the remaining base + fee and transferring it to the musician
+      // who never showed up. Waived for EVERY reported doc whose settlement
+      // hasn't happened yet, whatever its deposit did.
+      //
+      // Still guarded to the two "hasn't happened yet" states: a `paid`/
+      // `past_due` settlement is a real money record, and unwinding one is
+      // Task 12's clawback, never an erasure here.
+      const waivesSettlement = reportedPayment.settlement.status === "not_due"
+        || reportedPayment.settlement.status === "pending";
+      if (waivesSettlement) reportedUpdate["settlement.status"] = "waived";
+      // A fully-resolved doc (e.g. `applied` + `paid`) is left untouched
+      // rather than being given a meaningless updatedAt bump.
+      if (flipsDeposit || waivesSettlement) tx.update(reportedPaymentSnap.ref, reportedUpdate);
+      // Only a deposit flip needs the executor — a settlement-only waive
+      // moves no money and has nothing for resolveDepositPending to do.
+      if (flipsDeposit) depositsToResolve.push(occurrenceGigId);
+      // TASK 12's HAND-OFF (this is what the Task 8 discovery warn became). A
+      // `paid` settlement on the reported date means the money has ALREADY
+      // moved in both directions — the curator was charged at T+3 and the
+      // musician was paid — for a show this report says never happened. The
+      // unwind is a transfer reversal plus refunds, so it cannot live in here
+      // (it calls Stripe, and this is a transaction); it runs post-commit,
+      // against the terminal states the guards above deliberately left standing.
+      clawbackNeeded = reportedPayment.settlement.status === "paid";
+      if (!clawbackNeeded && reportedPayment.deposit.status === "applied") {
+        // An `applied` deposit whose settlement is NOT `paid` is a shape SP5
+        // does not produce — finalizeSettlementSuccess writes both in one
+        // update — so it means escrow was released into a settlement that then
+        // lost its terminal write, and the clawback has no `paid` doc to act
+        // on. Kept as a loud log for exactly that: the case is real enough to
+        // find, and rare enough not to automate.
+        console.warn(`reportNoShow: reported occurrence ${bookingId}/${occurrenceGigId} has an APPLIED deposit`
+          + ` under a "${reportedPayment.settlement.status}" settlement`
+          + `${waivesSettlement ? " (settlement waived)" : ""} — released escrow with no paid settlement to claw back`);
+      }
+    }
+
+    return { occurrenceGigId, depositsToResolve, clawbackNeeded };
   });
+
+  // SP5 Task 8: the money, post-commit — see executeCancellation's identical
+  // per-doc catch rationale.
+  for (const gigIdToResolve of result.depositsToResolve) {
+    await resolveDepositPending(bookingId, gigIdToResolve).catch((e) =>
+      console.error(`reportNoShow: deposit resolution failed for ${bookingId}/${gigIdToResolve} (sweep will retry)`, e));
+  }
+
+  // SP5 Task 12: the POST-TRANSFER unwind, for the one occurrence whose money
+  // had already moved. Post-commit for the same reason the deposit executor is:
+  // the transaction records the DECISION, the Stripe calls are the effect.
+  // clawbackSettledOccurrence never throws — every failure route inside it ends
+  // in a durable `clawback_failed` alert — so this catch only covers the
+  // unexpected, and it swallows rather than propagates for the same reason
+  // every other post-commit money step here does: the no-show report has
+  // already committed, and failing the caller now would tell the curator their
+  // report did not land when it did.
+  if (result.clawbackNeeded) {
+    await clawbackSettledOccurrence(bookingId, result.occurrenceGigId, now).catch((e) =>
+      console.error(`reportNoShow: clawback failed for ${bookingId}/${result.occurrenceGigId}`, e));
+  }
 
   await recomputeReliability(booking.musicianProfileId);
 
@@ -748,11 +942,19 @@ interface RemoveReliabilityMarkInput {
 //      (the caller below gates the call on kind === "reported_no_show").
 // completedCount increments here mirror scheduled.ts step 7's own idiom
 // exactly (read-modify-write, merge:true) — it's the exact credit the false
-// report stole. Deposit/acceptedTerms are left completely untouched (the
-// terms of the deal never changed, only whether the show is credited as
-// having happened).
+// report stole. acceptedTerms are left completely untouched (the terms of the
+// deal never changed, only whether the show is credited as having happened).
+//
+// SP5 TASK 12 EXTENDS THIS TO THE MONEY. The false report did not only steal
+// the completion credit: it waived the date's settlement (and, if the date had
+// already settled, clawed the whole thing back — the charge refunded, the
+// earnings transfer reversed). Restoring the booking without re-opening that
+// leaves the musician unpaid for a show the platform has just re-affirmed
+// happened. `reportedGigId` is the MARK's own gigId — the exact occurrence the
+// report was measured against — passed in by the caller rather than re-derived
+// here, so the money re-opened is provably the money the report unwound.
 async function restoreFalselyReportedBooking(
-  db: FirebaseFirestore.Firestore, bookingId: string, now: number,
+  db: FirebaseFirestore.Firestore, bookingId: string, reportedGigId: string, now: number,
 ): Promise<{ restored: boolean; curatorProfileId: string | null; musicianProfileId: string | null }> {
   const bookingRef = db.doc(`bookings/${bookingId}`);
   const bookingSnap = await bookingRef.get();
@@ -795,6 +997,52 @@ async function restoreFalselyReportedBooking(
     await recomputeReliability(booking.musicianProfileId);
   }
 
+  // THE MONEY, re-opened. Runs LAST and best-effort on purpose: the status and
+  // credit restores above are SP4's and must never be held hostage to a
+  // payments failure, and this is a self-contained re-arming of one payment doc
+  // — a no-op for a booking that never had one (pre-SP5) or whose settlement
+  // was not waived. The re-run itself is the sweep's: this only sets the date
+  // due again, and chargeSettlement reprices it from the frozen terms, charges
+  // the FULL base (the deposit went back in the clawback, so there is no slice
+  // credit left to apply) and re-transfers the earnings on fresh keys.
+  try {
+    const reopened = await reopenSettlementForRestore(bookingId, reportedGigId, now);
+    if (reopened) {
+      console.info(
+        `restoreFalselyReportedBooking: re-opened the settlement for ${bookingId}/${reportedGigId} — the next sweep run will re-charge and re-transfer it`);
+    }
+  } catch (e) {
+    // The booking is already restored, so throwing here would abort the audit
+    // row and both notifications for work that DID happen. It gets a DURABLE
+    // TICKET rather than a log line (review round 1, M2) for one reason: THERE
+    // IS NO RE-DRIVE. Nothing retries this — the sweep never looks at a `waived`
+    // settlement, and removeReliabilityMark cannot be called again for this mark
+    // (its own transaction only matches a mark that is not yet `removedByAdmin`,
+    // so a second call throws not-found). A lost log here means a musician who
+    // is never paid for a show the platform has formally re-affirmed, and
+    // nobody ever finds out. Shares the clawback's alert id: same occurrence,
+    // same "this date's money is in the wrong place" problem, one operator.
+    const detail = `an admin reversed a false no-show report and the booking was restored to "completed", but its`
+      + ` settlement could NOT be re-opened: ${e instanceof Error ? e.message : String(e)}. The date will not re-charge`
+      + " and the musician stays unpaid for it, and NOTHING will retry this — re-open it by hand on"
+      + ` bookings/${bookingId}/payments/${reportedGigId}: settlement.status="pending", settlement.settleAfter=<now>,`
+      + " settlement.intentId=null, settlement.attempts=<current+1>, settlement.nextRetryAt=null,"
+      + " settlement.chargingSince=null, settlement.lateFeeCents=null, settlement.lateFeeMusicianCents=null,"
+      + " settlement.delinquentAt=null (leave deposit.status alone — a refunded deposit is what makes the re-run charge"
+      + " the full base)";
+    const alertId = clawbackAlertId(bookingId, reportedGigId);
+    const shouldLog = await recordAdminAlert({
+      alertId, kind: "clawback_failed", detail, bookingId, gigId: reportedGigId, now,
+    }).catch((ae) => {
+      console.error(`restoreFalselyReportedBooking: failed to record the restore alert for ${bookingId}/${reportedGigId}`, ae);
+      return true;
+    });
+    if (shouldLog) {
+      console.error(
+        `restoreFalselyReportedBooking: ${bookingId}/${reportedGigId} — ${detail} (see adminAlerts/${alertId})`, e);
+    }
+  }
+
   return { restored: true, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };
 }
 
@@ -813,7 +1061,12 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
   // Read-modify-write transaction (mirrors flagAccount's rationale) —
   // audit-preserving: flips removedByAdmin on the matching entry, never
   // splices it out of the array.
-  await db.runTransaction(async (tx) => {
+  // Returns the removed mark's OWN gigId — the occurrence the report was
+  // measured against, which SP5 Task 12's restore needs to find the money the
+  // report unwound. Taken from the mark rather than re-queried, because the
+  // "most recent past occurrence" query reportNoShow used to pick it can
+  // legitimately select a different date by the time an admin reverses this.
+  const removedMarkGigId = await db.runTransaction(async (tx) => {
     const snap = await tx.get(reliabilityRef);
     const marks = (snap.data() as ReliabilityDoc | undefined)?.marks ?? [];
     // First non-removed match — if an admin already removed one prior mark
@@ -825,6 +1078,7 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
     if (idx === -1) throw new HttpsError("not-found", "No matching reliability mark found.");
     const nextMarks = marks.map((m, i) => (i === idx ? { ...m, removedByAdmin: true } : m));
     tx.update(reliabilityRef, { marks: nextMarks, updatedAt: now });
+    return marks[idx].gigId;
   });
 
   await recomputeReliability(musicianProfileId);
@@ -833,7 +1087,7 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
   // a late_cancel removal only ever changes the MARK judgment, never the
   // (genuinely real) cancellation itself.
   const { restored, curatorProfileId } = kind === "reported_no_show"
-    ? await restoreFalselyReportedBooking(db, bookingId, now)
+    ? await restoreFalselyReportedBooking(db, bookingId, removedMarkGigId, now)
     : { restored: false, curatorProfileId: null };
 
   await writeAudit({

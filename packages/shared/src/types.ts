@@ -73,8 +73,11 @@ export interface AuditLogDoc {
   actorUid: string;
   action: "profile_approved" | "profile_rejected" | "admin_granted" | "profile_deleted"
     | "track_approved" | "track_rejected" | "gig_taken_down" | "account_flagged"
-    | "reliability_mark_removed" | "booking_visibility_backfilled";
-  targetId: string;          // profileId or uid
+    | "reliability_mark_removed" | "booking_visibility_backfilled"
+    // SP5 Task 9: an operator manually released a stuck accept saga
+    // (releaseStuckSaga) after reconciling the Stripe side by hand.
+    | "booking_saga_released";
+  targetId: string;          // profileId, uid, or bookingId (booking_saga_released)
   detail: string;
   at: number;
 }
@@ -331,13 +334,14 @@ export interface OfferEntry {
 }
 export interface AcceptedTerms { amountCents: number; expectedQuantity: number | null; expectedTotalCents: number; }
 export interface BookingDeposit {
-  amountCents: number; status: "unpaid";               // sub-5 adds "held" | "refunded" | "forfeited"
+  amountCents: number; status: DepositStatus;           // see DepositStatus in the SP5 section below
   forfeitedTo: "musician" | null;                       // set by cancellation outcome; money moves in sub-5
   policy: { percent: number; curatorForfeitHours: number; musicianMarkHours: number }; // snapshot, never re-read from constants
 }
 export interface BookingCancellation {
   by: BookingSide; reason: string; at: number; hoursBeforeStart: number;
   outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
+  graceApplied?: boolean;   // SP5: 1h post-accept grace neutralized the penalty
 }
 // Task 6: one entry per cancelOccurrence call against a whole-run booking —
 // unlike BookingCancellation (the run-level outcome, which also moves
@@ -347,6 +351,7 @@ export interface BookingCancellation {
 export interface OccurrenceCancellation {
   gigId: string; by: BookingSide; at: number; hoursBeforeStart: number;
   outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
+  graceApplied?: boolean;   // SP5: 1h post-accept grace neutralized the penalty
 }
 // Named BookingRequestDoc (not BookingDoc) because SP2's BookingDoc (the
 // rates+prefs subdoc at profiles/{id}/private/booking, above) already owns
@@ -382,6 +387,30 @@ export interface BookingRequestDoc {
   // — absent on every pre-existing booking and on any booking accepted
   // before this fix landed, treated identically to false.
   selfDeal?: boolean;
+  // SP5: fee snapshot + aggregate payment state. Optional so every pre-SP5
+  // booking/fixture stays valid; acceptBooking writes both going forward.
+  feePolicy?: FeePolicy;
+  paymentSummary?: PaymentSummary;
+  // SP5: accept-saga crash marker — true between the staging transaction and
+  // the post-charge commit; the hourly payments sweep reconciles stuck ones.
+  depositChargePending?: boolean;
+  // SP5 Task 6: how many deposit-charge ATTEMPTS this booking has staged.
+  // Load-bearing for money safety, not diagnostics: both real Stripe and
+  // FakeStripe cache a DECLINE under its idempotency key, so a retry after a
+  // decline must use a DIFFERENT key or it just replays the decline forever.
+  // The accept saga's charge key is `{bookingId}:accept:deposit:{attempt}`;
+  // staging transaction A increments this counter, and crash-reconciliation
+  // (Task 9) reuses the PERSISTED value so its replay hits the same key (and
+  // therefore Stripe's original intent) rather than charging twice.
+  depositChargeAttempt?: number;
+  // SP5 Task 6: pending-charge recovery marker. Set when chargeOffSession
+  // left the PaymentIntent `processing` (StripePaymentPendingError) — a
+  // same-key retry is impossible (the cached `processing` outcome replays
+  // forever), so the intent id is persisted here, the staged payment docs
+  // and depositChargePending are LEFT in place, and the
+  // payment_intent.succeeded webhook finalizes the accept out-of-band.
+  // Cleared on commit and on any unstage.
+  depositChargeIntentId?: string | null;
 }
 
 // visibility + projections + reliability
@@ -413,3 +442,394 @@ export const MUSICIAN_MARK_WINDOW_HOURS = 24;
 export const MAX_RELIABILITY_MARKS = 200;
 export const NO_SHOW_REPORT_WINDOW_DAYS = 14;
 export const MAX_OCCURRENCE_CANCELLATIONS = 100;
+
+// ---------- Sub-project 5: payments ----------
+
+export const CURATOR_FEE_PCT = 11;
+export const MUSICIAN_FEE_PCT = 2;
+export const INSTANT_FEE_PCT = 4;
+export const INSTANT_FEE_MIN_CENTS = 100;
+// Owner ruling (M4): the smallest cash-out that may go out INSTANT. Below this
+// the 4% fee is a poor deal and the fast rail isn't worth it — a standard payout
+// (still >= $1) is the route for smaller amounts. Enforced by requestPayout and
+// mirrored by the Earnings page's Instant button.
+export const INSTANT_PAYOUT_MIN_CENTS = 1000;   // $10.00
+export const LATE_FEE_PCT = 10;
+// Percentage-POINTS of the outstanding amount, not "7% of the late fee" —
+// meaningful only relative to LATE_FEE_PCT: 7 of LATE_FEE_PCT's 10 points go
+// to the musician, the remaining 3 to the platform.
+export const LATE_FEE_MUSICIAN_PCT = 7;
+export const SETTLEMENT_DELAY_MS = 3 * 24 * 60 * 60 * 1000;   // T+3 window after gig END
+export const CANCEL_GRACE_MS = 60 * 60 * 1000;                // 1h post-accept grace, both sides
+// Owner ruling (M3): how long INSTANT payouts are BLOCKED on a profile after
+// self-deal-funded money lands in its balance (a forfeit transfer or an earnings
+// transfer for a `selfDeal` booking — the same uid on both sides). Self-deal is
+// a card->cash conversion path; the hold removes the FAST conversion, leaving
+// standard-payout-after-settle as the only route. 3 days lines up with the T+3
+// settlement window (SETTLEMENT_DELAY_MS) but is named separately so the two can
+// move independently.
+export const SELF_DEAL_HOLD_MS = 3 * 24 * 60 * 60 * 1000;     // 3d instant-payout hold on self-deal funds
+export const SETTLEMENT_RETRY_OFFSETS_MS =
+  [24 * 60 * 60 * 1000, 2 * 24 * 60 * 60 * 1000, 2 * 24 * 60 * 60 * 1000] as const; // +1d, +2d, +2d
+export const MAX_TRUE_UP_EXTRA_MINUTES = 720;
+export const MAX_TRUE_UP_EXTRA_SONGS = 500;
+
+// Snapshotted onto the booking at accept (alongside SP4's deposit.policy) —
+// later fee-constant changes never touch an accepted booking. All five
+// fields are INTEGER percent values — the money layer's assertPct rejects
+// fractional pcts at runtime, so never author a snapshot like 11.5.
+export interface FeePolicy {
+  curatorFeePct: number; musicianFeePct: number; instantFeePct: number;
+  lateFeePct: number; lateFeeMusicianPct: number;
+}
+
+// The deposit state machine. `unpaid` is the birth state; `applied`,
+// `refunded` and `forfeited` are terminal (only Task 12's clawback ever
+// re-opens one, and only from `applied`). Legal transitions — nothing else
+// is a valid write:
+//   unpaid  -> unpaid           SP5 Task 9: a DECLINED birth-deposit charge
+//                               stays unpaid and bumps depositAttempts +
+//                               depositNextRetryAt (see DepositState below) —
+//                               a decline is a retry, never a state change
+//   unpaid  -> held             THREE writers: the accept saga's batch charge,
+//                               the sweep's per-birth charge for a materialized
+//                               date, and (Task 11) finalizeDepositPayDue, when
+//                               a curator pays an exhausted birth deposit
+//                               on-session through payPastDue
+//   unpaid  -> refund_pending   a cancellation/no-show/waive landing on a
+//                               never-charged date. Only when a charge might
+//                               still be outstanding against it (an intent is
+//                               recorded); the executor then resolves it with
+//                               NO Stripe call in two shapes — a birth charge
+//                               left `processing`, and an UNCONFIRMED pay-now
+//                               intent (isUnconfirmedPayDueDeposit), neither of
+//                               which has a charge to refund
+//   unpaid  -> refunded         DIRECT, no executor and no money: the deposit
+//                               obligation is discharged without ever having
+//                               been collected. Three writers, all Task 11 —
+//                               the two waive branches' no-executor path (the
+//                               date is owed nothing), finalizeSettlementSuccess
+//                               when a settlement charged the FULL base and so
+//                               ABSORBED the deposit, and the same function
+//                               retiring a deposit whose only intent was an
+//                               unconfirmed pay-now one
+//   held    -> applied          settlement consumed the escrow for its date
+//   held    -> refund_pending   cancellation / no-show, refund outcome
+//   held    -> forfeit_pending  curator late-cancel of THAT date only
+//   *_pending -> refunded/forfeited   the post-commit executor, or the
+//                               sweep re-running a doc stuck pending
+//   applied -> (clawback)       Task 12 ONLY — needs a transfer reversal,
+//                               never a refund; no cancellation path may
+//                               touch an applied deposit
+// The two `*_pending` states are the transactional intent-to-move-money:
+// written in the same transaction as the cancellation itself, so a crash
+// before the money moves always leaves a doc the sweep can find and finish.
+//
+// THE CLOSING INVARIANT, and the reason the `unpaid -> refunded` edges above
+// exist at all: `unpaid` IS A DEBT-QUERY ANSWER, NOT A RESTING STATE. Once its
+// retry schedule is exhausted, an `unpaid` doc is precisely what
+// clearDelinquencyIfSettled counts as outstanding deposit debt — the thing that
+// gates the curator out of booking. So no path may leave a doc there once the
+// obligation has been DISCHARGED, by any route: paid, waived, cancelled, or
+// absorbed into a settlement that charged the full base. Leaving it `unpaid`
+// out of tidiness ("no money moved, so nothing to record") is how a curator
+// ends up permanently gated over a date they demonstrably owe nothing on.
+// `refunded` is the terminal state for "no escrow of ours is outstanding",
+// whether or not anything was ever collected.
+export type DepositStatus = "unpaid" | "held" | "applied"
+  | "refund_pending" | "refunded" | "forfeit_pending" | "forfeited";
+export type SettlementStatus = "not_due" | "pending" | "past_due" | "paid" | "waived";
+export type TransferStatus = "none" | "pending" | "transferred" | "reversed";
+
+export interface DepositState {
+  sliceCents: number;                    // ceil(the booking's deposit.policy.percent% of baseCents) — the accepted booking's frozen snapshot, never a live constant
+  feeShareCents: number;                 // ceil(sliceCents * curatorFeePct / 100)
+  intentId: string | null;               // shared for the accept batch; per-birth otherwise
+  // The Stripe CHARGE behind `intentId` (a PaymentIntent's latest_charge),
+  // captured at charge time. Transfers backed by a fresh charge must pass it
+  // as `sourceChargeId` (Task 8's forfeit transfer) so the transfer draws on
+  // that charge's own funds instead of the platform's aggregate available
+  // balance — otherwise a not-yet-settled charge yields balance_insufficient
+  // in live mode. Stays null when the charge id isn't known (a deposit
+  // finalized out-of-band by the payment_intent.succeeded webhook, whose
+  // event payload need not carry latest_charge).
+  chargeId: string | null;
+  status: DepositStatus;
+  chargedAt: number | null; resolvedAt: number | null;
+  forfeitTransferId: string | null;
+  // SP5 Task 9 — BIRTH-deposit dunning only (a date materialized onto an
+  // already-booked whole run, charged individually by the hourly payments
+  // sweep; the accept saga's own batch charge duns through the BOOKING's
+  // `depositChargeAttempt` instead, never these).
+  //
+  // `depositAttempts` is load-bearing for money safety, not diagnostics —
+  // exactly like BookingRequestDoc.depositChargeAttempt: both real Stripe and
+  // FakeStripe CACHE a decline under its idempotency key, so a retry after a
+  // decline must carry a different key or it replays the decline forever. The
+  // birth charge key is `{bookingId}:{gigId}:deposit:{depositAttempts}`, and
+  // the counter is PERSISTED before the attempt it names, so a crash between
+  // the charge and recording its outcome replays the SAME key (Stripe hands
+  // back the original intent) rather than charging twice. It increments ONLY
+  // on a decline.
+  //
+  // `depositNextRetryAt` is when the next attempt becomes due (offsets from
+  // SETTLEMENT_RETRY_OFFSETS_MS); null/absent means "no retry pending" —
+  // either it has never been attempted, or the retry schedule is exhausted
+  // (at which point the curator profile is flagged delinquent instead; there
+  // is deliberately NO late fee on a deposit — late fees are a settlement
+  // concept, spec §4).
+  //
+  // Both optional so every pre-Task-9 payment doc stays type-valid; readers
+  // must treat absent as 0 / null respectively.
+  depositAttempts?: number;
+  depositNextRetryAt?: number | null;
+  // SP5 Task 11 — the ON-SESSION intent `payPastDue` minted to rescue this
+  // deposit after its retry schedule ran out, mirrored out of `intentId` for
+  // exactly the reason SettlementState.payDueIntentId is: `intentId` alone
+  // cannot say whether the outstanding charge is one payPastDue may replace,
+  // and an `unpaid` deposit can also be carrying a birth charge left
+  // `processing` by the sweep. Optional; absent means null.
+  payDueIntentId?: string | null;
+}
+export interface SettlementState {
+  status: SettlementStatus;
+  settleAfter: number | null;            // gig END + SETTLEMENT_DELAY_MS, set when the gig ends
+  computedCents: number | null;          // final base − deposit slice (>= 0), set at charge time
+  feeShareCents: number | null;
+  trueUp: { extraMinutes: number; extraSongs: number; reportedAt: number } | null;
+  intentId: string | null;
+  // SP5 Task 11 — the ON-SESSION intent `payPastDue` minted for this
+  // occurrence, mirrored out of `intentId` so the two can be told apart.
+  //
+  // LOAD-BEARING, not diagnostics. `intentId` alone cannot answer "is the
+  // outstanding intent one payPastDue may replace?", and getting that wrong is
+  // a double charge: an off-session settlement intent left `processing` (or
+  // one that succeeded against a doc whose payout was blocked) also lives in
+  // `intentId`, and minting a second, confirmable intent beside it would let
+  // the curator pay a night twice. payPastDue therefore refuses whenever
+  // `intentId != null && intentId !== payDueIntentId`, and otherwise re-issues
+  // under its own deterministic key — which REPLAYS its previous intent rather
+  // than creating a second one, so an abandoned attempt is resumable.
+  //
+  // Optional so every pre-Task-11 payment doc stays type-valid; readers must
+  // treat absent as null.
+  payDueIntentId?: string | null;
+  attempts: number; nextRetryAt: number | null;
+  lateFeeCents: number | null; lateFeeMusicianCents: number | null;
+  // Explicit delinquency marker, set once (never cleared) when delinquency
+  // is declared. lateFeeCents is the MONEY, never the flag — a legitimately
+  // -zero late fee (e.g. a 0-pct policy snapshot) must not read as
+  // "not delinquent" just because the cents happen to be 0.
+  delinquentAt: number | null;
+  // SP5 Task 10 — PRE-CHARGE marker, written immediately before the
+  // settlement's Stripe call and cleared by every terminal write. Two jobs,
+  // both about the non-transactional gap a charge opens:
+  //  1. it closes the true-up window BEFORE the money is computed, so a
+  //     curator can never report extra minutes against a charge that is
+  //     already in flight (the settlement would then record an amount that
+  //     was never charged). `settlement.intentId` closes that window too, but
+  //     only AFTER the call returns — this covers the call itself.
+  //  2. its write time is the CAS baseline the terminal write is held to, so
+  //     the precondition spans the whole charge (same persist-before-charge
+  //     idiom as DepositState.depositAttempts).
+  // Readers must treat it as advisory and TIME-BOUNDED (IDEMPOTENCY_WINDOW_MS)
+  // — an instance that died mid-charge would otherwise lock the true-up
+  // window forever. Optional so every pre-Task-10 payment doc stays valid.
+  chargingSince?: number | null;
+}
+export interface TransferState {         // musician earnings for this occurrence
+  status: TransferStatus;
+  id: string | null; amountCents: number | null; transferredAt: number | null;
+}
+// bookings/{bookingId}/payments/{gigId} — one doc per occurrence, the money
+// truth for that date. Server-written only; readable by both booking sides.
+export interface PaymentDoc {
+  bookingId: string; gigId: string; occurrenceStartsAt: number;
+  curatorProfileId: string; musicianProfileId: string; selfDeal: boolean;
+  baseCents: number;                       // this occurrence's expected total (frozen terms, ITS OWN duration for perHour)
+  deposit: DepositState;
+  settlement: SettlementState;
+  transfer: TransferState;
+  createdAt: number; updatedAt: number;
+}
+
+export type PaymentSummaryState = "current" | "past_due" | "delinquent";
+export interface PaymentSummary {
+  state: PaymentSummaryState; heldCents: number; paidCents: number; transferredCents: number;
+}
+
+// SP5 Task 13: the MOST RECENT completed payout request for a profile, kept on
+// the identity doc as the replay memo for `requestPayout`.
+//
+// WHY IT EXISTS. Payout idempotency is scoped to a client-minted `requestId`
+// (not a timestamp), so a retried call reuses the same Stripe key and Stripe
+// replays the original payout instead of making a second one. But the
+// callable's own available-balance pre-check runs BEFORE that key is ever
+// used, and the first call already spent the balance — so a retry of a
+// full-balance cash-out would be refused with "that's more than your available
+// balance" and the caller would never learn the payout id. This record is what
+// makes such a retry return the original result: same `requestId` ⇒ hand back
+// the stored outcome, no Stripe call, no balance check.
+//
+// ONLY THE LAST ONE is kept — a retry of an OLDER requestId falls through to
+// the ordinary path, where the balance check (or Stripe's own key replay) still
+// makes a second payout impossible. Retries happen seconds after the original,
+// which is exactly the window "last" covers.
+export interface PayoutRequestRecord {
+  requestId: string;
+  payoutId: string;
+  method: "standard" | "instant";
+  amountCents: number;                     // gross — what left the balance in total
+  feeCents: number;                        // instant fee (0 for standard)
+  netCents: number;                        // what the payout itself moved
+  at: number;
+}
+
+// profiles/{profileId}/private/stripe — members + admins read, server-write.
+// One profile can hold both halves (a curator that also performs).
+export interface StripeProfileDoc {
+  customerId: string | null;               // curator half
+  defaultPaymentMethodId: string | null; cardBrand: string | null; cardLast4: string | null;
+  accountId: string | null;                // musician half (Express)
+  transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
+  onboardingStartedAt: number | null; onboardedAt: number | null;
+  delinquent: boolean; delinquentSince: number | null;
+  // Optional/backward-compatible: every pre-Task-13 doc omits it, and a
+  // profile that has never cashed out never gets it.
+  lastPayout?: PayoutRequestRecord | null;
+  // Owner ruling (M3): epoch ms until which INSTANT payouts are held on this
+  // profile because self-deal-funded money landed in its balance. null/absent =
+  // no hold. Set by the forfeit/earnings transfer sites for a `selfDeal`
+  // booking; requestPayout refuses an instant payout while `now < instantHoldUntil`.
+  // Standard payouts are unaffected.
+  instantHoldUntil?: number | null;
+  updatedAt: number;
+}
+
+// adminAlerts/{alertId} — SP5 Task 9, extended through Task 11. The money
+// paths have ABSORBING states: conditions they deliberately refuse to act on
+// (a charge that must not be replayed on an expired idempotency key, a marker
+// that must not be cleared, an intent that might still capture) and can only
+// escalate. A console.error alone is not an escalation — nobody is reading logs
+// at 3am — so each one also upserts a doc here, which is the durable "a human
+// has to look at this" queue. Server-written only; admins read it. Cleared by
+// an operator tool (releaseStuckSaga) setting resolvedAt.
+//
+// RAISED BY (the kinds below, and where from):
+//   paymentsSweep.ts    step 1 -> stuck_saga_marker / stale_accept_saga
+//                       step 2 -> stale_pending_deposit
+//                       step 3 -> deposit_pending_stuck
+//                       step 7 -> expired_booking_saga_marker
+//   paymentsSettlement.ts  chargeSettlement           -> settlement_pending_stuck
+//                          finalizeSettlementSuccess  -> settlement_raced,
+//                                                        settlement_payout_blocked
+//                          finalizeDepositPayDue's
+//                            webhook caller           -> deposit_raced
+//   paymentsPayouts.ts     requestPayout              -> payout_fee_uncollected
+//
+// Ids are DETERMINISTIC per underlying problem and are built ONLY by
+// paymentsCore.ts's id vocabulary (`stuckSagaAlertId` and friends), so an
+// hourly sweep updates one row rather than minting 24 a day. TWO ids are
+// deliberately SHARED by more than one kind — `stuck-saga:{bookingId}` covers
+// all three saga kinds, and `settlement-raced:{...}` covers both shapes of
+// "money moved and no state records it" — because each shared set is one
+// problem for one operator. recordAdminAlert re-logs whenever the KIND changes
+// on an existing row, so a condition changing shape is still visible.
+export type AdminAlertKind =
+  | "stuck_saga_marker"            // marker set on a booking that is no longer `open`
+  | "stale_accept_saga"            // staged >24h — its charge key can no longer be replayed
+  | "expired_booking_saga_marker"  // an expired booking whose deposits are still a live saga's
+  | "stale_pending_deposit"        // `*_pending` >24h — its refund/transfer key can no longer be re-issued
+  // SP5 Task 10: a settlement's money moved (charge and/or earnings transfer)
+  // but its terminal write lost a race to a concurrent waive — a post-transfer
+  // reportNoShow is the one path that can do this. Nothing automatic can
+  // decide whether to refund it or re-settle it, so it is escalated.
+  | "settlement_raced"
+  // SP5 Task 10: a settlement charge whose fate is unknown and which is
+  // therefore NEVER re-charged. Two shapes: an intent left `processing` that
+  // never resolved, and (Task 10 review, I2) a pre-charge claim older than
+  // Stripe's 24h key window that never recorded an intent at all. Either way
+  // a "retry" past that window would mint a real SECOND charge, so the row
+  // sits here until the webhook finalizes it or an operator resolves it in
+  // Stripe.
+  | "settlement_pending_stuck"
+  // SP5 Task 10 review (M1): the settlement is fully priced and the curator's
+  // side is done, but the MUSICIAN has no Stripe payout account, so the
+  // earnings transfer cannot be made and the doc is left unsettled. Distinct
+  // from the two above because nothing is stuck in Stripe and no money is at
+  // risk of moving twice — the fix is the musician finishing (or repairing)
+  // Express onboarding, after which the ordinary sweep settles it.
+  | "settlement_payout_blocked"
+  // SP5 Task 9/11: a BIRTH deposit left `unpaid` while carrying an intent — a
+  // charge that came back `processing` and never resolved, or an on-session
+  // pay-now intent the curator never confirmed. The deposit twin of
+  // `settlement_pending_stuck`, and refused for the identical reason: that
+  // intent can still succeed, so a fresh-key retry past Stripe's 24h window
+  // would be a real second charge. Sits here until an operator resolves the
+  // intent in Stripe (there is no birth-deposit webhook finalizer).
+  | "deposit_pending_stuck"
+  // SP5 Task 11: a pay-now deposit whose intent Stripe confirmed AFTER a racer
+  // (a cancellation, a waive) had already claimed the doc — money captured,
+  // escrow that does not exist. The deposit twin of `settlement_raced`: the
+  // ledger row is written from Stripe's own attested amount so the charge is
+  // never invisible, and the unwind (refund it) is an operator's call.
+  | "deposit_raced"
+  // SP5 Task 12: the post-transfer no-show CLAWBACK could not complete. Three
+  // shapes, one ticket, because an operator resolves them the same way (look at
+  // what Stripe actually holds for this occurrence, then finish the unwind by
+  // hand): the transfer reversal or one of the two refunds threw; the terminal
+  // write lost its race after the money had already come back; or the reported
+  // occurrence is `paid` with NO transfer to reverse, so the automatic unwind
+  // has no handle on it at all. The curator has been charged for a date they
+  // report never happened, so this is never merely logged.
+  | "clawback_failed"
+  // SP5 Task 13: an INSTANT payout was made but the platform's 4% fee could
+  // not be pulled back off the connected account (the account debit threw).
+  // The payout is NEVER unwound for this — the musician has their money and
+  // reversing a paid-out instant payout is not a thing — so the fee is simply
+  // uncollected revenue until an operator recovers it (debit the account by
+  // hand, or net it off a future payout). The ONE alert kind in SP5 that is
+  // profile-scoped rather than booking-scoped: its row carries a null
+  // bookingId/gigId and names the profile in `detail`.
+  | "payout_fee_uncollected";
+export interface AdminAlertDoc {
+  kind: AdminAlertKind;
+  detail: string;
+  // Null ONLY for `payout_fee_uncollected` (see above) — every other kind is
+  // raised about a specific occurrence of a specific booking.
+  bookingId: string | null; gigId: string | null;
+  // The start of the ORIGINAL episode, preserved across reopens: a sweep that
+  // observes this condition again after an operator set `resolvedAt` clears
+  // that field but never re-stamps this one, so "how long has this money been
+  // stuck" keeps measuring from when it first got stuck — not from the last
+  // time someone tried to close the ticket. A genuinely new episode gets a new
+  // row only when the underlying problem is a different (bookingId, gigId).
+  firstSeenAt: number;
+  lastSeenAt: number;
+  // How many times this condition has been OBSERVED — not how many runs it has
+  // survived, and not a sweep-only counter: one sweep run can observe the same
+  // stuck booking from two different steps (step 1's marker guard and step 7's)
+  // and both count, and the callable/webhook raisers (a raced settlement, a
+  // raced pay-now deposit) increment it the same way.
+  runCount: number;
+  resolvedAt: number | null;
+}
+
+export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
+  | "forfeit_transfer" | "earnings_transfer" | "late_fee" | "payout_standard"
+  | "payout_instant" | "transfer_reversal" | "account_debit"
+  // SP5 Task 13: a payout Stripe later BOUNCED (`payout.failed` — a closed
+  // bank account, a rejected debit card). The `payout_standard`/`payout_instant`
+  // row is written when the payout is REQUESTED, so this is the row that
+  // records the money coming back to the connected account's balance; without
+  // it a failed payout would be indistinguishable in the ledger from a paid
+  // one. Keyed off the payout's own id, so it can never collide with the
+  // request-time row (different kind, same object).
+  | "payout_failed";
+export interface LedgerEntry {
+  kind: LedgerKind;
+  amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign
+  bookingId: string | null; gigId: string | null; profileId: string | null;
+  stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
+  detail: string; at: number;
+}

@@ -1,6 +1,6 @@
 "use client";
 import {
-  validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT,
+  validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type BudgetStructure,
 } from "@gatekeep/shared";
 // SP4 (Task 13 item 9): re-exported, not redefined — see GigForms.tsx's
@@ -28,8 +28,14 @@ export { gigLocationLabel } from "../../app/u/[handle]/gigDisplay";
 // at this point (that only exists once a deposit is actually calculated,
 // after acceptBooking runs), so this is the "implied, not yet known" phrasing
 // rather than Task 10's "$X" variant.
+// SP5 Task 15 review round 1 (medium #6): payments are LIVE as of this
+// sub-project — the old "...will be collected... when payments launch"
+// wording was accurate pre-SP5 and is now simply false (acceptBooking fires
+// a real Stripe charge the moment it commits). DEPOSIT_PERCENT templated in
+// rather than a hardcoded "35%" literal, so this can never drift from the
+// actual constant.
 export const DEPOSIT_HONESTY_LINE =
-  "If accepted, a 35% deposit will be collected from the curator when payments launch.";
+  `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card at accept.`;
 
 export interface OfferState { amount: string; quantity: string; note: string; }
 export const emptyOffer = (): OfferState => ({ amount: "", quantity: "", note: "" });

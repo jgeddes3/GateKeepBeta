@@ -65,6 +65,13 @@ Prior records: `docs/superpowers/sp2-rulings.md`, `docs/superpowers/sp3-rulings.
     book — legit venue-owner-performer exists — but the booking is stamped `selfDeal: true` at
     accept and earns no `completedCount` credit. Sub-5 must decide whether selfDeal bookings settle
     normally.
+
+    **RESOLVED (SP5):** selfDeal bookings **settle normally, with fees fully applying** — the 11%
+    curator fee, the 2% musician commission and (if it comes to it) the late fee all behave exactly
+    as on any other booking. Rationale, ruled during brainstorming and recorded in the payments spec
+    §1: paying real fees to move your own money removes any farming incentive, so no exclusion
+    carve-out is needed and the money path stays single. The reliability side of this ruling is
+    unchanged — selfDeal still earns no `completedCount` credit.
 12. **`occurrenceCancellations` is reject-when-full** (cap 100, `resource-exhausted` — F7):
     settlement records are never silently discarded (unlike reliability marks, which stay
     drop-oldest-200 rolling history).
@@ -106,18 +113,52 @@ Prior records: `docs/superpowers/sp2-rulings.md`, `docs/superpowers/sp3-rulings.
   wire from `deposit` + `cancellation.outcome` + `deposit.forfeitedTo` ("musician" is the only
   forfeit target; platform-fee carve-out of forfeited deposits is sub-5's product decision).
   `expired` + non-null deposit = refund. Admin-takedown unwinds = refund (no forfeiture either way).
+
+  **RESOLVED (SP5):** the deposit is real money now. `DepositStatus` (`packages/shared/src/types.ts`)
+  runs `unpaid → held → applied` with `refund_pending`/`forfeit_pending` as the transactional
+  intent-to-move-money — written in the SAME transaction as the cancellation, so a crash before the
+  money moves always leaves a doc `paymentsSweep` can find and finish. Every edge this bullet named
+  is wired: `expired` + non-null deposit refunds, admin-takedown unwinds refund, and a curator
+  cancel inside 72h forfeits **to the musician**. The carve-out question is answered: **no platform
+  carve-out on forfeits** — the musician receives 100% of the deposit base (no 2% commission), and
+  the platform keeps only the curator's 11% fee share that was charged on that deposit either way.
+  Refunds always include the curator's fee share; we eat Stripe's processing cost. One addition
+  this bullet did not anticipate: `unpaid` is a DEBT-QUERY ANSWER, not a resting state — no path may
+  leave a doc there once the obligation is discharged, or the curator is permanently gated (see
+  `DepositStatus`'s closing-invariant comment).
 - **Settlement math from `acceptedTerms`**: perHour overtime, perSong count-true-up, perSet flat;
   per-occurrence basis for whole-run = the booking-linked FILLED gigs set (each occurrence's own
   `durationMinutes` × frozen `amountCents` for perHour). A booking-linked `taken_down` occurrence
   settles as NOT-performed. `occurrenceCancellations` entries are per-date settlement inputs; a
   full 100-entry array is a tripwire (the callable now refuses further per-date cancels).
+
+  **RESOLVED (SP5):** settlement runs **T+3 after each occurrence ENDS**, off-session, on the
+  frozen `acceptedTerms` exactly as specified — per-occurrence for whole runs, over the sweep's
+  filled-linked-gigs set (ruling 16's basis, not the spec's unimplemented `filled → closed`
+  transition), each occurrence using its OWN `durationMinutes` for `perHour`. Overtime/count
+  true-ups are a curator-reported, **increase-only** `confirmOccurrenceActuals` whose window closes
+  the moment a charge starts. A booking-linked `taken_down` date settles as not-performed. The
+  `occurrenceCancellations` tripwire held as recorded — SP5 consumes those entries as settlement
+  inputs and never needed the cap raised.
 - **selfDeal settlement decision** (ruling 11): decide whether `selfDeal: true` bookings settle
   normally, at a fee, or are excluded.
+
+  **RESOLVED (SP5):** normally, **at full fees** — see ruling 11's annotation above.
 - **`resumeSeries` tripwire — STILL OPEN, carried from sp3-rulings ruling 19 unchanged**: SP4
   deliberately did not add it; pause remains one-way. The requirements (approval-gate +
   `pausedBy` distinction) bind whoever adds it.
+
+  **STILL OPEN after SP5** — carried forward unchanged for the third sub-project running. SP5 was
+  a money sub-project and deliberately touched no series lifecycle; pause is still one-way, and the
+  requirements above still bind whoever adds it.
 - **Deferred guard cleanup**: `inviteMember` lacks `isValidDocId(profileId)`; `respondToInvite`
   validates inviteId by existence only.
+
+  **RESOLVED (SP5, Task 3):** both landed (`functions/src/members.ts`) — `inviteMember` guards
+  `profileId` with `isValidDocId`, and `respondToInvite` validates `inviteId`'s SHAPE before
+  building a doc path from it. The same review pass extended the fix past the two items recorded
+  here: `revokeInvite`, `removeMember` and `transferAdmin` were missing the identical guards and
+  got them too.
 - **Scale/hardening follow-ups** (README records them): materializer birth-decision race (filled
   gigs linked to a non-confirmed booking have no reconciling sweep step — accepted at
   daily-sweep-window probability; fix menu recorded), sweep step-6 `db.getAll` batching,

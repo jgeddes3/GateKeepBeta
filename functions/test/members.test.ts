@@ -221,6 +221,22 @@ describe("invites", () => {
       "inviteMember", { profileId, email: `no-account-cap-${now}@test.com`, role: "member", label: "x" }, owner.user))
       .rejects.toMatchObject({ code: "functions/resource-exhausted" });
   });
+
+  it("SP5 Task 3: inviteMember rejects a malformed profileId with invalid-argument, and creates no invite", async () => {
+    const { owner, profileId } = await bandWithOwner("inv14");
+    const email = `mal-${Date.now()}@test.com`;
+    await signUpTestUser(email);
+    await expect(callFn("inviteMember", { profileId: "a/b", email, role: "member", label: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    const invites = await adb.collection("invites").where("profileId", "==", profileId).get();
+    expect(invites.size).toBe(0);
+  });
+
+  it("SP5 Task 3: respondToInvite rejects an overlong (80-char) inviteId with invalid-argument", async () => {
+    const invitee = await signUpTestUser(`ov-${Date.now()}@test.com`);
+    await expect(callFn("respondToInvite", { inviteId: "x".repeat(80), accept: true }, invitee.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
 });
 
 describe("removal and admin transfer", () => {

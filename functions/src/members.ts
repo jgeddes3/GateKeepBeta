@@ -15,6 +15,7 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     const { profileId, email, role, label } = req.data;
     // Defensive runtime guards: onCall's generic type parameter does not
     // validate the untrusted request payload at runtime.
+    if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
     if (typeof email !== "string" || email.trim().length === 0) {
       throw new HttpsError("invalid-argument", "A valid email is required.");
     }
@@ -73,6 +74,7 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
     // already gates createProfileDraft/inviteMember the same way.
     requireVerifiedEmail(req);
     const { inviteId, accept } = req.data;
+    if (!isValidDocId(inviteId)) throw new HttpsError("invalid-argument", "An invite id is required.");
     const db = getFirestore();
     const ref = db.doc(`invites/${inviteId}`);
     const snap = await ref.get();
@@ -157,12 +159,10 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
     // guards -> writes is this file's standard ordering; revokeInvite and
     // transferAdmin below were ALSO missing requireVerifiedEmail + an
     // isValidDocId guard on their own ids and got the identical fix in this
-    // same review pass. inviteMember and respondToInvite are NOT claimed to
-    // fully match: inviteMember validates email/role/label but never runs
-    // profileId through isValidDocId, and respondToInvite validates inviteId
-    // only by existence (a not-found on a malformed id, not invalid-argument)
-    // rather than isValidDocId — standardizing those two remains a separate,
-    // not-yet-done cleanup.
+    // same review pass. inviteMember and respondToInvite were left as a
+    // separate, not-yet-done cleanup at the time — closed by SP5 Task 3,
+    // which added the same isValidDocId(profileId)/isValidDocId(inviteId)
+    // guards to both, immediately after destructuring req.data.
     requireVerifiedEmail(req);
     const { profileId, uid } = req.data;
     if (!isValidDocId(profileId) || !isValidDocId(uid)) {

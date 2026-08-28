@@ -8,14 +8,17 @@ import { formatDuration, type OfferPayload } from "./BookingForms";
 import { bookingHistoryLabel, depositLine } from "./BookingInbox";
 import { OfferForm } from "./OfferForm";
 import { CancelDialog } from "./CancelDialog";
+import { GatePrompt } from "../payments/GatePrompt";
+import { depositChargePreviewCents } from "../payments/fees";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
-  NO_SHOW_REPORT_WINDOW_DAYS,
+  NO_SHOW_REPORT_WINDOW_DAYS, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
+  DEPOSIT_PERCENT, CANCEL_GRACE_MS,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
 
-type Role = "musician" | "curator" | "both" | "none" | "loading";
-type Occurrence = { id: string; startsAt: number; durationMinutes: number };
+export type Role = "musician" | "curator" | "both" | "none" | "loading";
+export type Occurrence = { id: string; startsAt: number; durationMinutes: number };
 
 function ErrorBox({ message }: { message: string }) {
   return (
@@ -69,7 +72,10 @@ export function useNow(): number | null {
 // member of is a legitimate, expected outcome (see firestore.rules'
 // members `allow get` rule), and must not swallow the OTHER side's
 // successful result.
-function useRole(musicianProfileId: string | undefined, curatorProfileId: string | undefined, uid: string): Role {
+// Exported (Task 15) so PaymentsPanel.tsx can resolve the same viewer-side
+// role for the SAME booking without a second, subtly-divergent copy of this
+// membership-resolution logic.
+export function useRole(musicianProfileId: string | undefined, curatorProfileId: string | undefined, uid: string): Role {
   const [role, setRole] = useState<Role>("loading");
   useEffect(() => {
     if (!musicianProfileId || !curatorProfileId) return;
@@ -119,7 +125,10 @@ function useGig(gigId: string | undefined): GigDoc | null | "loading" | "unavail
 // stay "filled" forever (Task 8's review), so this list — and its LAST
 // entry in particular — is also what the completed-view no-show report
 // window below is computed from.
-function useOccurrences(bookingId: string): Occurrence[] {
+// Exported (Task 15) — PaymentsPanel.tsx/TrueUpForm.tsx need an occurrence's
+// OWN durationMinutes for the settlement/true-up preview math, and this is
+// the one query that already resolves it correctly (see the comment above).
+export function useOccurrences(bookingId: string): Occurrence[] {
   const [rows, setRows] = useState<Occurrence[]>([]);
   useEffect(() => {
     const { db } = getFirebase();
@@ -243,8 +252,30 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     const expectedTotalCents = computeExpectedTotalCents(booking.structure, lastEntry.amountCents, {
       durationMinutes: gig.durationMinutes, songCount: lastEntry.expectedQuantity ?? undefined,
     });
-    return { expectedTotalCents, depositAmountCents: computeDepositCents(expectedTotalCents) };
+    return {
+      expectedTotalCents, depositAmountCents: computeDepositCents(expectedTotalCents),
+      // SP5 Task 15: "Due now" fee transparency — the same preview math the
+      // Earnings page's other fee previews use (fees.ts), never the server's
+      // source of truth (invariant #1 — acceptBooking recomputes every cent
+      // independently from the frozen thread entry it commits).
+      chargePreview: depositChargePreviewCents(expectedTotalCents),
+    };
   })();
+  // SP5 Task 15 review round 1: "1-hour" derived from the actual shared
+  // constant rather than a hardcoded literal that could drift from it if
+  // CANCEL_GRACE_MS ever changes. CANCEL_GRACE_MS is exactly 3_600_000 today,
+  // so this is "1" — the arithmetic (not the literal) is what's load-bearing.
+  const graceHours = CANCEL_GRACE_MS / 3_600_000;
+  // SP5 Task 15 review round 1: side-appropriate flash window — a CURATOR
+  // accepting within their own 72h forfeit window is warned about forfeiture
+  // risk; a MUSICIAN accepting within their own 24h no-show-mark window
+  // (MUSICIAN_MARK_WINDOW_HOURS, same constant CancelDialog's own warning
+  // uses) is warned about that instead. Computed off the live gig's own
+  // startsAt (occurrences[] is empty pre-accept — no "filled" gig exists yet
+  // for THIS booking until acceptBooking materializes one).
+  const flashWindowHours = mySide === "curator" ? CURATOR_FORFEIT_WINDOW_HOURS : MUSICIAN_MARK_WINDOW_HOURS;
+  const startsSoonFlash = now != null && gig !== "loading" && gig !== "unavailable" && gig != null
+    && (gig.startsAt - now) < flashWindowHours * 3_600_000;
 
   const counter = async (payload: OfferPayload) => {
     setActionBusy("counter"); setActionError(null);
@@ -418,14 +449,60 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                   {actionBusy === "decline" ? "Declining…" : "Decline"}
                 </button>
               </div>
-              {actionError && <ErrorBox message={actionError} />}
+              {actionError && (
+                <GatePrompt message={actionError} curatorProfileId={booking.curatorProfileId}
+                  viewerIsMusician={mySide === "musician"} onRetry={accept} />
+              )}
               {showAcceptConfirm && (
                 <div style={{ border: "1px solid #111", borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
                   <p style={{ margin: 0, fontWeight: 600 }}>Confirm accept</p>
                   {preview ? (
                     <>
                       <p style={{ margin: 0 }}>Total: {formatCents(preview.expectedTotalCents)}</p>
-                      <p style={{ margin: 0, color: "#666" }}>{depositLine(preview.depositAmountCents)}</p>
+                      {/* SP5 Task 15 review round 1 (medium #4): the "Due now"
+                          breakdown is CURATOR money — only the curator side
+                          sees the actual figures; a musician-side accepter
+                          gets a neutral line instead (the charge lands on the
+                          CURATOR's card regardless of who clicks accept). */}
+                      {mySide === "curator" ? (
+                        <>
+                          <p style={{ margin: 0, color: "#666" }}>
+                            Due now: {formatCents(preview.chargePreview.totalCents)}{" "}
+                            ({formatCents(preview.chargePreview.sliceCents)} deposit{" + "}
+                            {formatCents(preview.chargePreview.feeCents)} service fee)
+                            {/* SP5 Task 15 review round 1 (medium #5): a whole-
+                                run booking's deposit is charged PER DATE, not
+                                once — the figure above is one date's worth.
+                                occurrences[] only ever holds "filled" gigs, so
+                                it's empty at this pre-accept point in
+                                practice; the count branch below is a
+                                cheap-if-available upgrade, not something this
+                                screen can currently reach, but it stays
+                                correct if that ever changes. */}
+                            {booking.seriesId != null && occurrences.length === 0
+                              ? " × each of the run's upcoming dates" : ""}
+                          </p>
+                          {booking.seriesId != null && occurrences.length > 0 && (
+                            <p style={{ margin: 0, color: "#666" }}>
+                              ≈ {occurrences.length} dates, {formatCents(preview.chargePreview.totalCents * occurrences.length)} total due now.
+                            </p>
+                          )}
+                          <p style={{ margin: 0, color: "#666" }}>
+                            Remaining {100 - DEPOSIT_PERCENT}% + fee auto-charges after each date.
+                          </p>
+                        </>
+                      ) : (
+                        <p style={{ margin: 0, color: "#666" }}>
+                          The curator&apos;s card is charged the deposit when you accept.
+                        </p>
+                      )}
+                      {startsSoonFlash && (
+                        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+                          {mySide === "curator"
+                            ? `This booking starts soon — once accepted it's final after a ${graceHours}-hour grace period (cancelling later forfeits your deposit).`
+                            : `This booking starts soon — once accepted it's final after a ${graceHours}-hour grace period (cancelling less than ${MUSICIAN_MARK_WINDOW_HOURS}h out adds a reliability mark).`}
+                        </p>
+                      )}
                     </>
                   ) : (
                     <p style={{ margin: 0, color: "#92400e" }}>
@@ -492,7 +569,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
 
           {showCancelFor ? (
             <CancelDialog bookingId={bookingId} gigId={showCancelFor.gigId} side={mySide} startsAt={showCancelFor.startsAt}
-              depositAmountCents={booking.deposit?.amountCents} mode={showCancelFor.mode}
+              depositAmountCents={booking.deposit?.amountCents} confirmedAt={booking.confirmedAt} mode={showCancelFor.mode}
               onClose={() => setShowCancelFor(null)} onDone={() => setShowCancelFor(null)} />
           ) : (
             cancelTarget && (

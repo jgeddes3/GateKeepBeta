@@ -134,6 +134,7 @@ export default function Dashboard() {
   return (
     <main style={{ maxWidth: 760, margin: "40px auto" }}>
       <h1>Dashboard</h1>
+      <p><a href="/dashboard/earnings">Earnings &amp; payouts</a></p>
       <p>
         {user.email} · <button onClick={signOutUser}>Sign out</button>
         {" · "}

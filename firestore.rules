@@ -97,6 +97,13 @@ service cloud.firestore {
         allow write: if false; // Cloud Functions only
       }
 
+      match /private/stripe {
+        // Payment identity + cached gate flags: members + admins only, same
+        // audience as private/booking. Server-write only.
+        allow read: if isMember(profileId) || isAdmin();
+        allow write: if false; // Cloud Functions only
+      }
+
       match /private/curatorBooking {
         // SP4: server-built projection (bookingVisibility.ts's
         // rebuildBookingProjections) — rates with "private"-visibility
@@ -197,6 +204,36 @@ service cloud.firestore {
         || isMember(resource.data.musicianProfileId) || isAdmin();
       allow write: if false;
     }
+
+    // ---------- Sub-project 5: payments ----------
+    match /bookings/{bookingId}/payments/{gigId} {
+      // Same audience as the parent booking: either side's members + admins.
+      // The parent get()s pin to the bookingId path segment, so a list query
+      // scoped under one booking is provable for members of either side.
+      // signedIn() guard (branch audit): short-circuits BEFORE the billed parent
+      // get()s so an anonymous caller does not pay a document read to be denied —
+      // matches the private/curatorBooking read rule's `signedIn() && exists()`
+      // idiom above. isMember() already re-checks signedIn(), so this only moves
+      // the cost, never the outcome.
+      allow read: if isAdmin()
+        || (signedIn() && (
+          isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.curatorProfileId)
+          || isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.musicianProfileId)));
+      allow write: if false; // Cloud Functions only
+    }
+    // Webhook idempotency + append-only money audit — server/admin surfaces.
+    match /stripeEvents/{eventId} { allow read: if isAdmin(); allow write: if false; }
+    match /ledger/{entryId}       { allow read: if isAdmin(); allow write: if false; }
+    // FakeStripe state (emulator only; the collection simply never exists in
+    // production) — never client-visible either way.
+    match /stripeFake/{doc=**}    { allow read, write: if false; }
+
+    // SP5 Task 9: the payments sweep's durable escalation queue — the money
+    // states it deliberately refuses to act on and can only hand to a human
+    // (see AdminAlertDoc). Admin-read, server-write, exactly like ledger and
+    // stripeEvents above; releaseStuckSaga is the callable that resolves a row.
+    match /adminAlerts/{alertId} { allow read: if isAdmin(); allow write: if false; }
+
     match /adminNotes/{uid} { allow read: if isAdmin(); allow write: if false; }
     match /curatorAccess/{uid} { allow read: if isOwner(uid) || isAdmin(); allow write: if false; }
     // S2: per-uid daily geocode call counter (functions/src/geocode.ts's

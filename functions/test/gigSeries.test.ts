@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
+import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder, coarsen } from "../src/geocode.js";
@@ -381,6 +381,7 @@ describe("pauseSeries", () => {
   it("with an active run booking at 71h before the next occurrence: curator-cancels the run (deposit_forfeited recorded, reason names the pause), series pauses, occurrences stay reopened (open)", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps4", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps4m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
     try {
       const gigId1 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 71 * 3_600_000 });
@@ -390,6 +391,11 @@ describe("pauseSeries", () => {
         "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
       await callFn("acceptBooking", { bookingId }, curator.user);
       expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
+      // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h) so this
+      // test exercises the SP4 71h-forfeit window, not the post-accept grace
+      // — a real pauseSeries call minutes after accept would otherwise land
+      // penalty-free.
+      await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
 
       await callFn("pauseSeries", { seriesId }, curator.user);
 
@@ -425,6 +431,7 @@ describe("pauseSeries", () => {
   it("zombie tolerance: once every future date was cancelled per-occurrence (no cancellable date left), pauseSeries still succeeds — the booking + linkage are left untouched for Task 8's sweep", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps5m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
     try {
       const gigId = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 50 * 3_600_000 });
@@ -505,6 +512,7 @@ describe("endSeries", () => {
   it("with an active run booking: curator-cancels the run (reason names the end), then the reopened future occurrences fall into the ordinary open|draft cancel sweep", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("es5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("es5m");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const seriesId = await createSeries(curatorProfileId, curator.user, { fillMode: "whole_run" });
     try {
       const gigId1 = await seedOccurrence(seriesId, curatorProfileId, { startsAt: Date.now() + 100 * 3_600_000 });
@@ -513,13 +521,19 @@ describe("endSeries", () => {
       const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
         "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
       await callFn("acceptBooking", { bookingId }, curator.user);
+      // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h) — without
+      // this, a fresh accept -> immediate endSeries would refund via grace
+      // regardless of the window, silently defeating the assertion below.
+      await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
 
       await callFn("endSeries", { seriesId }, curator.user);
 
       const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(bookingAfter.status).toBe("cancelled_by_curator");
       expect(bookingAfter.cancellation?.reason).toBe("Series ended by curator");
-      expect(bookingAfter.cancellation?.outcome).toBe("deposit_refunded"); // well outside the 72h forfeit window
+      // 100h out is well outside the 72h forfeit window — refunded on the
+      // window itself, not merely because grace (aged above) also would.
+      expect(bookingAfter.cancellation?.outcome).toBe("deposit_refunded");
 
       const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
       expect(seriesAfter?.status).toBe("ended");

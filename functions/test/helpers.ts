@@ -7,7 +7,7 @@ import { getFunctions, connectFunctionsEmulator, httpsCallable } from "firebase/
 import { getStorage as getClientStorage, connectStorageEmulator, ref as storageRef, uploadBytes } from "firebase/storage";
 import * as adminApp from "firebase-admin/app";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
-import type { Firestore } from "firebase-admin/firestore";
+import { getFirestore as getAdminFirestore, type Firestore } from "firebase-admin/firestore";
 
 // Needed before the admin app initializes below, so admin SDK auth calls
 // (e.g. updateUser) target the emulator rather than production.
@@ -56,6 +56,72 @@ export async function makeAdminUser(prefix: string) {
   await getAdminAuth(adminAppInstance).setCustomUserClaims(uid, { admin: true });
   await user.getIdToken(true); // refresh claims
   return { user, uid };
+}
+
+// Makes both sides of a booking money-ready for the Task 5 gates: the
+// curator gets a saved card (createSetupIntent's fake contract caches it on
+// profiles/{curator}/private/stripe immediately — no separate Elements flow
+// needed against the fake), and the musician gets an Express account whose
+// transfer flags are force-enabled directly (createOnboardingLink alone only
+// creates the account; onboarding completion is normally driven by the
+// account.updated webhook, which nothing in these fixtures triggers). Both
+// the fake's own object doc AND the cached private/stripe doc are flipped so
+// every gate helper — which reads the cached doc, not the fake's live state —
+// sees a payout-ready musician. As-built fake object path (see stripeClient.ts):
+// `stripeFake/state/objects/{id}`, NOT the stale `stripeFake/objects/{id}`
+// some earlier plan drafts show.
+export async function makeMoneyReady(
+  curator: { owner: { user: User }; profileId: string },
+  musician: { owner: { user: User }; profileId: string },
+): Promise<void> {
+  await callFn("createSetupIntent", { profileId: curator.profileId }, curator.owner.user);
+  await callFn("createOnboardingLink", { profileId: musician.profileId }, musician.owner.user);
+  const adb = getAdminFirestore(adminAppInstance);
+  const sp = (await adb.doc(`profiles/${musician.profileId}/private/stripe`).get()).data()!;
+  // Review round 1: fail with a named error instead of silently writing a
+  // junk `stripeFake/state/objects/undefined` doc if createOnboardingLink
+  // somehow didn't persist an accountId.
+  if (!sp?.accountId) {
+    throw new Error(`makeMoneyReady: musician ${musician.profileId} has no accountId after createOnboardingLink.`);
+  }
+  await adb.doc(`stripeFake/state/objects/${sp.accountId}`).set(
+    { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
+  await adb.doc(`profiles/${musician.profileId}/private/stripe`).set(
+    { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
+}
+
+// Sets a gig's startsAt relative to "now" AT THE MOMENT THIS RUNS — called
+// immediately before the boundary-sensitive callable under test, never
+// before the (multi-call, multi-second) profile/gig/booking setup chain.
+// That ordering matters: the setup chain's own wall-clock time would
+// otherwise erode any fixed buffer computed before it ran.
+//
+// NOTE (SP5): this moves the GIG's date only. A payment doc's
+// `occurrenceStartsAt` is stamped at accept time and does NOT follow — which
+// is correct for the cancellation-window tests (they only need the gig's
+// date to move), but a test that needs a genuinely PAST-dated payment doc
+// must push the gig into the past BEFORE acceptBooking instead.
+export async function setGigStartsAt(gigId: string, hoursFromNow: number): Promise<void> {
+  await getAdminFirestore(adminAppInstance).doc(`gigs/${gigId}`)
+    .update({ startsAt: Date.now() + hoursFromNow * 3_600_000 });
+}
+
+// SP5 Task 7: pushes a booking's confirmedAt `msAgo` milliseconds into the
+// past — called immediately before the boundary-sensitive callable under
+// test (same ordering rationale as setGigStartsAt above).
+export async function setConfirmedAtAgo(bookingId: string, msAgo: number): Promise<void> {
+  await getAdminFirestore(adminAppInstance).doc(`bookings/${bookingId}`)
+    .update({ confirmedAt: Date.now() - msAgo });
+}
+
+// The common case: safely outside CANCEL_GRACE_MS (1h). Every cancellation-
+// window test (forfeit AND refund/no-mark alike) calls this immediately
+// before its cancel/cancelOccurrence call — a booking that was just accepted
+// is INSIDE the grace window, so without this a refund/no-mark assertion
+// silently passes for the wrong reason (grace, not the window it claims to
+// test), and a forfeit assertion fails outright.
+export function ageConfirmedAt(bookingId: string): Promise<void> {
+  return setConfirmedAtAgo(bookingId, 2 * 3_600_000);
 }
 
 export async function callFn<T, R>(name: string, data: T, asUser?: User): Promise<R> {

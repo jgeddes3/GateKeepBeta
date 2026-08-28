@@ -2,6 +2,7 @@ import { ScrollView, View, Text, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { BookingThread } from "../../src/bookings/BookingThread";
+import { PaymentStatus } from "../../src/bookings/PaymentStatus";
 
 // Shared booking thread route (SP4 Task 12) — deep-linked from both role
 // tabs' inbox rows (BookingInbox.tsx) and from notification rows
@@ -36,6 +37,13 @@ export default function BookingThreadPage() {
           across client-side navigations to the same route with different
           params, mirroring web's identical key rationale. */}
       <BookingThread key={`${bookingId}-${user.uid}`} bookingId={bookingId} uid={user.uid} />
+      {/* SP5 Task 16 — the read-only money surface, keyed the same way and
+          for the same reason. It renders nothing at all until the booking
+          has payment docs (an accepted booking), so an open/negotiating
+          thread looks exactly as it did before. Mirrors web, where
+          PaymentsPanel sits directly beneath BookingThread on the booking
+          detail page. */}
+      <PaymentStatus key={`payments-${bookingId}-${user.uid}`} bookingId={bookingId} uid={user.uid} />
     </ScrollView>
   );
 }
