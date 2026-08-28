@@ -25,17 +25,16 @@ import {
 //    and a new EAS dev build, which was sub-5b); SP5b now wires the curator
 //    actions up: a card-on-file row (SaveCardSheet) and a native pay-past-due
 //    button (PayPastDueButton) beside the two past-due rows. "Report
-//    actuals"/TrueUpForm stays web-only (Task 5's scope, not this one).
+//    actuals"/TrueUpForm is Task 5's scope, not this one.
 //
-//    ONE DELIBERATE DIVERGENCE from web's copy remains, a consequence of
-//    still being read-only for the totals footer: the footer is side-gated.
-//    Web shows both lines to the curator side only (it renders inside a
-//    curator-gated block); mobile reaches the musician side too, so it shows
-//    the escrow line to both and the "total paid, including service fees"
-//    line only to the curator, whose bill that is. (SP5's other divergence —
-//    the two past-due labels reading "pay on the web" — is REMOVED by SP5b:
-//    the curator labels now match web's action-bearing copy, since there's a
-//    button to press again.)
+//    ONE DELIBERATE DIVERGENCE from web's copy remains: the totals footer is
+//    side-gated differently. Web shows both lines to the curator side only
+//    (it renders inside a curator-gated block); mobile reaches the musician
+//    side too, so it shows the escrow line to both and the "total paid,
+//    including service fees" line only to the curator, whose bill that is.
+//    (SP5's other divergence — the two past-due labels reading "pay on the
+//    web" — is REMOVED by SP5b: the curator labels now match web's
+//    action-bearing copy, since there's a button to press again.)
 //  * EarningsCard — the musician dashboard's balance headline
 //    (getStripeStatus), a strict subset of web's EarningsPanel with the
 //    cash-out/onboarding controls replaced by "manage payouts on the web".
