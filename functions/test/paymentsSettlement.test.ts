@@ -16,7 +16,7 @@ import {
 // (a deposit slice larger than the date is worth). Same direct-invoke style as
 // paymentsSweep.test.ts.
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
-import { chargeSettlement } from "../src/paymentsCore.js";
+import { chargeSettlement, IDEMPOTENCY_WINDOW_MS } from "../src/paymentsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -323,6 +323,22 @@ describe("settlement — the full T+3 pipeline", () => {
       { bookingId, gigId, extraMinutes: EXTRA_MINUTES - 20 }, curator.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
     // ...and a repeat at the same value is a no-op replace, not an accumulate.
+    await callFn("confirmOccurrenceActuals", { bookingId, gigId, extraMinutes: EXTRA_MINUTES }, curator.owner.user);
+    expect((await getPayment(bookingId, gigId))?.settlement.trueUp?.extraMinutes).toBe(EXTRA_MINUTES);
+
+    // The window also closes for the duration of a charge that is IN FLIGHT —
+    // the one-write-wide gap between the amount being computed and the intent
+    // id being recorded. Seeded directly, because the real marker only exists
+    // inside a single awaited chargeSettlement call.
+    const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
+    await paymentRef.update({ "settlement.chargingSince": Date.now() });
+    await expect(callFn("confirmOccurrenceActuals",
+      { bookingId, gigId, extraMinutes: EXTRA_MINUTES }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    // ...but only for as long as the charge behind it could still be replayed.
+    // A marker left by an instance that died mid-charge must not lock the
+    // curator out of reporting actuals forever.
+    await paymentRef.update({ "settlement.chargingSince": Date.now() - IDEMPOTENCY_WINDOW_MS - 1000 });
     await callFn("confirmOccurrenceActuals", { bookingId, gigId, extraMinutes: EXTRA_MINUTES }, curator.owner.user);
     expect((await getPayment(bookingId, gigId))?.settlement.trueUp?.extraMinutes).toBe(EXTRA_MINUTES);
 

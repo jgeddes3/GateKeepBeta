@@ -955,12 +955,20 @@ export async function finalizeSettlementSuccess(args: {
   const musicianStripe = await getStripeProfileDoc(p.musicianProfileId);
   if (math.earnings > 0 && !musicianStripe?.accountId) {
     // Unreachable in normal flow (accept is gated on a payout-ready musician).
-    // The doc is LEFT `pending`/`past_due` on purpose: the sweep re-runs it on
-    // the SAME attempt-scoped key, so the charge replays rather than doubling,
-    // and the musician's money is never dropped by flipping to a terminal
-    // state with no transfer behind it.
+    // The settlement is NOT flipped terminal — the musician's money must never
+    // be dropped by writing `paid` with no transfer behind it — but the CHARGE
+    // that already happened is persisted first, so chargeSettlement's
+    // unconditional outstanding-intent guard covers this doc from the very
+    // next run and it can never be charged a second time. Recovery is the
+    // payment_intent.succeeded webhook for this same intent (which re-enters
+    // here and completes once the account exists), or an operator working the
+    // `settlement_pending_stuck` alert that guard raises.
+    const rescue: Record<string, unknown> = { "settlement.chargingSince": null, updatedAt: now };
+    if (intentId) rescue["settlement.intentId"] = intentId;
+    await ref.update(rescue)
+      .catch((we) => console.error(`finalizeSettlementSuccess: failed to record intent ${String(intentId)} on ${bookingId}/${gigId}`, we));
     console.error(
-      `finalizeSettlementSuccess: no Stripe account for ${p.musicianProfileId} — ${bookingId}/${gigId} left unsettled for the next run`);
+      `finalizeSettlementSuccess: no Stripe account for ${p.musicianProfileId} — ${bookingId}/${gigId} left unsettled${intentId ? ` with intent ${intentId} recorded` : ""}`);
     return ran("skipped");
   }
 
@@ -1018,7 +1026,12 @@ export async function finalizeSettlementSuccess(args: {
     // recordRacedSettlement writes the audit rows and escalates.
     await recordRacedSettlement({
       bookingId, gigId, curatorProfileId: p.curatorProfileId, musicianProfileId: p.musicianProfileId,
-      charge: intentId ? { intentId, amountCents: args.chargedCents ?? math.chargeTotal } : null,
+      // `chargedCents ?? null`, never the recomputed `math.chargeTotal`: the
+      // doc's state has moved under us, so a re-derived figure could disagree
+      // with what Stripe actually took — and the interface's rule is that null
+      // means "we don't know", which is a truthful audit row's absence rather
+      // than a plausible-looking wrong one. All three raced branches agree.
+      charge: intentId ? { intentId, amountCents: args.chargedCents ?? null } : null,
       transfer: transfer ? { id: transfer.id, amountCents: math.earnings } : null,
       racedStatus: "waived/rewritten mid-transfer", now,
     });
@@ -1097,39 +1110,55 @@ export async function chargeSettlement(
   // is deliberately untouched.
   if (p.settlement.status !== "pending" && p.settlement.status !== "past_due") return ran("skipped");
 
-  // THE OUTSTANDING-INTENT TERMINATOR. A `pending` settlement that already
-  // carries an intent id is one whose charge came back `processing` and never
-  // resolved. It must NEVER be charged again: that intent can still succeed,
-  // so a fresh-key retry (which is exactly what this becomes once Stripe's
-  // 24h idempotency window closes — see IDEMPOTENCY_WINDOW_MS) is a real
-  // SECOND charge on the curator's card. The only ways out are the
+  // THE OUTSTANDING-INTENT TERMINATOR. A settlement that already carries an
+  // intent id has a real charge attached to it — one left `processing`, or one
+  // that succeeded against a doc a racer moved. It must NEVER be charged
+  // again: that intent can still succeed (or already has), so a fresh-key
+  // retry — which is exactly what a re-run becomes once Stripe's 24h
+  // idempotency window closes (see IDEMPOTENCY_WINDOW_MS) — is a real SECOND
+  // charge on the curator's card. The ways out are the
   // payment_intent.succeeded webhook finalizing it, or an operator cancelling
   // /refunding the intent in Stripe; either way this loop just waits.
   //
-  // Scoped to `pending` deliberately, so `past_due` dunning retries keep
-  // working: a declined settlement never carries an intent id (the decline
-  // path in recordSettlementFailure writes status/attempts/nextRetryAt and
-  // explicitly leaves `settlement.intentId` alone, and the only writers of
-  // that field are this pending branch and the terminal `paid` write).
+  // UNCONDITIONAL on the settlement status, deliberately. Dunning retries are
+  // unaffected because a declined settlement never carries an intent id
+  // (recordSettlementFailure writes status/attempts/nextRetryAt and leaves
+  // `settlement.intentId` alone). The THREE writers of that field are: the
+  // pending branch below, the terminal `paid` write in
+  // finalizeSettlementSuccess, and recordRacedSettlement — and that last one
+  // can stamp an intent id onto a `past_due` doc whose `nextRetryAt` is still
+  // live, which a `pending`-only guard would sail straight past into a second
+  // charge.
   //
-  // TODO(Task 11): `payPastDue` will persist an intent id on a `past_due`
-  // doc, which this guard deliberately does not cover — it must clear
-  // `nextRetryAt` (or extend this guard) so the sweep's step 6 cannot charge
-  // alongside a live on-session intent.
-  if (p.settlement.status === "pending" && p.settlement.intentId != null) {
+  // TODO(Tasks 11/12): two later paths must cooperate with this guard —
+  //  - `payPastDue` persists an on-session intent id on a `past_due` doc, so
+  //    it must CLEAR that id on a failed/abandoned attempt (or extend this
+  //    guard), otherwise step 6's retries are blocked forever;
+  //  - the restore re-run must clear `settlement.intentId` AND bump
+  //    `settlement.attempts` when it re-opens a clawed-back settlement —
+  //    without the clear this guard refuses it, and without the bump its
+  //    `settle:`/`earn:` keys replay consumed ones and no money moves.
+  if (p.settlement.intentId != null) {
     const alertId = settlementPendingAlertId(bookingId, gigId);
     const shouldLog = await recordAdminAlert({
       alertId, kind: "settlement_pending_stuck",
-      detail: `settlement charge left processing on intent ${p.settlement.intentId} — never re-charged; finalize it via the webhook or resolve the intent in Stripe`,
+      detail: `"${p.settlement.status}" settlement already carries intent ${p.settlement.intentId} — never re-charged; finalize it via the webhook or resolve the intent in Stripe`,
       bookingId, gigId, now,
     });
     if (shouldLog) {
       console.error(
-        `chargeSettlement: ${bookingId}/${gigId} is pending but holds intent ${p.settlement.intentId} — not re-charged; needs admin attention (see adminAlerts/${alertId})`);
+        `chargeSettlement: ${bookingId}/${gigId} is "${p.settlement.status}" but holds intent ${p.settlement.intentId} — not re-charged; needs admin attention (see adminAlerts/${alertId})`);
     }
     return ran("pending");
   }
 
+  // RATIFIED ORDERING (review round 2, O1): this guard sits BEFORE the
+  // unlinked-gig waive, so an occurrence whose gig was reopened while a charge
+  // is outstanding is NOT auto-waived and its deposit is NOT auto-refunded.
+  // Refunding escrow while a live intent can still land would leave the
+  // curator charged for a date the system has already declared owed nothing —
+  // the money question outranks the linkage question. The
+  // `settlement_pending_stuck` alert above is the discovery route.
   if (!gig) {
     // The gig doc is gone outright (deleteProfile's cascade). Its duration is
     // what prices this date, so there is nothing to charge — and deliberately
@@ -1161,10 +1190,18 @@ export async function chargeSettlement(
   //      precondition spans the charge itself. Taking the baseline from the
   //      WRITE (rather than the read) also means the window between reading
   //      and claiming the doc is covered by the write's own precondition.
+  //
+  // `chargingSince` ONLY — deliberately not `updatedAt` (the same call
+  // recomputePaymentSummary makes, and for the same reason: a field that
+  // exists to carry a timestamp does not need a second one written beside
+  // it, and the CAS baseline comes from `wr.writeTime` either way). It also
+  // keeps the sweep's `updatedAt`-as-"first seen in this state" proxy honest
+  // — see the enumeration at the top of paymentsSweep.ts, which is only true
+  // while nothing incidental bumps that field.
   let baseline: FirebaseFirestore.Timestamp;
   try {
     const wr = await ref.update(
-      { "settlement.chargingSince": now, updatedAt: now },
+      { "settlement.chargingSince": now },
       { lastUpdateTime: pSnap.updateTime! });
     baseline = wr.writeTime;
   } catch (e) {
@@ -1176,7 +1213,11 @@ export async function chargeSettlement(
   }
 
   const math = settlementMath(p, booking, gig);
-  let intentId = p.settlement.intentId;
+  // Starts null unconditionally — the outstanding-intent guard above has
+  // already proved `p.settlement.intentId` is null by this point, so there is
+  // no prior intent to carry forward (and TypeScript narrows it to `null` for
+  // exactly that reason).
+  let intentId: string | null = null;
   let chargeId: string | null = null;
   let chargedCents: number | null = null;
 

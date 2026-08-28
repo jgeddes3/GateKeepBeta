@@ -96,6 +96,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //    there is no key in flight for the window to protect, and extending it
 //    is correct rather than merely benign. (Birth dunning also bumps
 //    updatedAt, but only ever on `unpaid` docs, which this guard never sees.)
+//    Task 10's settlement path adds one more writer that is deliberately NOT
+//    an updatedAt writer: chargeSettlement's pre-charge claim writes
+//    `settlement.chargingSince` alone (it carries its own timestamp, and its
+//    CAS baseline is the write result). Keeping it out of `updatedAt` is what
+//    lets the enumeration above stay exhaustive.
 
 // Step 7's scan bound. An unwind older than this was either already refunded
 // by an earlier run of this step or needs a human — either way, re-scanning
