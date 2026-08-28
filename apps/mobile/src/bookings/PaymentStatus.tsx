@@ -5,12 +5,14 @@ import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
 import { useRole } from "./BookingThread";
+import { SaveCardSheet } from "../payments/SaveCardSheet";
+import { PayPastDueButton } from "../payments/PayPastDueButton";
 import {
   PAID_DEPOSIT_STATUSES, paymentRowKind,
-  type BookingRequestDoc, type PaymentDoc, type PaymentRowKind,
+  type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
 
-// SP5 Task 16 — mobile's READ-ONLY money surfaces. Two components:
+// SP5 Task 16 — mobile's money surfaces. Two components:
 //
 //  * PaymentStatus — the per-occurrence status chips for one booking,
 //    mounted under BookingThread by app/booking/[bookingId].tsx. An RN port
@@ -18,30 +20,29 @@ import {
 //    the paidCents membership test are literally the same code
 //    (@gatekeep/shared's `paymentRowKind` / `PAID_DEPOSIT_STATUSES`), and
 //    the surrounding totals arithmetic mirrors that panel's field-for-field,
-//    INCLUDING its review-round fixes. Every ACTION is stripped: no
-//    save-card row, no
-//    "Report actuals", no "Pay now". Mobile ships read-only this
-//    sub-project (spec §1, "Platforms") — native payment sheets need
-//    @stripe/stripe-react-native and a new EAS dev build, which is sub-5b.
+//    INCLUDING its review-round fixes. SP5 shipped this read-only (spec §1,
+//    "Platforms" — native payment sheets needed @stripe/stripe-react-native
+//    and a new EAS dev build, which was sub-5b); SP5b now wires the curator
+//    actions up: a card-on-file row (SaveCardSheet) and a native pay-past-due
+//    button (PayPastDueButton) beside the two past-due rows. "Report
+//    actuals"/TrueUpForm stays web-only (Task 5's scope, not this one).
 //
-//    TWO DELIBERATE DIVERGENCES from web's copy, both consequences of being
-//    read-only — neither is a drift to "fix" by re-syncing the strings:
-//      1. The two past-due labels say "pay on the web" where web says "pay
-//         now" next to a button that actually does it. Telling a musician's
-//         curator to "pay now" on a screen with nothing to press is worse
-//         than saying where the button lives.
-//      2. The totals footer is side-gated. Web shows both lines to the
-//         curator side only (it renders inside a curator-gated block);
-//         mobile reaches the musician side too, so it shows the escrow line
-//         to both and the "total paid, including service fees" line only to
-//         the curator, whose bill that is.
+//    ONE DELIBERATE DIVERGENCE from web's copy remains, a consequence of
+//    still being read-only for the totals footer: the footer is side-gated.
+//    Web shows both lines to the curator side only (it renders inside a
+//    curator-gated block); mobile reaches the musician side too, so it shows
+//    the escrow line to both and the "total paid, including service fees"
+//    line only to the curator, whose bill that is. (SP5's other divergence —
+//    the two past-due labels reading "pay on the web" — is REMOVED by SP5b:
+//    the curator labels now match web's action-bearing copy, since there's a
+//    button to press again.)
 //  * EarningsCard — the musician dashboard's balance headline
 //    (getStripeStatus), a strict subset of web's EarningsPanel with the
 //    cash-out/onboarding controls replaced by "manage payouts on the web".
 //
-// Both live in this one file because the plan's Task 16 file list creates
-// exactly one mobile source file, and they are the same thing from the two
-// sides: what SP5's money engine looks like when you can only LOOK at it.
+// Both live in this one file because the plan's Task 16 file list created
+// exactly one mobile source file — EarningsCard stays untouched and
+// read-only this sub-project (a later SP5b task removes it).
 
 type Row = PaymentDoc & { id: string };
 
@@ -84,9 +85,10 @@ const CHIP: Record<PaymentRowKind, { bg: string; fg?: string }> = {
 
 // Web's strings for the same states, side-framed the same way — kept
 // identical so a musician reading "Forfeited deposit — received 100% (…)" on
-// the web Earnings page sees that exact sentence on their phone too. The two
-// past-due lines are the deliberate exception (see divergence 1 in the file
-// header): there is no button to press here.
+// the web Earnings page sees that exact sentence on their phone too,
+// including the two past-due lines: SP5b wires up a real Pay Now button next
+// to them (below), so the curator copy matches web's action-bearing wording
+// again (see the file header's note on the removed divergence).
 function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): string {
   switch (kind) {
     case "forfeited": {
@@ -109,8 +111,8 @@ function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): strin
     }
     case "refunded": return "Refunded";
     case "waived": return "Waived — nothing owed on this date";
-    case "settlementPastDue": return isCuratorSide ? "Past due — pay on the web" : "Curator payment delayed";
-    case "depositPastDue": return isCuratorSide ? "Deposit past due — pay on the web" : "Payment delayed";
+    case "settlementPastDue": return isCuratorSide ? "Past due — pay now" : "Curator payment delayed";
+    case "depositPastDue": return isCuratorSide ? "Deposit past due — pay now" : "Payment delayed";
     case "settlementPending": {
       // "Settles"/"Pays out" is settlement.settleAfter (gig END + the T+3
       // delay), NOT the occurrence's own start date. settleAfter is set once
@@ -141,6 +143,9 @@ const rowStyle = { borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding
 // through a shared parent context.
 export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: string }) {
   const [booking, setBooking] = useState<BookingRequestDoc | "loading" | "unavailable">("loading");
+  const [showSaveCard, setShowSaveCard] = useState(false);
+  const [stripeStatus, setStripeStatus] = useState<StripeStatusResult | "loading" | "error">("loading");
+  const [stripeReloadKey, setStripeReloadKey] = useState(0);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(getFirebase().db, "bookings", bookingId),
@@ -156,6 +161,20 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
   const role = useRole(musicianProfileId, curatorProfileId, uid);
   const rows = usePaymentRows(bookingId);
   const isCuratorSide = role === "curator" || role === "both";
+
+  useEffect(() => {
+    if (!isCuratorSide || !curatorProfileId) return;
+    let cancelled = false;
+    // No synchronous setStripeStatus("loading") here (react-hooks/set-state
+    // -in-effect) — same idiom as web's PaymentsPanel: the initial
+    // useState("loading") already covers first mount, and a reload just
+    // leaves the PREVIOUS status on screen until the new one resolves,
+    // rather than flashing back to "loading".
+    httpsCallable<{ profileId: string }, StripeStatusResult>(getFirebase().functions, "getStripeStatus")({ profileId: curatorProfileId })
+      .then((res) => { if (!cancelled) setStripeStatus(res.data); })
+      .catch(() => { if (!cancelled) setStripeStatus("error"); });
+    return () => { cancelled = true; };
+  }, [isCuratorSide, curatorProfileId, stripeReloadKey]);
 
   if (booking === "loading" || booking === "unavailable" || role === "loading" || role === "none") return null;
   // Nothing to show before acceptBooking's saga staged the payments
@@ -185,6 +204,39 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
   return (
     <View style={{ gap: 10, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Payments</Text>
+
+      {isCuratorSide && curatorProfileId && (
+        <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding: 12, gap: 8 }}>
+          {showSaveCard ? (
+            <SaveCardSheet profileId={curatorProfileId}
+              onSaved={() => { setShowSaveCard(false); setStripeReloadKey((k) => k + 1); }}
+              onClose={() => setShowSaveCard(false)} />
+          ) : stripeStatus === "loading" ? (
+            <Text style={{ color: "#666" }}>Loading card status…</Text>
+          ) : stripeStatus === "error" ? (
+            <View style={{ gap: 4 }}>
+              <Text style={{ color: "#92400e" }}>Couldn&apos;t load your card status.</Text>
+              <Pressable onPress={() => setStripeReloadKey((k) => k + 1)}>
+                <Text style={{ color: "#92400e", textDecorationLine: "underline" }}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <Text>
+                {stripeStatus.hasCard
+                  ? `Card on file: ${stripeStatus.cardBrand ?? "card"} •••• ${stripeStatus.cardLast4 ?? "----"}`
+                  : "No card on file"}
+              </Text>
+              <Pressable onPress={() => setShowSaveCard(true)}>
+                <Text style={{ color: "#111", textDecorationLine: "underline" }}>
+                  {stripeStatus.hasCard ? "Update card" : "Add a card"}
+                </Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      )}
+
       <View style={{ gap: 8 }}>
         {rows.map((row) => {
           const kind = paymentRowKind(row);
@@ -195,6 +247,9 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
               {/* Badge sets its own alignSelf: "flex-start", so it sizes to
                   its text without a wrapper row. */}
               <Badge label={rowLabel(kind, row, isCuratorSide)} bg={chip.bg} fg={chip.fg} />
+              {isCuratorSide && (kind === "settlementPastDue" || kind === "depositPastDue") && (
+                <PayPastDueButton bookingId={bookingId} gigId={row.id} onDone={() => setStripeReloadKey((k) => k + 1)} />
+              )}
             </View>
           );
         })}
@@ -212,11 +267,13 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
             Total paid so far: {formatCents(paidCents)} (includes {formatCents(feesCents)} in service fees)
           </Text>
         )}
-        <Text style={{ color: "#666", fontSize: 13 }}>
-          {isCuratorSide
-            ? "Cards, past-due payments and receipts are managed on the web."
-            : "Payout setup and cash-outs are managed on the web."}
-        </Text>
+        {/* Curator-side line removed in SP5b: the card-on-file row above and
+            the Pay Now buttons beside each past-due row now cover that
+            surface natively. The musician line stays — payout setup and
+            cash-outs remain web-only until Task 7. */}
+        {!isCuratorSide && (
+          <Text style={{ color: "#666", fontSize: 13 }}>Payout setup and cash-outs are managed on the web.</Text>
+        )}
       </View>
     </View>
   );
