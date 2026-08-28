@@ -14,6 +14,10 @@ describe("FakeStripe", () => {
   const fake = new FakeStripe();
   beforeAll(async () => { await adb.doc("stripeFake/config").delete().catch(() => {}); });
 
+  // The two balance buckets come back together (getBalances); every assertion
+  // below is about the standard one.
+  const balanceOf = async (accountId: string) => (await fake.getBalances(accountId)).availableCents;
+
   it("honors idempotency keys — same key, same intent, one object", async () => {
     const key = `test-idem-${Date.now()}`;
     const a = await fake.chargeOffSession({ customerId: "cus_x", amountCents: 1000, idempotencyKey: key, meta: {} });
@@ -124,10 +128,10 @@ describe("FakeStripe", () => {
   it("transfer/payout/debit maintain a coherent account balance", async () => {
     const { id: acct } = await fake.createExpressAccount({});
     await fake.transferToAccount({ accountId: acct, amountCents: 10_000, idempotencyKey: `t-${Date.now()}`, meta: {} });
-    expect(await fake.getAvailableBalanceCents(acct)).toBe(10_000);
+    expect(await balanceOf(acct)).toBe(10_000);
     await fake.createPayout({ accountId: acct, amountCents: 6_000, instant: false, idempotencyKey: `p-${Date.now()}`, meta: {} });
     await fake.debitConnectedAccount({ accountId: acct, amountCents: 500, idempotencyKey: `db-${Date.now()}`, meta: {} });
-    expect(await fake.getAvailableBalanceCents(acct)).toBe(3_500);
+    expect(await balanceOf(acct)).toBe(3_500);
     await expect(fake.createPayout({ accountId: acct, amountCents: 99_999, instant: true, idempotencyKey: `p2-${Date.now()}`, meta: {} }))
       .rejects.toThrow("exceeds balance");
   });
@@ -135,9 +139,9 @@ describe("FakeStripe", () => {
   it("reverseTransfer decrements the account balance and rejects a non-transfer target", async () => {
     const { id: acct } = await fake.createExpressAccount({});
     const { id: transferId } = await fake.transferToAccount({ accountId: acct, amountCents: 5_000, idempotencyKey: `rt-${Date.now()}`, meta: {} });
-    expect(await fake.getAvailableBalanceCents(acct)).toBe(5_000);
+    expect(await balanceOf(acct)).toBe(5_000);
     await fake.reverseTransfer({ transferId, idempotencyKey: `rtr-${Date.now()}` });
-    expect(await fake.getAvailableBalanceCents(acct)).toBe(0);
+    expect(await balanceOf(acct)).toBe(0);
     await expect(fake.reverseTransfer({ transferId: acct, idempotencyKey: `rtr2-${Date.now()}` }))
       .rejects.toThrow("is not a transfer");
     // A second reversal of the SAME transfer (a new idempotencyKey, so this

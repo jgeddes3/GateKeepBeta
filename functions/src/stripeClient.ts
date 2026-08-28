@@ -33,6 +33,8 @@ export const stripeSecretKey = defineSecret("STRIPE_SECRET_KEY");
 export const stripeWebhookSecret = defineSecret("STRIPE_WEBHOOK_SECRET");
 
 export interface ChargeResult { id: string; chargeId: string | null; }
+// A connected account's two payout buckets, read together (see getBalances).
+export interface StripeBalances { availableCents: number; instantAvailableCents: number; }
 export interface StripeAccountState {
   id: string; transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
 }
@@ -143,10 +145,13 @@ export interface StripeLike {
     sourceChargeId?: string;
   }): Promise<{ id: string }>;
   reverseTransfer(params: { transferId: string; idempotencyKey: string }): Promise<{ id: string }>;
-  getAvailableBalanceCents(accountId: string): Promise<number>;
-  // Instant-payout-eligible slice of the balance — a subset of
-  // getAvailableBalanceCents (funds still settling aren't instant-eligible).
-  getInstantAvailableBalanceCents(accountId: string): Promise<number>;
+  // BOTH balance buckets in ONE call. `instantAvailableCents` is the
+  // instant-payout-eligible slice — a subset of `availableCents` (funds still
+  // settling are available but not instant-eligible). They come off the SAME
+  // Stripe balance object, so splitting this into two methods only ever bought
+  // two round trips for one answer: every caller either wants both (the status
+  // surface) or wants one of them chosen at runtime by payout method.
+  getBalances(accountId: string): Promise<StripeBalances>;
   createPayout(params: {
     accountId: string; amountCents: number; instant: boolean; idempotencyKey: string; meta: Record<string, string>;
   }): Promise<{ id: string }>;
@@ -287,11 +292,24 @@ export class FakeStripe implements StripeLike {
       // loser replays it. This gives id CONSISTENCY, not mutual exclusion:
       // both racers still fully execute make() before this point (e.g. two
       // payment_intent docs briefly exist) — harmless for chargeOffSession,
-      // and the balance-mutating methods (transferToAccount, createPayout,
-      // debitConnectedAccount) only get away with tolerating it because
-      // nothing in this codebase actually races them on the same key
-      // (documented here, not redesigned — a real race would double-apply
-      // the balance change).
+      // but NOT for the balance-mutating methods (transferToAccount,
+      // createPayout, debitConnectedAccount): two racers both run make(), so
+      // the fake double-applies the balance change and only the id is
+      // reconciled.
+      //
+      // THERE IS A REAL SAME-KEY RACER, as of Task 13: `requestPayout` keys on
+      // a client-supplied requestId, so two concurrent calls carrying the same
+      // requestId (a double-clicked button, a client retrying before the first
+      // response lands) reach createPayout on ONE key at once. What protects
+      // production is REAL Stripe, which answers a second in-flight request on
+      // a live idempotency key with a 409 rather than executing it — this fake
+      // has no such interlock and would decrement the balance twice.
+      //
+      // Tolerated rather than redesigned because nothing in the emulator
+      // suite races a key (the tests are sequential), so the divergence is
+      // never exercised. A test that DID race one would see the fake move
+      // money twice where Stripe would not: document it there, don't "fix" it
+      // by trusting the fake.
       await ref.create(record);
     } catch (createError) {
       if (!isAlreadyExists(createError)) throw createError;
@@ -488,15 +506,13 @@ export class FakeStripe implements StripeLike {
       return { id };
     }, p.transferId);
   }
-  async getAvailableBalanceCents(accountId: string): Promise<number> {
+  async getBalances(accountId: string): Promise<StripeBalances> {
     const snap = await this.objRef(accountId).get();
-    return (snap.data()?.balanceCents as number | undefined) ?? 0;
-  }
-  async getInstantAvailableBalanceCents(accountId: string): Promise<number> {
-    // The fake tracks one running balance per account — no real
-    // card-network settlement delay to model, so "instant available"
-    // coincides with "available".
-    return this.getAvailableBalanceCents(accountId);
+    const balance = (snap.data()?.balanceCents as number | undefined) ?? 0;
+    // The fake tracks one running balance per account — no real card-network
+    // settlement delay to model, so "instant available" coincides with
+    // "available".
+    return { availableCents: balance, instantAvailableCents: balance };
   }
   async createPayout(p: { accountId: string; amountCents: number; instant: boolean; idempotencyKey: string; meta: Record<string, string> }) {
     return this.idem(p.idempotencyKey, async () => {
@@ -737,13 +753,20 @@ export class RealStripe implements StripeLike {
     const r = await this.s.transfers.createReversal(p.transferId, {}, { idempotencyKey: p.idempotencyKey });
     return { id: r.id };
   }
-  async getAvailableBalanceCents(accountId: string) {
+  async getBalances(accountId: string): Promise<StripeBalances> {
+    // ONE retrieve for both buckets — they are two fields of the same balance
+    // object, and reading it twice was two round trips for one answer (and a
+    // window in which the two figures could come from different moments).
     const b = await this.s.balance.retrieve({ stripeAccount: accountId });
-    return b.available.filter((a) => a.currency === "usd").reduce((s, a) => s + a.amount, 0);
-  }
-  async getInstantAvailableBalanceCents(accountId: string) {
-    const b = await this.s.balance.retrieve({ stripeAccount: accountId });
-    return (b.instant_available ?? []).filter((a) => a.currency === "usd").reduce((s, a) => s + a.amount, 0);
+    // Structurally typed rather than against Stripe's two distinct bucket
+    // types (Balance.Available vs Balance.InstantAvailable) — the only fields
+    // this sums are the two they share.
+    const usdTotal = (buckets: ReadonlyArray<{ currency: string; amount: number }> | undefined): number =>
+      (buckets ?? []).filter((a) => a.currency === "usd").reduce((s, a) => s + a.amount, 0);
+    return {
+      availableCents: usdTotal(b.available),
+      instantAvailableCents: usdTotal(b.instant_available),
+    };
   }
   async createPayout(p: { accountId: string; amountCents: number; instant: boolean; idempotencyKey: string; meta: Record<string, string> }) {
     const po = await this.s.payouts.create(

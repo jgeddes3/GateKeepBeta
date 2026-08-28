@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { User } from "firebase/auth";
 import { signUpTestUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
-import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT,
   type LedgerEntry, type NotificationDoc, type ProfileDraftInput, type StripeProfileDoc,
@@ -76,10 +76,17 @@ async function seedBalance(accountId: string, amountCents: number): Promise<void
   });
 }
 
-const balanceOf = (accountId: string) => getStripe().getAvailableBalanceCents(accountId);
+const balanceOf = async (accountId: string) => (await getStripe().getBalances(accountId)).availableCents;
 
 // Re-derived from the constants rather than hard-coded, so a rate change moves
 // the expectation with the product instead of failing the suite.
+//
+// ONE HARD-CODED FIGURE SURVIVES ON PURPOSE — the `expect(feeCents).toBe(200)`
+// in the 4%-of-$50 test below. That one is a RATE ANCHOR, not a duplicate of
+// this helper: without it, a change to INSTANT_FEE_PCT would silently flow
+// through both the code and every expectation here and the suite would still
+// pass while the product's headline price had moved. It is meant to fail, and
+// to be updated deliberately, when the rate changes.
 const expectedInstantFee = (amountCents: number) =>
   Math.max(INSTANT_FEE_MIN_CENTS, Math.ceil(amountCents * INSTANT_FEE_PCT / 100));
 
@@ -171,6 +178,33 @@ describe("requestPayout — standard", () => {
     expect(memo.lastPayout?.requestId).toBe(requestId);
     expect(memo.lastPayout?.payoutId).toBe(first.payoutId);
   });
+
+  it("LAYER 2 — with the memo gone, Stripe's own key still replays the payout instead of making a second one", async () => {
+    const { owner, profileId, accountId } = await makePayoutReady("porpl2");
+    await seedBalance(accountId, 10_000);
+    const requestId = freshRequestId();
+
+    const first = await payout({ profileId, amountCents: 4_000, method: "standard", requestId }, owner.user);
+    const balanceAfterFirst = await balanceOf(accountId);
+
+    // Simulates the one window the memo cannot cover: a crash (or a logged
+    // memo-write failure) between the payout and the memo write. Everything
+    // downstream must then rest on the idempotency key alone.
+    await adb.doc(`profiles/${profileId}/private/stripe`).update({ lastPayout: FieldValue.delete() });
+
+    const second = await payout({ profileId, amountCents: 4_000, method: "standard", requestId }, owner.user);
+    // Same Stripe object, no second movement, no second ledger row. This
+    // assertion PINS THE KEY SCHEMA: `{profileId}:payout:{requestId}` must stay
+    // derivable from the request alone — folding a nonce, a timestamp or an
+    // attempt counter into it would make this call mint a second payout.
+    expect(second.payoutId).toBe(first.payoutId);
+    expect(await balanceOf(accountId)).toBe(balanceAfterFirst);
+    expect((await ledgerRowsFor(profileId)).filter((r) => r.kind === "payout_standard")).toHaveLength(1);
+    // Honest about what it knows: the callable cannot tell a replayed Stripe
+    // object from a fresh one, so this path reports `replayed: false` even
+    // though nothing moved (see RequestPayoutResult.replayed).
+    expect(second.replayed).toBe(false);
+  });
 });
 
 describe("requestPayout — instant", () => {
@@ -179,7 +213,10 @@ describe("requestPayout — instant", () => {
     await seedBalance(accountId, 10_000);
     const amountCents = 5_000;
     const feeCents = expectedInstantFee(amountCents);
-    expect(feeCents).toBe(200); // 4% of $50 — above the $1 floor
+    // THE RATE ANCHOR (see expectedInstantFee's note): 4% of $50, above the $1
+    // floor. Deliberately hard-coded so a change to INSTANT_FEE_PCT has to be
+    // acknowledged here rather than sliding through every derived expectation.
+    expect(feeCents).toBe(200);
 
     const result = await payout(
       { profileId, amountCents, method: "instant", requestId: freshRequestId() }, owner.user);
@@ -377,7 +414,7 @@ describe("getStripeStatus — balances", () => {
     expect(s.payoutsEnabled).toBe(true);
     expect(s.availableBalanceCents).toBe(12_345);
     // FakeStripe has no settlement delay to model, so the instant bucket
-    // coincides with the available one (see getInstantAvailableBalanceCents).
+    // coincides with the available one (see FakeStripe.getBalances).
     expect(s.instantAvailableBalanceCents).toBe(12_345);
   });
 

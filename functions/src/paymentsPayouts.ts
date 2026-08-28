@@ -81,6 +81,13 @@ export interface RequestPayoutResult {
   // profile's last completed request — the caller is looking at the ORIGINAL
   // payout's result. The web uses it to say "already sent" rather than
   // reporting a second cash-out.
+  //
+  // NOT a complete account of "no money moved": a retry that falls through to
+  // Stripe's own key replay (layer 2, reached only when the memo write failed
+  // and logged) also moves nothing, yet reports `false` — the callable cannot
+  // tell a replayed Stripe object from a fresh one. Cosmetic only, and bounded
+  // by an event that leaves an error in the logs: the payout is still never
+  // made twice, the caller is merely told "sent" instead of "already sent".
   replayed: boolean;
 }
 
@@ -107,15 +114,11 @@ export async function readPayoutBalances(sp: StripeProfileDoc | null): Promise<P
   if (!sp?.accountId || sp.payoutsEnabled !== true) {
     return { availableBalanceCents: 0, instantAvailableBalanceCents: 0 };
   }
-  const stripe = getStripe();
   try {
-    // One round trip each against real Stripe, so run them together — the
-    // status surface is on the critical path of the Earnings page load.
-    const [available, instant] = await Promise.all([
-      stripe.getAvailableBalanceCents(sp.accountId),
-      stripe.getInstantAvailableBalanceCents(sp.accountId),
-    ]);
-    return { availableBalanceCents: available, instantAvailableBalanceCents: instant };
+    // ONE Stripe round trip for both buckets (getBalances) — this callable is
+    // on the critical path of the Earnings page load.
+    const b = await getStripe().getBalances(sp.accountId);
+    return { availableBalanceCents: b.availableCents, instantAvailableBalanceCents: b.instantAvailableCents };
   } catch (e) {
     console.error(`readPayoutBalances: failed to read Stripe balance for account ${sp.accountId}`, e);
     return { availableBalanceCents: null, instantAvailableBalanceCents: null };
@@ -211,9 +214,8 @@ export const requestPayout = onCall<RequestPayoutInput>(
     // available one (funds still settling are available but not
     // instant-eligible), so an instant payout must be checked against it, not
     // against the standard balance.
-    const balance = method === "instant"
-      ? await stripe.getInstantAvailableBalanceCents(sp.accountId)
-      : await stripe.getAvailableBalanceCents(sp.accountId);
+    const buckets = await stripe.getBalances(sp.accountId);
+    const balance = method === "instant" ? buckets.instantAvailableCents : buckets.availableCents;
     // The GROSS amount is what leaves the balance either way — the instant fee
     // is debited separately, not deducted from what Stripe pays out of it.
     if (amountCents > balance) throw new HttpsError("failed-precondition", PAYOUT_OVER_BALANCE_MESSAGE);
