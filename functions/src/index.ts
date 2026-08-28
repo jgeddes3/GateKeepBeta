@@ -23,3 +23,6 @@ export {
   createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus, releaseStuckSaga,
   confirmOccurrenceActuals, payPastDue,
 } from "./payments.js";
+// Also the edge that loads paymentsPayouts.ts's payout.paid/payout.failed
+// webhook registrations (see paymentsWebhook.ts's header).
+export { requestPayout } from "./paymentsPayouts.js";

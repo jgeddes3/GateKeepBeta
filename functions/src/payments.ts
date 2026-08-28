@@ -24,6 +24,9 @@ import {
 } from "./paymentsSettlement.js";
 import { resolveBookingSideStrict } from "./bookingLifecycle.js";
 import { webhookHandlers } from "./paymentsWebhook.js";
+// Task 13's balance surface. One-way edge: paymentsPayouts.ts owns the payout
+// callable and the payout webhooks and knows nothing about this file.
+import { readPayoutBalances } from "./paymentsPayouts.js";
 
 export function emptyStripeProfile(now: number): StripeProfileDoc {
   return {
@@ -254,7 +257,16 @@ export async function syncStripeAccountFlags(profileId: string, now: number): Pr
   }, now);
 }
 
-// One status surface for both halves + (Task 13 adds balance fields).
+// One status surface for both halves — card state, onboarding/gate flags,
+// delinquency, and (Task 13) the two payout balances.
+//
+// THE BALANCES ARE DEGRADABLE, in exactly the sense syncStripeAccountFlags's
+// non-missing-account branch already is: `readPayoutBalances` returns nulls and
+// logs when Stripe can't be read, rather than throwing. This whole callable is
+// what the Earnings page and the curator delinquency banner load from, and a
+// Stripe blip must not blank either of them. 0 (not null) means "we asked and
+// there's nothing" — including the no-account/payouts-off case, where there is
+// no balance to have.
 export const getStripeStatus = onCall<{ profileId: string }>(
   { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
     const uid = requireAuthUid(req);
@@ -263,11 +275,18 @@ export const getStripeStatus = onCall<{ profileId: string }>(
     if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
     await requireProfileMember(profileId, uid);
     const sp = await syncStripeAccountFlags(profileId, Date.now()) ?? emptyStripeProfile(Date.now());
+    // AFTER the flag sync, never before: a deleted Connect account zeroes
+    // `payoutsEnabled` there, and reading the balance off the synced doc is
+    // what makes such an account report 0/0 instead of attempting a Stripe
+    // balance call that can only fail.
+    const balances = await readPayoutBalances(sp);
     return {
       hasCard: sp.defaultPaymentMethodId != null, cardBrand: sp.cardBrand, cardLast4: sp.cardLast4,
       hasAccount: sp.accountId != null, transfersEnabled: sp.transfersEnabled,
       payoutsEnabled: sp.payoutsEnabled, instantEligible: sp.instantEligible,
       delinquent: sp.delinquent,
+      availableBalanceCents: balances.availableBalanceCents,
+      instantAvailableBalanceCents: balances.instantAvailableBalanceCents,
     };
   });
 

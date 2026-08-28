@@ -701,6 +701,20 @@ export class RealStripe implements StripeLike {
     const pi = await this.s.paymentIntents.create({
       amount: p.amountCents, currency: "usd", customer: p.customerId, metadata: p.meta,
       automatic_payment_methods: { enabled: true },
+      // payPastDue's whole point is that a curator may pay with a FRESH card —
+      // the one on file is the one that kept declining. Without this the new
+      // card is used once and thrown away, so the very next off-session charge
+      // fails against the same dead card. `off_session` tells Stripe to save it
+      // for future merchant-initiated charges.
+      //
+      // It does NOT re-point the customer's default payment method: that stays
+      // an explicit user action (the save-card modal calling
+      // refreshPaymentMethod, which resolves the confirmed SetupIntent's card
+      // and pins it). Making the default follow a past-due payment silently
+      // would change which card every future charge lands on without anyone
+      // asking for it — this only makes sure the card CAN be picked up when
+      // they do ask.
+      setup_future_usage: "off_session",
     }, { idempotencyKey: p.idempotencyKey });
     return { id: pi.id, clientSecret: pi.client_secret! };
   }

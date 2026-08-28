@@ -19,7 +19,10 @@ import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.
 //    completion), "settlement" -> Task 10, "paydue" / "paydue_deposit" ->
 //    Task 11
 //  - payment_intent.payment_failed -> recorded no-op (see below)
-//  - payout.paid/payout.failed -> Task 13
+//  - payout.paid/payout.failed -> Task 13, registered in paymentsPayouts.ts
+//    beside requestPayout, which writes the REQUEST-time ledger row these two
+//    record the outcome of (`payout.paid` is a logged no-op for exactly that
+//    reason; `payout.failed` writes the money-came-back row and notifies)
 //  - transfer.reversed      -> Task 12, registered in paymentsSettlement.ts
 //    beside the clawback whose reversals it dedupes against (ledger only —
 //    it writes no document state)
@@ -43,13 +46,17 @@ export const webhookHandlers: Record<string, WebhookHandler> = {};
 //     "settlement"     -> paymentsSettlement.ts  (the T+3 charge's tail)
 //     "paydue"         -> paymentsSettlement.ts  (payPastDue, settlement debt)
 //     "paydue_deposit" -> paymentsSettlement.ts  (payPastDue, deposit debt)
-//   METADATA-ONLY, with NO handler BY DESIGN — these five are not charges a
-//   saga waits on, they are outbound moves that either completed synchronously
-//   or have no follow-up state to write. The metadata exists as a RECOVERY
+//   METADATA-ONLY, with NO handler BY DESIGN — these are not charges a saga
+//   waits on, they are outbound moves that either completed synchronously or
+//   have no follow-up state to write. The metadata exists as a RECOVERY
 //   HANDLE (Task 8's note: look an object up by {bookingId, gigId, purpose}
 //   when a key has expired) and for dashboard filtering, not for dispatch:
 //     "earnings", "forfeit"                  (transferToAccount)
 //     "deposit_refund", "below_deposit_refund", "accept_abort"  (refund)
+//     "payout"                               (Task 13 createPayout — its own
+//                                             payout.paid/failed events are
+//                                             handled, but not through here)
+//     "payout_fee"                           (Task 13 debitConnectedAccount)
 //   A payment_intent.succeeded carrying one of these would be a bug elsewhere
 //   (none of them creates a PaymentIntent), and the dispatcher's no-handler
 //   branch logs it rather than throwing.

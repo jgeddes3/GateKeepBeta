@@ -645,6 +645,33 @@ export interface PaymentSummary {
   state: PaymentSummaryState; heldCents: number; paidCents: number; transferredCents: number;
 }
 
+// SP5 Task 13: the MOST RECENT completed payout request for a profile, kept on
+// the identity doc as the replay memo for `requestPayout`.
+//
+// WHY IT EXISTS. Payout idempotency is scoped to a client-minted `requestId`
+// (not a timestamp), so a retried call reuses the same Stripe key and Stripe
+// replays the original payout instead of making a second one. But the
+// callable's own available-balance pre-check runs BEFORE that key is ever
+// used, and the first call already spent the balance — so a retry of a
+// full-balance cash-out would be refused with "that's more than your available
+// balance" and the caller would never learn the payout id. This record is what
+// makes such a retry return the original result: same `requestId` ⇒ hand back
+// the stored outcome, no Stripe call, no balance check.
+//
+// ONLY THE LAST ONE is kept — a retry of an OLDER requestId falls through to
+// the ordinary path, where the balance check (or Stripe's own key replay) still
+// makes a second payout impossible. Retries happen seconds after the original,
+// which is exactly the window "last" covers.
+export interface PayoutRequestRecord {
+  requestId: string;
+  payoutId: string;
+  method: "standard" | "instant";
+  amountCents: number;                     // gross — what left the balance in total
+  feeCents: number;                        // instant fee (0 for standard)
+  netCents: number;                        // what the payout itself moved
+  at: number;
+}
+
 // profiles/{profileId}/private/stripe — members + admins read, server-write.
 // One profile can hold both halves (a curator that also performs).
 export interface StripeProfileDoc {
@@ -654,6 +681,9 @@ export interface StripeProfileDoc {
   transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
   onboardingStartedAt: number | null; onboardedAt: number | null;
   delinquent: boolean; delinquentSince: number | null;
+  // Optional/backward-compatible: every pre-Task-13 doc omits it, and a
+  // profile that has never cashed out never gets it.
+  lastPayout?: PayoutRequestRecord | null;
   updatedAt: number;
 }
 
@@ -666,7 +696,7 @@ export interface StripeProfileDoc {
 // has to look at this" queue. Server-written only; admins read it. Cleared by
 // an operator tool (releaseStuckSaga) setting resolvedAt.
 //
-// RAISED BY (the eight kinds below, and where from):
+// RAISED BY (the kinds below, and where from):
 //   paymentsSweep.ts    step 1 -> stuck_saga_marker / stale_accept_saga
 //                       step 2 -> stale_pending_deposit
 //                       step 3 -> deposit_pending_stuck
@@ -676,6 +706,7 @@ export interface StripeProfileDoc {
 //                                                        settlement_payout_blocked
 //                          finalizeDepositPayDue's
 //                            webhook caller           -> deposit_raced
+//   paymentsPayouts.ts     requestPayout              -> payout_fee_uncollected
 //
 // Ids are DETERMINISTIC per underlying problem and are built ONLY by
 // paymentsCore.ts's id vocabulary (`stuckSagaAlertId` and friends), so an
@@ -732,11 +763,22 @@ export type AdminAlertKind =
   // occurrence is `paid` with NO transfer to reverse, so the automatic unwind
   // has no handle on it at all. The curator has been charged for a date they
   // report never happened, so this is never merely logged.
-  | "clawback_failed";
+  | "clawback_failed"
+  // SP5 Task 13: an INSTANT payout was made but the platform's 4% fee could
+  // not be pulled back off the connected account (the account debit threw).
+  // The payout is NEVER unwound for this — the musician has their money and
+  // reversing a paid-out instant payout is not a thing — so the fee is simply
+  // uncollected revenue until an operator recovers it (debit the account by
+  // hand, or net it off a future payout). The ONE alert kind in SP5 that is
+  // profile-scoped rather than booking-scoped: its row carries a null
+  // bookingId/gigId and names the profile in `detail`.
+  | "payout_fee_uncollected";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
-  bookingId: string; gigId: string | null;
+  // Null ONLY for `payout_fee_uncollected` (see above) — every other kind is
+  // raised about a specific occurrence of a specific booking.
+  bookingId: string | null; gigId: string | null;
   // The start of the ORIGINAL episode, preserved across reopens: a sweep that
   // observes this condition again after an operator set `resolvedAt` clears
   // that field but never re-stamps this one, so "how long has this money been
@@ -756,7 +798,15 @@ export interface AdminAlertDoc {
 
 export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   | "forfeit_transfer" | "earnings_transfer" | "late_fee" | "payout_standard"
-  | "payout_instant" | "transfer_reversal" | "account_debit";
+  | "payout_instant" | "transfer_reversal" | "account_debit"
+  // SP5 Task 13: a payout Stripe later BOUNCED (`payout.failed` — a closed
+  // bank account, a rejected debit card). The `payout_standard`/`payout_instant`
+  // row is written when the payout is REQUESTED, so this is the row that
+  // records the money coming back to the connected account's balance; without
+  // it a failed payout would be indistinguishable in the ledger from a paid
+  // one. Keyed off the payout's own id, so it can never collide with the
+  // request-time row (different kind, same object).
+  | "payout_failed";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign

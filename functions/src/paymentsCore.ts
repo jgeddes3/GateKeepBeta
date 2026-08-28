@@ -717,7 +717,7 @@ const ALERT_LOG_THROTTLE_MS = 24 * 60 * 60 * 1000;
 
 // ---------- the adminAlerts id vocabulary ----------
 //
-// EVERY alert id in SP5 is built by one of these eight functions, and they all
+// EVERY alert id in SP5 is built by one of these functions, and they all
 // live here rather than beside their raisers (review round 3, I3). Three
 // reasons, and the third is the one that bites:
 //  - the ids are DETERMINISTIC per underlying problem, so an hourly sweep
@@ -730,7 +730,8 @@ const ALERT_LOG_THROTTLE_MS = 24 * 60 * 60 * 1000;
 //  - two of these ids are SHARED by more than one raiser on purpose (see the
 //    per-id notes), which is a decision that has to be visible in one place to
 //    survive.
-// Format is `{problem}-{scope}:{ids}`, hyphenated, with the booking id first.
+// Format is `{problem}-{scope}:{ids}`, hyphenated, with the booking id first
+// (or, for the one profile-scoped id, the profile id first).
 
 // Step 1's accept-saga problems. ONE id for all three kinds
 // (`stuck_saga_marker`, `stale_accept_saga`, `expired_booking_saga_marker`):
@@ -786,6 +787,15 @@ export function settlementPayoutAlertId(bookingId: string, gigId: string): strin
 export function clawbackAlertId(bookingId: string, gigId: string): string {
   return `clawback:${bookingId}:${gigId}`;
 }
+// Task 13: an instant payout whose 4% fee could not be debited back off the
+// connected account. THE ONLY PROFILE-SCOPED id in this vocabulary (payouts are
+// not booking-scoped at all), and scoped to the REQUEST rather than the profile
+// so two different uncollected fees are two tickets — the operator recovers each
+// one separately, and a replayed request (same requestId) updates the one row it
+// already has instead of minting a second.
+export function payoutFeeAlertId(profileId: string, requestId: string): string {
+  return `payout-fee:${profileId}:${requestId}`;
+}
 
 // The durable "a human has to look at this" queue (adminAlerts/{alertId}).
 // Every SP5 path that deliberately REFUSES to move money — because moving it
@@ -801,7 +811,9 @@ export function clawbackAlertId(bookingId: string, gigId: string): string {
 // Returns whether the caller should log this observation.
 export async function recordAdminAlert(a: {
   alertId: string; kind: AdminAlertKind; detail: string;
-  bookingId: string; gigId: string | null; now: number;
+  // Null only for the one profile-scoped kind (`payout_fee_uncollected` —
+  // payouts belong to no booking); every other raiser names an occurrence.
+  bookingId: string | null; gigId: string | null; now: number;
 }): Promise<boolean> {
   const ref = getFirestore().doc(`adminAlerts/${a.alertId}`);
   try {
