@@ -7,6 +7,7 @@ import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { AboutForm, LocationForm, LookingForForm, AmenitiesForm, GalleryPhotosSection } from "../../src/curator/CuratorForms";
+import { DelinquencyBanner } from "../../src/payments/DelinquencyBanner";
 import { validateLookingFor, type ProfileDoc, type CuratorDetails, type CuratorSubtype } from "@gatekeep/shared";
 
 // This tab IS the curator wizard AND the post-approval editor — same shape
@@ -144,6 +145,7 @@ export default function CuratorDashboard() {
     <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }} keyboardShouldPersistTaps="handled">
       <Text style={{ fontSize: 22, fontWeight: "700" }}>{profile.name}</Text>
       <Text>Status: {profile.status.replace("_", " ")}</Text>
+      <DelinquencyBanner key={`delinquency-${profileId}`} profileId={profileId} />
       {profile.status === "approved" && (
         <View style={{ gap: 4 }}>
           {PUBLIC_PROFILE_HOST_READY && (
