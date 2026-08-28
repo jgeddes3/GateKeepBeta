@@ -31,6 +31,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   computeInstantFeeCents, isValidDocId, INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT,
+  PAYOUT_INSTANT_INELIGIBLE_MESSAGE,
   type PayoutRequestRecord, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
@@ -47,9 +48,16 @@ const MAX_CENTS = 2 ** 45;
 // Caller-facing refusals, exported for the reason every other SP5 message
 // constant is: they are different situations with different fixes, and the web
 // keys its inline prompts off them.
+//
+// PAYOUT_INSTANT_INELIGIBLE_MESSAGE moved to @gatekeep/shared/messages.ts
+// (review round 1, the fix round before Task 15) — the Earnings page's
+// Instant button tooltip needs this EXACT string, and re-exports it below so
+// every existing in-repo import (this file's own callable, functions/test/*)
+// keeps resolving from "./paymentsPayouts.js" unchanged. The other three
+// below stay local: the web only ever displays them verbatim (a caught
+// error), it never pre-empts/mirrors their copy client-side.
+export { PAYOUT_INSTANT_INELIGIBLE_MESSAGE };
 export const PAYOUT_SETUP_REQUIRED_MESSAGE = "Finish payout setup first.";
-export const PAYOUT_INSTANT_INELIGIBLE_MESSAGE =
-  "Instant payouts need an eligible debit card on your Stripe account.";
 export const PAYOUT_OVER_BALANCE_MESSAGE = "That's more than your available balance.";
 export const PAYOUT_AMOUNT_TOO_SMALL_MESSAGE = "Amount is too small for an instant payout.";
 // One requestId means ONE cash-out. Reusing it for a different amount or

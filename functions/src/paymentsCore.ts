@@ -28,6 +28,9 @@ import { HttpsError } from "firebase-functions/v2/https";
 import {
   computeDepositCents, computeExpectedTotalCents, computeFeeShareCents,
   DEFAULT_FEE_POLICY, SETTLEMENT_RETRY_OFFSETS_MS,
+  CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
+  BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
+  DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE,
 } from "@gatekeep/shared";
 import type {
   AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositState, DepositStatus,
@@ -44,46 +47,18 @@ export async function getStripeProfileDoc(profileId: string): Promise<StripeProf
   return (snap.data() as StripeProfileDoc | undefined) ?? null;
 }
 
-// Task 5 booking gates. Distinct messages — the web UI keys its two inline
-// prompts off them.
-export const CURATOR_CARD_REQUIRED_MESSAGE = "Save a payment card before sending offers or booking musicians.";
-export const CURATOR_DELINQUENT_MESSAGE = "This profile has an overdue payment — settle it before booking again.";
-export const MUSICIAN_PAYOUTS_REQUIRED_MESSAGE = "Finish payout setup before applying to or accepting bookings.";
-// Task 5 review #1: the two curator-gate messages above are second-person,
-// curator-authored copy ("Save a payment card...") — actionable only by
-// someone on the curator side. acceptBooking can be called by EITHER side
-// (either direction lands the deposit charge on the curator's card), so a
-// musician-side caller who trips the curator gate must never see them; both
-// curator-gate failure kinds collapse to this one neutral message for a
-// musician-side caller instead. A curator-side caller keeps the specific
-// message either way — it names exactly what they need to fix.
-export const BOOKING_NOT_CONFIRMABLE_MESSAGE =
-  "This booking can't be confirmed right now — the other side needs to update its payment details.";
+// Task 5 booking gates, Task 6 accept-saga outcomes, and the Task 6
+// accept-abort message — moved to @gatekeep/shared/messages.ts (review round
+// 1, the fix round before Task 15) so apps/web can import these exact
+// strings instead of hand-copying them. Re-exported here so every existing
+// in-repo import (this file's own gates below, bookings.ts, gigSeries.ts,
+// and functions/test/*) keeps resolving from "./paymentsCore.js" unchanged.
+export {
+  CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
+  BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
+  DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE,
+};
 
-// Task 6 accept-saga outcomes the CALLER sees. Both are caller-facing copy
-// (the web accept button renders them inline), so they live beside the gate
-// messages above rather than inside bookings.ts.
-//
-// DECLINED: definite failure — the staged payment docs are deleted and the
-// booking is left `open`, so a retry (after fixing the card) is a clean,
-// fresh attempt.
-export const CARD_DECLINED_MESSAGE = "Your card was declined — update your payment method and try again.";
-// PROCESSING: NOT a failure — the PaymentIntent exists and is still settling.
-// The staged docs and depositChargePending stay in place and the
-// payment_intent.succeeded webhook completes the accept out-of-band; a retry
-// is deliberately refused while that's outstanding (a second charge would be
-// a real double charge, since the pending intent can still succeed).
-export const DEPOSIT_PROCESSING_MESSAGE =
-  "Your payment is processing — the booking will confirm automatically once it completes.";
-// The narrow crash window: depositChargePending is set but no intent id was
-// ever recorded (the instance died between staging and the charge, or
-// between the charge and recording its outcome). Whether money moved is
-// UNKNOWN here, so accept refuses rather than re-staging + re-charging on a
-// fresh attempt key; Task 9's sweep reconciles using the persisted attempt
-// counter (same key ⇒ Stripe replays the original intent, never a second
-// charge).
-export const DEPOSIT_RECONCILING_MESSAGE =
-  "This booking's payment is still being processed — try again in a few minutes.";
 // Every OTHER mutation of an `open` booking (counter / decline / withdraw)
 // while an accept saga is staged on it. Distinct from the two accept-path
 // messages above because the caller here isn't accepting anything — they're
@@ -98,13 +73,9 @@ export const DEPOSIT_RECONCILING_MESSAGE =
 //    ever firing on a genuinely stranded charge.
 export const BOOKING_LOCKED_BY_DEPOSIT_MESSAGE =
   "A deposit payment is processing for this booking — try again in a few minutes.";
-// The charge landed but the accept could not be committed (the gig/series
-// moved underneath it), and the refund SUCCEEDED. Told to the caller in place
-// of the raw abort reason so they aren't left wondering whether they were
-// charged for a booking that never happened. Only ever used when the refund
-// is confirmed — a failed refund must not claim the money came back.
-export const ACCEPT_ABORTED_REFUNDED_MESSAGE =
-  "The booking could not be confirmed — your deposit charge has been refunded.";
+// (ACCEPT_ABORTED_REFUNDED_MESSAGE — the charge landed but the accept could
+// not be committed and the refund SUCCEEDED — now lives in
+// @gatekeep/shared/messages.ts and is re-exported above.)
 
 // Curator-side money gate: saved card + not delinquent. Required before
 // offerGig and before acceptBooking (either side accepting lands the deposit

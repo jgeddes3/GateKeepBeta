@@ -1,27 +1,18 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { collection, getDocs, onSnapshot, query, where } from "firebase/firestore";
+import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { instantFeePreviewCents } from "./fees";
 import { rememberOnboardingProfileId } from "./onboardingRedirect";
-import type { PaymentDoc } from "@gatekeep/shared";
+import type { StripeStatusResult } from "./types";
+import { PAYOUT_INSTANT_INELIGIBLE_MESSAGE, type PaymentDoc } from "@gatekeep/shared";
 
 // SP5 Task 14 — the musician's payouts surface. House idiom throughout (see
 // src/bookings/CancelDialog.tsx): "use client", httpsCallable + inline
 // styles, verbatim server-error surfacing, busy/error local state.
 
-export interface StripeStatusResult {
-  hasCard: boolean; cardBrand: string | null; cardLast4: string | null;
-  hasAccount: boolean; transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
-  delinquent: boolean;
-  // As-built correction (Task 13): 0 means "asked, nothing there"; null means
-  // "Stripe couldn't be read just now" — MUST render as "balance unavailable",
-  // never $0.00.
-  availableBalanceCents: number | null;
-  instantAvailableBalanceCents: number | null;
-}
 interface RequestPayoutResult { payoutId: string; feeCents: number; netCents: number; replayed: boolean; }
 
 // Mirrors money.ts's assertCents ceiling — keeps an absurd/malformed typed
@@ -30,49 +21,64 @@ interface RequestPayoutResult { payoutId: string; feeCents: number; netCents: nu
 // to keep the CLIENT from crashing on a bad preview input).
 const MAX_PREVIEW_CENTS = 2 ** 45;
 
-// dollars-string input -> whole cents, or null when not a usable positive
-// amount. UI-only validation — the server is the actual authority (invariant
-// #1: no client-supplied amounts drive what's charged/paid; this only shapes
-// what the client SENDS as amountCents, which requestPayout independently
-// checks against the live balance).
+// dollars-string input -> whole cents, or null when not a usable amount.
+// UI-only validation — the server is the actual authority (invariant #1: no
+// client-supplied amounts drive what's charged/paid; this only shapes what
+// the client SENDS as amountCents, which requestPayout independently checks
+// against the live balance). The 100-cent floor mirrors requestPayout's own
+// ("Cash out at least $1, as a whole number of cents.") — a naive `n > 0`
+// check let a value that rounds to well under $1 (or even to 0, for a tiny
+// fractional-cent typo) sail through as "valid" for both the fee preview and
+// the button-enabled state.
 function parseDollarsToCents(s: string): number | null {
   const n = Number(s.trim());
   if (!Number.isFinite(n) || n <= 0) return null;
   const cents = Math.round(n * 100);
-  return cents > MAX_PREVIEW_CENTS ? null : cents;
+  return cents < 100 || cents > MAX_PREVIEW_CENTS ? null : cents;
 }
 
-type PaymentRow = PaymentDoc & { id: string };
+type PaymentRow = PaymentDoc & { id: string; bookingId: string };
 
-// The profile's payment docs across every booking it's the musician side of
-// — one onSnapshot on the bookings list (rules-provable: musicianProfileId
-// pinned, same shape as BookingInbox's own query), then an n+1 one-shot
-// getDocs per booking's payments subcollection (same acceptable n+1 idiom as
-// BookingInbox's useRowGigTitle/useNextOccurrence — inbox/earnings scale,
-// not a paginated list). No orderBy on the bookings query on purpose: adding
-// one here would need a NEW composite index (musicianProfileId, updatedAt)
-// that nothing else in the app defines yet; a plain equality filter is
-// covered by Firestore's automatic single-field index, and results are
-// sorted client-side below instead.
+// The profile's payment docs across its 50 most-recently-updated bookings as
+// the musician side — one onSnapshot on the bookings list (rules-provable:
+// musicianProfileId pinned, same shape as BookingInbox's own query), ordered
+// by updatedAt desc via the (musicianProfileId ASC, updatedAt DESC)
+// composite index that ALREADY EXISTS (SP4 Task 11 — see
+// firestore.indexes.json), then an n+1 one-shot getDocs per booking's
+// payments subcollection (same acceptable n+1 idiom as BookingInbox's
+// useRowGigTitle/useNextOccurrence — inbox/earnings scale, not a paginated
+// list).
 function usePaymentRows(profileId: string): PaymentRow[] {
   const [rows, setRows] = useState<PaymentRow[]>([]);
   useEffect(() => {
     let cancelled = false;
+    // Bumped on every onSnapshot fire so a late-resolving OLDER fan-out (the
+    // Promise.all over a booking's payments subcollections) can never
+    // clobber a NEWER one's result — onSnapshot can fire again (a booking
+    // updated) before the previous fire's n+1 getDocs calls have all
+    // settled, and network timing gives no guarantee the older fire resolves
+    // first.
+    let generation = 0;
     const { db } = getFirebase();
     const unsubscribe = onSnapshot(
-      query(collection(db, "bookings"), where("musicianProfileId", "==", profileId)),
+      query(collection(db, "bookings"), where("musicianProfileId", "==", profileId),
+        orderBy("updatedAt", "desc"), limit(50)),
       async (snap) => {
+        const myGeneration = ++generation;
         const perBooking = await Promise.all(snap.docs.map(async (b) => {
           try {
             const paySnap = await getDocs(collection(db, `bookings/${b.id}/payments`));
-            // PaymentDoc already carries its own `bookingId` field (== b.id
-            // here) — the spread supplies it, no need to set it separately.
-            return paySnap.docs.map((d) => ({ id: d.id, ...(d.data() as PaymentDoc) }));
+            // Spread first, id/bookingId set AFTER (last-one-wins, no
+            // duplicate-key error) — PaymentDoc already carries its own
+            // `bookingId` field (== b.id here); overriding it with the
+            // known-good b.id means the row's key (below) never depends on
+            // trusting a server-written field to match its own parent path.
+            return paySnap.docs.map((d) => ({ ...(d.data() as PaymentDoc), id: d.id, bookingId: b.id }));
           } catch {
             return []; // permission-denied/offline on one booking's subcollection — drop it, not the whole panel
           }
         }));
-        if (!cancelled) setRows(perBooking.flat());
+        if (!cancelled && myGeneration === generation) setRows(perBooking.flat());
       },
       () => { if (!cancelled) setRows([]); });
     return () => { cancelled = true; unsubscribe(); };
@@ -88,7 +94,7 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
   return (
     <ul>
       {pending.map((r) => (
-        <li key={r.id}>
+        <li key={`${r.bookingId}:${r.id}`}>
           {formatGigDateTime(r.occurrenceStartsAt)}
           {" — "}
           {r.settlement.status === "past_due"
@@ -100,15 +106,21 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
   );
 }
 
+// History caps at 20, same as BookingInbox's own history list (SP4 Task 10) —
+// a generous soft cap so an unusually busy profile's Earnings page stays
+// bounded without pagination UI yet.
+const HISTORY_LIMIT = 20;
+
 function HistoryList({ rows }: { rows: PaymentRow[] }) {
   const history = rows
     .filter((r) => r.transfer.status === "transferred" || r.deposit.status === "forfeited")
-    .sort((a, b) => (b.transfer.transferredAt ?? b.updatedAt) - (a.transfer.transferredAt ?? a.updatedAt));
+    .sort((a, b) => (b.transfer.transferredAt ?? b.updatedAt) - (a.transfer.transferredAt ?? a.updatedAt))
+    .slice(0, HISTORY_LIMIT);
   if (history.length === 0) return <p style={{ color: "#666" }}>No payout history yet.</p>;
   return (
     <ul>
       {history.map((r) => (
-        <li key={r.id}>
+        <li key={`${r.bookingId}:${r.id}`}>
           {formatGigDateTime(r.occurrenceStartsAt)}
           {" — "}
           {r.deposit.status === "forfeited" && `Forfeited deposit — received 100% (${formatCents(r.deposit.sliceCents)})`}
@@ -137,6 +149,11 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
   // cash-out and mints its own id.
   const requestRef = useRef<{ id: string; method: "standard" | "instant"; amountCents: number } | null>(null);
   const rows = usePaymentRows(profileId);
+  // Hoisted once per render (not recomputed inline at each use site) so the
+  // fee preview label and the Instant-button gating logic below can never
+  // disagree about what "the typed amount" currently parses to.
+  const previewCents = parseDollarsToCents(amount);
+  const previewFeeCents = previewCents != null ? instantFeePreviewCents(previewCents) : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -180,16 +197,20 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
     if (typeof status !== "object") return;
     const amountCents = parseDollarsToCents(amount);
     if (amountCents == null) {
-      setPayoutError("Enter a whole-dollar amount greater than $0.");
+      setPayoutError("Enter at least $1.00.");
       return;
     }
     setPayoutBusy(true);
     setPayoutError(null);
     setPayoutMessage(null);
-    if (!requestRef.current || requestRef.current.method !== method || requestRef.current.amountCents !== amountCents) {
-      requestRef.current = { id: crypto.randomUUID(), method, amountCents };
-    }
     try {
+      // Minted INSIDE the try (not before it): crypto.randomUUID() throws in
+      // a non-secure-context browser, and minting it ahead of the try would
+      // leave payoutBusy stuck true forever (the throw would skip both the
+      // catch below and the finally that resets it).
+      if (!requestRef.current || requestRef.current.method !== method || requestRef.current.amountCents !== amountCents) {
+        requestRef.current = { id: crypto.randomUUID(), method, amountCents };
+      }
       const res = await httpsCallable<
         { profileId: string; amountCents: number; method: "standard" | "instant"; requestId: string },
         RequestPayoutResult
@@ -250,12 +271,19 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
                 <p style={{ margin: "2px 0 0", fontSize: 28, fontWeight: 700 }}>
                   {status.availableBalanceCents == null ? "Balance unavailable — try again shortly" : formatCents(status.availableBalanceCents)}
                 </p>
+                {status.availableBalanceCents != null && status.instantAvailableBalanceCents != null
+                  && status.instantAvailableBalanceCents !== status.availableBalanceCents && (
+                  <p style={{ margin: "2px 0 0", fontSize: 13, color: "#666" }}>
+                    Instant available: {formatCents(status.instantAvailableBalanceCents)}
+                  </p>
+                )}
               </div>
               <div>
                 <label>
                   Amount to cash out{" "}
-                  <input type="number" min="0.01" step="0.01" value={amount}
-                    onChange={(e) => setAmount(e.target.value)} disabled={payoutBusy}
+                  <input type="number" min="1" step="0.01" value={amount}
+                    onChange={(e) => { setAmount(e.target.value); setPayoutError(null); }}
+                    disabled={payoutBusy || status.availableBalanceCents == null}
                     style={{ width: 100 }} aria-label="Amount to cash out (dollars)" />
                 </label>
               </div>
@@ -263,12 +291,11 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
                 <button onClick={() => submitPayout("standard")} disabled={payoutBusy}>
                   Standard (free, 1–3 business days)
                 </button>
-                <button onClick={() => submitPayout("instant")} disabled={payoutBusy || !status.instantEligible}
-                  title={!status.instantEligible ? "Instant payouts need an eligible debit card on your Stripe account." : undefined}>
-                  {(() => {
-                    const preview = parseDollarsToCents(amount);
-                    return `Instant${preview != null ? ` — fee ${formatCents(instantFeePreviewCents(preview))}` : ""}`;
-                  })()}
+                <button onClick={() => submitPayout("instant")}
+                  disabled={payoutBusy || !status.instantEligible
+                    || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}
+                  title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE : undefined}>
+                  {`Instant${previewCents != null && previewFeeCents != null ? ` — fee ${formatCents(previewFeeCents)}` : ""}`}
                 </button>
               </div>
               {payoutError && (

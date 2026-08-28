@@ -2,6 +2,10 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   isValidDocId, MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS,
+  TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage, TRUE_UP_WINDOW_CLOSED_MESSAGE,
+  TRUE_UP_PAYMENT_STARTED_MESSAGE, TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE,
+  PAY_PAST_DUE_NOT_OVERDUE_MESSAGE, PAY_PAST_DUE_NOTHING_OWED_MESSAGE, PAY_PAST_DUE_NO_CUSTOMER_MESSAGE,
+  PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE, PAY_PAST_DUE_RACED_MESSAGE, PAY_PAST_DUE_DATE_CANCELLED_MESSAGE,
   type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type PaymentDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
@@ -466,34 +470,17 @@ export interface ConfirmOccurrenceActualsInput {
   bookingId: string; gigId: string; extraMinutes?: number; extraSongs?: number;
 }
 
-// Caller-facing refusals, exported for the same reason releaseStuckSaga's
-// three are (Task 10 review, M5): they are DIFFERENT situations with
-// DIFFERENT fixes, and a test that only asserts "failed-precondition" cannot
-// tell them apart. One shared string per family was actively misleading here
-// — "report positive whole numbers" is not advice a curator who reported 900
-// minutes can act on, and "the settlement window" is not what a curator whose
-// card is being charged right now is looking at.
-export const TRUE_UP_SHAPE_MESSAGE =
-  "Report extra minutes and/or extra songs as positive whole numbers.";
-// The caps bound the settlement base (spec §4), so the limit is part of the
-// message: a curator who over-reports needs the number, not a restatement of
-// the rule they just broke.
-export const trueUpOverCapMessage = (unit: "minutes" | "songs", limit: number): string =>
-  `Report at most ${limit} extra ${unit} for one date — contact support if a date really ran longer than that.`;
-// The settlement window closed for good: this date is paid, waived, or has
-// not been performed yet. Nothing the curator does re-opens it.
-export const TRUE_UP_WINDOW_CLOSED_MESSAGE =
-  "Actuals can only be reported during the settlement window for a date that's already been played.";
-// A charge EXISTS for this date (one left processing, or one that succeeded
-// against a doc a racer moved). Reporting more now would settle the doc for an
-// amount that was never charged.
-export const TRUE_UP_PAYMENT_STARTED_MESSAGE =
-  "A payment for this date has already started — actuals can no longer be changed.";
-// A charge is IN FLIGHT this second (the one-write-wide gap between the amount
-// being computed and the intent id being recorded). Unlike the two above this
-// one is genuinely transient, so the copy invites a retry.
-export const TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE =
-  "This date is being charged right now — try reporting actuals again in a few minutes.";
+// Caller-facing refusals — DIFFERENT situations with DIFFERENT fixes, and a
+// test that only asserts "failed-precondition" cannot tell them apart. Moved
+// to @gatekeep/shared/messages.ts (review round 1, the fix round before Task
+// 15) so TrueUpForm's client-side validation hint can mirror this exact
+// copy; re-exported here so every existing in-repo import (this file's own
+// callable below, functions/test/*) keeps resolving from "./payments.js"
+// unchanged.
+export {
+  TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage, TRUE_UP_WINDOW_CLOSED_MESSAGE,
+  TRUE_UP_PAYMENT_STARTED_MESSAGE, TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE,
+};
 
 // Curator-only, INCREASE-ONLY true-up of what actually happened on one booked
 // date, reported during the T+3 settlement window.
@@ -612,30 +599,16 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
 
 export interface PayPastDueInput { bookingId: string; gigId: string; }
 
-// Caller-facing refusals, exported so tests (and the web) can tell WHICH one
-// fired — they are five different situations with five different fixes.
-export const PAY_PAST_DUE_NOT_OVERDUE_MESSAGE =
-  "There's nothing overdue on this date — it's already settled, or its payment hasn't been attempted yet.";
-export const PAY_PAST_DUE_NOTHING_OWED_MESSAGE =
-  "This date's balance is already covered — nothing left to pay.";
-export const PAY_PAST_DUE_NO_CUSTOMER_MESSAGE =
-  "This profile has no payment account yet — save a card first, then try again.";
-// A charge that is NOT this callable's own is outstanding on the occurrence: an
-// off-session settlement intent left processing, or one that succeeded against
-// a doc whose payout was blocked. Minting a second, confirmable intent beside
-// it is how a curator would end up paying one night twice, so this refuses and
-// leaves it to the webhook (or an operator working the
-// `settlement_pending_stuck` alert).
-export const PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE =
-  "A payment for this date is already being processed — check back in a few minutes.";
-// The doc moved between the read this decision was made from and the write.
-export const PAY_PAST_DUE_RACED_MESSAGE =
-  "This booking changed while we were setting up the payment — try again.";
-// A cancellation claimed the occurrence WHILE its deposit was being paid. The
-// charge is real, so this is not "try again" — the pending executor sends it
-// back, and telling the curator their date is secured would be a lie.
-export const PAY_PAST_DUE_DATE_CANCELLED_MESSAGE =
-  "That date was just cancelled — the charge will be reconciled.";
+// Caller-facing refusals — five different situations with five different
+// fixes. Moved to @gatekeep/shared/messages.ts (review round 1, the fix
+// round before Task 15) so PayPastDueButton can key UI off the specific one
+// that fired; re-exported here so every existing in-repo import (this
+// file's own callable below, functions/test/*) keeps resolving from
+// "./payments.js" unchanged.
+export {
+  PAY_PAST_DUE_NOT_OVERDUE_MESSAGE, PAY_PAST_DUE_NOTHING_OWED_MESSAGE, PAY_PAST_DUE_NO_CUSTOMER_MESSAGE,
+  PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE, PAY_PAST_DUE_RACED_MESSAGE, PAY_PAST_DUE_DATE_CANCELLED_MESSAGE,
+};
 
 // ON-SESSION recovery from a `past_due` (usually delinquent) settlement: the
 // server prices the debt, mints a PaymentIntent the curator confirms in the
