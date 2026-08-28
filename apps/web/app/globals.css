@@ -1,20 +1,60 @@
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@import "tailwindcss";
+
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --gk-bg-0: #0E0B13; --gk-bg-1: #150F20; --gk-bg-2: #1D1229;
+  --gk-surface: #1A1424; --gk-border: #2C2438;
+  --gk-text: #F5F1F8; --gk-muted: rgba(245,241,248,.62);
+  --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
+  --gk-success: #7BC48A; --gk-warning: #E8B15C; --gk-destructive: #E5484D;
+  --gk-scrim: linear-gradient(to top, var(--gk-bg-0) 4%, rgba(14,11,19,.35) 55%, transparent);
+  --gk-page: linear-gradient(165deg, var(--gk-bg-0) 0%, var(--gk-bg-1) 55%, var(--gk-bg-2) 100%);
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --gk-bg-0: #FAF7F2; --gk-bg-1: #FAF7F2; --gk-bg-2: #FAF7F2;
+  --gk-surface: #FFFFFF; --gk-border: #E4DDD2;
+  --gk-text: #1C1524; --gk-muted: rgba(28,21,36,.62);
+  --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
+  --gk-success: #2E7D43; --gk-warning: #9A6A1B; --gk-destructive: #C62A30;
+  --gk-page: #FAF7F2;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* System preference, honored only when the pre-hydration script (layout.tsx)
+   has not stamped an explicit data-theme attribute. A user's own System,
+   Light, or Dark choice (ThemeToggle) always wins over this media query. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --gk-bg-0: #FAF7F2; --gk-bg-1: #FAF7F2; --gk-bg-2: #FAF7F2;
+    --gk-surface: #FFFFFF; --gk-border: #E4DDD2;
+    --gk-text: #1C1524; --gk-muted: rgba(28,21,36,.62);
+    --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
+    --gk-success: #2E7D43; --gk-warning: #9A6A1B; --gk-destructive: #C62A30;
+    --gk-page: #FAF7F2;
   }
+}
+
+@theme inline {
+  --color-gk-bg-0: var(--gk-bg-0);
+  --color-gk-bg-1: var(--gk-bg-1);
+  --color-gk-bg-2: var(--gk-bg-2);
+  --color-gk-surface: var(--gk-surface);
+  --color-gk-border: var(--gk-border);
+  --color-gk-text: var(--gk-text);
+  --color-gk-muted: var(--gk-muted);
+  --color-gk-accent: var(--gk-accent);
+  --color-gk-on-accent: var(--gk-on-accent);
+  --color-gk-success: var(--gk-success);
+  --color-gk-warning: var(--gk-warning);
+  --color-gk-destructive: var(--gk-destructive);
+
+  --font-syne: var(--font-syne);
+  --font-sora: var(--font-sora);
 }
 
 html {
   height: 100%;
-}
-
-html {
   max-width: 100vw;
   overflow-x: hidden;
 }
@@ -27,26 +67,14 @@ body {
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--gk-page);
+  color: var(--gk-text);
+  font-family: var(--font-sora);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-}
-
-* {
-  box-sizing: border-box;
-  padding: 0;
-  margin: 0;
 }
 
 a {
   color: inherit;
   text-decoration: none;
-}
-
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
-  }
 }
