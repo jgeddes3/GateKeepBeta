@@ -440,10 +440,14 @@ export interface ConfirmOccurrenceActualsInput {
 //     report), so a curator can never talk their own bill down after the fact,
 //     and a repeated call REPLACES rather than accumulates — the payload is
 //     the cumulative total, so a retried/duplicated request is idempotent.
-//  3. It is refused once the settlement leaves `pending`, and once a charge
-//     has been initiated at all (`settlement.intentId`) — a pending
-//     PaymentIntent is still `pending`-status, and letting the true-up move
-//     under it would settle the doc for an amount that was never charged.
+//  3. It is refused once the settlement leaves `pending`, once a charge has
+//     been initiated at all (`settlement.intentId` — a still-`processing`
+//     PaymentIntent leaves the status `pending`), AND for as long as a charge
+//     is IN FLIGHT (`settlement.chargingSince`, written immediately before the
+//     Stripe call). Without that last one there is a one-write-wide window in
+//     which a true-up could land between the amount being computed and the
+//     intent id being recorded, settling the doc for an amount that was never
+//     charged.
 //
 // Structure-aware: perHour bookings true-up minutes, perSong bookings true-up
 // songs, and perSet bookings are flat — there is nothing to report.
@@ -497,7 +501,15 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
       const snap = await tx.get(ref);
       const p = snap.data() as PaymentDoc | undefined;
       if (!p) throw new HttpsError("not-found", "No payment record for that date.");
-      if (p.settlement.status !== "pending" || p.settlement.intentId != null) {
+      // TIME-BOUNDED on purpose: `chargingSince` is cleared by every terminal
+      // settlement write, but an instance that dies mid-charge leaves it set
+      // with nothing to clear it. Bounding it by Stripe's idempotency window
+      // means such a marker stops blocking exactly when the charge behind it
+      // stops being replayable — the same clock every other SP5 recovery
+      // guard measures against.
+      const charging = p.settlement.chargingSince != null
+        && now - p.settlement.chargingSince < IDEMPOTENCY_WINDOW_MS;
+      if (p.settlement.status !== "pending" || p.settlement.intentId != null || charging) {
         throw new HttpsError("failed-precondition", "Actuals can only be reported during the settlement window.");
       }
       const prev = p.settlement.trueUp;

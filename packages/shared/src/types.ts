@@ -555,6 +555,21 @@ export interface SettlementState {
   // -zero late fee (e.g. a 0-pct policy snapshot) must not read as
   // "not delinquent" just because the cents happen to be 0.
   delinquentAt: number | null;
+  // SP5 Task 10 — PRE-CHARGE marker, written immediately before the
+  // settlement's Stripe call and cleared by every terminal write. Two jobs,
+  // both about the non-transactional gap a charge opens:
+  //  1. it closes the true-up window BEFORE the money is computed, so a
+  //     curator can never report extra minutes against a charge that is
+  //     already in flight (the settlement would then record an amount that
+  //     was never charged). `settlement.intentId` closes that window too, but
+  //     only AFTER the call returns — this covers the call itself.
+  //  2. its write time is the CAS baseline the terminal write is held to, so
+  //     the precondition spans the whole charge (same persist-before-charge
+  //     idiom as DepositState.depositAttempts).
+  // Readers must treat it as advisory and TIME-BOUNDED (IDEMPOTENCY_WINDOW_MS)
+  // — an instance that died mid-charge would otherwise lock the true-up
+  // window forever. Optional so every pre-Task-10 payment doc stays valid.
+  chargingSince?: number | null;
 }
 export interface TransferState {         // musician earnings for this occurrence
   status: TransferStatus;
@@ -609,7 +624,13 @@ export type AdminAlertKind =
   // but its terminal write lost a race to a concurrent waive — a post-transfer
   // reportNoShow is the one path that can do this. Nothing automatic can
   // decide whether to refund it or re-settle it, so it is escalated.
-  | "settlement_raced";
+  | "settlement_raced"
+  // SP5 Task 10: a settlement charge came back `processing` and never
+  // resolved. It is NEVER re-charged (the outstanding intent can still
+  // succeed, and past Stripe's 24h key window a "retry" would mint a real
+  // SECOND charge), so it sits here until the webhook finalizes it or an
+  // operator resolves the intent in Stripe.
+  | "settlement_pending_stuck";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;

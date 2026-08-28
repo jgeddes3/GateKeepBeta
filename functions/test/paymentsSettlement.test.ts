@@ -8,7 +8,7 @@ import {
   computeDepositCents, computeEarningsCents, computeExpectedTotalCents, computeFeeShareCents,
   computeSettlementBaseCents, DEFAULT_FEE_POLICY,
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
+  type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
   type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
 } from "@gatekeep/shared";
 // The sweep drives steps 5/6; chargeSettlement is invoked DIRECTLY for the
@@ -208,6 +208,19 @@ async function accountBalanceCents(accountId: string): Promise<number> {
 
 async function idemUsed(key: string): Promise<boolean> {
   return (await adb.doc(`stripeFake/state/idem/${encodeURIComponent(key)}`).get()).exists;
+}
+
+// FakeStripe's keys never expire; REAL Stripe's do, after 24h. Dropping the
+// cached entry is how a test reproduces that expiry — past it the same key is
+// brand new, so anything that "retries" on it mints a genuinely second charge.
+async function expireIdemKey(key: string): Promise<void> {
+  await adb.doc(`stripeFake/state/idem/${encodeURIComponent(key)}`).delete();
+}
+
+// The durable escalation queue — a refusal that isn't recorded here is a
+// refusal nobody will ever action.
+async function adminAlert(alertId: string): Promise<AdminAlertDoc | undefined> {
+  return (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc | undefined;
 }
 
 async function ledgerRows(bookingId: string): Promise<LedgerEntry[]> {
@@ -587,9 +600,9 @@ describe("settlement — defenses", () => {
       .update({ "deposit.sliceCents": BASE_CENTS + excess });
 
     expect(await chargeSettlement({ bookingId: zero.bookingId, gigId: zero.gigId, now: Date.now() }))
-      .toBe("charged");
+      .toEqual({ outcome: "charged", transferred: true });
     expect(await chargeSettlement({ bookingId: below.bookingId, gigId: below.gigId, now: Date.now() }))
-      .toBe("charged");
+      .toEqual({ outcome: "charged", transferred: true });
 
     const zeroPaid = await getPayment(zero.bookingId, zero.gigId);
     expect(zeroPaid?.settlement.status).toBe("paid");
@@ -659,6 +672,34 @@ describe("settlement — a charge left processing", () => {
     await expect(callFn("confirmOccurrenceActuals", { bookingId, gigId, extraMinutes: 30 }, curator.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
 
+    // THE DOUBLE-CHARGE TERMINATOR. This doc is still `pending` with its
+    // `settleAfter` in the past, so every hourly run finds it again — and it
+    // must never be charged a second time. Reproduced under the condition that
+    // makes it dangerous: the idempotency key EXPIRED (real Stripe drops it
+    // after 24h; the fake's never do, so the test drops it by hand) and the
+    // card is now perfectly good. Without the guard this run would mint a
+    // brand-new intent and charge the curator twice for one night.
+    await expireIdemKey(`${bookingId}:${gigId}:settle:0`);
+    const secondRun = await runPaymentsSweep(Date.now());
+    expect(secondRun.settlementsPending).toBeGreaterThanOrEqual(1);
+
+    const stillPending = await getPayment(bookingId, gigId);
+    expect(stillPending?.settlement.status).toBe("pending");
+    expect(stillPending?.settlement.intentId).toBe(intentId);      // the SAME intent, not a new one
+    expect(stillPending?.settlement.attempts).toBe(0);
+    expect(stillPending?.transfer.status).toBe("none");
+    // No charge was even ATTEMPTED: the key the attempt would have used is
+    // still absent, and nothing reached the musician.
+    expect(await idemUsed(`${bookingId}:${gigId}:settle:0`)).toBe(false);
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "settlement_charged")).toBe(false);
+    // Refusing is correct; refusing silently is not.
+    const stuckAlert = await adminAlert(`settlement-pending:${bookingId}:${gigId}`);
+    expect(stuckAlert?.kind).toBe("settlement_pending_stuck");
+    expect(stuckAlert?.bookingId).toBe(bookingId);
+    expect(stuckAlert?.gigId).toBe(gigId);
+    expect(stuckAlert?.resolvedAt).toBeNull();
+
     // Stripe confirms it — the settlement finishes out-of-band, exactly as the
     // synchronous path would have.
     const evt = fakeEvent("payment_intent.succeeded", {
@@ -692,6 +733,68 @@ describe("settlement — a charge left processing", () => {
     expect(afterReplay?.transfer.transferredAt).toBe(paid!.transfer.transferredAt);
     expect(afterReplay?.transfer.id).toBe(paid!.transfer.id);
     expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
+  });
+
+  // The PRE-TRANSFER race, end to end. A charge is outstanding when the
+  // curator reports a no-show, which waives the very occurrence the charge was
+  // for. When the intent then succeeds, the musician must NOT be paid — but
+  // the curator's money did move, so it has to be recorded and escalated
+  // rather than dropped.
+  it("a no-show waive landing under an outstanding charge blocks the transfer, records the charge, and escalates", async () => {
+    const { curator, musician, gigId, bookingId } = await makeEndedBooking("strace");
+    const customerId = await curatorCustomerId(curator.profileId);
+    const accountId = await musicianAccountId(musician.profileId);
+
+    await scheduleSettlement(bookingId, gigId);
+    await makeSettlementDue(bookingId, gigId);
+    try {
+      await setChargeKnob("pendingCustomerIds", customerId, true);
+      await runPaymentsSweep(Date.now());
+    } finally {
+      await setChargeKnob("pendingCustomerIds", customerId, false);
+    }
+    const intentId = (await getPayment(bookingId, gigId))!.settlement.intentId!;
+    expect(intentId).toBeTruthy();
+
+    // The curator reports the no-show while that intent is still settling.
+    // Task 8 waives the reported occurrence's settlement and sends its deposit
+    // back — it is the one path that knows this date did not happen.
+    await callFn("reportNoShow", { bookingId, reason: "The act never turned up." }, curator.owner.user);
+    const waived = await getPayment(bookingId, gigId);
+    expect(waived?.settlement.status).toBe("waived");
+    expect(waived?.deposit.status).toBe("refunded");
+
+    // ...and now Stripe confirms the charge.
+    const evt = fakeEvent("payment_intent.succeeded", {
+      id: intentId, amount: FLAT_CHARGE_CENTS, amount_received: FLAT_CHARGE_CENTS,
+      metadata: { bookingId, gigId, purpose: "settlement" },
+    });
+    expect((await postWebhook(evt)).status).toBe(200);
+
+    const after = await getPayment(bookingId, gigId);
+    // THE assertion: the musician was never paid for a night they didn't play.
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(after?.transfer.status).toBe("none");
+    expect(after?.transfer.id).toBeNull();
+    // The waive stands — the raced write is merge-only and touches no status
+    // the racer owns.
+    expect(after?.settlement.status).toBe("waived");
+    expect(after?.deposit.status).toBe("refunded");
+    expect(after?.settlement.intentId).toBe(intentId);
+    expect(after?.settlement.chargingSince).toBeNull();
+    // The curator's money DID move, so the audit row exists regardless of the
+    // exceptional exit — an operator reconciling the alert reads the ledger.
+    const chargeRow = (await ledgerRows(bookingId)).find((r) => r.kind === "settlement_charged");
+    expect(chargeRow?.amountCents).toBe(FLAT_CHARGE_CENTS);
+    expect(chargeRow?.stripeId).toBe(intentId);
+    expect(chargeRow?.profileId).toBe(curator.profileId);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "earnings_transfer")).toBe(false);
+    // ...and it is escalated, with the unambiguous "just refund it" wording
+    // (nothing went out to the musician, so no reversal is involved).
+    const alert = await adminAlert(`settlement-raced:${bookingId}:${gigId}`);
+    expect(alert?.kind).toBe("settlement_raced");
+    expect(alert?.detail).toContain("NO transfer was made");
+    expect(alert?.resolvedAt).toBeNull();
   });
 });
 

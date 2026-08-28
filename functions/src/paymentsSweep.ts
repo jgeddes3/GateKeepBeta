@@ -936,16 +936,17 @@ async function runSettlementCharges(
       if (!at) continue;
       try {
         if (spec.countRetry) report.retriesAttempted++;
-        const outcome = await chargeSettlement({ bookingId: at.bookingId, gigId: at.gigId, now });
-        if (outcome === "charged") {
-          report.settlementsCharged++;
-          // The earnings transfer happens INSIDE chargeSettlement (it needs
-          // the settlement charge's own charge id as the transfer's
-          // sourceChargeId), so "charged" is the sweep's only handle on it.
-          report.transfersMade++;
-        } else if (outcome === "declined") report.settlementsDeclined++;
+        const { outcome, transferred } = await chargeSettlement({ bookingId: at.bookingId, gigId: at.gigId, now });
+        if (outcome === "charged") report.settlementsCharged++;
+        else if (outcome === "declined") report.settlementsDeclined++;
         else if (outcome === "pending") report.settlementsPending++;
         else if (outcome === "waived") report.settlementsWaived++;
+        // Counted off what actually FIRED, not off the outcome: the earnings
+        // transfer happens inside chargeSettlement (it needs the settlement
+        // charge's own charge id as its sourceChargeId), and it can both be
+        // absent from a "charged" run (zero earnings) and present on one that
+        // lost its terminal write. `transferred` is the only honest handle.
+        if (transferred) report.transfersMade++;
       } catch (e) {
         console.error(`paymentsSweep: settlement charge failed for ${at.bookingId}/${at.gigId}`, e);
         bumpError(report, spec.errorKey);
