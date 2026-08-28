@@ -13,7 +13,8 @@ import { cn } from "@/src/lib/utils";
 // already use (verified 6.36:1 in DESIGN.md), so the checked thumb reads
 // clearly against the ember track in both themes; the unchecked thumb
 // uses gk-text against a gk-surface track for the same reason (gk-border
-// alone is deliberately too low-contrast to carry this on its own).
+// alone is deliberately too low-contrast to carry this on its own). The
+// focus ring uses --gk-focus, not --gk-accent directly; see globals.css.
 function Switch({ className, ...props }: React.ComponentProps<typeof SwitchPrimitive.Root>) {
   return (
     <SwitchPrimitive.Root
@@ -22,7 +23,7 @@ function Switch({ className, ...props }: React.ComponentProps<typeof SwitchPrimi
         "peer inline-flex h-6 w-10 shrink-0 items-center rounded-gk-sm border outline-none transition-colors",
         "border-gk-border bg-gk-surface",
         "data-[state=checked]:border-gk-accent data-[state=checked]:bg-gk-accent",
-        "focus-visible:ring-2 focus-visible:ring-gk-accent",
+        "focus-visible:ring-2 focus-visible:ring-gk-focus",
         "disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}

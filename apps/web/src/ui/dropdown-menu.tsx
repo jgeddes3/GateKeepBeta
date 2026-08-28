@@ -69,7 +69,7 @@ function DropdownMenuItem({
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         "data-[highlighted]:bg-gk-border/40 data-[highlighted]:text-gk-text",
         "data-[inset]:pl-8",
-        "data-[variant=destructive]:text-gk-destructive data-[variant=destructive]:data-[highlighted]:bg-gk-destructive/12",
+        "data-[variant=destructive]:text-gk-destructive data-[variant=destructive]:data-[highlighted]:bg-gk-destructive/14",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0",
         className,
       )}

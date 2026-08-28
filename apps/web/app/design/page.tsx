@@ -181,11 +181,13 @@ export default function DesignReferencePage() {
         </div>
       </Section>
 
-      <Section title="Buttons" description="All variants, all sizes, and a disabled state for each variant.">
+      <Section
+        title="Buttons"
+        description="All variants, all sizes, and a disabled state for each variant. secondary is the only bordered-ghost role: shadcn's separate outline variant was removed (it themed identically to secondary, an ambiguous duplicate DESIGN.md never asked for)."
+      >
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="default">Primary pill</Button>
           <Button variant="secondary">Secondary</Button>
-          <Button variant="outline">Outline</Button>
           <Button variant="destructive">Destructive</Button>
           <Button variant="ghost">Ghost</Button>
           <Button variant="link">Link</Button>
@@ -196,9 +198,6 @@ export default function DesignReferencePage() {
           </Button>
           <Button variant="secondary" disabled>
             Secondary
-          </Button>
-          <Button variant="outline" disabled>
-            Outline
           </Button>
           <Button variant="destructive" disabled>
             Destructive
@@ -313,14 +312,14 @@ export default function DesignReferencePage() {
         <div className="flex flex-wrap items-center gap-3">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="outline">Hover for tooltip</Button>
+              <Button variant="secondary">Hover for tooltip</Button>
             </TooltipTrigger>
             <TooltipContent>Sample tooltip content</TooltipContent>
           </Tooltip>
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline">Open dropdown</Button>
+              <Button variant="secondary">Open dropdown</Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent>
               <DropdownMenuLabel>Sample actions</DropdownMenuLabel>
@@ -350,7 +349,7 @@ export default function DesignReferencePage() {
 
           <Sheet>
             <SheetTrigger asChild>
-              <Button variant="outline">Open sheet</Button>
+              <Button variant="secondary">Open sheet</Button>
             </SheetTrigger>
             <SheetContent>
               <SheetHeader>

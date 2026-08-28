@@ -10,7 +10,9 @@ import { IconClose } from "./icons";
 // Theme pass: same treatment as Dialog (solid gk-surface, gk-border, real
 // shadow: it is one of DESIGN.md's four shadow-carrying overlay types).
 // No radius on the edge that meets the viewport border, since a sheet is
-// flush against it; the opposite edge keeps the 10px card/input tier.
+// flush against it; the opposite edge keeps the 10px card/input tier. The
+// close button's focus ring uses --gk-focus, not --gk-accent directly;
+// see globals.css.
 function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
   return <SheetPrimitive.Root data-slot="sheet" {...props} />;
 }
@@ -74,7 +76,7 @@ function SheetContent({
         {...props}
       >
         {children}
-        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-gk-sm text-gk-muted outline-none transition-colors hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-accent disabled:pointer-events-none">
+        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-gk-sm text-gk-muted outline-none transition-colors hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus disabled:pointer-events-none">
           <IconClose size={16} />
           <span className="sr-only">Close</span>
         </SheetPrimitive.Close>

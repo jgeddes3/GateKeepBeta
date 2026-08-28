@@ -86,6 +86,7 @@ reach for the `gk-*` utility or the `var(--gk-*)` custom property, never a hardc
 | `--gk-warning` | `#E8B15C` | Warning status tint |
 | `--gk-destructive` | `#E5484D` | Destructive status tint, destructive button fill |
 | `--gk-on-destructive` | `#FFFFFF` | Text/icon color on top of a solid `--gk-destructive` fill |
+| `--gk-focus` | `var(--gk-accent)` | Focus ring / focus border color |
 | `--gk-scrim` | gradient, see below | Bottom-up night scrim over photography |
 | `--gk-page` | gradient, see below | Page-level background |
 
@@ -131,6 +132,7 @@ equivalent, `bg-[image:var(--gk-scrim)]`) instead. Every other token in the tabl
 | `--gk-warning` | `#9A6A1B` | Re-derived for AA on a light surface |
 | `--gk-destructive` | `#C62A30` | Re-derived for AA on a light surface |
 | `--gk-on-destructive` | `#FFFFFF` | Same as dark |
+| `--gk-focus` | `#BF5038` | Focus ring / focus border color, re-derived for AA (see below) |
 | `--gk-page` | `#FAF7F2` | Flat warm paper, no gradient |
 
 `--gk-scrim` is not redefined in light: it inherits the dark gradient value from `:root` (see
@@ -162,8 +164,29 @@ background. Safe patterns:
 
 `--gk-border` is intentionally low-contrast against `--gk-surface` in both themes (around
 1.2-1.35:1): it is a quiet separator, not the sole indicator of an interactive boundary. Focus
-states and hover states must carry their own visible affordance (the ember focus ring on
+states and hover states must carry their own visible affordance (the `--gk-focus` ring on
 interactive elements) rather than relying on the border color alone.
+
+**`--gk-focus` (post-launch review addition).** The focus ring/border on every interactive
+`src/ui` component (`button.tsx`, `input.tsx`, `textarea.tsx`, `select.tsx`, `dialog.tsx`,
+`sheet.tsx`, `switch.tsx`, `tabs.tsx`) originally used `--gk-accent` directly. Bare ember measures
+**~2.64:1** against `--gk-page` (`#FAF7F2`) and **~2.82:1** against `--gk-surface` (`#FFFFFF`) in
+light theme, both below the WCAG AA non-text/focus-indicator minimum of **3:1** (SC 1.4.11), so a
+keyboard user tabbing through a light-theme form got a focus ring that is present in the DOM but
+close to invisible. `--gk-focus` fixes this without touching `--gk-accent` itself (the brand accent
+does not change):
+- **Dark theme:** `--gk-focus: var(--gk-accent)`. Ember already clears 3:1 against every dark
+  surface (the 6.4-6.9:1 figure above), so the focus token is just the accent.
+- **Light theme:** `--gk-focus: #BF5038`, the same hue as ember (10.7 degrees vs. ember's 10.9
+  degrees in HSL, same brand family, just darker/less light) rather than an unrelated color.
+  Computed contrast: **4.75:1** against `--gk-surface` (`#FFFFFF`), **4.45:1** against `--gk-page`
+  (`#FAF7F2`). Both clear the 3:1 minimum with real margin, not right at the edge.
+
+Every `focus-visible:ring-*` / `focus-visible:border-*` in `src/ui` reaches for `ring-gk-focus` /
+`border-gk-focus`, never `ring-gk-accent` / `border-gk-accent`. On `input.tsx`, `textarea.tsx`, and
+`select.tsx`, the solid `border-gk-focus` (full opacity) is the indicator that carries the 3:1
+obligation on its own; the accompanying `ring-gk-focus/40` is a diluted supplementary glow layered
+on top of that already-compliant border, not a second independent claim to AA compliance.
 
 ## Typography
 
@@ -195,6 +218,16 @@ shadcn ships. The pill tier is Tailwind's built-in `rounded-full` and needs no t
 reserved strictly for the primary button variant and chips, as the table says: `src/ui/switch.tsx`
 is a rounded-rect toggle (`rounded-gk-sm`) rather than the conventional pill switch shape for
 exactly this reason.
+
+**`src/ui/button.tsx` variant roster (post-launch review fix).** This spec's section 4 names three
+button roles: primary (ember pill), secondary (outlined ghost), destructive (status red). The
+initial theme pass kept shadcn's full six-variant default set, and themed "outline" and "secondary"
+identically (the same bordered, transparent, `gk-border` treatment), an indistinguishable duplicate
+DESIGN.md never asked for. "outline" was removed rather than given a fabricated fourth look:
+`variant="secondary"` is the one bordered-ghost role going forward. The surviving variants are
+`default` (primary, pill), `secondary` (outlined ghost), `destructive` (status red), `ghost` (no
+border, transparent, for the lowest-emphasis actions), and `link` (text-only, underlined on hover,
+`--gk-text` colored per the accent note above, never `--gk-accent`).
 
 ## Elevation and motion
 
@@ -235,6 +268,11 @@ or border tint) with a soft background tint at roughly 14% opacity of the same c
 re-derived per theme so the pairing clears AA. Badges are always 6px radius and always carry real
 state (never decorative). Do not invent a fourth status color; if a new state is needed, it maps to
 one of these three or gets a written exception here first.
+
+The same **14%** figure is the one soft-tint opacity for this color family, full stop: a hover or
+highlighted-state tint on a status color (for example `src/ui/dropdown-menu.tsx`'s destructive item
+highlight) uses the same `/14` as the badge background, not a nearby-but-different value picked ad
+hoc per component.
 
 ## Icons
 

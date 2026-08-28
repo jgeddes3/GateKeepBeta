@@ -9,7 +9,8 @@ import { cn } from "@/src/lib/utils";
 // so it never has to invoke the pill radius tier at all ("borders do the
 // separating", DESIGN.md > Elevation). The active indicator is ember,
 // which DESIGN.md's accent dosage list names explicitly ("the active nav
-// item"): a tab is the same kind of state affordance.
+// item"): a tab is the same kind of state affordance. The focus ring uses
+// --gk-focus, not --gk-accent directly; see globals.css.
 function Tabs({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Root>) {
   return (
     <TabsPrimitive.Root
@@ -37,7 +38,7 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
       className={cn(
         "inline-flex items-center justify-center gap-1.5 border-b-2 border-transparent px-1 py-2.5 font-sora text-sm font-medium text-gk-muted whitespace-nowrap outline-none transition-colors",
         "hover:text-gk-text",
-        "focus-visible:ring-2 focus-visible:ring-gk-accent focus-visible:rounded-gk-sm",
+        "focus-visible:ring-2 focus-visible:ring-gk-focus focus-visible:rounded-gk-sm",
         "disabled:pointer-events-none disabled:opacity-50",
         "data-[state=active]:border-gk-accent data-[state=active]:text-gk-text",
         className,

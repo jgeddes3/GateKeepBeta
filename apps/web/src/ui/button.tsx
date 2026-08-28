@@ -10,14 +10,27 @@ import { cn } from "@/src/lib/utils";
 // Every other variant uses the 10px card/input tier so a button sits flush
 // against an adjacent input in a form row. The "icon" size is a compact
 // square control, so it drops to the 6px small-control tier instead.
+// Focus ring uses --gk-focus, not --gk-accent directly: bare ember fails
+// the 3:1 WCAG non-text contrast minimum against light-theme surfaces (see
+// globals.css and DESIGN.md's accessibility note); --gk-focus resolves to
+// the accent itself in dark theme and a darker same-hue value in light.
+//
+// Post-launch review fix: shadcn's default variant set ships both
+// "outline" and "secondary", and this file originally themed them to the
+// exact same class string (an ambiguous, indistinguishable pair). DESIGN.md
+// section 4 only names three button roles (primary/secondary/destructive)
+// and defines secondary AS "outlined ghost", so there was never a second,
+// distinct role for "outline" to fill; removed it rather than invent a
+// fourth visual treatment DESIGN.md doesn't ask for. "secondary" is the
+// bordered-ghost button going forward; components should not reference
+// variant="outline".
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap font-sora text-sm font-medium outline-none transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 focus-visible:ring-2 focus-visible:ring-gk-accent",
+  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap font-sora text-sm font-medium outline-none transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 focus-visible:ring-2 focus-visible:ring-gk-focus",
   {
     variants: {
       variant: {
         default: "rounded-full bg-gk-accent text-gk-on-accent hover:bg-gk-accent/90",
         destructive: "rounded-gk bg-gk-destructive text-gk-on-destructive hover:bg-gk-destructive/90",
-        outline: "rounded-gk border border-gk-border bg-transparent text-gk-text hover:bg-gk-border/40",
         secondary: "rounded-gk border border-gk-border bg-transparent text-gk-text hover:bg-gk-border/40",
         ghost: "rounded-gk bg-transparent text-gk-text hover:bg-gk-border/30",
         link: "rounded-none text-gk-text underline-offset-4 hover:underline",

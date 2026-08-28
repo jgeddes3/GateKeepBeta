@@ -7,9 +7,10 @@ import { cn } from "@/src/lib/utils";
 import { IconCaretDown, IconCaretUp, IconCheck } from "./icons";
 
 // Theme pass: Trigger matches Input (10px radius, gk-surface, ember focus
-// ring) so a select sits flush next to a text input in a form row.
-// Content is the same floating-popover treatment as DropdownMenu (10px
-// radius, real shadow: DESIGN.md's overlay shadow allowance).
+// ring, using --gk-focus rather than --gk-accent directly, see input.tsx)
+// so a select sits flush next to a text input in a form row. Content is
+// the same floating-popover treatment as DropdownMenu (10px radius, real
+// shadow: DESIGN.md's overlay shadow allowance).
 function Select({ ...props }: React.ComponentProps<typeof SelectPrimitive.Root>) {
   return <SelectPrimitive.Root data-slot="select" {...props} />;
 }
@@ -38,7 +39,7 @@ function SelectTrigger({
         "flex w-fit items-center justify-between gap-2 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2 font-sora text-sm text-gk-text outline-none",
         "data-[size=default]:h-10 data-[size=sm]:h-9",
         "data-[placeholder]:text-gk-muted",
-        "focus-visible:border-gk-accent focus-visible:ring-2 focus-visible:ring-gk-accent/40",
+        "focus-visible:border-gk-focus focus-visible:ring-2 focus-visible:ring-gk-focus/40",
         "aria-invalid:border-gk-destructive aria-invalid:ring-2 aria-invalid:ring-gk-destructive/25",
         "disabled:cursor-not-allowed disabled:opacity-50",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:text-gk-muted",

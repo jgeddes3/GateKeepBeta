@@ -14,6 +14,11 @@
   --gk-on-destructive: #FFFFFF;
   --gk-scrim: linear-gradient(to top, var(--gk-bg-0) 4%, rgba(14,11,19,.35) 55%, transparent);
   --gk-page: linear-gradient(165deg, var(--gk-bg-0) 0%, var(--gk-bg-1) 55%, var(--gk-bg-2) 100%);
+  /* Focus ring color (post-launch review fix): in dark theme ember already
+     clears 3:1 non-text contrast against every surface (~6.4-6.9:1, see
+     DESIGN.md), so the focus token is just the accent itself. See the
+     light block below for why light theme needs a different value. */
+  --gk-focus: var(--gk-accent);
   /* Base radius (Task 2 addition): the 10px tier for cards and inputs.
      Badges and small controls use the fixed 6px tier below; primary CTAs
      and chips use rounded-full (999px pill), never this variable. */
@@ -27,6 +32,14 @@
   --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
   --gk-success: #2E7D43; --gk-warning: #9A6A1B; --gk-destructive: #C62A30;
   --gk-on-destructive: #FFFFFF;
+  /* Focus ring color (post-launch review fix, not a change to --gk-accent
+     itself): bare ember measures ~2.64-2.82:1 against the light surfaces
+     below, under the 3:1 WCAG AA non-text/focus-indicator minimum
+     (SC 1.4.11). #BF5038 is the same hue (10.7 degrees vs ember's 10.9
+     degrees, same brand family, just darker) at 4.75:1 against
+     --gk-surface (#FFFFFF) and 4.45:1 against --gk-page (#FAF7F2). See
+     DESIGN.md > "Accessibility note on the accent" for the full numbers. */
+  --gk-focus: #BF5038;
   --gk-page: #FAF7F2;
 }
 
@@ -42,6 +55,7 @@
     --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
     --gk-success: #2E7D43; --gk-warning: #9A6A1B; --gk-destructive: #C62A30;
     --gk-on-destructive: #FFFFFF;
+    --gk-focus: #BF5038;
     --gk-page: #FAF7F2;
   }
 }
@@ -60,6 +74,7 @@
   --color-gk-warning: var(--gk-warning);
   --color-gk-destructive: var(--gk-destructive);
   --color-gk-on-destructive: var(--gk-on-destructive);
+  --color-gk-focus: var(--gk-focus);
 
   --font-syne: var(--font-syne);
   --font-sora: var(--font-sora);

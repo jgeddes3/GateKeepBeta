@@ -5,6 +5,12 @@ import { cn } from "@/src/lib/utils";
 // Theme pass: 10px radius (the card/input tier), solid gk-surface, ember
 // focus ring. No shadow: DESIGN.md reserves shadow for overlays, and a
 // form input sitting flat on the page is not one.
+//
+// Post-launch review fix: the focus border and ring now use --gk-focus
+// (not --gk-accent) so the solid border alone clears the 3:1 WCAG
+// non-text contrast minimum in light theme (see globals.css); the diluted
+// ring/40 stays a supplementary glow layered on top of that compliant
+// border, not the sole indicator.
 function Input({ className, type, ...props }: React.ComponentProps<"input">) {
   return (
     <input
@@ -16,7 +22,7 @@ function Input({ className, type, ...props }: React.ComponentProps<"input">) {
         "selection:bg-gk-accent selection:text-gk-on-accent",
         "file:h-7 file:border-0 file:bg-transparent file:font-sora file:text-sm file:font-medium file:text-gk-text",
         "disabled:cursor-not-allowed disabled:opacity-50",
-        "focus-visible:border-gk-accent focus-visible:ring-2 focus-visible:ring-gk-accent/40",
+        "focus-visible:border-gk-focus focus-visible:ring-2 focus-visible:ring-gk-focus/40",
         "aria-invalid:border-gk-destructive aria-invalid:ring-2 aria-invalid:ring-gk-destructive/25",
         className,
       )}

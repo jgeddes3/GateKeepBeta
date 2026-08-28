@@ -12,7 +12,8 @@ import { IconClose } from "./icons";
 // popovers..."), so it keeps a real shadow, unlike Card. The scrim uses a
 // plain neutral black tint (not a gk-* token): it dims whatever page
 // content sits behind the dialog in either theme, which is chrome, not a
-// brand color decision.
+// brand color decision. The close button's focus ring uses --gk-focus, not
+// --gk-accent directly; see globals.css.
 function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;
 }
@@ -65,7 +66,7 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="absolute top-4 right-4 rounded-gk-sm text-gk-muted outline-none transition-colors hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-accent disabled:pointer-events-none"
+            className="absolute top-4 right-4 rounded-gk-sm text-gk-muted outline-none transition-colors hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus disabled:pointer-events-none"
           >
             <IconClose size={16} />
             <span className="sr-only">Close</span>
