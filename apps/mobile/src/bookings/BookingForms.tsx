@@ -1,6 +1,6 @@
 import { View, Text, TextInput } from "react-native";
 import {
-  validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT,
+  validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type BudgetStructure, type GigPublicLocation,
 } from "@gatekeep/shared";
 
@@ -16,8 +16,14 @@ import {
 
 // Exact copy web uses for the pre-acceptance surfaces (Apply / Offer a gig)
 // — no computed dollar amount exists yet at this point.
+// Final-review fix wave — mirrors web's SP5 Task 15 review round 1 fix
+// (medium #6): payments are LIVE as of that sub-project — "will be
+// collected... when payments launch" was accurate pre-SP5 and is now simply
+// false (acceptBooking fires a real Stripe charge the moment it commits).
+// DEPOSIT_PERCENT templated in rather than a hardcoded "35%" literal, so
+// this can never drift from the actual constant.
 export const DEPOSIT_HONESTY_LINE =
-  "If accepted, a 35% deposit will be collected from the curator when payments launch.";
+  `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card at accept.`;
 
 export interface OfferState { amount: string; quantity: string; note: string; }
 export const emptyOffer = (): OfferState => ({ amount: "", quantity: "", note: "" });

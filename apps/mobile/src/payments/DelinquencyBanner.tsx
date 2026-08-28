@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { View, Text, Pressable } from "react-native";
+import { View, Text } from "react-native";
 import { useRouter } from "expo-router";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
 import type { StripeStatusResult } from "@gatekeep/shared";
 
-// SP5 Task 6 — mounted on the curator dashboard. One-shot getStripeStatus
+// SP5b Task 6 — mounted on the curator dashboard. One-shot getStripeStatus
 // on mount (no need for a live subscription here — a curator opening this
 // page is exactly when a fresh read is worth it) plus, only when delinquent,
 // the shared delinquentBookings.ts query (also used by GatePrompt's
@@ -47,11 +47,10 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
           Settle it from{" "}
           {affected.map((id, i) => (
             <Text key={id}>
-              <Pressable onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } } as any)}>
-                <Text style={{ color: "#991b1b", textDecorationLine: "underline" }}>
-                  this booking{affected.length > 1 ? ` (${i + 1})` : ""}
-                </Text>
-              </Pressable>
+              <Text style={{ color: "#991b1b", textDecorationLine: "underline" }}
+                onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}>
+                this booking{affected.length > 1 ? ` (${i + 1})` : ""}
+              </Text>
               {i < affected.length - 1 ? ", " : ""}
             </Text>
           ))}

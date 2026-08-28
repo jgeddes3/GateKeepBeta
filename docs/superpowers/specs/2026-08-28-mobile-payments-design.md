@@ -121,7 +121,9 @@ fork per platform. `StripeStatusResult` (currently `apps/web/src/payments/types.
 `stripeLoader.ts` posture exactly:
 
 - Save card: call `createSetupIntent`, **skip the sheet** — FakeStripe already marks the card
-  saved server-side before the callable returns — then `refreshPaymentMethod` + `onSaved`.
+  saved server-side before the callable returns — and, as-built (mirroring web's SaveCardModal
+  precedent), also skip the now-redundant `refreshPaymentMethod` round trip: call `onSaved`
+  directly.
 - Pay past due: call `payPastDue`; a `{ done: false, clientSecret }` result renders the same
   "finish this payment where Stripe is configured" notice web shows keyless (unreachable under
   FakeStripe, which confirms synchronously — defensive only).

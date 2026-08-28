@@ -4,7 +4,10 @@ import { useRouter } from "expo-router";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
-import { type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc } from "@gatekeep/shared";
+import {
+  DEPOSIT_PERCENT,
+  type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc,
+} from "@gatekeep/shared";
 
 // RN port of ../../../web/src/bookings/BookingInbox.tsx (SP4 Task 12) —
 // per-profile booking inbox + the booking-status DISPLAY helpers it (and
@@ -42,8 +45,16 @@ export function bookingHistoryLabel(b: Pick<BookingRequestDoc, "status" | "accep
 // amount exists (a confirmed booking's own deposit.amountCents). Distinct
 // from BookingForms.tsx's DEPOSIT_HONESTY_LINE, the pre-acceptance "implied,
 // not yet known" phrasing.
+// Final-review fix wave — mirrors web's SP5 Task 15 review round 1 fix
+// (medium #6): payments are LIVE — "will be collected when payments launch"
+// was accurate pre-SP5 and is now simply false (acceptBooking fires a real
+// Stripe charge the moment it commits). DEPOSIT_PERCENT templated in rather
+// than a hardcoded "35%" literal, so this can never drift from the actual
+// constant. Both call sites (this row, BookingThread's Confirmed section)
+// only ever render for an already-confirmed booking, so "charged... at
+// accept" describes something that has, in fact, already happened.
 export function depositLine(amountCents: number): string {
-  return `35% deposit (${formatCents(amountCents)}) will be collected when payments launch.`;
+  return `${DEPOSIT_PERCENT}% deposit (${formatCents(amountCents)}) charged to the curator's card at accept.`;
 }
 
 type BookingRow = BookingRequestDoc & { id: string };

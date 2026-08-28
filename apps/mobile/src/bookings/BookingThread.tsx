@@ -11,7 +11,7 @@ import { CancelDialog } from "./CancelDialog";
 import { GatePrompt } from "../payments/GatePrompt";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
-  NO_SHOW_REPORT_WINDOW_DAYS,
+  NO_SHOW_REPORT_WINDOW_DAYS, DEPOSIT_PERCENT, depositChargePreviewCents,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
 
@@ -229,7 +229,14 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     const expectedTotalCents = computeExpectedTotalCents(booking.structure, lastEntry.amountCents, {
       durationMinutes: gig.durationMinutes, songCount: lastEntry.expectedQuantity ?? undefined,
     });
-    return { expectedTotalCents, depositAmountCents: computeDepositCents(expectedTotalCents) };
+    return {
+      expectedTotalCents, depositAmountCents: computeDepositCents(expectedTotalCents),
+      // Money-copy parity with web (SP5 Task 15) — the same fee-inclusive
+      // "Due now" preview web's BookingThread renders, never the server's
+      // source of truth (invariant #1 — acceptBooking recomputes every cent
+      // independently from the frozen thread entry it commits).
+      chargePreview: depositChargePreviewCents(expectedTotalCents),
+    };
   })();
 
   const counter = async (payload: OfferPayload) => {
@@ -410,7 +417,43 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                   {preview ? (
                     <>
                       <Text>Total: {formatCents(preview.expectedTotalCents)}</Text>
-                      <Text style={{ color: "#666" }}>{depositLine(preview.depositAmountCents)}</Text>
+                      {/* Web parity (SP5 Task 15 review round 1, medium #4):
+                          the "Due now" breakdown is CURATOR money — only the
+                          curator side sees the actual figures; a
+                          musician-side accepter gets a neutral line instead
+                          (the charge lands on the CURATOR's card regardless
+                          of who clicks accept). */}
+                      {mySide === "curator" ? (
+                        <>
+                          <Text style={{ color: "#666" }}>
+                            Due now: {formatCents(preview.chargePreview.totalCents)}{" "}
+                            ({formatCents(preview.chargePreview.sliceCents)} deposit{" + "}
+                            {formatCents(preview.chargePreview.feeCents)} service fee)
+                            {/* A whole-run booking's deposit is charged PER
+                                DATE, not once — occurrences[] only ever holds
+                                "filled" gigs, so it's empty at this
+                                pre-accept point in practice; the count branch
+                                below is a cheap-if-available upgrade, not
+                                something this screen can currently reach,
+                                but stays correct if that ever changes (web
+                                parity). */}
+                            {booking.seriesId != null && occurrences.length === 0
+                              ? " × each of the run's upcoming dates" : ""}
+                          </Text>
+                          {booking.seriesId != null && occurrences.length > 0 && (
+                            <Text style={{ color: "#666" }}>
+                              ≈ {occurrences.length} dates, {formatCents(preview.chargePreview.totalCents * occurrences.length)} total due now.
+                            </Text>
+                          )}
+                          <Text style={{ color: "#666" }}>
+                            Remaining {100 - DEPOSIT_PERCENT}% + fee auto-charges after each date.
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={{ color: "#666" }}>
+                          The curator&apos;s card is charged the deposit when you accept.
+                        </Text>
+                      )}
                     </>
                   ) : (
                     <Text style={{ color: "#92400e" }}>

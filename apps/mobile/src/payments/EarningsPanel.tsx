@@ -233,10 +233,25 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
       const res = await httpsCallable<{ profileId: string }, { url: string }>(
         getFirebase().functions, "createOnboardingLink")({ profileId });
       onboardingInFlight.current = true;
-      await WebBrowser.openBrowserAsync(res.data.url);
-      // Browser dismissed — whatever happened in there, re-read the truth.
-      onboardingInFlight.current = false;
-      setReloadKey((k) => k + 1);
+      // expo-web-browser's openBrowserAsync resolves at a DIFFERENT moment per
+      // platform (see the installed package's own source comments): iOS
+      // resolves with {type: 'dismiss'} only once the user closes the in-app
+      // browser, but Android resolves with {type: 'opened'} as soon as the
+      // Custom Tab is on screen — the await returns while the user is still
+      // mid-flow inside Stripe's hosted form. Only clear-and-reload on a REAL
+      // dismissal; on 'opened' (Android) the flag stays ARMED so the AppState
+      // 'active' listener below re-polls once the user actually backgrounds/
+      // foregrounds out of the Custom Tab instead of re-polling too early.
+      // Any future in-app-browser flow in this app will hit this same
+      // platform asymmetry.
+      const result = await WebBrowser.openBrowserAsync(res.data.url);
+      if (result.type !== "opened") {
+        // A real dismissal (iOS always; Android when the tab was closed
+        // without ever fully opening) — whatever happened in there, re-read
+        // the truth now.
+        onboardingInFlight.current = false;
+        setReloadKey((k) => k + 1);
+      }
     } catch (e) {
       setOnboardError(e instanceof Error ? e.message : "Could not start payout setup.");
     } finally {
@@ -312,7 +327,7 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
               <Text>Set up payouts to get paid for your bookings.</Text>
               <Pressable onPress={() => void setupPayouts()} disabled={onboardBusy}
                 style={{ backgroundColor: "#111", paddingVertical: 10, paddingHorizontal: 14, borderRadius: 8, opacity: onboardBusy ? 0.6 : 1, alignSelf: "flex-start" }}>
-                <Text style={{ color: "#fff" }}>{onboardBusy ? "Redirecting…" : "Set up payouts"}</Text>
+                <Text style={{ color: "#fff" }}>{onboardBusy ? "Opening Stripe…" : "Set up payouts"}</Text>
               </Pressable>
               {onboardError && (
                 <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
