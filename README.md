@@ -351,12 +351,21 @@ on).
 
 **Surfaces.** Web is the full experience: `apps/web/src/payments/` (save-card modal, onboarding,
 the booking `PaymentsPanel` with true-ups and pay-past-due, the `EarningsPanel` with cash-out, the
-delinquency banner). **Mobile is read-only this sub-project** —
-`apps/mobile/src/bookings/PaymentStatus.tsx` renders the same per-occurrence status chips (mirroring
-web's row-state mapping exactly, so a date never reads differently on the two platforms) plus an
-Earnings card on the musician dashboard showing the balance headline and pointing at the web for
-anything actionable. Native payment sheets are **sub-5b**: they need
-`@stripe/stripe-react-native` and a new EAS dev build.
+delinquency banner). **Mobile now carries the full action set natively** (`apps/mobile/src/payments/`)
+— a native `PaymentSheet` (cards + Apple Pay + Google Pay) drives both save-card
+(`SaveCardSheet.tsx`) and pay-past-due (`PayPastDueButton.tsx`); musician onboarding opens Stripe's
+hosted Express flow in an in-app browser and re-syncs status by re-polling `getStripeStatus` when
+the browser is dismissed or the app re-foregrounds; `EarningsPanel.tsx` adds cash-out
+(standard/instant with a live fee preview) and a `TrueUpForm.tsx`; `GatePrompt.tsx` surfaces the
+apply/offer/accept gates; a `DelinquencyBanner.tsx` sits on the curator dashboard; and the booking
+payment panel manages the card on file. Row-state mapping and fee previews are single-sourced with
+web through `@gatekeep/shared` (`paymentDisplay.ts`, `feePreviews.ts` — `StripeStatusResult` is
+shared too), so a date or a fee never reads differently on the two platforms. Stripe-hosted
+onboarding still returns to the **web** pages by design — the return/refresh URLs are server-built
+`APP_ORIGIN` pages, never client-supplied, so neither client can forge one and fail the gate open;
+mobile has no return page of its own and relies on the re-poll described above instead. With no
+`EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` set, all of this runs **keyless**: the native sheets are
+skipped and the emulator loop works with zero Stripe keys.
 
 **Data & boundaries.** `bookings/{id}/payments/{gigId}` (one doc per occurrence, the money truth for
 that date) reads to both sides' members + admins and is server-write only;
@@ -378,9 +387,9 @@ birth deposits, running the dunning schedule, finishing `*_pending` money moves 
 and escalating states it deliberately refuses to act on into `adminAlerts` for a human
 (`releaseStuckSaga` is the admin callable that resolves one).
 
-**Not in sub-project 5**: mobile payment sheets (sub-5b), dispute/chargeback flows beyond Stripe's
-dashboard defaults, tax forms/1099s, statements/exports, multi-currency, live-mode activation, and
-platform payout accounting/reporting.
+**Not in sub-project 5**: dispute/chargeback flows beyond Stripe's dashboard defaults, tax
+forms/1099s, statements/exports, multi-currency, live-mode activation, and platform payout
+accounting/reporting.
 
 ## Environment variables
 
@@ -706,6 +715,21 @@ before a real launch:
   non-callable HTTPS entry point in the codebase and is App-Check-exempt by nature (Stripe cannot
   attest). Its protection is signature verification plus event idempotency.
 
+### Sub-project 5b launch checklist (mobile payments)
+
+1. **Apple Developer portal**: create merchant id `merchant.app.gatekeep.mobile`; add the Apple Pay
+   payment-processing certificate via the Stripe dashboard (test mode first, again at go-live).
+2. **Stripe dashboard**: enable Google Pay. (`testEnv` follows the key: any non-`pk_live_` key runs
+   Google Pay in test mode.)
+3. Set `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` as an EAS environment variable (dashboard or
+   `eas env:create`), plus `apps/mobile/.env` for local dev-client runs. `eas.json` stays
+   key-free. No key = keyless mode (sheets skipped — emulator dev posture).
+4. Cut a **new** EAS dev-client build for both platforms before device testing
+   (`npx eas-cli build --profile development --platform all` from `apps/mobile/`) — the Stripe
+   native module changed the binary.
+5. `APP_ORIGIN` must be set on deployed functions before testing onboarding from a device (the
+   Stripe return/refresh pages live on web).
+
 ### Manual smoke walkthrough (real Stripe test mode)
 
 The emulator suite covers the sagas against `FakeStripe`; this walkthrough is the one thing it
@@ -760,6 +784,41 @@ forwarding events). Nothing here uses real money, but everything here is real St
    overdue payment…". Then use **Pay now** on the panel with a good card: expect an on-session
    PaymentIntent (3DS challenge if you use **4000 0025 0000 3155**), the date flipping to "Paid",
    and the delinquency gate clearing on the next attempt to book.
+
+**Mobile (device, test keys, dev build).** Steps 9–15 repeat the relevant parts of the above through
+the native surfaces sub-5b added. Requires a real device (not the simulator/emulator, for Apple
+Pay/Google Pay and the in-app browser hand-off), a fresh EAS dev-client build
+(`npx eas-cli build --profile development --platform all`, since the Stripe native module changed
+the binary), and `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` set for that build — a keyless build skips the
+sheets entirely.
+
+9. **Save a card (sheet).** As the curator, open the booking payment panel on the device and save
+   **4242 4242 4242 4242** through the native `PaymentSheet`. Expect: the sheet completes without
+   leaving the app, and the card row reads "Card on file: visa •••• 4242" — the same row-state
+   mapping web renders, sourced from the shared `paymentDisplay.ts`.
+10. **3DS challenge inside the sheet.** Save **4000 0027 6000 3184** instead. Expect: the challenge
+    is presented inside the `PaymentSheet` itself (no hand-off to a browser) before it completes.
+11. **Past-due rescue, both debt shapes, from the sheet.** With **4000 0000 0000 0341** on file, let
+    a retry schedule exhaust — once for an exhausted birth-deposit retry ("Deposit past due — pay
+    now") and once for an exhausted post-settlement retry ("Past due — pay now"), the two separate
+    debt shapes `payPastDue` handles — then use **Pay now** to clear each with a good card through the
+    sheet. Expect: an on-session PaymentIntent, the row flipping to "Deposit held" for the deposit
+    debt or "Paid" for the settlement debt, and the delinquency gate clearing either way.
+12. **Apple Pay / Google Pay rows.** On a capable device (an iPhone signed into a wallet, or an
+    Android with Google Pay configured, with the merchant id and Google Pay enabled per the sub-5b
+    checklist above) open the same sheet. Expect: an Apple Pay or Google Pay row appears above the
+    card entry.
+13. **Onboarding round-trip.** As the musician, hit "Set up payouts" on the mobile Earnings card.
+    Expect: an in-app browser (not the system browser) opens Stripe's hosted Express onboarding;
+    complete it with the same test values as step 5 above. Dismissing the browser — or backgrounding
+    and re-foregrounding the app — re-polls `getStripeStatus`, and the payout/apply gates open
+    without a manual refresh.
+14. **Standard then instant payout.** From the mobile Earnings card, request a standard payout, then
+    an instant one. Expect: the fee preview shown before confirming ($0 standard, 4% min $1 instant)
+    matches the fee `requestPayout` actually returns.
+15. **A `perHour` true-up.** Submit a true-up whose actual hours differ from the booking's planned
+    hours through the mobile true-up form. Expect: the preview delta shown before submitting matches
+    the amount actually charged once the true-up settles.
 
 ### Sub-project 2 polish follow-ups (non-blocking)
 
