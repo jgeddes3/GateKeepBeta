@@ -19,4 +19,6 @@ export { applyToGig, offerGig, counterBooking, declineBooking, withdrawBooking, 
 export { cancelBooking, cancelOccurrence, reportNoShow, removeReliabilityMark } from "./bookingLifecycle.js";
 export { stripeWebhook } from "./paymentsWebhook.js";
 export { paymentsSweep } from "./paymentsSweep.js";
-export { createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus } from "./payments.js";
+export {
+  createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus, releaseStuckSaga,
+} from "./payments.js";

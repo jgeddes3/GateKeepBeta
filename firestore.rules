@@ -222,6 +222,12 @@ service cloud.firestore {
     // production) — never client-visible either way.
     match /stripeFake/{doc=**}    { allow read, write: if false; }
 
+    // SP5 Task 9: the payments sweep's durable escalation queue — the money
+    // states it deliberately refuses to act on and can only hand to a human
+    // (see AdminAlertDoc). Admin-read, server-write, exactly like ledger and
+    // stripeEvents above; releaseStuckSaga is the callable that resolves a row.
+    match /adminAlerts/{alertId} { allow read: if isAdmin(); allow write: if false; }
+
     match /adminNotes/{uid} { allow read: if isAdmin(); allow write: if false; }
     match /curatorAccess/{uid} { allow read: if isOwner(uid) || isAdmin(); allow write: if false; }
     // S2: per-uid daily geocode call counter (functions/src/geocode.ts's

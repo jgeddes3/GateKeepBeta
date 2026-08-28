@@ -6,8 +6,8 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc, type PaymentDoc,
-  type ProfileDraftInput, type StripeProfileDoc,
+  type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
+  type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
 } from "@gatekeep/shared";
 // The sweep under test — invoked DIRECTLY with an injected clock, exactly like
 // scheduled.test.ts drives runDailySweep: no scheduler emulator config, no
@@ -168,6 +168,26 @@ async function setChargeKnob(
 
 async function fakeObject(id: string): Promise<Record<string, unknown> | undefined> {
   return (await adb.doc(`stripeFake/state/objects/${id}`).get()).data();
+}
+
+async function musicianAccountId(profileId: string): Promise<string> {
+  const sp = await getStripeDoc(profileId);
+  if (!sp?.accountId) throw new Error(`no accountId cached for musician profile ${profileId}`);
+  return sp.accountId;
+}
+
+// FakeStripe's running per-account balance — the only honest way to assert
+// "no money reached the musician" (the absence of a transfer object would also
+// be true if the balance write alone had been lost).
+async function accountBalanceCents(accountId: string): Promise<number> {
+  const d = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+  return (d?.balanceCents as number | undefined) ?? 0;
+}
+
+// The sweep's durable escalation queue — a refusal that isn't recorded here is
+// a refusal nobody will ever action.
+async function adminAlert(alertId: string): Promise<AdminAlertDoc | undefined> {
+  return (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc | undefined;
 }
 
 // FakeStripe's idempotency ledger — the honest way to assert WHICH key an
@@ -441,6 +461,18 @@ describe("payments sweep — birth deposits (step 3)", () => {
     }
   });
 
+  // NOT COVERED, deliberately: the `birthDepositRaced` branch (a cancellation
+  // moving the deposit to `*_pending` DURING the charge, so the CAS on the
+  // `held` write loses). Reaching it needs a write that lands strictly between
+  // the sweep's pre-charge read and its post-charge write — both inside a
+  // single awaited `runPaymentsSweep` call, with no seam a test can write
+  // through. Racing an admin-SDK update against the whole sweep (the M-10
+  // TOCTOU idiom) would have to hit a sub-millisecond window that also moves
+  // whenever an earlier step's work changes, i.e. a flaky test that fails to
+  // prove anything on a green run. The branch is instead kept small, total
+  // (every non-`*_pending` outcome is logged and counted) and audited by
+  // inspection: it never writes `deposit.status`, and the ledger row is
+  // written on both paths.
   it("a birth deposit left `processing` records its intent and is NEVER re-charged", async () => {
     const { curator, bookingId } = await makeConfirmedSingleBooking("swpend");
     const customerId = await curatorCustomerId(curator.profileId);
@@ -499,8 +531,8 @@ describe("payments sweep — stuck *_pending deposits (step 2)", () => {
     });
 
     const report = await runPaymentsSweep(Date.now());
-    expect(report.pendingResolved).toBeGreaterThanOrEqual(1);
-    expect(report.pendingStale).toBeGreaterThanOrEqual(1);
+    expect(report.pendingDepositsResolved).toBeGreaterThanOrEqual(1);
+    expect(report.pendingDepositsStale).toBeGreaterThanOrEqual(1);
 
     const resolved = await getPayment(fresh.bookingId, fresh.gigId);
     expect(resolved?.deposit.status).toBe("refunded");
@@ -513,6 +545,53 @@ describe("payments sweep — stuck *_pending deposits (step 2)", () => {
     expect(untouched?.deposit.status).toBe("refund_pending");
     expect(untouched?.deposit.resolvedAt).toBeNull();
     expect(await fakeObject(stalePayment.deposit.intentId!).then((i) => i?.refundedCents)).toBe(0);
+
+    // The refusal is ESCALATED, not just logged: an hourly console.error is 24
+    // identical lines a day that nobody is paged on.
+    const alert = await adminAlert(`stale-pending:${stale.bookingId}:${stale.gigId}`);
+    expect(alert?.kind).toBe("stale_pending_deposit");
+    expect(alert?.bookingId).toBe(stale.bookingId);
+    expect(alert?.runCount).toBeGreaterThanOrEqual(1);
+    expect(alert?.resolvedAt).toBeNull();
+  });
+
+  // The staleness guard exists to protect an idempotency KEY, so it must apply
+  // exactly where a key exists — and nowhere else. Both legs in one test,
+  // because they are two halves of one predicate.
+  it("staleness is scoped to Stripe-touching resolutions: a stale forfeit REFUSES (even with no intent), a stale never-charged refund RESOLVES", async () => {
+    const forfeit = await makeConfirmedSingleBooking("swfstale");
+    const refund = await makeConfirmedSingleBooking("swrstale");
+    const accountId = await musicianAccountId(forfeit.musician.profileId);
+    const balanceBefore = await accountBalanceCents(accountId);
+
+    // A never-charged deposit that a curator late-cancel forfeited. Resolving
+    // it STILL calls Stripe — the musician is owed the slice whether or not
+    // the card was ever charged — so a null intentId is no exemption here.
+    await adb.doc(`bookings/${forfeit.bookingId}/payments/${forfeit.gigId}`).update({
+      "deposit.status": "forfeit_pending", "deposit.intentId": null, "deposit.chargeId": null,
+      "settlement.status": "waived", updatedAt: Date.now() - 25 * HOUR_MS,
+    });
+    // A never-charged deposit that was refunded instead: no money ever moved,
+    // so resolving it makes NO Stripe call and there is no key to expire.
+    // Refusing this one would strand it forever.
+    await adb.doc(`bookings/${refund.bookingId}/payments/${refund.gigId}`).update({
+      "deposit.status": "refund_pending", "deposit.intentId": null, "deposit.chargeId": null,
+      "settlement.status": "waived", updatedAt: Date.now() - 25 * HOUR_MS,
+    });
+
+    await runPaymentsSweep(Date.now());
+
+    const forfeitDoc = await getPayment(forfeit.bookingId, forfeit.gigId);
+    expect(forfeitDoc?.deposit.status).toBe("forfeit_pending");   // refused
+    expect(forfeitDoc?.deposit.forfeitTransferId).toBeNull();
+    expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
+    expect((await adminAlert(`stale-pending:${forfeit.bookingId}:${forfeit.gigId}`))?.kind)
+      .toBe("stale_pending_deposit");
+
+    const refundDoc = await getPayment(refund.bookingId, refund.gigId);
+    expect(refundDoc?.deposit.status).toBe("refunded");           // resolved, no Stripe call
+    expect(typeof refundDoc?.deposit.resolvedAt).toBe("number");
+    expect(await adminAlert(`stale-pending:${refund.bookingId}:${refund.gigId}`)).toBeUndefined();
   });
 });
 
@@ -576,6 +655,109 @@ describe("payments sweep — accept-saga reconciliation (step 1)", () => {
     expect((await getPayment(bookingId, gigId))?.deposit.status).toBe("unpaid");
     // Nothing was charged: the expired key was never used.
     expect(await idemUsed(`${bookingId}:accept:deposit:7`)).toBe(false);
+
+    // Refusing is correct; refusing silently is not. The durable queue entry
+    // is the escalation — the log is just a convenience.
+    const alert = await adminAlert(`stuck-saga:${bookingId}`);
+    expect(alert?.kind).toBe("stale_accept_saga");
+    expect(alert?.bookingId).toBe(bookingId);
+    expect(alert?.gigId).toBeNull();
+    expect(alert?.runCount).toBeGreaterThanOrEqual(1);
+    expect(alert?.firstSeenAt).toBeTypeOf("number");
+    expect(alert?.resolvedAt).toBeNull();
+  });
+
+  it("releases a marker left behind with nothing staged — no charge, and the attempt counter is never reset", async () => {
+    const curator = await makeApprovedCuratorProfile("swrelc");
+    const musician = await makeApprovedMusicianProfile("swrelm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+
+    // unstageAccept's own documented failure mode: the staged docs went, the
+    // marker write didn't. Nothing can be charged against docs that no longer
+    // exist, so the booking is simply freed.
+    await stageAcceptManually(bookingId, gigId, 1);
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).delete();
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.acceptSagasReleased).toBeGreaterThanOrEqual(1);
+
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargePending).toBe(false);
+    expect(after.depositChargeAttempt).toBe(1);   // only ever goes up — a retry must mint a fresh key
+    expect(await idemUsed(`${bookingId}:accept:deposit:1`)).toBe(false);
+  });
+
+  it("a replayed charge that DECLINES unstages the saga and leaves the booking open for a clean retry", async () => {
+    const curator = await makeApprovedCuratorProfile("swdecc");
+    const musician = await makeApprovedMusicianProfile("swdecm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await stageAcceptManually(bookingId, gigId, 1);
+    const customerId = await curatorCustomerId(curator.profileId);
+
+    try {
+      await setChargeKnob("declineCustomerIds", customerId, true);
+      const report = await runPaymentsSweep(Date.now());
+      expect(report.acceptSagasDeclined).toBeGreaterThanOrEqual(1);
+    } finally {
+      await setChargeKnob("declineCustomerIds", customerId, false);
+    }
+
+    // A decline moved no money, so the marker comes off and the staging goes —
+    // the booking is a clean `open` again.
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargePending).toBe(false);
+    expect(await getPayment(bookingId, gigId)).toBeUndefined();
+    // The key WAS consumed (the decline is cached under it), which is exactly
+    // why the next accept attempt increments depositChargeAttempt.
+    expect(await idemUsed(`${bookingId}:accept:deposit:1`)).toBe(true);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "deposit_charged")).toBe(false);
+  });
+
+  // Rule 3 (see paymentsSweep.ts's header). The moderation cascades expire a
+  // booking without consulting the saga marker, which lands a staged saga's
+  // docs squarely in step 7's "expired booking with an outstanding deposit"
+  // net. They are NOT step 7's to refund: a charge may be in flight against
+  // exactly that set, and step 1's commit accounts the charge against exactly
+  // that set.
+  it("an EXPIRED booking's staged saga docs are left untouched by the refund backstop (rule 3)", async () => {
+    const curator = await makeApprovedCuratorProfile("swrule3c");
+    const musician = await makeApprovedMusicianProfile("swrule3m");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await stageAcceptManually(bookingId, gigId, 1);
+
+    // Exactly what unwindBookingsForModeration / the daily sweep's expiry step
+    // do — neither looks at depositChargePending.
+    await adb.doc(`bookings/${bookingId}`).update({ status: "expired", resolvedAt: Date.now() });
+
+    const report = await runPaymentsSweep(Date.now());
+    // Step 1 refuses to reconcile a booking that is no longer `open`...
+    expect(report.errors.reconcileStuckMarker ?? 0).toBeGreaterThanOrEqual(1);
+    // ...and step 7 refuses to refund its staged docs.
+    expect(report.errors.expiredStagedSaga ?? 0).toBeGreaterThanOrEqual(1);
+
+    const staged = await getPayment(bookingId, gigId);
+    expect(staged?.deposit.status).toBe("unpaid");          // not refunded, not refund_pending
+    expect(staged?.deposit.resolvedAt).toBeNull();
+    expect(staged?.settlement.status).toBe("not_due");      // not waived either
+    expect((await getBooking(bookingId)).depositChargePending).toBe(true);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "refund")).toBe(false);
+
+    // Both steps escalate to the SAME alert row — it is one stuck booking, not
+    // two problems — so it is observed twice in a single run.
+    const alert = await adminAlert(`stuck-saga:${bookingId}`);
+    expect(alert?.kind).toBe("expired_booking_saga_marker");   // step 7 observed it last
+    expect(alert?.runCount).toBeGreaterThanOrEqual(2);
   });
 
   // The safety property behind commitAcceptAfterCharge's contract point 2 and
@@ -707,6 +889,50 @@ describe("payments sweep — settlement scheduling (step 4)", () => {
     } finally {
       await endSeriesQuietly(series.id);
     }
+  });
+});
+
+describe("payments sweep — settlement charge loops (steps 5/6)", () => {
+  // Task 10 owns the money; this task owns the WIRING. The queries, the
+  // pagination, the per-doc isolation and the counters are all live now, so
+  // Task 10 only has to fill in chargeSettlement's body — and this test is
+  // what will catch it if the loops ever stop reaching it.
+  it("hands due `pending` and due `past_due` occurrences to chargeSettlement (a no-op stub today: nothing moves)", async () => {
+    const { bookingId, gigId } = await makeConfirmedSingleBooking("swloops");
+    const pastDueGigId = `swloopspd${Date.now()}`;
+    await seedBirthDeposit(bookingId, pastDueGigId, Date.now() - 2 * DAY_MS);
+
+    const now = Date.now();
+    // Due for its T+3 settlement charge (step 5).
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
+      "settlement.status": "pending", "settlement.settleAfter": now - 1000,
+    });
+    // Already tried and failed, and its retry is due (step 6). `held` so the
+    // birth-deposit step ignores it; past-dated so step 4 does too.
+    await adb.doc(`bookings/${bookingId}/payments/${pastDueGigId}`).update({
+      "deposit.status": "held", "deposit.intentId": "pi_loops_fixture",
+      "settlement.status": "past_due", "settlement.nextRetryAt": now - 1000, "settlement.attempts": 1,
+    });
+
+    const report = await runPaymentsSweep(now);
+
+    // The retry loop reached the doc...
+    expect(report.retriesAttempted).toBeGreaterThanOrEqual(1);
+    // ...and the stub reported "skipped", so no money is claimed anywhere.
+    expect(report.settlementsCharged).toBe(0);
+    expect(report.settlementsDeclined).toBe(0);
+    expect(report.transfersMade).toBe(0);
+    expect(report.errors.chargeSettlement ?? 0).toBe(0);
+    expect(report.errors.retrySettlement ?? 0).toBe(0);
+
+    // Both docs are exactly as they were — a no-op stub must be a no-op.
+    const due = await getPayment(bookingId, gigId);
+    expect(due?.settlement.status).toBe("pending");
+    expect(due?.deposit.status).toBe("held");
+    const pastDue = await getPayment(bookingId, pastDueGigId);
+    expect(pastDue?.settlement.status).toBe("past_due");
+    expect(pastDue?.settlement.attempts).toBe(1);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "settlement_charged")).toBe(false);
   });
 });
 

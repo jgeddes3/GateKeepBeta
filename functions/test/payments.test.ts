@@ -1120,6 +1120,51 @@ describe("Task 6 accept saga", () => {
     // The loser is superseded, never charged — no payment docs of its own.
     expect(await getPaymentDocs(rivalBookingId)).toHaveLength(0);
   });
+
+  // SP5 Task 9 (review round 2): the operator escape hatch for the one thing
+  // the hourly sweep deliberately refuses to do — a saga staged past Stripe's
+  // 24h idempotency window, whose charge key can no longer be replayed, so
+  // nothing automatic can determine whether the curator was charged. The
+  // operator settles that in the Stripe dashboard and then calls this.
+  it("releaseStuckSaga: an admin frees a staged booking (and neither booking side can)", async () => {
+    const curator = await makeApprovedCuratorProfile("t6relc");
+    const musician = await makeApprovedMusicianProfile("t6relm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await stageViaPendingCharge(curator, bookingId);
+
+    // Admin-only, even for the curator whose own money is stuck: releasing is
+    // an assertion that the Stripe side has been reconciled by hand, which
+    // only an operator can make.
+    await expect(callFn("releaseStuckSaga", { bookingId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    await expect(callFn("releaseStuckSaga", { bookingId }, musician.owner.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    expect((await getBooking(bookingId)).depositChargePending).toBe(true);
+
+    const operator = await makeAdminUser("t6relop");
+    const res = await callFn<{ bookingId: string }, { ok: boolean; deletedStagedDocs: number }>(
+      "releaseStuckSaga", { bookingId }, operator.user);
+    expect(res.deletedStagedDocs).toBe(1);
+
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargePending).toBe(false);
+    expect(after.depositChargeIntentId).toBeNull();
+    // NEVER reset — the next accept must mint a key that has never been used.
+    expect(after.depositChargeAttempt).toBe(1);
+    expect(await getPaymentDocs(bookingId)).toHaveLength(0);
+
+    const audit = await adb.collection("auditLogs").where("targetId", "==", bookingId).get();
+    expect(audit.docs.some((d) => d.data().action === "booking_saga_released")).toBe(true);
+
+    // Fails closed on a booking that isn't actually stuck — a no-op write an
+    // operator could mistake for a fix is worse than an error.
+    await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
 });
 
 // ---------- Task 8: cancellation money (refund/forfeit executors + wiring) ----------

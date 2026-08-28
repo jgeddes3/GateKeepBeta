@@ -314,7 +314,18 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
 // to call freely within that window.
 //
 // Never throws for a missing/already-terminal doc — callers log and continue.
-export async function resolveDepositPending(bookingId: string, gigId: string): Promise<void> {
+//
+// `skipRecompute` suppresses the trailing paymentSummary recompute for a
+// caller that is resolving SEVERAL docs of the SAME booking in a loop and will
+// run one recompute itself afterwards. The recompute reads the whole payments
+// subcollection and rewrites one aggregate field, so doing it per-doc in a
+// loop is N reads to produce N-1 intermediate values nobody observes. Only
+// pass it if you actually run the recompute after the loop — the aggregate is
+// self-healing, but leaving it stale until the next unrelated payment tick is
+// a real (if temporary) reporting error on the booking.
+export async function resolveDepositPending(
+  bookingId: string, gigId: string, opts: { skipRecompute?: boolean } = {},
+): Promise<void> {
   const db = getFirestore();
   const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
   const snap = await ref.get();
@@ -372,8 +383,10 @@ export async function resolveDepositPending(bookingId: string, gigId: string): P
       // the `*_pending` states explicitly (see recomputePaymentSummary's
       // per-status table). Skipping it here would leave the deposit
       // reading as still-held escrow for as long as the doc stays stuck.
-      await recomputePaymentSummary(bookingId)
-        .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
+      if (!opts.skipRecompute) {
+        await recomputePaymentSummary(bookingId)
+          .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
+      }
       return;
     }
     const t = await getStripe().transferToAccount({
@@ -402,8 +415,10 @@ export async function resolveDepositPending(bookingId: string, gigId: string): P
   // Best-effort, exactly like every other recompute call site: a failure here
   // leaves a stale aggregate that the next payment transition re-derives
   // (self-healing), never a wrong terminal state on the doc above.
-  await recomputePaymentSummary(bookingId)
-    .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
+  if (!opts.skipRecompute) {
+    await recomputePaymentSummary(bookingId)
+      .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
+  }
 }
 
 // Marks the given payment docs `*_pending` inside the CALLER'S transaction —

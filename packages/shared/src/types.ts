@@ -73,7 +73,10 @@ export interface AuditLogDoc {
   actorUid: string;
   action: "profile_approved" | "profile_rejected" | "admin_granted" | "profile_deleted"
     | "track_approved" | "track_rejected" | "gig_taken_down" | "account_flagged"
-    | "reliability_mark_removed" | "booking_visibility_backfilled";
+    | "reliability_mark_removed" | "booking_visibility_backfilled"
+    // SP5 Task 9: an operator manually released a stuck accept saga
+    // (releaseStuckSaga) after reconciling the Stripe side by hand.
+    | "booking_saga_released";
   targetId: string;          // profileId or uid
   detail: string;
   at: number;
@@ -584,6 +587,35 @@ export interface StripeProfileDoc {
   onboardingStartedAt: number | null; onboardedAt: number | null;
   delinquent: boolean; delinquentSince: number | null;
   updatedAt: number;
+}
+
+// adminAlerts/{alertId} — SP5 Task 9. The hourly payments sweep has four
+// ABSORBING states: conditions it deliberately refuses to act on (a charge it
+// must not replay on an expired idempotency key, a marker it must not clear)
+// and can only escalate. A console.error alone is not an escalation — nobody
+// is reading logs at 3am — so each one also upserts a doc here, which is the
+// durable "a human has to look at this" queue. Server-written only; admins
+// read it. Cleared by an operator tool (releaseStuckSaga) setting resolvedAt.
+//
+// Ids are DETERMINISTIC per underlying problem (`stuck-saga:{bookingId}`,
+// `stale-pending:{bookingId}:{gigId}`), so an hourly sweep updates one row
+// rather than minting 24 a day.
+export type AdminAlertKind =
+  | "stuck_saga_marker"            // marker set on a booking that is no longer `open`
+  | "stale_accept_saga"            // staged >24h — its charge key can no longer be replayed
+  | "expired_booking_saga_marker"  // an expired booking whose deposits are still a live saga's
+  | "stale_pending_deposit";       // `*_pending` >24h — its refund/transfer key can no longer be re-issued
+export interface AdminAlertDoc {
+  kind: AdminAlertKind;
+  detail: string;
+  bookingId: string; gigId: string | null;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  // How many times a sweep has OBSERVED this condition — not how many runs it
+  // has survived: one run can observe the same stuck booking from two
+  // different steps (step 1's marker guard and step 7's), and both count.
+  runCount: number;
+  resolvedAt: number | null;
 }
 
 export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"

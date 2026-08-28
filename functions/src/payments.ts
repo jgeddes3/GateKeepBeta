@@ -1,7 +1,10 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
-import { isValidDocId, type StripeProfileDoc } from "@gatekeep/shared";
+import {
+  isValidDocId, type BookingRequestDoc, type PaymentDoc, type StripeProfileDoc,
+} from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
+import { requireAdmin, writeAudit } from "./review.js";
 import {
   getStripe, isFakeStripe, stripeSecretKey,
   StripeAccountMissingError, StripeSetupIntentMismatchError, type StripeAccountState,
@@ -286,3 +289,77 @@ webhookHandlers["account.updated"] = async (object) => {
   }
   await syncStripeAccountFlags(profileId, Date.now());
 };
+
+// ---------- SP5 Task 9: operator release valve ----------
+
+// Clears a stuck accept saga's marker so the booking is usable again.
+//
+// FOR USE **AFTER** AN OPERATOR HAS RECONCILED THE STRIPE SIDE BY HAND. This
+// callable moves no money and checks no money: it is the last step of a manual
+// recovery, not the recovery itself. The situation it exists for is the one
+// the hourly sweep deliberately refuses to touch (adminAlerts, kinds
+// `stale_accept_saga` / `stuck_saga_marker` / `expired_booking_saga_marker`):
+// a booking staged for more than Stripe's 24h idempotency window, whose charge
+// key can no longer be replayed, so nothing automatic can tell whether the
+// curator was charged. The operator answers that in the Stripe dashboard —
+// refunding the intent, or letting the charge stand and settling it manually —
+// and THEN calls this to unstick the booking.
+//
+// What it does: clears `depositChargePending`/`depositChargeIntentId`, deletes
+// the staged docs that are still `unpaid`, writes an audit row, and resolves
+// the alert. What it deliberately does NOT do: touch a `held`/`*_pending`/
+// terminal payment doc (those are real money records — a delete would erase
+// escrow), issue any refund, or clear a delinquency.
+//
+// `depositChargeAttempt` is left in place on purpose, exactly as every unstage
+// path does: the counter must only ever go up, so the next accept attempt
+// mints a key that has never been used.
+export const releaseStuckSaga = onCall<{ bookingId: string }>(
+  { region: "us-central1" }, async (req) => {
+    const actorUid = requireAdmin(req);
+    const { bookingId } = req.data ?? ({} as { bookingId: string });
+    if (!isValidDocId(bookingId)) throw new HttpsError("invalid-argument", "A booking id is required.");
+
+    const db = getFirestore();
+    const bookingRef = db.doc(`bookings/${bookingId}`);
+    const snap = await bookingRef.get();
+    if (!snap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const booking = snap.data() as BookingRequestDoc;
+    // Fail closed on anything that isn't actually stuck: without the marker
+    // there is no saga to release, and "clearing" one would be a no-op write
+    // that an operator could mistake for a fix.
+    if (booking.depositChargePending !== true) {
+      throw new HttpsError("failed-precondition", "This booking has no staged deposit charge to release.");
+    }
+
+    // Only `unpaid` docs — the staging. A doc that reached `held` (or any
+    // pending/terminal state) is money that exists and is not this callable's
+    // to erase.
+    const paymentsSnap = await db.collection(`bookings/${bookingId}/payments`).get();
+    const removed: string[] = [];
+    const kept: string[] = [];
+    for (const doc of paymentsSnap.docs) {
+      const p = doc.data() as PaymentDoc;
+      if (p.deposit.status !== "unpaid") { kept.push(`${doc.id}:${p.deposit.status}`); continue; }
+      await doc.ref.delete();
+      removed.push(doc.id);
+    }
+
+    await bookingRef.update({
+      depositChargePending: false, depositChargeIntentId: null, updatedAt: Date.now(),
+    });
+
+    await writeAudit({
+      actorUid, action: "booking_saga_released", targetId: bookingId,
+      detail: `released staged deposit charge (attempt ${String(booking.depositChargeAttempt ?? "none")}); `
+        + `deleted ${removed.length} unpaid staged doc(s)${kept.length ? `; kept ${kept.join(", ")}` : ""}`,
+    });
+
+    // Best-effort: the alert doc is a queue entry, not a money record — a
+    // failure to close it must not fail a release that already committed.
+    await db.doc(`adminAlerts/stuck-saga:${bookingId}`)
+      .update({ resolvedAt: Date.now() })
+      .catch(() => { /* no alert row (released before a sweep ever saw it) — nothing to resolve */ });
+
+    return { ok: true, deletedStagedDocs: removed.length };
+  });

@@ -267,7 +267,7 @@ export interface SweepReport {
 // S3: each of the steps below is independently wrapped in its own try/catch —
 // a poisoned doc (e.g. a malformed series) that makes ONE step throw is logged
 // and counted in `report.errors`, but never prevents the REMAINING steps from
-// running. Steps 2-5 each own their own chunked writer, committed at the end
+// running. Steps 2-6 each own their own chunked writer, committed at the end
 // of that step's try block, so one step's failure can only ever lose that
 // step's own not-yet-durable writes, never another step's. Step 1 goes one
 // better (SP5 Task 9 review): ONE batch per SERIES, so a failure can't even
