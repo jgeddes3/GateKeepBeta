@@ -7,7 +7,10 @@ import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { instantFeePreviewCents } from "./fees";
 import { rememberOnboardingProfileId } from "./onboardingRedirect";
 import type { StripeStatusResult } from "./types";
-import { PAYOUT_INSTANT_INELIGIBLE_MESSAGE, type PaymentDoc } from "@gatekeep/shared";
+import {
+  PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
+  type PaymentDoc,
+} from "@gatekeep/shared";
 
 // SP5 Task 14 — the musician's payouts surface. House idiom throughout (see
 // src/bookings/CancelDialog.tsx): "use client", httpsCallable + inline
@@ -154,6 +157,11 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
   // disagree about what "the typed amount" currently parses to.
   const previewCents = parseDollarsToCents(amount);
   const previewFeeCents = previewCents != null ? instantFeePreviewCents(previewCents) : null;
+  // Owner ruling (M4): the $10 instant minimum, mirrored client-side so the
+  // Instant button disables (with an explaining tooltip) below it rather than
+  // letting the server bounce it. requestPayout is the actual authority; this
+  // only pre-empts the round trip. A standard payout stays available below $10.
+  const belowInstantMin = previewCents != null && previewCents < INSTANT_PAYOUT_MIN_CENTS;
 
   useEffect(() => {
     let cancelled = false;
@@ -292,9 +300,10 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
                   Standard (free, 1–3 business days)
                 </button>
                 <button onClick={() => submitPayout("instant")}
-                  disabled={payoutBusy || !status.instantEligible
+                  disabled={payoutBusy || !status.instantEligible || belowInstantMin
                     || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}
-                  title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE : undefined}>
+                  title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE
+                    : belowInstantMin ? PAYOUT_INSTANT_MIN_MESSAGE : undefined}>
                   {`Instant${previewCents != null && previewFeeCents != null ? ` — fee ${formatCents(previewFeeCents)}` : ""}`}
                 </button>
               </div>

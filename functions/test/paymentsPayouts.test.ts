@@ -4,15 +4,16 @@ import { signUpTestUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
-  INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT,
-  type LedgerEntry, type NotificationDoc, type ProfileDraftInput, type StripeProfileDoc,
+  INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT, INSTANT_PAYOUT_MIN_CENTS, SELF_DEAL_HOLD_MS,
+  type LedgerEntry, type NotificationDoc, type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import {
-  PAYOUT_AMOUNT_TOO_SMALL_MESSAGE, PAYOUT_INSTANT_INELIGIBLE_MESSAGE,
+  PAYOUT_INSTANT_INELIGIBLE_MESSAGE,
+  PAYOUT_INSTANT_MIN_MESSAGE, PAYOUT_INSTANT_HELD_MESSAGE,
   PAYOUT_OVER_BALANCE_MESSAGE, PAYOUT_REQUEST_ID_REUSED_MESSAGE, PAYOUT_SETUP_REQUIRED_MESSAGE,
   type RequestPayoutInput, type RequestPayoutResult,
 } from "../src/paymentsPayouts.js";
-import { payoutFeeAlertId, recordAdminAlert } from "../src/paymentsCore.js";
+import { payoutFeeAlertId, recordAdminAlert, resolveDepositPending } from "../src/paymentsCore.js";
 // The fake's own balance API, used to SEED and to READ balances below — see
 // seedBalance's note on why this suite touches it directly.
 import { getStripe } from "../src/stripeClient.js";
@@ -24,9 +25,10 @@ const WEBHOOK_URL = "http://localhost:5001/gatekeep-dev-jg/us-central1/stripeWeb
 
 vi.setConfig({ testTimeout: 30_000 });
 
-// A DRAFT musician profile is enough for every callable in this file: both
-// requestPayout and getStripeStatus gate on profile MEMBERSHIP (which
-// createProfileDraft grants the creator immediately), never on review status.
+// A DRAFT musician profile is enough for every callable in this file:
+// getStripeStatus gates on profile MEMBERSHIP and requestPayout on profile
+// ADMIN (owner ruling H2) — createProfileDraft grants the creator BOTH
+// immediately (the owner's member doc is role:"admin"), never on review status.
 // Skipping the approval chain keeps this suite's fixtures to three calls.
 async function makeMusicianProfile(prefix: string) {
   const owner = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
@@ -249,13 +251,15 @@ describe("requestPayout — instant", () => {
     expect(await balanceOf(accountId)).toBe(9_000);
   });
 
-  it("refuses an amount the fee would swallow whole with invalid-argument", async () => {
+  it("refuses a sub-$10 instant amount with the $10 minimum (M4), which now subsumes the old fee-would-swallow-it belt", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("pofeeeq");
     await seedBalance(accountId, 10_000);
-    // $1.00: the fee floor equals the amount, so the musician would receive
-    // nothing. (The balance is ample — this is the FEE rule, not the balance one.)
+    // $1.00: below the $10 instant minimum, which fires BEFORE — and now
+    // subsumes — the fee-swallow-whole belt (that belt only ever bit at/below
+    // ~$1, itself well under $10, so it is kept in the callable purely as
+    // defense-in-depth against a future rate/minimum change). Balance untouched.
     await expect(payout({ profileId, amountCents: 100, method: "instant", requestId: freshRequestId() }, owner.user))
-      .rejects.toMatchObject({ code: "functions/invalid-argument", message: PAYOUT_AMOUNT_TOO_SMALL_MESSAGE });
+      .rejects.toMatchObject({ code: "functions/invalid-argument", message: PAYOUT_INSTANT_MIN_MESSAGE });
     expect(await balanceOf(accountId)).toBe(10_000);
   });
 
@@ -481,5 +485,112 @@ describe("the uncollected-fee escalation", () => {
     expect(doc.data()?.bookingId).toBeNull();
     expect(doc.data()?.gigId).toBeNull();
     expect(doc.data()?.resolvedAt).toBeNull();
+  });
+});
+
+// Seeds one `forfeit_pending` deposit payment doc and runs the REAL executor
+// (resolveDepositPending — the exact call the cancel/no-show paths end in) so a
+// self-deal forfeit's hold is set by production code, not by the test. `selfDeal`
+// is the only thing that changes between the two M3 cases.
+async function forfeitDepositTo(musicianProfileId: string, selfDeal: boolean): Promise<{ bookingId: string; gigId: string }> {
+  const bookingId = `bk_m3_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const gigId = "g1";
+  const now = Date.now();
+  const doc: PaymentDoc = {
+    bookingId, gigId, occurrenceStartsAt: now,
+    curatorProfileId: "cur_selfdeal", musicianProfileId, selfDeal,
+    baseCents: 10_000,
+    deposit: {
+      sliceCents: 3_500, feeShareCents: 385, intentId: "pi_sd", chargeId: "ch_sd",
+      status: "forfeit_pending", chargedAt: now, resolvedAt: null, forfeitTransferId: null,
+    },
+    settlement: {
+      status: "waived", settleAfter: null, computedCents: null, feeShareCents: null,
+      trueUp: null, intentId: null, attempts: 0, nextRetryAt: null,
+      lateFeeCents: null, lateFeeMusicianCents: null, delinquentAt: null,
+    },
+    transfer: { status: "none", id: null, amountCents: null, transferredAt: null },
+    createdAt: now, updatedAt: now,
+  };
+  await adb.doc(`bookings/${bookingId}/payments/${gigId}`).set(doc);
+  await resolveDepositPending(bookingId, gigId);
+  return { bookingId, gigId };
+}
+
+describe("requestPayout — authority (H2: admin only)", () => {
+  it("a non-admin member cannot request a payout (permission-denied); the admin owner can", async () => {
+    const { owner, profileId, accountId } = await makePayoutReady("h2auth");
+    await seedBalance(accountId, 10_000);
+    // A plain (role:"member", not admin) member of the SAME profile.
+    const member = await signUpTestUser(`h2member-${Date.now()}@test.com`);
+    await adb.doc(`profiles/${profileId}/members/${member.uid}`).set(
+      { uid: member.uid, role: "member", label: "helper", joinedAt: Date.now() });
+
+    await expect(payout({ profileId, amountCents: 5_000, method: "standard", requestId: freshRequestId() }, member.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    // The admin owner is allowed — the money-draining action is admin-gated,
+    // like removeMember/transferAdmin.
+    const ok = await payout({ profileId, amountCents: 5_000, method: "standard", requestId: freshRequestId() }, owner.user);
+    expect(ok.payoutId).toMatch(/^po_/);
+  });
+});
+
+describe("requestPayout — instant $10 minimum (M4)", () => {
+  it("refuses instant below $10 (invalid-argument), allows exactly $10, and standard is unaffected below $10", async () => {
+    const { owner, profileId, accountId } = await makePayoutReady("m4min");
+    await seedBalance(accountId, 20_000);
+
+    // $9.99 instant → invalid-argument (below the minimum)
+    await expect(payout({ profileId, amountCents: INSTANT_PAYOUT_MIN_CENTS - 1, method: "instant", requestId: freshRequestId() }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument", message: PAYOUT_INSTANT_MIN_MESSAGE });
+    // $10.00 instant → allowed (exactly the minimum)
+    const inst = await payout({ profileId, amountCents: INSTANT_PAYOUT_MIN_CENTS, method: "instant", requestId: freshRequestId() }, owner.user);
+    expect(inst.payoutId).toMatch(/^po_/);
+    // $9.99 standard → allowed (the minimum is instant-only; standard floors at $1)
+    const std = await payout({ profileId, amountCents: INSTANT_PAYOUT_MIN_CENTS - 1, method: "standard", requestId: freshRequestId() }, owner.user);
+    expect(std.feeCents).toBe(0);
+    expect(std.netCents).toBe(INSTANT_PAYOUT_MIN_CENTS - 1);
+  });
+});
+
+describe("requestPayout — self-deal instant hold (M3)", () => {
+  it("a self-deal forfeit sets the instant hold; instant is then refused (held) while standard is still allowed", async () => {
+    const { owner, profileId, accountId } = await makePayoutReady("m3hold");
+
+    await forfeitDepositTo(profileId, true);
+    // The forfeit landed 100% of the slice in the balance...
+    expect(await balanceOf(accountId)).toBe(3_500);
+    // ...and stamped the instant hold ~now + SELF_DEAL_HOLD_MS.
+    const sp = (await adb.doc(`profiles/${profileId}/private/stripe`).get()).data() as StripeProfileDoc;
+    expect(typeof sp.instantHoldUntil).toBe("number");
+    expect(sp.instantHoldUntil!).toBeGreaterThan(Date.now());
+    expect(sp.instantHoldUntil!).toBeLessThanOrEqual(Date.now() + SELF_DEAL_HOLD_MS + 5_000);
+
+    // Instant refused BY THE HOLD (a $10 request, so it clears the M4 minimum
+    // and reaches the hold check), standard still works.
+    await expect(payout({ profileId, amountCents: 1_000, method: "instant", requestId: freshRequestId() }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: PAYOUT_INSTANT_HELD_MESSAGE });
+    const std = await payout({ profileId, amountCents: 1_000, method: "standard", requestId: freshRequestId() }, owner.user);
+    expect(std.netCents).toBe(1_000);
+  });
+
+  it("a NON-self-deal forfeit sets NO instant hold — instant stays available", async () => {
+    const { owner, profileId, accountId } = await makePayoutReady("m3nohold");
+
+    await forfeitDepositTo(profileId, false);
+    expect(await balanceOf(accountId)).toBe(3_500);
+    const sp = (await adb.doc(`profiles/${profileId}/private/stripe`).get()).data() as StripeProfileDoc;
+    expect(sp.instantHoldUntil == null).toBe(true);
+
+    const inst = await payout({ profileId, amountCents: 1_000, method: "instant", requestId: freshRequestId() }, owner.user);
+    expect(inst.payoutId).toMatch(/^po_/);
+  });
+
+  it("an EXPIRED hold does not block instant", async () => {
+    const { owner, profileId, accountId } = await makePayoutReady("m3exp");
+    await seedBalance(accountId, 10_000);
+    await adb.doc(`profiles/${profileId}/private/stripe`).set({ instantHoldUntil: Date.now() - 1000 }, { merge: true });
+    const inst = await payout({ profileId, amountCents: 1_000, method: "instant", requestId: freshRequestId() }, owner.user);
+    expect(inst.payoutId).toMatch(/^po_/);
   });
 });

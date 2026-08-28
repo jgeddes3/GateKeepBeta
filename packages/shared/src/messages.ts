@@ -67,6 +67,16 @@ export const ACCEPT_ABORTED_REFUNDED_MESSAGE =
 // string as the button's tooltip — the two must never drift apart.
 export const PAYOUT_INSTANT_INELIGIBLE_MESSAGE =
   "Instant payouts need an eligible debit card on your Stripe account.";
+// Owner ruling (M4): the $10 instant-payout minimum. The Earnings page mirrors
+// this client-side (disables the Instant button and shows this as its tooltip)
+// when the entered amount is below INSTANT_PAYOUT_MIN_CENTS.
+export const PAYOUT_INSTANT_MIN_MESSAGE =
+  "Instant payouts must be at least $10.00 — use a standard payout for smaller amounts.";
+// Owner ruling (M3): instant payouts are held for a few days after self-deal
+// funds (the same person on both sides of a booking) land in the balance.
+// Standard payout after the funds settle is the way to withdraw them.
+export const PAYOUT_INSTANT_HELD_MESSAGE =
+  "Instant payout is temporarily unavailable on recent funds — use a standard payout, which sends once they settle.";
 
 // ---------- Task 11 payPastDue (originally payments.ts) --------------------
 // Five different situations with five different fixes — Task 15's

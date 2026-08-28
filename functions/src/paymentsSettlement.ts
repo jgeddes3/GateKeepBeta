@@ -63,7 +63,7 @@ import {
   clearDelinquencyIfSettled, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
   isUnconfirmedPayDueDeposit, recomputePaymentSummary, recordAdminAlert, resolveDepositPending,
   writeLedger, clawbackAlertId, depositPendingAlertId, depositRacedAlertId, settlementPayoutAlertId,
-  settlementPendingAlertId, settlementRacedAlertId, IDEMPOTENCY_WINDOW_MS,
+  settlementPendingAlertId, settlementRacedAlertId, IDEMPOTENCY_WINDOW_MS, setSelfDealInstantHold,
 } from "./paymentsCore.js";
 
 // How long `payPastDue` parks a `past_due` occurrence's `nextRetryAt` while the
@@ -819,6 +819,10 @@ export async function finalizeSettlementSuccess(args: {
       profileId: p.musicianProfileId, stripeId: transfer.id,
       detail: "earnings transfer (net of the musician fee, incl. any late-fee share)",
     }).catch((e) => console.error(`finalizeSettlementSuccess: earnings_transfer ledger row failed for ${bookingId}/${gigId}`, e));
+    // Owner ruling (M3): a self-deal settlement is card->cash to the same person
+    // — hold INSTANT payout of the earnings just transferred (standard payout
+    // after the funds settle is unaffected). Best-effort tail step, like the rest.
+    if (p.selfDeal) await setSelfDealInstantHold(p.musicianProfileId, now);
   }
   if (absorbedIntentBlocked) {
     // The settlement absorbed this deposit's value, but the deposit itself

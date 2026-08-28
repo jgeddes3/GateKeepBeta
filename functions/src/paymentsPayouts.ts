@@ -30,11 +30,12 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  computeInstantFeeCents, isValidDocId, INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT,
-  PAYOUT_INSTANT_INELIGIBLE_MESSAGE,
+  computeInstantFeeCents, isValidDocId, INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT, INSTANT_PAYOUT_MIN_CENTS,
+  PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, PAYOUT_INSTANT_HELD_MESSAGE,
   type PayoutRequestRecord, type StripeProfileDoc,
 } from "@gatekeep/shared";
-import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
+import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
+import { requireProfileAdmin } from "./profiles.js";
 import { getStripe, stripeSecretKey } from "./stripeClient.js";
 import { getStripeProfileDoc, payoutFeeAlertId, recordAdminAlert, writeLedger } from "./paymentsCore.js";
 import { notifyProfileMembers } from "./notifications.js";
@@ -56,7 +57,7 @@ const MAX_CENTS = 2 ** 45;
 // keeps resolving from "./paymentsPayouts.js" unchanged. The other three
 // below stay local: the web only ever displays them verbatim (a caught
 // error), it never pre-empts/mirrors their copy client-side.
-export { PAYOUT_INSTANT_INELIGIBLE_MESSAGE };
+export { PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, PAYOUT_INSTANT_HELD_MESSAGE };
 export const PAYOUT_SETUP_REQUIRED_MESSAGE = "Finish payout setup first.";
 export const PAYOUT_OVER_BALANCE_MESSAGE = "That's more than your available balance.";
 export const PAYOUT_AMOUNT_TOO_SMALL_MESSAGE = "Amount is too small for an instant payout.";
@@ -190,10 +191,12 @@ export const requestPayout = onCall<RequestPayoutInput>(
     if (typeof requestId !== "string" || !REQUEST_ID_RE.test(requestId)) {
       throw new HttpsError("invalid-argument", "A request id is required (8-64 characters, letters/digits/-/_).");
     }
-    // SECURITY RULING PENDING (H2/M3/M4) — branch audit H2 (member-vs-admin
-    // gating on createOnboardingLink/requestPayout) is withheld for an owner
-    // product ruling; requireProfileMember is deliberately left as-is here.
-    await requireProfileMember(profileId, uid);
+    // Owner ruling (H2): ADMIN-only. A payout DRAINS the profile's balance out
+    // of the platform, so it is a payout-authority action gated like
+    // removeMember/transferAdmin — not the any-member content permission.
+    // (Members still SEE the balance/status via getStripeStatus.)
+    // FUTURE (sub-5c): admin-initiated member payout splits.
+    await requireProfileAdmin(profileId, uid);
 
     const sp = await getStripeProfileDoc(profileId);
     // Fail closed on a partial doc, exactly as the booking gates do.
@@ -202,6 +205,21 @@ export const requestPayout = onCall<RequestPayoutInput>(
     }
     if (method === "instant" && sp.instantEligible !== true) {
       throw new HttpsError("failed-precondition", PAYOUT_INSTANT_INELIGIBLE_MESSAGE);
+    }
+    // Owner ruling (M4): the $10 instant minimum. A small cash-out isn't worth
+    // the 4% instant fee — a standard payout (still >= $1) is the route for
+    // smaller amounts. invalid-argument (an amount refusal), and standard is
+    // unaffected.
+    if (method === "instant" && amountCents < INSTANT_PAYOUT_MIN_CENTS) {
+      throw new HttpsError("invalid-argument", PAYOUT_INSTANT_MIN_MESSAGE);
+    }
+    // Owner ruling (M3): INSTANT payout is HELD while self-deal-funded money is
+    // still fresh in this balance (stamped by the forfeit/earnings transfer sites
+    // for a `selfDeal` booking). Self-deal is a card->cash conversion path; the
+    // hold removes the FAST rail, so a standard payout — which only sends once the
+    // funds settle — is the way to withdraw them. Standard payout is unaffected.
+    if (method === "instant" && sp.instantHoldUntil != null && Date.now() < sp.instantHoldUntil) {
+      throw new HttpsError("failed-precondition", PAYOUT_INSTANT_HELD_MESSAGE);
     }
 
     // LAYER 1. Ahead of the balance check on purpose: the first attempt already
@@ -249,13 +267,10 @@ export const requestPayout = onCall<RequestPayoutInput>(
       return { payoutId: po.id, feeCents: 0, netCents: amountCents, replayed: false };
     }
 
-    // SECURITY RULING PENDING (H2/M3/M4) — branch audit M4 (an instant-payout
-    // minimum amount) is withheld for an owner product ruling; no minimum is
-    // enforced on the instant path here, deliberately, pending that decision.
-    //
     // Instant: the fee comes out of the requested amount (the musician asks for
     // X and receives X - fee), and the fee itself moves platform-ward as a
-    // separate account debit.
+    // separate account debit. The $10 minimum (M4) and self-deal hold (M3) were
+    // enforced above, before the memo/balance reads.
     //
     // FEE % FROM THE LIVE CONSTANTS, not a snapshot: a payout is not
     // booking-scoped, so no `feePolicy` applies to it. INSTANT_FEE_PCT is the

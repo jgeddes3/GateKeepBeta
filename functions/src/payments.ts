@@ -9,6 +9,7 @@ import {
   type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type PaymentDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
+import { requireProfileAdmin } from "./profiles.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import {
   getStripe, isFakeStripe, stripeSecretKey,
@@ -183,10 +184,12 @@ export const createOnboardingLink = onCall<{ profileId: string }>(
     requireVerifiedEmail(req);
     const { profileId } = req.data ?? ({} as { profileId: string });
     if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
-    // SECURITY RULING PENDING (H2/M3/M4) — branch audit H2 (member-vs-admin
-    // gating on createOnboardingLink/requestPayout) is withheld for an owner
-    // product ruling; requireProfileMember is deliberately left as-is here.
-    await requireProfileMember(profileId, uid);
+    // Owner ruling (H2): ADMIN-only. Onboarding sets the profile's payout
+    // DESTINATION (which connected account the money lands in), so it is a
+    // payout-authority action gated like removeMember/transferAdmin — not the
+    // any-member content permission. Reading payout status/balance stays a
+    // member permission (getStripeStatus below keeps requireProfileMember).
+    await requireProfileAdmin(profileId, uid);
 
     const stripe = getStripe();
     const now = Date.now();

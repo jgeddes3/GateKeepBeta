@@ -140,6 +140,22 @@ describe("createOnboardingLink", () => {
     const spAfterSecond = await getStripeDoc(profileId);
     expect(spAfterSecond?.accountId).toBe(spAfterFirst?.accountId);
   });
+
+  it("H2 (owner ruling): a non-admin member cannot createOnboardingLink (permission-denied); the admin owner can", async () => {
+    const { owner, profileId } = await makeApprovedMusicianProfile("colauth");
+    // A plain (role:"member", not admin) member of the same profile.
+    const member = await signUpTestUser(`colauth-member-${Date.now()}@test.com`);
+    await adb.doc(`profiles/${profileId}/members/${member.uid}`).set(
+      { uid: member.uid, role: "member", label: "helper", joinedAt: Date.now() });
+
+    await expect(callFn("createOnboardingLink", { profileId }, member.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    // Onboarding sets the payout DESTINATION, so it is admin-gated — the owner
+    // (an admin) is allowed.
+    const ok = await callFn<{ profileId: string }, { url: string }>(
+      "createOnboardingLink", { profileId }, owner.user);
+    expect(ok.url).toBeTruthy();
+  });
 });
 
 describe("createSetupIntent idempotent customer creation", () => {

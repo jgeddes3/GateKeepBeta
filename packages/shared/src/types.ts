@@ -449,6 +449,11 @@ export const CURATOR_FEE_PCT = 11;
 export const MUSICIAN_FEE_PCT = 2;
 export const INSTANT_FEE_PCT = 4;
 export const INSTANT_FEE_MIN_CENTS = 100;
+// Owner ruling (M4): the smallest cash-out that may go out INSTANT. Below this
+// the 4% fee is a poor deal and the fast rail isn't worth it — a standard payout
+// (still >= $1) is the route for smaller amounts. Enforced by requestPayout and
+// mirrored by the Earnings page's Instant button.
+export const INSTANT_PAYOUT_MIN_CENTS = 1000;   // $10.00
 export const LATE_FEE_PCT = 10;
 // Percentage-POINTS of the outstanding amount, not "7% of the late fee" —
 // meaningful only relative to LATE_FEE_PCT: 7 of LATE_FEE_PCT's 10 points go
@@ -456,6 +461,14 @@ export const LATE_FEE_PCT = 10;
 export const LATE_FEE_MUSICIAN_PCT = 7;
 export const SETTLEMENT_DELAY_MS = 3 * 24 * 60 * 60 * 1000;   // T+3 window after gig END
 export const CANCEL_GRACE_MS = 60 * 60 * 1000;                // 1h post-accept grace, both sides
+// Owner ruling (M3): how long INSTANT payouts are BLOCKED on a profile after
+// self-deal-funded money lands in its balance (a forfeit transfer or an earnings
+// transfer for a `selfDeal` booking — the same uid on both sides). Self-deal is
+// a card->cash conversion path; the hold removes the FAST conversion, leaving
+// standard-payout-after-settle as the only route. 3 days lines up with the T+3
+// settlement window (SETTLEMENT_DELAY_MS) but is named separately so the two can
+// move independently.
+export const SELF_DEAL_HOLD_MS = 3 * 24 * 60 * 60 * 1000;     // 3d instant-payout hold on self-deal funds
 export const SETTLEMENT_RETRY_OFFSETS_MS =
   [24 * 60 * 60 * 1000, 2 * 24 * 60 * 60 * 1000, 2 * 24 * 60 * 60 * 1000] as const; // +1d, +2d, +2d
 export const MAX_TRUE_UP_EXTRA_MINUTES = 720;
@@ -684,6 +697,12 @@ export interface StripeProfileDoc {
   // Optional/backward-compatible: every pre-Task-13 doc omits it, and a
   // profile that has never cashed out never gets it.
   lastPayout?: PayoutRequestRecord | null;
+  // Owner ruling (M3): epoch ms until which INSTANT payouts are held on this
+  // profile because self-deal-funded money landed in its balance. null/absent =
+  // no hold. Set by the forfeit/earnings transfer sites for a `selfDeal`
+  // booking; requestPayout refuses an instant payout while `now < instantHoldUntil`.
+  // Standard payouts are unaffected.
+  instantHoldUntil?: number | null;
   updatedAt: number;
 }
 

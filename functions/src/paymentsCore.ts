@@ -27,7 +27,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   computeDepositCents, computeExpectedTotalCents, computeFeeShareCents,
-  DEFAULT_FEE_POLICY, DEPOSIT_EXHAUSTED_ATTEMPTS, PAID_DEPOSIT_STATUSES,
+  DEFAULT_FEE_POLICY, DEPOSIT_EXHAUSTED_ATTEMPTS, PAID_DEPOSIT_STATUSES, SELF_DEAL_HOLD_MS,
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
   DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE,
@@ -45,6 +45,30 @@ import { getStripe } from "./stripeClient.js";
 export async function getStripeProfileDoc(profileId: string): Promise<StripeProfileDoc | null> {
   const snap = await getFirestore().doc(`profiles/${profileId}/private/stripe`).get();
   return (snap.data() as StripeProfileDoc | undefined) ?? null;
+}
+
+// Owner ruling (M3): stamp the INSTANT-payout hold on a musician profile when
+// self-deal-funded money lands in its balance — a `selfDeal` forfeit transfer
+// (resolveDepositPending's forfeit branch) or a `selfDeal` earnings transfer
+// (finalizeSettlementSuccess). Self-deal is a card->cash conversion path with
+// the same person on both sides; the hold removes the FAST rail, leaving a
+// standard payout (which only sends once the funds settle) as the way out.
+//
+// Extends to the LATER of any existing hold and now+SELF_DEAL_HOLD_MS, so a
+// second self-deal credit can lengthen but never shorten the window. Best-effort
+// and merge-only: the money has ALREADY moved by the time this runs, so a
+// failure here must never fail the transfer — it only means this one event's
+// block wasn't recorded (a subsequent self-deal transfer re-stamps it, and
+// standard payout is unaffected regardless).
+export async function setSelfDealInstantHold(musicianProfileId: string, now: number): Promise<void> {
+  const ref = getFirestore().doc(`profiles/${musicianProfileId}/private/stripe`);
+  try {
+    const existing = (await ref.get()).data() as StripeProfileDoc | undefined;
+    const until = Math.max(existing?.instantHoldUntil ?? 0, now + SELF_DEAL_HOLD_MS);
+    await ref.set({ instantHoldUntil: until, updatedAt: now }, { merge: true });
+  } catch (e) {
+    console.error(`setSelfDealInstantHold: failed to set the instant-payout hold for ${musicianProfileId}`, e);
+  }
 }
 
 // Task 5 booking gates, Task 6 accept-saga outcomes, and the Task 6
@@ -424,13 +448,6 @@ export async function resolveDepositPending(
       });
     }
   } else {
-    // SECURITY RULING PENDING (H2/M3/M4) — branch audit M3 (a velocity limit /
-    // hold on self-deal forfeits, where the same uid sits on both sides and the
-    // deposit forfeits from the curator to the musician who is themselves) is
-    // withheld for an owner product ruling; this forfeit executes with no such
-    // hold, deliberately, pending that decision. `p.selfDeal` is the flag a
-    // future hold would read.
-    //
     // 100% of the deposit BASE to the musician — no commission is taken on a
     // forfeit; the platform keeps the curator's fee share by simply not
     // refunding it (see the refund branch above).
@@ -475,6 +492,9 @@ export async function resolveDepositPending(
       kind: "forfeit_transfer", amountCents: p.deposit.sliceCents, bookingId, gigId,
       profileId: p.musicianProfileId, stripeId: t.id, detail: "deposit forfeited to musician (100%)",
     }).catch((e) => console.error(`resolveDepositPending: ledger write failed for forfeit ${bookingId}/${gigId}`, e));
+    // Owner ruling (M3): a self-deal forfeit is card->cash to the same person —
+    // hold INSTANT payout of these funds (standard-after-settle is unaffected).
+    if (p.selfDeal) await setSelfDealInstantHold(p.musicianProfileId, now);
   }
 
   // Best-effort, exactly like every other recompute call site: a failure here
