@@ -17,7 +17,8 @@ import {
   writeLedger, recomputePaymentSummary,
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, BOOKING_NOT_CONFIRMABLE_MESSAGE,
   MUSICIAN_PAYOUTS_REQUIRED_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
-  DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE, type StagedOccurrence,
+  DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE, BOOKING_LOCKED_BY_DEPOSIT_MESSAGE,
+  type StagedOccurrence,
 } from "./paymentsCore.js";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
@@ -291,6 +292,13 @@ export const counterBooking = onCall<CounterBookingInput>({ region: "us-central1
     if (freshBooking.status !== "open") {
       throw new HttpsError("failed-precondition", `Cannot counter a booking in status "${freshBooking.status}".`);
     }
+    // An accept saga is mid-flight on this booking — see
+    // BOOKING_LOCKED_BY_DEPOSIT_MESSAGE for why this is a money guard rather
+    // than a courtesy. Checked against the TRANSACTIONAL read, like every
+    // other precondition here.
+    if (freshBooking.depositChargePending === true) {
+      throw new HttpsError("failed-precondition", BOOKING_LOCKED_BY_DEPOSIT_MESSAGE);
+    }
     if (freshBooking.thread.length >= MAX_BOOKING_THREAD_ENTRIES) {
       throw new HttpsError("resource-exhausted",
         `A booking's negotiation thread may have at most ${MAX_BOOKING_THREAD_ENTRIES} entries.`);
@@ -351,6 +359,12 @@ export const declineBooking = onCall<{ bookingId: string }>({ region: "us-centra
     if (freshBooking.status !== "open") {
       throw new HttpsError("failed-precondition", `Cannot decline a booking in status "${freshBooking.status}".`);
     }
+    // See counterBooking's identical guard (and
+    // BOOKING_LOCKED_BY_DEPOSIT_MESSAGE): resolving a booking out from under a
+    // staged charge strands both the money and the sweep's staleness clock.
+    if (freshBooking.depositChargePending === true) {
+      throw new HttpsError("failed-precondition", BOOKING_LOCKED_BY_DEPOSIT_MESSAGE);
+    }
     tx.update(bookingRef, { status: "declined", resolvedAt: now, updatedAt: now });
   });
 
@@ -398,6 +412,12 @@ export const withdrawBooking = onCall<{ bookingId: string }>({ region: "us-centr
     }
     if (freshBooking.status !== "open") {
       throw new HttpsError("failed-precondition", `Cannot withdraw a booking in status "${freshBooking.status}".`);
+    }
+    // See counterBooking's identical guard (and
+    // BOOKING_LOCKED_BY_DEPOSIT_MESSAGE): resolving a booking out from under a
+    // staged charge strands both the money and the sweep's staleness clock.
+    if (freshBooking.depositChargePending === true) {
+      throw new HttpsError("failed-precondition", BOOKING_LOCKED_BY_DEPOSIT_MESSAGE);
     }
     tx.update(bookingRef, { status: "withdrawn", resolvedAt: now, updatedAt: now });
   });

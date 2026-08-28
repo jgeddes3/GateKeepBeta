@@ -14,7 +14,7 @@ import type { RefreshPaymentMethodInput } from "../src/payments.js";
 import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
-  DEPOSIT_RECONCILING_MESSAGE,
+  DEPOSIT_RECONCILING_MESSAGE, BOOKING_LOCKED_BY_DEPOSIT_MESSAGE,
   // Task 8's post-commit executor, exercised DIRECTLY below (same rationale
   // as commitAcceptAfterCharge above): Task 9's sweep is its other caller,
   // and its idempotency contract — a re-run against an already-terminal doc
@@ -835,6 +835,39 @@ describe("Task 6 accept saga", () => {
     const after = await getBooking(bookingId);
     expect(after.status).toBe("open");
     expect(after.depositChargeAttempt).toBe(1);   // untouched — no new attempt was minted
+  });
+
+  // SP5 Task 9 (review round 1, item 4): while a charge is staged, every other
+  // mutation of the booking is refused. This is money safety, not politeness —
+  // a countered/declined/withdrawn booking still carrying the saga marker can
+  // never be committed OR safely refunded by the sweep, and any such write
+  // bumps `updatedAt`, which is exactly the sweep's ">24h staged" expired-key
+  // proxy. counterBooking stands in for all three (identical guard, identical
+  // transactional placement).
+  it("counterBooking is refused while a deposit charge is staged, leaving the saga untouched", async () => {
+    const curator = await makeApprovedCuratorProfile("t6lockc");
+    const musician = await makeApprovedMusicianProfile("t6lockm");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await stageViaPendingCharge(curator, bookingId);
+
+    // The musician applied, so it IS the curator's turn — this is refused for
+    // the money reason, not the turn check that precedes it.
+    await expect(callFn(
+      "counterBooking", { bookingId, offer: offerPayload({ amountCents: 16000 }) }, curator.owner.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: BOOKING_LOCKED_BY_DEPOSIT_MESSAGE,
+      });
+
+    // The staged saga is intact: its marker, its thread, and — the point of
+    // the guard — its `updatedAt`, unbumped.
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("open");
+    expect(after.depositChargePending).toBe(true);
+    expect(after.thread).toHaveLength(1);
+    expect(await getPaymentDocs(bookingId)).toHaveLength(1);
   });
 
   it("payment_intent.succeeded with an unrecognised purpose is a processed 200 no-op", async () => {

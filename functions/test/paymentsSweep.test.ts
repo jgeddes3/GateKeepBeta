@@ -422,8 +422,61 @@ describe("payments sweep — birth deposits (step 3)", () => {
       expect(curatorNotes.some((n) => n.title === "Deposit payment failed")).toBe(true);
       const musicianNotes = await notificationsFor(musician.owner.uid);
       expect(musicianNotes.some((n) => n.title === "A deposit didn't go through")).toBe(true);
+
+      // THE TERMINATOR (review round 1). Exhaustion clears depositNextRetryAt
+      // to null, which a clock-only gate would read as "due now" — so this
+      // doc would be re-charged on a fresh key every single hour, forever,
+      // spamming both sides. One more sweep, and nothing may move.
+      const curatorNoteCount = curatorNotes.length;
+      const musicianNoteCount = musicianNotes.length;
+      await runPaymentsSweep(Date.now());
+
+      const stillExhausted = await getPayment(bookingId, bornGigId);
+      expect(stillExhausted?.deposit.depositAttempts).toBe(SETTLEMENT_RETRY_OFFSETS_MS.length + 1);
+      expect(await idemUsed(`${bookingId}:${bornGigId}:deposit:${SETTLEMENT_RETRY_OFFSETS_MS.length + 1}`)).toBe(false);
+      expect((await notificationsFor(curator.owner.uid))).toHaveLength(curatorNoteCount);
+      expect((await notificationsFor(musician.owner.uid))).toHaveLength(musicianNoteCount);
     } finally {
       await setChargeKnob("declineCustomerIds", customerId, false);
+    }
+  });
+
+  it("a birth deposit left `processing` records its intent and is NEVER re-charged", async () => {
+    const { curator, bookingId } = await makeConfirmedSingleBooking("swpend");
+    const customerId = await curatorCustomerId(curator.profileId);
+    const bornGigId = `swpendborn${Date.now()}`;
+    await seedBirthDeposit(bookingId, bornGigId, Date.now() + 14 * DAY_MS);
+
+    try {
+      await setChargeKnob("pendingCustomerIds", customerId, true);
+      const report = await runPaymentsSweep(Date.now());
+      expect(report.birthDepositsPending).toBeGreaterThanOrEqual(1);
+
+      const pending = await getPayment(bookingId, bornGigId);
+      // Not a decline and not a success: the intent exists and is settling, so
+      // the doc stays unpaid, the counter does NOT move (a decline is the only
+      // thing that consumes a key), and the intent id is persisted as the
+      // handle to whatever it becomes.
+      expect(pending?.deposit.status).toBe("unpaid");
+      expect(pending?.deposit.intentId).toBeTruthy();
+      expect(pending?.deposit.depositAttempts).toBe(0);
+      expect(pending?.deposit.chargedAt).toBeNull();
+      const intentId = pending!.deposit.intentId!;
+      expect(await fakeObject(intentId).then((i) => i?.status)).toBe("processing");
+
+      // Knob off — a perfectly good card now. It must STILL not be charged:
+      // the outstanding intent can still succeed, so a fresh-key charge would
+      // be a genuine double charge.
+      await setChargeKnob("pendingCustomerIds", customerId, false);
+      await runPaymentsSweep(Date.now());
+
+      const after = await getPayment(bookingId, bornGigId);
+      expect(after?.deposit.status).toBe("unpaid");
+      expect(after?.deposit.intentId).toBe(intentId);
+      expect(after?.deposit.depositAttempts).toBe(0);
+      expect(await idemUsed(`${bookingId}:${bornGigId}:deposit:1`)).toBe(false);
+    } finally {
+      await setChargeKnob("pendingCustomerIds", customerId, false);
     }
   });
 });
@@ -523,6 +576,38 @@ describe("payments sweep — accept-saga reconciliation (step 1)", () => {
     expect((await getPayment(bookingId, gigId))?.deposit.status).toBe("unpaid");
     // Nothing was charged: the expired key was never used.
     expect(await idemUsed(`${bookingId}:accept:deposit:7`)).toBe(false);
+  });
+
+  // The safety property behind commitAcceptAfterCharge's contract point 2 and
+  // abortAcceptAfterFailedCommit's caller-beware note: the sweep must never
+  // refund a deposit that belongs to a CONFIRMED accept.
+  //
+  // The genuine `racedOut` branch (a racer commits between the sweep's query
+  // read and its post-commit re-read) is not deterministically seedable
+  // without hooking the sweep mid-flight. What IS seedable — and is the same
+  // hazard from the other end — is a confirmed booking still carrying the
+  // marker, which step 1's very first guard rejects before it can charge or
+  // refund anything.
+  it("never touches a CONFIRMED booking's escrow: a stale saga marker on it is refused and surfaced, not reconciled", async () => {
+    const { gigId, bookingId } = await makeConfirmedSingleBooking("swracer");
+    const before = (await getPayment(bookingId, gigId))!;
+    expect(before.deposit.status).toBe("held");
+
+    // A lost write: the accept committed (the commit clears this flag in the
+    // very same transaction that confirms), but the marker somehow survived.
+    await adb.doc(`bookings/${bookingId}`).update({ depositChargePending: true });
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.errors.reconcileStuckMarker ?? 0).toBeGreaterThanOrEqual(1);
+
+    const after = await getBooking(bookingId);
+    expect(after.status).toBe("confirmed");
+    const payment = await getPayment(bookingId, gigId);
+    expect(payment?.deposit.status).toBe("held");
+    expect(payment?.deposit.intentId).toBe(before.deposit.intentId);
+    // Not a cent moved, in either direction.
+    expect(await fakeObject(before.deposit.intentId!).then((i) => i?.refundedCents)).toBe(0);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "refund")).toBe(false);
   });
 
   it("a saga whose accept can no longer commit is charged, re-read, then REFUNDED and unstaged", async () => {

@@ -63,6 +63,23 @@ const PAGE_SIZE = 200;
 // write for a saga; the cancellation transaction's `*_pending` write for a
 // deposit), so it is a good enough "first seen in this state" proxy without
 // adding a dedicated timestamp field to two doc shapes.
+//
+// The proxy is only honest if nothing ELSE bumps `updatedAt` while the doc
+// sits in that state — otherwise a busy doc's clock resets and the guard
+// never fires. What keeps it honest:
+//  - BOOKING side: while `depositChargePending` is true, every mutating
+//    booking callable refuses (acceptBooking's in-txn check; counter/decline/
+//    withdrawBooking's, added in this task's review round; cancellation
+//    requires `confirmed`). recomputePaymentSummary deliberately does not bump
+//    updatedAt. The only writer left is this sweep recording a pending intent
+//    id — which moves the booking to the webhook's care and out of this
+//    guard's path entirely.
+//  - PAYMENT-DOC side: the only sweep write to an already-`*_pending` doc is
+//    the raced-cancellation merge in the birth-deposit charge below, which
+//    bumps updatedAt for a doc whose refund has not been ISSUED yet — so
+//    there is no key in flight for the window to protect, and extending it
+//    is correct rather than merely benign. (Birth dunning also bumps
+//    updatedAt, but only ever on `unpaid` docs, which this guard never sees.)
 const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // Step 7's scan bound. An unwind older than this was either already refunded
@@ -118,6 +135,15 @@ function emptyReport(): PaymentsSweepReport {
 
 function bumpError(report: PaymentsSweepReport, key: string): void {
   report.errors[key] = (report.errors[key] ?? 0) + 1;
+}
+
+// A `{ lastUpdateTime: ... }` precondition that lost its race. The Admin SDK
+// surfaces the underlying gRPC status as a numeric code (9 =
+// FAILED_PRECONDITION); the string forms are a defensive fallback, not the
+// expected shape. Mirrors paymentsCore.ts's identical isAlreadyExists helper.
+function isFailedPrecondition(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === 9 || code === "failed-precondition" || code === "FAILED_PRECONDITION";
 }
 
 // A payment doc's (bookingId, gigId) taken from its own PATH rather than its
@@ -396,6 +422,17 @@ async function resolvePendingDeposits(
         if (!at) continue;
         try {
           const p = doc.data() as PaymentDoc;
+          // Does resolving this doc actually touch Stripe? Only then is there
+          // an idempotency key that can expire:
+          //  - forfeit_pending ALWAYS transfers (resolveDepositPending's
+          //    forfeit branch calls transferToAccount regardless of intentId —
+          //    a never-charged deposit still owes the musician its slice), so
+          //    it is never exempt;
+          //  - refund_pending with NO intentId moves no money at all — it
+          //    resolves straight to terminal `refunded` with no Stripe call,
+          //    so refusing it would strand a doc forever over a key hazard
+          //    that does not exist for it.
+          const touchesStripe = status === "forfeit_pending" || p.deposit.intentId != null;
           // Staleness guard (see IDEMPOTENCY_WINDOW_MS). resolveDepositPending
           // is only safe to re-run freely INSIDE the 24h key window; past it,
           // the same key would mint a SECOND refund or a SECOND transfer.
@@ -405,7 +442,7 @@ async function resolvePendingDeposits(
           // search/list surface StripeLike does not expose yet, so the
           // implemented behavior for now is REFUSE + LOG (never a blind
           // replay); adding the metadata lookup is the future enhancement.
-          if (p.updatedAt < now - IDEMPOTENCY_WINDOW_MS) {
+          if (touchesStripe && p.updatedAt < now - IDEMPOTENCY_WINDOW_MS) {
             console.error(
               `paymentsSweep: ${at.bookingId}/${at.gigId} has been ${status} since ${new Date(p.updatedAt).toISOString()} (>24h) — refusing to re-issue on an expired idempotency key; needs admin attention`);
             report.pendingStale++;
@@ -494,6 +531,18 @@ async function chargeOneBirthDeposit(
     return;
   }
 
+  const attempts = p.deposit.depositAttempts ?? 0;
+
+  // TERMINATOR (review round 1). The retry SCHEDULE is what runs out, and the
+  // counter — not the clock — is what says so: exhaustion deliberately clears
+  // `depositNextRetryAt` to null (there is no next retry), so a clock-only
+  // gate would read null as "due now" and re-charge this doc every hour
+  // forever, minting a fresh key and a fresh decline each time (and, before
+  // declareCuratorDelinquent's already-flagged short-circuit, a fresh pair of
+  // notifications). Dunning stops here; the curator's delinquency flag is the
+  // standing signal, and Task 11's payPastDue is the way out.
+  if (attempts > SETTLEMENT_RETRY_OFFSETS_MS.length) return;
+
   // Dunning backoff. Filtered in application code rather than by a second
   // composite index: the candidate set is bounded by "future booked dates
   // whose deposit hasn't landed", which is tiny — same trade the daily sweep's
@@ -510,7 +559,6 @@ async function chargeOneBirthDeposit(
   if (!booking || booking.status !== "confirmed") return;
   if (booking.depositChargePending === true) return;   // step 1 owns this booking's money
 
-  const attempts = p.deposit.depositAttempts ?? 0;
   // PERSIST the counter BEFORE the attempt it names (as-built contract #2): a
   // crash between the charge and recording its outcome must re-derive the SAME
   // key next run. Absent already means 0, so this write only ever runs once
@@ -528,6 +576,25 @@ async function chargeOneBirthDeposit(
     return;
   }
 
+  // The CAS baseline for the `held` write below, read immediately before the
+  // charge — the paginated snapshot this doc came from can be hundreds of docs
+  // old, and the attempt-counter write above has already invalidated its
+  // updateTime anyway. Doubles as a final status re-check: a cancellation that
+  // landed since the page was read means there is nothing to charge.
+  const preChargeSnap = await doc.ref.get();
+  const preCharge = preChargeSnap.data() as PaymentDoc | undefined;
+  if (!preCharge || preCharge.deposit.status !== "unpaid" || preCharge.deposit.intentId != null) return;
+  const chargeBaseline = preChargeSnap.updateTime;
+  // Explicit, because the failure mode is SILENT: `{ lastUpdateTime: undefined }`
+  // is not a weaker precondition, it is NO precondition. Only a non-existent
+  // doc has no updateTime (already excluded above) — so this can't fire, and
+  // if it ever did, refusing to charge is the right answer.
+  if (!chargeBaseline) {
+    console.error(`paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} has no updateTime — refusing to charge without a CAS baseline`);
+    bumpError(report, "birthDepositNoBaseline");
+    return;
+  }
+
   const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
   try {
     const r = await getStripe().chargeOffSession({
@@ -535,17 +602,54 @@ async function chargeOneBirthDeposit(
       idempotencyKey: `${at.bookingId}:${at.gigId}:deposit:${attempts}`,
       meta: { bookingId: at.bookingId, gigId: at.gigId, purpose: "deposit" },
     });
-    await doc.ref.update({
-      "deposit.status": "held", "deposit.intentId": r.id, "deposit.chargeId": r.chargeId,
-      "deposit.chargedAt": now, "deposit.depositNextRetryAt": null, updatedAt: now,
-    });
+    // Optimistic precondition — the same hazard step 4's waive branch guards:
+    // the charge is a non-transactional gap during which a cancellation can
+    // move this deposit to `refund_pending`/`forfeit_pending`. Writing `held`
+    // blindly would erase that marker, and with it the executor's entire
+    // record that the money is supposed to move back.
+    let markedHeld = true;
+    try {
+      await doc.ref.update({
+        "deposit.status": "held", "deposit.intentId": r.id, "deposit.chargeId": r.chargeId,
+        "deposit.chargedAt": now, "deposit.depositNextRetryAt": null, updatedAt: now,
+      }, { lastUpdateTime: chargeBaseline });
+    } catch (ue) {
+      if (!isFailedPrecondition(ue)) throw ue;
+      markedHeld = false;
+      const raced = (await doc.ref.get()).data() as PaymentDoc | undefined;
+      if (raced?.deposit.status === "refund_pending" || raced?.deposit.status === "forfeit_pending") {
+        // A cancellation won. The money DID move, so record what paid for it —
+        // and deliberately NOT the status: the pending marker is now the
+        // truth, and step 2's executor needs the intent id (to refund against)
+        // and the charge id (as a forfeit transfer's sourceChargeId) that this
+        // charge just produced. Without this write the executor would find a
+        // `refund_pending` doc with a null intentId and resolve it to
+        // `refunded` having sent nothing back.
+        await doc.ref.update({
+          "deposit.intentId": r.id, "deposit.chargeId": r.chargeId, "deposit.chargedAt": now, updatedAt: now,
+        });
+        console.error(
+          `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} was cancelled (${raced.deposit.status}) while charging intent ${r.id} — recorded the charge and left it for the pending executor`);
+      } else {
+        // Something else moved it. The charge is real and now unaccounted
+        // for — never silently overwritten, always surfaced.
+        console.error(
+          `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} changed under intent ${r.id} (now ${String(raced?.deposit.status)}) — charge recorded in the ledger only; needs admin attention`);
+      }
+      bumpError(report, "birthDepositRaced");
+      // The ledger row + summary recompute below still run: the money moved,
+      // and that is true regardless of which doc state it landed in.
+    }
     await writeLedger({
       kind: "deposit_charged", amountCents, bookingId: at.bookingId, gigId: at.gigId,
       profileId: p.curatorProfileId, stripeId: r.id, detail: "birth deposit (materialized occurrence)",
     }).catch((le) => console.error(`paymentsSweep: deposit_charged ledger row failed for ${at.bookingId}/${at.gigId}`, le));
     await recomputePaymentSummary(at.bookingId)
       .catch((e) => console.error(`paymentsSweep: summary recompute failed for ${at.bookingId}`, e));
-    report.birthDepositsCharged++;
+    // Counts the deposits that actually became ESCROW. A charge that landed on
+    // a doc a cancellation had already claimed is money that moved but escrow
+    // that never existed — it is counted in errors.birthDepositRaced instead.
+    if (markedHeld) report.birthDepositsCharged++;
     // TODO(Task 11): a successful charge after a dunning run deliberately does
     // NOT clear the curator's profile-level `delinquent` flag here — that is
     // `clearDelinquencyIfSettled`'s job, which can only answer "is EVERYTHING

@@ -58,6 +58,20 @@ export const DEPOSIT_PROCESSING_MESSAGE =
 // charge).
 export const DEPOSIT_RECONCILING_MESSAGE =
   "This booking's payment is still being processed — try again in a few minutes.";
+// Every OTHER mutation of an `open` booking (counter / decline / withdraw)
+// while an accept saga is staged on it. Distinct from the two accept-path
+// messages above because the caller here isn't accepting anything — they're
+// being told the booking is briefly frozen, not that their own payment is.
+//
+// This guard is money-safety, not politeness (SP5 Task 9 review, item 4):
+//  - a resolved booking (declined/withdrawn) still carrying the saga marker
+//    can never be committed OR safely refunded by the sweep — it lands in the
+//    stuck-marker branch and needs a human;
+//  - and any such write bumps `updatedAt`, which is precisely the sweep's
+//    ">24h staged" proxy — resetting it would keep the expired-key guard from
+//    ever firing on a genuinely stranded charge.
+export const BOOKING_LOCKED_BY_DEPOSIT_MESSAGE =
+  "A deposit payment is processing for this booking — try again in a few minutes.";
 // The charge landed but the accept could not be committed (the gig/series
 // moved underneath it), and the refund SUCCEEDED. Told to the caller in place
 // of the raw abort reason so they aren't left wondering whether they were
