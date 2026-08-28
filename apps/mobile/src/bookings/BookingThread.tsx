@@ -106,7 +106,14 @@ function useGig(gigId: string | undefined): GigDoc | null | "loading" | "unavail
 // same query. Past FILLED gigs stay "filled" forever (Task 8's review), so
 // this list's LAST entry is what the completed-view no-show report window
 // is computed from.
-function useOccurrences(bookingId: string): Occurrence[] {
+//
+// Exported (SP5b Task 5): PaymentStatus.tsx needs the SAME per-occurrence
+// durationMinutes true-up previews key off, and web already exports its
+// identical hook from the equivalent file for the equivalent consumer
+// (apps/web/src/payments/PaymentsPanel.tsx imports useOccurrences from
+// src/bookings/BookingThread.tsx) — a second hand-rolled copy of this on
+// mobile would be free to drift from the server's own "filled" query.
+export function useOccurrences(bookingId: string): Occurrence[] {
   const [rows, setRows] = useState<Occurrence[]>([]);
   useEffect(() => {
     const { db } = getFirebase();

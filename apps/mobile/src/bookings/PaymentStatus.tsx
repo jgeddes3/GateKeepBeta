@@ -4,11 +4,12 @@ import { collection, doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
-import { useRole } from "./BookingThread";
+import { useRole, useOccurrences } from "./BookingThread";
 import { SaveCardSheet } from "../payments/SaveCardSheet";
 import { PayPastDueButton } from "../payments/PayPastDueButton";
+import { TrueUpForm } from "../payments/TrueUpForm";
 import {
-  PAID_DEPOSIT_STATUSES, paymentRowKind,
+  PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
   type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
 
@@ -23,9 +24,10 @@ import {
 //    INCLUDING its review-round fixes. SP5 shipped this read-only (spec §1,
 //    "Platforms" — native payment sheets needed @stripe/stripe-react-native
 //    and a new EAS dev build, which was sub-5b); SP5b now wires the curator
-//    actions up: a card-on-file row (SaveCardSheet) and a native pay-past-due
-//    button (PayPastDueButton) beside the two past-due rows. "Report
-//    actuals"/TrueUpForm is Task 5's scope, not this one.
+//    actions up: a card-on-file row (SaveCardSheet), a native pay-past-due
+//    button (PayPastDueButton) beside the two past-due rows, and (Task 5) a
+//    "Report actuals" true-up mount (TrueUpForm) beside the settlementPending
+//    row, mirroring PaymentsPanel.tsx's own row-map placement exactly.
 //
 //    ONE DELIBERATE DIVERGENCE from web's copy remains: the totals footer is
 //    side-gated differently. Web shows both lines to the curator side only
@@ -142,6 +144,7 @@ const rowStyle = { borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding
 // through a shared parent context.
 export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: string }) {
   const [booking, setBooking] = useState<BookingRequestDoc | "loading" | "unavailable">("loading");
+  const [openTrueUpFor, setOpenTrueUpFor] = useState<string | null>(null);
   const [showSaveCard, setShowSaveCard] = useState(false);
   const [stripeStatus, setStripeStatus] = useState<StripeStatusResult | "loading" | "error">("loading");
   const [stripeReloadKey, setStripeReloadKey] = useState(0);
@@ -156,8 +159,9 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
   const musicianProfileId = booking !== "loading" && booking !== "unavailable" ? booking.musicianProfileId : undefined;
   const curatorProfileId = booking !== "loading" && booking !== "unavailable" ? booking.curatorProfileId : undefined;
   // Hooks run unconditionally, in the same order, every render — the early
-  // returns below happen AFTER both.
+  // returns below happen AFTER all three.
   const role = useRole(musicianProfileId, curatorProfileId, uid);
+  const occurrences = useOccurrences(bookingId);
   const rows = usePaymentRows(bookingId);
   const isCuratorSide = role === "curator" || role === "both";
 
@@ -179,6 +183,11 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
   // Nothing to show before acceptBooking's saga staged the payments
   // subcollection at all (an open/negotiating booking) — no empty panel.
   if (rows.length === 0) return null;
+
+  // Task 5's true-up mount keys a settlementPending row's occurrence back to
+  // its own durationMinutes — same lookup web's PaymentsPanel builds from
+  // the same useOccurrences hook.
+  const durationByGigId = new Map(occurrences.map((o) => [o.id, o.durationMinutes]));
 
   // Mirrors recomputePaymentSummary's per-status table field-for-field, as
   // web's panel does: heldCents is ESCROW ONLY ("held" — the one status
@@ -248,6 +257,21 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
               <Badge label={rowLabel(kind, row, isCuratorSide)} bg={chip.bg} fg={chip.fg} />
               {isCuratorSide && (kind === "settlementPastDue" || kind === "depositPastDue") && (
                 <PayPastDueButton bookingId={bookingId} gigId={row.id} onDone={() => setStripeReloadKey((k) => k + 1)} />
+              )}
+              {isCuratorSide && kind === "settlementPending" && booking.structure !== "perSet" && (
+                openTrueUpFor === row.id ? (
+                  <TrueUpForm
+                    bookingId={bookingId} gigId={row.id} structure={booking.structure}
+                    amountCents={booking.acceptedTerms?.amountCents ?? 0} feePolicy={resolveFeePolicy(booking.feePolicy)}
+                    durationMinutes={durationByGigId.get(row.id) ?? 0} songCount={booking.acceptedTerms?.expectedQuantity ?? null}
+                    current={row.settlement.trueUp}
+                    onDone={() => setOpenTrueUpFor(null)} onCancel={() => setOpenTrueUpFor(null)}
+                  />
+                ) : (
+                  <Pressable onPress={() => setOpenTrueUpFor(row.id)} style={{ alignSelf: "flex-start" }}>
+                    <Text style={{ fontSize: 13, textDecorationLine: "underline" }}>Report actuals</Text>
+                  </Pressable>
+                )
               )}
             </View>
           );
