@@ -1,25 +1,38 @@
 import { useEffect, useState } from "react";
-import { View, Text } from "react-native";
+import { View, Text, Pressable } from "react-native";
 import { collection, doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
 import { useRole } from "./BookingThread";
 import {
-  SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type DepositStatus, type PaymentDoc,
+  paymentRowKind,
+  type BookingRequestDoc, type DepositStatus, type PaymentDoc, type PaymentRowKind,
 } from "@gatekeep/shared";
 
 // SP5 Task 16 — mobile's READ-ONLY money surfaces. Two components:
 //
 //  * PaymentStatus — the per-occurrence status chips for one booking,
 //    mounted under BookingThread by app/booking/[bookingId].tsx. An RN port
-//    of apps/web/src/payments/PaymentsPanel.tsx's row-state mapping (its
-//    rowKind/rowLabel and its totals accounting, INCLUDING that panel's
-//    review-round fixes) with every ACTION stripped: no save-card row, no
+//    of apps/web/src/payments/PaymentsPanel.tsx: the row-state ladder is
+//    literally the same code (@gatekeep/shared's `paymentRowKind`), and the
+//    totals accounting mirrors that panel's field-for-field, INCLUDING its
+//    review-round fixes. Every ACTION is stripped: no save-card row, no
 //    "Report actuals", no "Pay now". Mobile ships read-only this
 //    sub-project (spec §1, "Platforms") — native payment sheets need
 //    @stripe/stripe-react-native and a new EAS dev build, which is sub-5b.
+//
+//    TWO DELIBERATE DIVERGENCES from web's copy, both consequences of being
+//    read-only — neither is a drift to "fix" by re-syncing the strings:
+//      1. The two past-due labels say "pay on the web" where web says "pay
+//         now" next to a button that actually does it. Telling a musician's
+//         curator to "pay now" on a screen with nothing to press is worse
+//         than saying where the button lives.
+//      2. The totals footer is side-gated. Web shows both lines to the
+//         curator side only (it renders inside a curator-gated block);
+//         mobile reaches the musician side too, so it shows the escrow line
+//         to both and the "total paid, including service fees" line only to
+//         the curator, whose bill that is.
 //  * EarningsCard — the musician dashboard's balance headline
 //    (getStripeStatus), a strict subset of web's EarningsPanel with the
 //    cash-out/onboarding controls replaced by "manage payouts on the web".
@@ -27,12 +40,6 @@ import {
 // Both live in this one file because the plan's Task 16 file list creates
 // exactly one mobile source file, and they are the same thing from the two
 // sides: what SP5's money engine looks like when you can only LOOK at it.
-
-// Mirrors functions/src/paymentsCore.ts's DEPOSIT_EXHAUSTED_ATTEMPTS the same
-// way web's PaymentsPanel does — derived from the one shared constant it is
-// actually built from (SETTLEMENT_RETRY_OFFSETS_MS.length retries plus the
-// original attempt), never a third hand-copied number.
-const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
 
 // Byte-identical to PaymentsPanel's own set (which in turn mirrors
 // paymentsCore.ts's functions-only PAID_DEPOSIT_STATUSES): every deposit
@@ -67,60 +74,29 @@ function usePaymentRows(bookingId: string): Row[] {
   return rows;
 }
 
-type RowKind =
-  | "forfeited" | "paid" | "refunded" | "waived"
-  | "settlementPastDue" | "depositPastDue" | "settlementPending"
-  | "depositHeld" | "depositUnpaid";
-
-// Precedence, terminal-first — copied from web's PaymentsPanel deliberately
-// unchanged, including its ordering rationale: a row is only ever in ONE of
-// these in steady state, but the order matters for the brief windows where
-// more than one condition is technically true (a *_pending transient
-// alongside a settlement that hasn't moved yet). Any change here must land
-// on BOTH platforms or a musician sees a different status for the same date
-// depending which app they opened.
-function rowKind(row: Row): RowKind {
-  if (row.deposit.status === "forfeited" || row.deposit.status === "forfeit_pending") return "forfeited";
-  if (row.settlement.status === "paid") return "paid";
-  if (row.deposit.status === "refunded" || row.deposit.status === "refund_pending") return "refunded";
-  if (row.settlement.status === "waived") return "waived";
-  if (row.settlement.status === "past_due") return "settlementPastDue";
-  // An exhausted BIRTH deposit — payPastDue's OTHER debt shape: no
-  // settlement is past_due yet, but the deposit's own retry schedule ran out
-  // and the curator is (or is about to be) delinquent over it. Mobile can't
-  // offer the "Pay now" button web attaches to this state, but it must still
-  // NAME the debt — otherwise a curator whose only debt is a deposit sees a
-  // booking that looks fine on their phone while they're gated out of
-  // booking anywhere.
-  if (row.deposit.status === "unpaid" && (row.deposit.depositAttempts ?? 0) >= DEPOSIT_EXHAUSTED_ATTEMPTS
-    && (row.settlement.status === "not_due" || row.settlement.status === "pending")) {
-    return "depositPastDue";
-  }
-  if (row.settlement.status === "pending") return "settlementPending";
-  if (row.deposit.status === "held" || row.deposit.status === "applied") return "depositHeld";
-  return "depositUnpaid";
-}
-
 // Chip palette, reusing the colors this app already assigns these meanings
 // (GigForms' STATUS_BG / BookingInbox's "your turn" badge): amber =
 // in-flight or attention, red = debt, green = done, indigo = scheduled,
-// grey = nothing owed / nothing yet.
-const CHIP: Record<RowKind, { bg: string; fg: string }> = {
+// grey = nothing owed / nothing yet. `fg` omitted where Badge's own default
+// (#111) is already the right ink.
+const CHIP: Record<PaymentRowKind, { bg: string; fg?: string }> = {
   forfeited: { bg: "#fef3c7", fg: "#92400e" },
   paid: { bg: "#dcfce7", fg: "#166534" },
   refunded: { bg: "#f3f4f6", fg: "#374151" },
   waived: { bg: "#f3f4f6", fg: "#374151" },
   settlementPastDue: { bg: "#fee2e2", fg: "#991b1b" },
   depositPastDue: { bg: "#fee2e2", fg: "#991b1b" },
-  settlementPending: { bg: "#e0e7ff", fg: "#111" },
-  depositHeld: { bg: "#e0e7ff", fg: "#111" },
+  settlementPending: { bg: "#e0e7ff" },
+  depositHeld: { bg: "#e0e7ff" },
   depositUnpaid: { bg: "#f3f4f6", fg: "#374151" },
 };
 
-// Same strings web renders for the same states, side-framed the same way —
-// kept verbatim so a musician reading "Forfeited deposit — received 100%
-// (…)" on the web Earnings page sees that exact sentence on their phone too.
-function rowLabel(kind: RowKind, row: Row, isCuratorSide: boolean): string {
+// Web's strings for the same states, side-framed the same way — kept
+// identical so a musician reading "Forfeited deposit — received 100% (…)" on
+// the web Earnings page sees that exact sentence on their phone too. The two
+// past-due lines are the deliberate exception (see divergence 1 in the file
+// header): there is no button to press here.
+function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): string {
   switch (kind) {
     case "forfeited": {
       // forfeit_pending is IN PROGRESS — the cancellation committed but the
@@ -155,16 +131,16 @@ function rowLabel(kind: RowKind, row: Row, isCuratorSide: boolean): string {
     case "depositHeld": return isCuratorSide ? "Deposit held" : "Deposit held in escrow";
     case "depositUnpaid": return "Charges when the date is confirmed";
     default: {
-      // Exhaustiveness guard, not a dead fallback — a new RowKind member
-      // fails to compile here until it's handled above (web's identical
-      // guard).
+      // Exhaustiveness guard, not a dead fallback — a new PaymentRowKind
+      // member fails to compile here (and in web's identical guard) until
+      // both platforms handle it.
       const exhaustive: never = kind;
       return exhaustive;
     }
   }
 }
 
-const rowStyle = { borderWidth: 1 as const, borderColor: "#eee", borderRadius: 8, padding: 10, gap: 6 };
+const rowStyle = { borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding: 10, gap: 6 };
 
 // Mounted by app/booking/[bookingId].tsx beneath BookingThread. Subscribes
 // to the booking doc independently of BookingThread's own subscription —
@@ -220,28 +196,30 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Payments</Text>
       <View style={{ gap: 8 }}>
         {rows.map((row) => {
-          const kind = rowKind(row);
+          const kind = paymentRowKind(row);
           const chip = CHIP[kind];
           return (
             <View key={row.id} style={rowStyle}>
               <Text style={{ fontWeight: "700" }}>{formatGigDateTime(row.occurrenceStartsAt)}</Text>
-              <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
-                <Badge label={rowLabel(kind, row, isCuratorSide)} bg={chip.bg} fg={chip.fg} />
-              </View>
+              {/* Badge sets its own alignSelf: "flex-start", so it sizes to
+                  its text without a wrapper row. */}
+              <Badge label={rowLabel(kind, row, isCuratorSide)} bg={chip.bg} fg={chip.fg} />
             </View>
           );
         })}
       </View>
       <View style={{ gap: 2 }}>
-        {isCuratorSide ? (
-          <>
-            <Text style={{ color: "#666", fontSize: 13 }}>Held in escrow: {formatCents(heldCents)}</Text>
-            <Text style={{ color: "#666", fontSize: 13 }}>
-              Total paid so far: {formatCents(paidCents)} (includes {formatCents(feesCents)} in service fees)
-            </Text>
-          </>
-        ) : (
-          <Text style={{ color: "#666", fontSize: 13 }}>Held in escrow for you: {formatCents(heldCents)}</Text>
+        {/* Neutral on purpose for BOTH sides: heldCents is the escrow GROSS
+            (the deposit slice the curator was charged), and the musician's
+            eventual share of it is that minus the 2% commission — or, on a
+            forfeit, all of it. "Held in escrow for you" would state a net
+            the musician will not actually receive. */}
+        <Text style={{ color: "#666", fontSize: 13 }}>Held in escrow: {formatCents(heldCents)}</Text>
+        {/* The bill, so curator-side only — a musician has no "total paid". */}
+        {isCuratorSide && (
+          <Text style={{ color: "#666", fontSize: 13 }}>
+            Total paid so far: {formatCents(paidCents)} (includes {formatCents(feesCents)} in service fees)
+          </Text>
         )}
         <Text style={{ color: "#666", fontSize: 13 }}>
           {isCuratorSide
@@ -275,14 +253,19 @@ interface StripeStatusSummary {
 
 export function EarningsCard({ profileId }: { profileId: string }) {
   const [status, setStatus] = useState<StripeStatusSummary | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
 
+  // No synchronous setStatus("loading") on reload — same idiom as web's
+  // EarningsPanel: the initial useState covers first mount, and a retry
+  // leaves the previous state on screen until the new one resolves rather
+  // than flashing back through "Loading…".
   useEffect(() => {
     let cancelled = false;
     httpsCallable<{ profileId: string }, StripeStatusSummary>(getFirebase().functions, "getStripeStatus")({ profileId })
       .then((res) => { if (!cancelled) setStatus(res.data); })
       .catch(() => { if (!cancelled) setStatus("error"); });
     return () => { cancelled = true; };
-  }, [profileId]);
+  }, [profileId, reloadKey]);
 
   return (
     <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding: 12, gap: 8 }}>
@@ -291,8 +274,15 @@ export function EarningsCard({ profileId }: { profileId: string }) {
       {status === "loading" && <Text style={{ color: "#666" }}>Loading…</Text>}
 
       {status === "error" && (
-        <View style={{ backgroundColor: "#fef3c7", borderRadius: 8, padding: 10 }}>
+        <View style={{ backgroundColor: "#fef3c7", borderRadius: 8, padding: 10, gap: 6 }}>
           <Text style={{ color: "#92400e" }}>Couldn&apos;t load your payout status.</Text>
+          {/* A READ retry, not a money action — re-running getStripeStatus is
+              idempotent and moves nothing, so it stays on the read-only side
+              of this sub-project's mobile boundary. Mirrors web's Retry on
+              the same failure. */}
+          <Pressable onPress={() => setReloadKey((k) => k + 1)}>
+            <Text style={{ color: "#92400e", textDecorationLine: "underline" }}>Retry</Text>
+          </Pressable>
         </View>
       )}
 

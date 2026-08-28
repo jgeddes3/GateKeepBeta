@@ -27,7 +27,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   computeDepositCents, computeExpectedTotalCents, computeFeeShareCents,
-  DEFAULT_FEE_POLICY, SETTLEMENT_RETRY_OFFSETS_MS,
+  DEFAULT_FEE_POLICY, DEPOSIT_EXHAUSTED_ATTEMPTS,
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   BOOKING_NOT_CONFIRMABLE_MESSAGE, CARD_DECLINED_MESSAGE, DEPOSIT_PROCESSING_MESSAGE,
   DEPOSIT_RECONCILING_MESSAGE, ACCEPT_ABORTED_REFUNDED_MESSAGE,
@@ -550,16 +550,20 @@ export function markDepositsPendingInTx(
 export const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // The first `deposit.depositAttempts` value that means "this birth deposit's
-// retry schedule is over". SETTLEMENT_RETRY_OFFSETS_MS is the schedule (+1d,
-// +2d, +2d — three retries after the initial attempt), so the count runs 1..3
-// while retries remain and hits this on the failure that exhausts it.
+// retry schedule is over" — now DEFINED IN @gatekeep/shared
+// (paymentDisplay.ts), beside the SETTLEMENT_RETRY_OFFSETS_MS schedule it is
+// derived from, because both clients' row classifier needs the same
+// terminator and a second derivation is exactly the drift this constant
+// exists to prevent (Task 16 review round 1). Re-exported from here so every
+// server-side import keeps working unchanged — the same treatment messages.ts
+// gave the SP5 copy constants.
 //
-// Named because FOUR places need the same terminator and were each spelling it
-// out (review round 3, M5): the sweep's step-3 gate, its dunning writer,
-// payPastDue's deposit-mode predicate, and clearDelinquencyIfSettled's debt
-// query — which needs the CONSTANT rather than the predicate, because it asks
-// Firestore the question as a range filter.
-export const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
+// Named because FOUR server places need the same terminator and were each
+// spelling it out (review round 3, M5): the sweep's step-3 gate, its dunning
+// writer, payPastDue's deposit-mode predicate, and clearDelinquencyIfSettled's
+// debt query — which needs the CONSTANT rather than the predicate, because it
+// asks Firestore the question as a range filter.
+export { DEPOSIT_EXHAUSTED_ATTEMPTS };
 
 // Absent means zero: the counter is written lazily (persist-before-charge), so
 // a doc that has never been attempted simply has no field.

@@ -650,8 +650,11 @@ before a real launch:
 - **Register the webhook endpoint in the Stripe dashboard** (Developers → Webhooks → Add endpoint).
   The URL is the deployed `stripeWebhook` function's HTTPS trigger URL (`firebase deploy` prints it;
   it also appears in the Firebase console under Functions). Subscribe at minimum to
-  `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `account.updated`,
-  `payout.paid` and `payout.failed`. Then copy the endpoint's **signing secret** and store it with
+  `payment_intent.succeeded`, `payment_intent.payment_failed`, `transfer.reversed`, `account.updated`,
+  `payout.paid` and `payout.failed` — every type `webhookHandlers` actually registers a handler for.
+  `transfer.reversed` matters more than its quiet name suggests: it is the **only** way the platform
+  learns about an earnings transfer reversed from the Stripe dashboard rather than by our own
+  clawback path. Then copy the endpoint's **signing secret** and store it with
   `firebase functions:secrets:set STRIPE_WEBHOOK_SECRET` — **the endpoint is useless until this is
   done**: `stripeWebhook` verifies every request's signature and rejects all of them against an
   empty secret, which silently breaks the recovery path for charges Stripe leaves `processing`
@@ -727,7 +730,7 @@ forwarding events). Nothing here uses real money, but everything here is real St
    "Deposit held in escrow".
 4. **Decline after save.** Add **4000 0000 0000 0341** as the card (it attaches successfully but
    **fails when charged**) and accept another booking. Expect: the accept is refused with "Your card
-   was declined — update your payment method and try again", the booking stays `open`, and **no
+   was declined — update your payment method and try again.", the booking stays `open`, and **no
    payment docs are left staged**. Then switch back to 4242 and accept again — expect a clean
    success. This is the one path that proves declines do not strand a booking: the retry uses a new
    attempt-scoped idempotency key, so it must NOT replay the cached decline.
@@ -738,8 +741,10 @@ forwarding events). Nothing here uses real money, but everything here is real St
    round-trip is `APP_ORIGIN` plus the `account.updated` webhook both working.
 6. **Settlement (T+3).** Real settlement waits three days after the gig ends, which no smoke test
    should sit through. Either let a past-dated occurrence come due naturally, or fast-forward the
-   date's `settlement.settleAfter` to a past timestamp in the Firestore console (server-written
-   field; the hourly `paymentsSweep` is its only reader) and wait for the next sweep run. Expect: a
+   date's `settlement.settleAfter` to a past timestamp in the Firestore console (a server-written
+   field — `paymentsSweep` is the only thing that ACTS on it, though both clients render it as the
+   "Settles / Pays out ~" date, so an edited value shows up in the UI too) and wait for the next
+   sweep run. Expect: a
    second succeeded PaymentIntent for the remaining 65% + fee, a **Transfer to the connected
    account for 98% of the base**, and both clients flipping the date to "Paid".
 7. **Instant-payout simulation.** Instant payouts need a debit card as the connected account's

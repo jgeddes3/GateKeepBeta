@@ -10,8 +10,8 @@ import { TrueUpForm } from "./TrueUpForm";
 import { PayPastDueButton } from "./PayPastDueButton";
 import type { StripeStatusResult } from "./types";
 import {
-  SETTLEMENT_RETRY_OFFSETS_MS, resolveFeePolicy,
-  type BookingRequestDoc, type DepositStatus, type PaymentDoc,
+  paymentRowKind, resolveFeePolicy,
+  type BookingRequestDoc, type DepositStatus, type PaymentDoc, type PaymentRowKind,
 } from "@gatekeep/shared";
 
 // SP5 Task 15 — the booking detail page's money surface: subscribes to
@@ -20,13 +20,6 @@ import {
 // plus a card-on-file row and a totals footer. Curator-side (and dual
 // "both") members get the actions (report actuals, pay past due, update the
 // card); musicians see the same rows read-only, musician-framed.
-
-// Mirrors functions/src/paymentsCore.ts's DEPOSIT_EXHAUSTED_ATTEMPTS
-// (SETTLEMENT_RETRY_OFFSETS_MS.length retries, plus the original attempt) —
-// that constant is functions-only, so this is the SAME derivation from the
-// one shared constant it's actually built from, not a second hand-copied
-// number that could drift from it.
-const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
 
 // Review round 1 (medium #2): mirrors functions/src/paymentsCore.ts's
 // PAID_DEPOSIT_STATUSES exactly (a functions-only Set, not exported to
@@ -57,36 +50,13 @@ function usePaymentRows(bookingId: string): Row[] {
   return rows;
 }
 
-type RowKind =
-  | "forfeited" | "paid" | "refunded" | "waived"
-  | "settlementPastDue" | "depositPastDue" | "settlementPending"
-  | "depositHeld" | "depositUnpaid";
-
-// Precedence, terminal-first: a row can only ever be in ONE of these at a
-// time in steady state, but the ordering matters for the brief windows where
-// more than one condition is technically true (e.g. a *_pending transient
-// state alongside a settlement that hasn't moved yet).
-function rowKind(row: Row): RowKind {
-  if (row.deposit.status === "forfeited" || row.deposit.status === "forfeit_pending") return "forfeited";
-  if (row.settlement.status === "paid") return "paid";
-  if (row.deposit.status === "refunded" || row.deposit.status === "refund_pending") return "refunded";
-  if (row.settlement.status === "waived") return "waived";
-  if (row.settlement.status === "past_due") return "settlementPastDue";
-  // An exhausted BIRTH deposit — payPastDue's OTHER debt shape (see its
-  // header): no settlement is past_due yet, but the deposit's own retry
-  // schedule ran out and the curator is (or is about to be) delinquent over
-  // it. Without surfacing this, a curator whose only debt is a deposit would
-  // have no way to find the "Pay now" button that clears the gate at all.
-  if (row.deposit.status === "unpaid" && (row.deposit.depositAttempts ?? 0) >= DEPOSIT_EXHAUSTED_ATTEMPTS
-    && (row.settlement.status === "not_due" || row.settlement.status === "pending")) {
-    return "depositPastDue";
-  }
-  if (row.settlement.status === "pending") return "settlementPending";
-  if (row.deposit.status === "held" || row.deposit.status === "applied") return "depositHeld";
-  return "depositUnpaid";
-}
-
-function rowLabel(kind: RowKind, row: Row, isCuratorSide: boolean): string {
+// The row-state ladder itself now lives in @gatekeep/shared's
+// paymentDisplay.ts (`paymentRowKind`), shared with mobile's PaymentStatus so
+// the two surfaces can never classify the same date differently. Only the
+// LABELS below stay here — this panel's copy is action-bearing ("Past due —
+// pay now" sits next to the button that does it), which mobile's read-only
+// port deliberately words differently.
+function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): string {
   switch (kind) {
     case "forfeited": {
       // Review round 1 (low #12): forfeit_pending is IN PROGRESS — the
@@ -249,7 +219,7 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
 
       <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 10 }}>
         {rows.map((row) => {
-          const kind = rowKind(row);
+          const kind = paymentRowKind(row);
           return (
             <li key={row.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, display: "grid", gap: 6 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
