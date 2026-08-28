@@ -98,10 +98,11 @@ was):
   §5) and the $10 instant minimum surfaced client-side; submit `requestPayout({ profileId,
   amountCents, method, requestId })` with a client-minted UUID `requestId` (same idempotency
   contract web uses); render `PAYOUT_*` refusal messages verbatim.
-- **Admin gating (H2)**: `createOnboardingLink` and `requestPayout` are profile-ADMIN-only.
-  The panel checks the viewer's membership role (the members subcollection doc mobile already
-  reads elsewhere) and renders read-only status + "an admin of this profile manages payouts" for
-  non-admin members rather than dead buttons.
+- **Admin gating (H2)**: `createOnboardingLink` and `requestPayout` are profile-ADMIN-only,
+  enforced server-side. Mobile matches web's as-built posture exactly: no client-side role
+  check (mobile's ProfileContext carries no member role, same as web's panel), the buttons
+  render for any member, and a non-admin's press surfaces the server's permission refusal
+  verbatim — the same friendly-wrapper idiom every callable error in this app uses.
 - Musician-side `PaymentStatus` footer ("Payout setup and cash-outs are managed on the web.")
   now links to the Earnings surface in-app.
 
@@ -144,8 +145,11 @@ zero Stripe keys — the 578-test suite and rules suite are untouched.
 - **CI gates unchanged**: `pnpm typecheck` (5), shared suite (+ feePreviews tests moved/extended),
   `pnpm emu:test` 578, `pnpm emu:rules` 77, web build (import-flip regression), mobile lint,
   `npx expo export --platform ios`.
-- `stripe.ts` is the mock seam: component logic (gate branching, keyless mode, result handling)
-  unit-tests against a mocked module; no test drives the real native sheet.
+- Mobile has NO unit-test runner (`"test": "echo no unit tests in mobile yet"` — repo
+  convention since SP1); 5b does not add one. Logic that warrants tests lives in
+  `packages/shared` (the §5 fee-preview move ships with shared tests); mobile components stay
+  wiring, verified by typecheck/lint/export like every prior SP's mobile work. `stripe.ts`
+  stays the single native-import seam regardless — it is what makes keyless mode one branch.
 - **Device smoke (manual, real test-mode keys)** — extend README's SP5 walkthrough with a mobile
   section: save 4242, 3DS challenge 4000 0027 6000 3184 in-sheet, decline-after-save
   4000 0000 0000 0341 → dunning → Pay now, Apple Pay + Google Pay test cards, onboarding
@@ -162,8 +166,9 @@ import flips.
 1. Apple: create merchant id `merchant.app.gatekeep.mobile` in the Apple Developer portal; add
    the Apple Pay payment-processing certificate via the Stripe dashboard (test mode first).
 2. Google: enable Google Pay in the Stripe dashboard; `testEnv` stays true until live.
-3. Set `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` in `eas.json` build profiles (and `.env` for local
-   dev-client runs) — baked at build time like web's publishable key.
+3. Set `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` as an EAS environment variable (dashboard or
+   `eas env:create`; `apps/mobile/.env` for local dev-client runs) — baked at build time like
+   web's publishable key. `eas.json` itself stays key-free.
 4. Cut a **new EAS dev build** (both platforms) before device testing; production builds inherit
    the plugin config.
 5. `APP_ORIGIN` must be set on deployed functions before device onboarding tests (the return
