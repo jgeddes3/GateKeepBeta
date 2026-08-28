@@ -1,25 +1,21 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { collection, getDocs, limit, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { fetchDelinquentBookingIds } from "./delinquentBookings";
 import type { StripeStatusResult } from "./types";
-
-const MAX_LINKED = 5;
 
 // SP5 Task 15 — mounted on the curator profile editor (the closest thing
 // this app has to a "curator dashboard shell": it's where a curator's own
 // bookings already render below, via BookingInbox). One-shot getStripeStatus
 // on mount (no need for a live subscription here — a curator opening this
 // page is exactly when a fresh read is worth it) plus, only when delinquent,
-// a client query pinned to curatorProfileId == <this profile> (provable
-// under firestore.rules' bookings read rule, same shape as BookingInbox's
-// own curator-side queries — no orderBy, so no new composite index needed
-// for the equality-only compound filter).
+// the shared delinquentBookings.ts query (also used by GatePrompt's
+// CuratorDelinquentGate — one copy of the query, review round 1 low #14).
 export function DelinquencyBanner({ profileId }: { profileId: string }) {
   const [status, setStatus] = useState<StripeStatusResult | null>(null);
-  const [affected, setAffected] = useState<{ id: string }[] | "loading">("loading");
+  const [affected, setAffected] = useState<string[] | "loading">("loading");
 
   useEffect(() => {
     let cancelled = false;
@@ -32,10 +28,8 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
   useEffect(() => {
     if (status?.delinquent !== true) return;
     let cancelled = false;
-    const { db } = getFirebase();
-    getDocs(query(collection(db, "bookings"),
-      where("curatorProfileId", "==", profileId), where("paymentSummary.state", "==", "delinquent"), limit(MAX_LINKED)))
-      .then((snap) => { if (!cancelled) setAffected(snap.docs.map((d) => ({ id: d.id }))); })
+    fetchDelinquentBookingIds(profileId)
+      .then((ids) => { if (!cancelled) setAffected(ids); })
       .catch(() => { if (!cancelled) setAffected([]); });
     return () => { cancelled = true; };
   }, [status?.delinquent, profileId]);
@@ -52,9 +46,9 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
       ) : affected.length > 0 ? (
         <p style={{ margin: 0, color: "#991b1b" }}>
           Settle it from{" "}
-          {affected.map((b, i) => (
-            <span key={b.id}>
-              <Link href={`/dashboard/bookings/${b.id}`} style={{ color: "#991b1b", textDecoration: "underline" }}>
+          {affected.map((id, i) => (
+            <span key={id}>
+              <Link href={`/dashboard/bookings/${id}`} style={{ color: "#991b1b", textDecoration: "underline" }}>
                 this booking{affected.length > 1 ? ` (${i + 1})` : ""}
               </Link>
               {i < affected.length - 1 ? ", " : ""}

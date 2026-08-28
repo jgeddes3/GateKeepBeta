@@ -6,6 +6,7 @@ import { formatCents } from "../gigs/GigForms";
 import { trueUpDeltaPreviewCents } from "./fees";
 import {
   MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS, TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage,
+  TRUE_UP_INCREASE_ONLY_MESSAGE,
   type BudgetStructure, type FeePolicy,
 } from "@gatekeep/shared";
 
@@ -33,24 +34,39 @@ export function TrueUpForm({
   current: { extraMinutes: number; extraSongs: number } | null;
   onDone: () => void; onCancel: () => void;
 }) {
-  const [minutesInput, setMinutesInput] = useState(String(current?.extraMinutes ?? 0));
-  const [songsInput, setSongsInput] = useState(String(current?.extraSongs ?? 0));
+  const isPerHour = structure === "perHour";
+  // Review round 1 (low #7): empty by default, never "0" — a booking with no
+  // prior report has current == null, and confirmOccurrenceActuals' own
+  // SHAPE check refuses extraMinutes===0 && extraSongs===0 outright. A "0"
+  // pre-fill would let a curator submit the empty state UNCHANGED straight
+  // into a guaranteed server refusal; a blank field makes clear a real
+  // number is expected. Once a report exists, current's axis value is
+  // always > 0 (0/0 is never a value the server would have accepted), so
+  // this only ever pre-fills a genuine positive number.
+  const currentAxisValue = isPerHour ? current?.extraMinutes : current?.extraSongs;
+  const [rawInput, setRawInput] = useState(currentAxisValue != null && currentAxisValue > 0 ? String(currentAxisValue) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (structure === "perSet") return null; // flat — nothing to report
 
-  const isPerHour = structure === "perHour";
-  const rawInput = isPerHour ? minutesInput : songsInput;
-  const parsedValue = Math.round(Number(rawInput));
-  const shapeOk = rawInput.trim() !== "" && Number.isFinite(Number(rawInput)) && Number.isInteger(parsedValue) && parsedValue >= 0;
+  const trimmed = rawInput.trim();
+  const parsedValue = Math.round(Number(trimmed));
+  const inputShapeOk = trimmed !== "" && Number.isFinite(Number(trimmed)) && Number.isInteger(parsedValue) && parsedValue >= 0;
   const cap = isPerHour ? MAX_TRUE_UP_EXTRA_MINUTES : MAX_TRUE_UP_EXTRA_SONGS;
-  const overCap = shapeOk && parsedValue > cap;
-  const currentValue = isPerHour ? (current?.extraMinutes ?? 0) : (current?.extraSongs ?? 0);
-  const belowCurrent = shapeOk && parsedValue < currentValue;
+  const overCap = inputShapeOk && parsedValue > cap;
+  const belowCurrent = inputShapeOk && parsedValue < (currentAxisValue ?? 0);
 
-  const nextExtraMinutes = isPerHour ? parsedValue : (current?.extraMinutes ?? 0);
-  const nextExtraSongs = isPerHour ? (current?.extraSongs ?? 0) : parsedValue;
+  const nextExtraMinutes = isPerHour ? (inputShapeOk ? parsedValue : (currentAxisValue ?? 0)) : (current?.extraMinutes ?? 0);
+  const nextExtraSongs = isPerHour ? (current?.extraSongs ?? 0) : (inputShapeOk ? parsedValue : (currentAxisValue ?? 0));
+  // Review round 1 (low #7): mirrors confirmOccurrenceActuals' own SHAPE
+  // check exactly — server-side this is folded into ONE
+  // `(extraMinutes===0 && extraSongs===0)` clause alongside the integer/
+  // non-negative checks, not a separate rule. A booking that's never had
+  // actuals reported has BOTH extras at 0 by default, and 0/0 is refused
+  // outright as malformed, not accepted as "no change".
+  const bothZero = nextExtraMinutes === 0 && nextExtraSongs === 0;
+  const shapeOk = inputShapeOk && !bothZero;
 
   const preview = shapeOk && !overCap && !belowCurrent
     ? trueUpDeltaPreviewCents(structure, amountCents, feePolicy, durationMinutes, songCount,
@@ -66,7 +82,7 @@ export function TrueUpForm({
     // three regardless.
     if (!shapeOk) { setError(TRUE_UP_SHAPE_MESSAGE); return; }
     if (overCap) { setError(trueUpOverCapMessage(isPerHour ? "minutes" : "songs", cap)); return; }
-    if (belowCurrent) { setError("Reported actuals can only increase."); return; }
+    if (belowCurrent) { setError(TRUE_UP_INCREASE_ONLY_MESSAGE); return; }
     setBusy(true);
     try {
       await httpsCallable(getFirebase().functions, "confirmOccurrenceActuals")({
@@ -86,9 +102,8 @@ export function TrueUpForm({
       <label>
         {isPerHour ? "Extra minutes played" : "Extra songs played"}:{" "}
         <input type="number" min={0} max={cap} step={1} disabled={busy} style={{ width: 90 }}
-          value={isPerHour ? minutesInput : songsInput}
-          onChange={(e) => (isPerHour ? setMinutesInput(e.target.value) : setSongsInput(e.target.value))}
-          aria-label={isPerHour ? "Extra minutes played" : "Extra songs played"} />
+          value={rawInput} onChange={(e) => setRawInput(e.target.value)}
+          placeholder="0" aria-label={isPerHour ? "Extra minutes played" : "Extra songs played"} />
       </label>
       <p style={{ margin: 0, fontSize: 12, color: "#666" }}>
         Actuals can only increase — this replaces any previous report for this date.

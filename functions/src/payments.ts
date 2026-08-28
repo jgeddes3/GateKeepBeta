@@ -3,7 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import {
   isValidDocId, MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS,
   TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage, TRUE_UP_WINDOW_CLOSED_MESSAGE,
-  TRUE_UP_PAYMENT_STARTED_MESSAGE, TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE,
+  TRUE_UP_PAYMENT_STARTED_MESSAGE, TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE, TRUE_UP_INCREASE_ONLY_MESSAGE,
   PAY_PAST_DUE_NOT_OVERDUE_MESSAGE, PAY_PAST_DUE_NOTHING_OWED_MESSAGE, PAY_PAST_DUE_NO_CUSTOMER_MESSAGE,
   PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE, PAY_PAST_DUE_RACED_MESSAGE, PAY_PAST_DUE_DATE_CANCELLED_MESSAGE,
   type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type PaymentDoc, type StripeProfileDoc,
@@ -479,7 +479,7 @@ export interface ConfirmOccurrenceActualsInput {
 // unchanged.
 export {
   TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage, TRUE_UP_WINDOW_CLOSED_MESSAGE,
-  TRUE_UP_PAYMENT_STARTED_MESSAGE, TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE,
+  TRUE_UP_PAYMENT_STARTED_MESSAGE, TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE, TRUE_UP_INCREASE_ONLY_MESSAGE,
 };
 
 // Curator-only, INCREASE-ONLY true-up of what actually happened on one booked
@@ -585,7 +585,7 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
       }
       const prev = p.settlement.trueUp;
       if (prev && (extraMinutes < prev.extraMinutes || extraSongs < prev.extraSongs)) {
-        throw new HttpsError("failed-precondition", "Reported actuals can only increase.");
+        throw new HttpsError("failed-precondition", TRUE_UP_INCREASE_ONLY_MESSAGE);
       }
       tx.update(ref, {
         "settlement.trueUp": { extraMinutes, extraSongs, reportedAt: now },

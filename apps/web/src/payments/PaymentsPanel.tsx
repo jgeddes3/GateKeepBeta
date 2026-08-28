@@ -11,7 +11,7 @@ import { PayPastDueButton } from "./PayPastDueButton";
 import type { StripeStatusResult } from "./types";
 import {
   SETTLEMENT_RETRY_OFFSETS_MS, resolveFeePolicy,
-  type BookingRequestDoc, type PaymentDoc,
+  type BookingRequestDoc, type DepositStatus, type PaymentDoc,
 } from "@gatekeep/shared";
 
 // SP5 Task 15 — the booking detail page's money surface: subscribes to
@@ -27,6 +27,19 @@ import {
 // one shared constant it's actually built from, not a second hand-copied
 // number that could drift from it.
 const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
+
+// Review round 1 (medium #2): mirrors functions/src/paymentsCore.ts's
+// PAID_DEPOSIT_STATUSES exactly (a functions-only Set, not exported to
+// shared — kept in sync by hand). Every deposit status where the curator's
+// card was actually charged and the money hasn't come back to them yet:
+// held/applied (escrow, then released into a settlement),
+// forfeit_pending/forfeited (forfeiture in flight or done — the curator
+// still paid; only the DESTINATION changed), and refund_pending (charged,
+// the refund just hasn't completed). See recomputePaymentSummary's own
+// per-status table for the authoritative definition this must track.
+const PAID_DEPOSIT_STATUSES = new Set<DepositStatus>([
+  "held", "applied", "forfeit_pending", "forfeited", "refund_pending",
+]);
 
 type Row = PaymentDoc & { id: string };
 
@@ -74,15 +87,23 @@ function rowKind(row: Row): RowKind {
 }
 
 function rowLabel(kind: RowKind, row: Row, isCuratorSide: boolean): string {
-  const dateLabel = formatGigDateTime(row.occurrenceStartsAt);
   switch (kind) {
-    case "forfeited":
+    case "forfeited": {
+      // Review round 1 (low #12): forfeit_pending is IN PROGRESS — the
+      // cancellation committed but the transfer to the musician hasn't
+      // landed yet (see DepositStatus's state-machine comment in types.ts).
+      // Only the terminal "forfeited" status gets the "you received/paid"
+      // copy; forfeit_pending gets its own in-progress line.
+      if (row.deposit.status === "forfeit_pending") {
+        return isCuratorSide ? "Forfeiting to the musician…" : "Forfeiting to you…";
+      }
       return isCuratorSide
         ? `Forfeited — ${formatCents(row.deposit.sliceCents)} paid to the musician`
         // Same copy EarningsPanel's HistoryList already uses for the
         // identical case — kept byte-identical so a musician sees the same
         // sentence on both surfaces.
         : `Forfeited deposit — received 100% (${formatCents(row.deposit.sliceCents)})`;
+    }
     case "paid": {
       const totalCents = (row.settlement.computedCents ?? 0) + (row.settlement.feeShareCents ?? 0) + (row.settlement.lateFeeCents ?? 0);
       return isCuratorSide
@@ -93,10 +114,27 @@ function rowLabel(kind: RowKind, row: Row, isCuratorSide: boolean): string {
     case "waived": return "Waived — nothing owed on this date";
     case "settlementPastDue": return isCuratorSide ? "Past due — pay now" : "Curator payment delayed";
     case "depositPastDue": return isCuratorSide ? "Deposit past due — pay now" : "Payment delayed";
-    case "settlementPending": return isCuratorSide ? `Settles ${dateLabel}` : `Pays out ~${dateLabel}`;
+    case "settlementPending": {
+      // Review round 1 (medium #3): "Settles"/"Pays out" is when settlement
+      // actually happens (settlement.settleAfter — gig END + the T+3 delay),
+      // NOT the occurrence's own start date. settleAfter is set once the gig
+      // ends, which is a precondition for a doc ever reaching "pending" in
+      // the first place, so it's non-null in practice; occurrenceStartsAt is
+      // a defensive fallback only (a doc somehow "pending" before its own
+      // settleAfter was recorded).
+      const settleLabel = formatGigDateTime(row.settlement.settleAfter ?? row.occurrenceStartsAt);
+      return isCuratorSide ? `Settles ${settleLabel}` : `Pays out ~${settleLabel}`;
+    }
     case "depositHeld": return isCuratorSide ? "Deposit held" : "Deposit held in escrow";
     case "depositUnpaid": return "Charges when the date is confirmed";
-    default: return "";
+    default: {
+      // Review round 1 (low #15): exhaustiveness guard, not a dead fallback
+      // — if RowKind ever grows a new member, THIS won't compile until every
+      // case above handles it too, instead of silently rendering an empty
+      // label at runtime (what the old `default: return ""` did).
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
   }
 }
 
@@ -107,6 +145,16 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
   const [stripeStatus, setStripeStatus] = useState<StripeStatusResult | "loading" | "error">("loading");
   const [stripeReloadKey, setStripeReloadKey] = useState(0);
 
+  // Review round 1 (low #17) — ACCEPTED double listener: BookingThread.tsx
+  // (mounted on the same page, right above this panel) already runs its own
+  // onSnapshot on this exact bookings/{bookingId} doc; this is a second,
+  // independent one. A page-level context (subscribe once, hand the doc down
+  // to both) was considered and rejected: PaymentsPanel and BookingThread are
+  // deliberately self-contained "surfaces" (same precedent as EarningsPanel
+  // running its own bookings subscription alongside BookingInbox's) — one
+  // extra doc listener per booking-detail page view is negligible, and
+  // keeping the two components independent avoids coupling them through
+  // shared parent-context wiring for a saving that doesn't matter here.
   useEffect(() => {
     const unsub = onSnapshot(doc(getFirebase().db, "bookings", bookingId),
       (s) => setBooking(s.exists() ? (s.data() as BookingRequestDoc) : "unavailable"),
@@ -147,10 +195,19 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
   const amountCents = booking.acceptedTerms?.amountCents ?? 0;
   const songCount = booking.acceptedTerms?.expectedQuantity ?? null;
 
+  // Review round 1 (medium #1, #2): mirrors recomputePaymentSummary's own
+  // per-status table field-for-field — heldCents is ESCROW ONLY ("held", the
+  // one deposit status meaning "the platform is currently sitting on this
+  // money, unreleased"), while paidCents is broader: every status in
+  // PAID_DEPOSIT_STATUSES where the curator's card was charged at all,
+  // whether or not that money has since moved on. feesCents (this panel's
+  // own addition — recomputePaymentSummary doesn't track it) rides along
+  // with paidCents for the same set of statuses, since a forfeited/refund-
+  // pending deposit's fee share was still charged to the curator.
   let heldCents = 0, paidCents = 0, feesCents = 0;
   for (const r of rows) {
-    if (r.deposit.status === "held" || r.deposit.status === "applied") {
-      heldCents += r.deposit.sliceCents;
+    if (r.deposit.status === "held") heldCents += r.deposit.sliceCents;
+    if (PAID_DEPOSIT_STATUSES.has(r.deposit.status)) {
       paidCents += r.deposit.sliceCents + r.deposit.feeShareCents;
       feesCents += r.deposit.feeShareCents;
     }

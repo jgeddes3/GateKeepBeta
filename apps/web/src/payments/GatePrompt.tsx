@@ -1,9 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { collection, getDocs, limit, query, where } from "firebase/firestore";
-import { getFirebase } from "../lib/firebase";
 import { SaveCardModal } from "./SaveCardModal";
+import { fetchDelinquentBookingIds } from "./delinquentBookings";
 import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   DEPOSIT_PROCESSING_MESSAGE,
@@ -64,13 +63,11 @@ function CuratorCardGate({ message, curatorProfileId, onRetry }: {
 // (a brief lag between the sweep flagging delinquency and this read, or —
 // defensively — a delinquent flag with no single booking to blame).
 function CuratorDelinquentGate({ message, curatorProfileId }: { message: string; curatorProfileId: string }) {
-  const [affected, setAffected] = useState<{ id: string }[] | "loading">("loading");
+  const [affected, setAffected] = useState<string[] | "loading">("loading");
   useEffect(() => {
     let cancelled = false;
-    const { db } = getFirebase();
-    getDocs(query(collection(db, "bookings"),
-      where("curatorProfileId", "==", curatorProfileId), where("paymentSummary.state", "==", "delinquent"), limit(5)))
-      .then((snap) => { if (!cancelled) setAffected(snap.docs.map((d) => ({ id: d.id }))); })
+    fetchDelinquentBookingIds(curatorProfileId)
+      .then((ids) => { if (!cancelled) setAffected(ids); })
       .catch(() => { if (!cancelled) setAffected([]); });
     return () => { cancelled = true; };
   }, [curatorProfileId]);
@@ -79,9 +76,9 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
       <p style={{ margin: 0, color: "#92400e" }}>{message}</p>
       {affected === "loading" ? null : affected.length > 0 ? (
         <p style={{ margin: 0 }}>
-          {affected.map((b, i) => (
-            <span key={b.id}>
-              <Link href={`/dashboard/bookings/${b.id}`}>
+          {affected.map((id, i) => (
+            <span key={id}>
+              <Link href={`/dashboard/bookings/${id}`}>
                 Go to the overdue booking{affected.length > 1 ? ` (${i + 1})` : ""}
               </Link>
               {i < affected.length - 1 ? ", " : ""}
@@ -95,13 +92,22 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
   );
 }
 
-export function GatePrompt({ message, curatorProfileId, onRetry }: {
+export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetry }: {
   message: string;
   // Known only at curator-authored call sites (OfferComposer, BookingThread's
   // accept). Omitted at a musician-only call site (the apply flow) — the two
   // curator-keyed messages below simply never fire there, so this being
   // undefined never hides a prompt that should have shown.
   curatorProfileId?: string;
+  // Review round 1 (low #9): acceptBooking's requireMusicianPayoutReady check
+  // is unconditional — it fires the SAME MUSICIAN_PAYOUTS_REQUIRED_MESSAGE
+  // whichever side clicks accept. A musician caller (or the apply flow,
+  // which is ALWAYS the musician) can act on it — Finish payout setup is
+  // THEIR page. A curator caller cannot: the blocked profile isn't theirs,
+  // so the link would be actionable-looking but pointless. Defaults to false
+  // (curator-authored call sites that never actually hit this message don't
+  // need to think about it).
+  viewerIsMusician?: boolean;
   // Re-runs the original action after the user fixes the gate (saves a
   // card). Only ever actually invoked from the card-gate's onSaved — every
   // other branch below is read-only.
@@ -114,11 +120,15 @@ export function GatePrompt({ message, curatorProfileId, onRetry }: {
     return <CuratorDelinquentGate message={message} curatorProfileId={curatorProfileId} />;
   }
   if (message === MUSICIAN_PAYOUTS_REQUIRED_MESSAGE) {
-    return (
+    return viewerIsMusician ? (
       <WarnBox>
         <p style={{ margin: 0, color: "#92400e" }}>{message}</p>
         <p style={{ margin: 0 }}><Link href="/dashboard/earnings">Finish payout setup →</Link></p>
       </WarnBox>
+    ) : (
+      <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+        The musician hasn&apos;t finished payout setup yet — they&apos;ve been notified.
+      </p>
     );
   }
   // DEPOSIT_PROCESSING_MESSAGE is NOT a failure (the booking confirms

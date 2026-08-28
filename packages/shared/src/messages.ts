@@ -109,3 +109,10 @@ export const TRUE_UP_PAYMENT_STARTED_MESSAGE =
 // genuinely transient, so the copy invites a retry.
 export const TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE =
   "This date is being charged right now — try reporting actuals again in a few minutes.";
+// The final true-up refusal — increase-only (a curator can never talk their
+// own bill down after the fact). Task 15 review round 1: moved here from a
+// functions-only literal (same treatment as the four messages above) so
+// TrueUpForm's client-side validation can mirror the EXACT string
+// confirmOccurrenceActuals throws instead of a second, hand-typed copy that
+// could silently drift from it.
+export const TRUE_UP_INCREASE_ONLY_MESSAGE = "Reported actuals can only increase.";

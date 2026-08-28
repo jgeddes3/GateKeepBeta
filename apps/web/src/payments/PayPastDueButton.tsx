@@ -108,7 +108,15 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
     }
   };
 
-  if (done) return <p style={{ margin: 0, color: "#166534" }}>Payment sent.</p>;
+  // Review round 1 (low #13): the delinquency LIFT (clearDelinquencyIfSettled)
+  // is NOT guaranteed to have landed by the time either success path gets
+  // here — the real-Stripe path finalizes off the payment_intent.succeeded
+  // webhook (fully async, arrives after this confirm call already returned),
+  // and even the fake-mode `done:true` path's onDone() just triggers a fresh
+  // getStripeStatus read that can still race the finalize write by a beat.
+  // The copy says so rather than implying the delinquency banner/card row is
+  // guaranteed to already reflect it.
+  if (done) return <p style={{ margin: 0, color: "#166534" }}>Payment sent — clearing any overdue status may take a moment.</p>;
 
   if (clientSecret) {
     return (

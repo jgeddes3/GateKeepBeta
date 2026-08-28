@@ -120,7 +120,7 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
           throws MUSICIAN_PAYOUTS_REQUIRED_MESSAGE verbatim — GatePrompt
           links to /dashboard/earnings; any other error falls through to the
           same plain warning line this used to render directly. */}
-      {error && <GatePrompt message={error} onRetry={submit} />}
+      {error && <GatePrompt message={error} viewerIsMusician onRetry={submit} />}
       <button onClick={submit} disabled={busy}>{busy ? "Applying…" : "Apply"}</button>
       <p style={{ color: "#666", fontSize: 13, margin: 0 }}>{DEPOSIT_HONESTY_LINE}</p>
     </div>

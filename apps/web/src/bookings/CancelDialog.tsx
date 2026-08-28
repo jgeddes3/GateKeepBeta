@@ -57,9 +57,16 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
   // authoritative; a few seconds of client/server clock drift near either
   // boundary is accepted, same as the window warning below already does.
   const inGracePeriod = now != null && confirmedAt != null && (now - confirmedAt) < CANCEL_GRACE_MS;
+  // SP5 Task 15 review round 1: derived from the actual constant (not a
+  // hardcoded "1-hour" literal) — see BookingThread.tsx's identical graceHours
+  // derivation for the same rationale.
+  const graceHours = CANCEL_GRACE_MS / 3_600_000;
   const warning = hoursBeforeStart == null ? "Checking the cancellation window…"
     : inGracePeriod
-      ? "You're within the 1-hour grace period after accepting — cancelling now is penalty-free, regardless of the window below."
+      // Review round 1 fix: the branch below (the ONLY other warning text
+      // this dialog ever shows) never renders alongside this one — there is
+      // no "window below" for this sentence to dangle a reference to.
+      ? `You're within the ${graceHours}-hour grace period after accepting — cancelling now is penalty-free, regardless of the usual cancellation window.`
       : side === "curator"
     ? (hoursBeforeStart < CURATOR_FORFEIT_WINDOW_HOURS
         ? `Cancelling now forfeits your deposit${depositRef} — the gig is in ${hoursLabel}h.`
