@@ -48,7 +48,14 @@
       "expo-apple-authentication",
       "@react-native-google-signin/google-signin",
       "expo-notifications",
-      "expo-audio"
+      "expo-audio",
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.app.gatekeep.mobile",
+          "enableGooglePay": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

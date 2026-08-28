@@ -1,13 +1,31 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect } from "react";
+import type { ReactElement, ReactNode } from "react";
 import * as Sentry from "@sentry/react-native";
 import { setAudioModeAsync } from "expo-audio";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
 import { ProfileProvider } from "../src/shell/ProfileContext";
+import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
 
 // Crash reporting: no-op in dev, and a no-op in production too until
 // EXPO_PUBLIC_SENTRY_DSN is set (see README manual follow-ups).
 Sentry.init({ dsn: process.env.EXPO_PUBLIC_SENTRY_DSN ?? "", enabled: !__DEV__ });
+
+// Renders children bare when keyless — the provider (and the native module
+// behind it) never loads in emulator dev or on a dev client from before this
+// module existed. Lazy require for the same reason stripe.ts documents.
+function MaybeStripeProvider({ children }: { children: ReactNode }) {
+  if (!stripeEnabled) return <>{children}</>;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { StripeProvider } = require("@stripe/stripe-react-native") as
+    typeof import("@stripe/stripe-react-native");
+  return (
+    <StripeProvider publishableKey={publishableKey} urlScheme="gatekeep"
+      merchantIdentifier={MERCHANT_IDENTIFIER}>
+      {children as ReactElement}
+    </StripeProvider>
+  );
+}
 
 function Gate() {
   const { user, loading } = useAuth();
@@ -43,5 +61,7 @@ export default function RootLayout() {
       }
     })();
   }, []);
-  return <AuthProvider><ProfileProvider><Gate /></ProfileProvider></AuthProvider>;
+  return (
+    <AuthProvider><ProfileProvider><MaybeStripeProvider><Gate /></MaybeStripeProvider></ProfileProvider></AuthProvider>
+  );
 }
