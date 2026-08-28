@@ -137,6 +137,8 @@ export default function Dashboard() {
       <p>
         {user.email} · <button onClick={signOutUser}>Sign out</button>
         {" · "}
+        <a href="/dashboard/earnings">Earnings &amp; payouts</a>
+        {" · "}
         <button onClick={deleteAccount} style={{ color: "#dc2626" }}>Delete account</button>
       </p>
       <h2>Your profiles</h2>
