@@ -664,6 +664,26 @@ export async function finalizeSettlementSuccess(args: {
   if (math.creditsDeposit) {
     updates["deposit.status"] = "applied";
     updates["deposit.resolvedAt"] = now;
+  } else if (p.deposit.status === "unpaid" && p.deposit.intentId == null) {
+    // THE SETTLEMENT ABSORBED THE DEPOSIT (review round 2, D1). An `unpaid`
+    // deposit contributes no slice credit (settlementMath's `creditsDeposit` is
+    // false), so `due` is the FULL base — the curator has just been charged the
+    // entire value of the date, deposit included. The deposit obligation is
+    // therefore discharged, and saying so is not bookkeeping tidiness:
+    // `clearDelinquencyIfSettled` measures deposit debt as "still `unpaid` with
+    // an exhausted attempt counter", so a doc left `unpaid` here is a PHANTOM
+    // debt that gates the curator forever — for a date they demonstrably paid
+    // in full. `refunded` is the terminal state for "no escrow of ours is
+    // outstanding", exactly as both waive branches use it for a never-charged
+    // deposit; no money moves, because none ever did.
+    //
+    // An intent-carrying doc is deliberately LEFT ALONE: that intent can still
+    // capture (a birth charge left `processing`, or an unconfirmed pay-now
+    // intent), and declaring the deposit resolved while a charge for it is
+    // live would strand real money with nothing recording it.
+    updates["deposit.status"] = "refunded";
+    updates["deposit.resolvedAt"] = now;
+    updates["deposit.depositNextRetryAt"] = null;
   }
   if (transfer) {
     updates["transfer.status"] = "transferred";
@@ -835,6 +855,19 @@ export async function chargeSettlement(
         + " confirmation window — abandoned pay-now attempt: cancel the intent in Stripe, then clear"
         + " settlement.intentId to hand the date back to the dunning ladder. NEVER re-charged while it stands"
       : `"${p.settlement.status}" settlement already carries intent ${p.settlement.intentId} — never re-charged; finalize it via the webhook or resolve the intent in Stripe`;
+    if (abandonedPayDue) {
+      // ...AND GATE, not merely alert (review round 2). Without this, "start a
+      // pay-now and walk away" is a way OUT of delinquency: payPastDue parks
+      // the retry clock, the ladder stops, and the curator books on. The flag
+      // alone is the right sanction — deliberately NO late fee, because the
+      // dunning ladder has not been exhausted (recordSettlementFailure owns
+      // that, and only on a real 4th decline). Idempotent and
+      // `delinquentSince`-preserving, so re-running every hour never re-stamps
+      // the clock an operator reads; lifting works exactly as it does for any
+      // other debt, once this occurrence is paid or extinguished.
+      await declareCuratorDelinquent(p.curatorProfileId, now)
+        .catch((e) => console.error(`chargeSettlement: failed to flag ${p.curatorProfileId} over an abandoned pay-now attempt`, e));
+    }
     const alertId = settlementPendingAlertId(bookingId, gigId);
     const shouldLog = await recordAdminAlert({
       alertId, kind: "settlement_pending_stuck", detail, bookingId, gigId, now,
@@ -1052,7 +1085,7 @@ export async function chargeSettlement(
 export async function finalizeDepositPayDue(args: {
   bookingId: string; gigId: string; intentId: string;
   chargeId?: string | null; chargedCents?: number | null; now: number;
-}): Promise<"held" | "skipped"> {
+}): Promise<"held" | "raced" | "skipped"> {
   const { bookingId, gigId, intentId, now } = args;
   const ref = getFirestore().doc(`bookings/${bookingId}/payments/${gigId}`);
   const snap = await ref.get();
@@ -1067,6 +1100,7 @@ export async function finalizeDepositPayDue(args: {
     return "skipped";
   }
   const amountCents = args.chargedCents ?? (p.deposit.sliceCents + p.deposit.feeShareCents);
+  let raced = false;
   try {
     await ref.update({
       "deposit.status": "held", "deposit.intentId": intentId,
@@ -1082,9 +1116,17 @@ export async function finalizeDepositPayDue(args: {
     // A racer moved the doc during this call — a cancellation marking it
     // `*_pending` is the realistic one. Its decision stands, and the charge is
     // still recorded below so the executor has an intent to refund against.
+    raced = true;
     console.warn(`finalizeDepositPayDue: ${bookingId}/${gigId} changed under a pay-now deposit — left as the racer wrote it`);
-    await ref.update({ "deposit.intentId": intentId, "deposit.chargedAt": now, updatedAt: now })
-      .catch((we) => console.error(`finalizeDepositPayDue: failed to record intent ${intentId} on ${bookingId}/${gigId}`, we));
+    await ref.update({
+      "deposit.intentId": intentId,
+      // The CHARGE ID goes with it (review round 2): the pending executor uses
+      // it as a forfeit transfer's `sourceChargeId` (as-built contract #3), and
+      // dropping it here would make that transfer draw on the platform's
+      // aggregate balance instead of the money this very charge produced.
+      "deposit.chargeId": args.chargeId ?? p.deposit.chargeId ?? null,
+      "deposit.chargedAt": now, updatedAt: now,
+    }).catch((we) => console.error(`finalizeDepositPayDue: failed to record intent ${intentId} on ${bookingId}/${gigId}`, we));
   }
   await writeLedger({
     kind: "deposit_charged", amountCents, bookingId, gigId,
@@ -1095,7 +1137,12 @@ export async function finalizeDepositPayDue(args: {
   // The whole point: this is the obligation that was gating the curator.
   await clearDelinquencyIfSettled(p.curatorProfileId, now)
     .catch((e) => console.error(`finalizeDepositPayDue: delinquency clear failed for ${p.curatorProfileId}`, e));
-  return "held";
+  // DISTINCT from "held" on purpose: the money moved but no escrow exists —
+  // the racer's `*_pending` marker owns this doc now, and its executor will
+  // send the charge back. A caller that reported this as a completed payment
+  // would tell the curator their date is secured when it has just been
+  // cancelled out from under them.
+  return raced ? "raced" : "held";
 }
 
 // ONE handler, TWO purposes, because the recovery is identical either way:

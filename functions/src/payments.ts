@@ -326,6 +326,14 @@ webhookHandlers["account.updated"] = async (object) => {
 // path does: the counter must only ever go up, so the next accept attempt
 // mints a key that has never been used.
 //
+// It also deliberately does NOT lift a delinquency, and that is safe for a
+// structural reason rather than a judgement call (shared with unstageAccept —
+// see its note): a STAGED doc never carries `deposit.depositAttempts`, which is
+// written only by the sweep's birth-deposit charge and never against a staged
+// set (rule 3). Firestore indexes only documents that HAVE a field, so such a
+// doc is invisible to clearDelinquencyIfSettled's exhausted-deposit query — it
+// was never counted as debt, and deleting it extinguishes nothing.
+//
 // The three refusals below are what keep this from becoming a foot-gun: an
 // operator reaching for it on a saga that is still moving would undo work in
 // flight. Exported so the test asserts WHICH refusal fired, not merely that
@@ -602,6 +610,11 @@ export const PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE =
 // The doc moved between the read this decision was made from and the write.
 export const PAY_PAST_DUE_RACED_MESSAGE =
   "This booking changed while we were setting up the payment — try again.";
+// A cancellation claimed the occurrence WHILE its deposit was being paid. The
+// charge is real, so this is not "try again" — the pending executor sends it
+// back, and telling the curator their date is secured would be a lie.
+export const PAY_PAST_DUE_DATE_CANCELLED_MESSAGE =
+  "That date was just cancelled — the charge will be reconciled.";
 
 // ON-SESSION recovery from a `past_due` (usually delinquent) settlement: the
 // server prices the debt, mints a PaymentIntent the curator confirms in the
@@ -681,7 +694,16 @@ export const payPastDue = onCall<PayPastDueInput>(
     // the sweep is still trying, and a manual charge would race it.
     const settlementDue = p.settlement.status === "past_due";
     const depositExhausted = p.deposit.status === "unpaid"
-      && (p.deposit.depositAttempts ?? 0) > SETTLEMENT_RETRY_OFFSETS_MS.length;
+      && (p.deposit.depositAttempts ?? 0) > SETTLEMENT_RETRY_OFFSETS_MS.length
+      // ...for a date that has NOT been settled yet — which is what the deposit
+      // branch's own "future occurrence" framing already assumes, made explicit
+      // (review round 2, D1). A settlement that charged with no slice credit
+      // took the FULL base, deposit included, and finalizeSettlementSuccess
+      // resolves such a deposit `refunded` for exactly that reason; charging it
+      // here would bill the curator a second time for money already collected.
+      // `waived` is excluded on the same logic (nothing is owed for the date at
+      // all) and `past_due` is the settlement branch's business, not this one.
+      && (p.settlement.status === "not_due" || p.settlement.status === "pending");
     if (!settlementDue && !depositExhausted) {
       throw new HttpsError("failed-precondition", PAY_PAST_DUE_NOT_OVERDUE_MESSAGE);
     }
@@ -744,10 +766,17 @@ export const payPastDue = onCall<PayPastDueInput>(
         // Emulator contract (see the settlement branch below): "called" means
         // "confirmed". The real path's equivalent is the "paydue-deposit"
         // webhook purpose, which runs this same finalizer.
-        const held = await finalizeDepositPayDue({
+        const outcome = await finalizeDepositPayDue({
           bookingId, gigId, intentId: depositIntent.id, chargedCents: depositAmount, now,
         });
-        return { done: held === "held", amountCents: depositAmount };
+        if (outcome === "raced") {
+          // The money moved but no escrow exists: a cancellation claimed this
+          // doc mid-call and its executor will send the charge back. Reporting
+          // `done: true` here would tell the curator their date is secured at
+          // the exact moment it was cancelled out from under them.
+          throw new HttpsError("failed-precondition", PAY_PAST_DUE_DATE_CANCELLED_MESSAGE);
+        }
+        return { done: outcome === "held", amountCents: depositAmount };
       }
       return { done: false, clientSecret: depositIntent.clientSecret, amountCents: depositAmount };
     }

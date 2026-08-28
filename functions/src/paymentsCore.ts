@@ -356,7 +356,28 @@ export async function resolveDepositPending(
     // (spec §1) — the platform only ever keeps it on a FORFEIT, and there by
     // simply not refunding it.
     const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
-    if (p.deposit.intentId) {
+    // AN UNCONFIRMED PAY-NOW INTENT IS NOT A CHARGE (review round 2, D2).
+    // payPastDue's deposit mode records its on-session intent id BEFORE the
+    // curator confirms it in the browser, so an `unpaid` doc can carry an
+    // intent against which nothing was ever captured — `chargedAt` is the
+    // discriminator, written only by a path that knows money moved
+    // (finalizeDepositPayDue, or the sweep's own birth charge). Refunding it
+    // would be a refund of nothing: FakeStripe throws "refund of unknown
+    // intent"/"refund exceeds charge", and real Stripe 400s on a PaymentIntent
+    // with no successful charge — either way the doc would be stranded
+    // `refund_pending` forever by an error that can never resolve.
+    //
+    // So this resolves terminally with NO Stripe call, exactly as a
+    // never-charged deposit does. The intent itself is left dangling; the
+    // proper unwind is cancelling it, which needs the same future
+    // `StripeLike.cancelIntent` the abandoned-settlement path is waiting on.
+    // Harmless meanwhile: it is on-session, so it can only ever be confirmed by
+    // a browser holding its clientSecret, and the webhook's finalizer refuses a
+    // doc that is no longer `unpaid`.
+    const unconfirmedPayDue = p.deposit.intentId != null
+      && p.deposit.intentId === p.deposit.payDueIntentId
+      && p.deposit.chargedAt == null;
+    if (p.deposit.intentId && !unconfirmedPayDue) {
       // PARTIAL refund against the accept batch's shared intent: a whole-run
       // booking's occurrences all point at ONE intent, and each doc refunds
       // only its own slice+fee of it. Keyed per-(booking,gig) so the
@@ -372,12 +393,16 @@ export async function resolveDepositPending(
         profileId: p.curatorProfileId, stripeId: r.id, detail: "deposit refund (incl. fee share)",
       }).catch((e) => console.error(`resolveDepositPending: ledger write failed for refund ${bookingId}/${gigId}`, e));
     } else {
-      // Never charged (a doc still `unpaid` when the cancellation landed —
-      // e.g. a webhook-recovery accept whose intent never succeeded, or a
-      // birth deposit the sweep hadn't charged yet). There is no money to
-      // send back, so this resolves straight to the terminal state; no
-      // Stripe call, and no ledger row for money that never moved.
-      await ref.update({ "deposit.status": "refunded", "deposit.resolvedAt": now, updatedAt: now });
+      // Never charged: a doc still `unpaid` when the cancellation landed (a
+      // webhook-recovery accept whose intent never succeeded, a birth deposit
+      // the sweep hadn't charged yet) — or one carrying only an UNCONFIRMED
+      // pay-now intent, per the note above. There is no money to send back, so
+      // this resolves straight to the terminal state; no Stripe call, and no
+      // ledger row for money that never moved.
+      await ref.update({
+        "deposit.status": "refunded", "deposit.resolvedAt": now,
+        "deposit.depositNextRetryAt": null, updatedAt: now,
+      });
     }
   } else {
     // 100% of the deposit BASE to the musician — no commission is taken on a

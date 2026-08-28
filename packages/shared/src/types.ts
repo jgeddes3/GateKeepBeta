@@ -662,7 +662,14 @@ export type AdminAlertKind =
   // from the two above because nothing is stuck in Stripe and no money is at
   // risk of moving twice — the fix is the musician finishing (or repairing)
   // Express onboarding, after which the ordinary sweep settles it.
-  | "settlement_payout_blocked";
+  | "settlement_payout_blocked"
+  // SP5 Task 9/11: a BIRTH deposit left `unpaid` while carrying an intent — a
+  // charge that came back `processing` and never resolved. The deposit twin of
+  // `settlement_pending_stuck`, and refused for the identical reason: that
+  // intent can still succeed, so a fresh-key retry past Stripe's 24h window
+  // would be a real second charge. Sits here until an operator resolves the
+  // intent in Stripe (there is no birth-deposit webhook finalizer).
+  | "deposit_pending_stuck";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;

@@ -252,6 +252,9 @@ function stuckSagaAlertId(bookingId: string): string { return `stuck-saga:${book
 function stalePendingAlertId(bookingId: string, gigId: string): string {
   return `stale-pending:${bookingId}:${gigId}`;
 }
+function depositPendingAlertId(bookingId: string, gigId: string): string {
+  return `deposit-pending:${bookingId}:${gigId}`;
+}
 
 // ---------------------------------------------------------------------------
 // Step 1 — RECONCILE stuck accept sagas
@@ -672,12 +675,24 @@ async function chargeOneBirthDeposit(
 
   if (p.deposit.intentId != null) {
     // Unpaid but already carrying an intent: a birth charge that came back
-    // `processing` and never resolved. NEVER re-charged — that outstanding
-    // intent can still succeed, so a fresh-key retry would be a real double
-    // charge — and re-logged every run so it stays visible until an operator
-    // (or Task 11's webhook work) finalizes it.
-    console.error(
-      `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} is unpaid but holds intent ${p.deposit.intentId} — not re-charged; needs admin attention`);
+    // `processing` and never resolved, or an on-session pay-now intent the
+    // curator has not confirmed. NEVER re-charged — that outstanding intent can
+    // still succeed, so a fresh-key retry would be a real double charge.
+    //
+    // ESCALATED to the durable queue rather than logged bare (review round 2):
+    // this is one of the sweep's absorbing states, and an hourly console.error
+    // nobody reads is not an escalation — the row is the signal, the log is a
+    // convenience, and recordAdminAlert throttles the latter to once a day.
+    const alertId = depositPendingAlertId(at.bookingId, at.gigId);
+    const shouldLog = await recordAdminAlert({
+      alertId, kind: "deposit_pending_stuck",
+      detail: `birth deposit is unpaid but holds intent ${p.deposit.intentId} — never re-charged; resolve the intent in Stripe, then clear deposit.intentId`,
+      bookingId: at.bookingId, gigId: at.gigId, now,
+    });
+    if (shouldLog) {
+      console.error(
+        `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} is unpaid but holds intent ${p.deposit.intentId} — not re-charged; needs admin attention (see adminAlerts/${alertId})`);
+    }
     report.birthDepositsPending++;
     return;
   }

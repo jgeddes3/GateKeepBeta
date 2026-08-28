@@ -49,6 +49,12 @@ const DEPOSIT_CHARGE_CENTS = SLICE_CENTS + DEPOSIT_FEE_CENTS;
 // both use, derived rather than transcribed.
 const EXHAUSTED_DEPOSIT_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
 
+// What a date settles for when its deposit was NEVER paid: no slice credit, so
+// the settlement charges the FULL base plus commission on all of it.
+const ABSORBED_DUE_CENTS = BASE_CENTS;
+const ABSORBED_FEE_CENTS = computeFeeShareCents(ABSORBED_DUE_CENTS, FEE.curatorFeePct);
+const ABSORBED_CHARGE_CENTS = ABSORBED_DUE_CENTS + ABSORBED_FEE_CENTS;
+
 // The no-true-up settlement of that fixture: what the ladder keeps failing to
 // charge, and therefore what the late fee is a percentage OF.
 const DUE_CENTS = BASE_CENTS - SLICE_CENTS;
@@ -705,6 +711,37 @@ describe("payPastDue — an exhausted birth deposit", () => {
       { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
   });
 
+  it("refuses a staged accept saga's doc (rule 3) and a doc carrying someone else's intent", async () => {
+    const { curator, gigId, bookingId } = await makeFutureBooking("dundref");
+    await seedExhaustedBirthDeposit(bookingId, gigId);
+    const bookingRef = adb.doc(`bookings/${bookingId}`);
+    const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
+    const payDueKey = `${bookingId}:${gigId}:paydue-deposit:${EXHAUSTED_DEPOSIT_ATTEMPTS}`;
+
+    // RULE 3: an `unpaid` doc under a booking carrying the accept-saga marker
+    // belongs to step 1 alone — a charge is in flight against exactly that
+    // staged set, and charging one of its docs on a key that saga knows nothing
+    // about is how one accept becomes two charges.
+    await bookingRef.update({ depositChargePending: true });
+    await expect(callFn("payPastDue", { bookingId, gigId }, curator.owner.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE,
+      });
+    expect(await idemUsed(payDueKey)).toBe(false);
+    await bookingRef.update({ depositChargePending: false });
+
+    // ...and an `unpaid` deposit already carrying an intent that is NOT this
+    // callable's own: a birth charge left `processing` by the sweep can still
+    // capture, so a second confirmable intent beside it would double-charge.
+    await paymentRef.update({ "deposit.intentId": "pi_someone_elses" });
+    await expect(callFn("payPastDue", { bookingId, gigId }, curator.owner.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE,
+      });
+    expect(await idemUsed(payDueKey)).toBe(false);
+    await paymentRef.update({ "deposit.intentId": null });
+  });
+
   // Case B: the debt is extinguished by being CANCELLED rather than paid. A
   // curator gated over a date nobody owes any more could otherwise never book.
   it("lifts the gate when the occurrence is cancelled instead — an extinguished debt is not an unpaid one", async () => {
@@ -727,5 +764,61 @@ describe("payPastDue — an exhausted birth deposit", () => {
     const openGig = await createOpenGig(curator.profileId, curator.owner.user);
     await callFn("offerGig",
       { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
+  });
+
+  // The third way the debt goes away, and the one that used to strand a curator
+  // forever: the date is PERFORMED. With no deposit in escrow the settlement
+  // gets no slice credit, so it charges the FULL base — the deposit is absorbed
+  // into that one charge. If the doc were left `unpaid` afterwards it would
+  // still answer clearDelinquencyIfSettled's deposit-debt query, gating a
+  // curator over money they had demonstrably just paid in full.
+  it("absorbs the debt when the date settles at full base — the deposit resolves and the gate opens", async () => {
+    const { curator, musician, gigId, bookingId } = await makeEndedBooking("dunabs");
+    const accountId = await musicianAccountId(musician.profileId);
+    await seedExhaustedBirthDeposit(bookingId, gigId);
+    await seedDelinquent(curator.profileId);
+
+    // Step 4 schedules the performed date (scheduleSettlement's helper asserts
+    // a `held` deposit, which is exactly what this case does not have).
+    await runPaymentsSweep(Date.now());
+    expect((await getPayment(bookingId, gigId))?.settlement.status).toBe("pending");
+    await makeSettlementDue(bookingId, gigId);
+    await runPaymentsSweep(Date.now());
+
+    const settled = await getPayment(bookingId, gigId);
+    expect(settled?.settlement.status).toBe("paid");
+    // NO slice credit: the full base, plus commission on all of it.
+    expect(settled?.settlement.computedCents).toBe(ABSORBED_DUE_CENTS);
+    expect(settled?.settlement.feeShareCents).toBe(ABSORBED_FEE_CENTS);
+    expect(await fakeObject(settled!.settlement.intentId!).then((i) => i?.amountCents)).toBe(ABSORBED_CHARGE_CENTS);
+    expect(settled?.transfer.amountCents).toBe(EARNINGS_CENTS);
+    expect(await accountBalanceCents(accountId)).toBe(EARNINGS_CENTS);
+
+    // THE FIX: the absorbed deposit is retired rather than left `unpaid`.
+    // `refunded` is the "no escrow of ours is outstanding" terminal state — no
+    // money moved, because none ever did.
+    expect(settled?.deposit.status).toBe("refunded");
+    expect(typeof settled?.deposit.resolvedAt).toBe("number");
+    expect(settled?.deposit.depositNextRetryAt).toBeNull();
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "refund")).toBe(false);
+
+    // ...so both debt questions now answer "nothing", and the gate opens.
+    expect((await getStripeDoc(curator.profileId))?.delinquent).toBe(false);
+    const openGig = await createOpenGig(curator.profileId, curator.owner.user);
+    await callFn("offerGig",
+      { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
+
+    // And the debt cannot be charged a SECOND time through the deposit mode:
+    // that predicate now requires an unsettled date.
+    await expect(callFn("payPastDue", { bookingId, gigId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: PAY_PAST_DUE_NOT_OVERDUE_MESSAGE });
+
+    // The aggregate agrees: nothing held, the settlement charge accounted for,
+    // and the refunded deposit contributing nothing.
+    const summary = (await getBooking(bookingId)).paymentSummary;
+    expect(summary?.state).toBe("current");
+    expect(summary?.heldCents).toBe(0);
+    expect(summary?.paidCents).toBe(ABSORBED_CHARGE_CENTS);
+    expect(summary?.transferredCents).toBe(EARNINGS_CENTS);
   });
 });

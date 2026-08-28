@@ -981,6 +981,15 @@ async function clearStagedMarker(db: FirebaseFirestore.Firestore, bookingId: str
 // the sweep reconstructs its list from PAYMENT DOCS, which carry no
 // durationMinutes. Narrowing the parameter is what stops a caller from having
 // to fabricate a fake duration just to satisfy the type.
+//
+// STRUCTURAL INVARIANT THIS RELIES ON, shared with releaseStuckSaga: a STAGED
+// doc never carries `deposit.depositAttempts`. Only the sweep's birth-deposit
+// charge writes that field (persist-before-charge), and it never touches a
+// staged set (rule 3). Two things depend on it — a staged doc is invisible to
+// clearDelinquencyIfSettled's exhausted-deposit query (Firestore indexes only
+// documents that HAVE the field), so an in-flight accept can never look like a
+// debt and gate the curator; and deleting one here therefore extinguishes no
+// obligation, which is why this function has no delinquency-lift call.
 export async function unstageAccept(
   db: FirebaseFirestore.Firestore, bookingId: string, occurrences: { gigId: string }[],
   chargeOutstanding: boolean,
