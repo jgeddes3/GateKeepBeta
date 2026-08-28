@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* Powers the dialog/sheet/tooltip entrance and exit transitions
+   (data-[state=open]:animate-in etc. below): the MOTION 1 dial's short,
+   named list of deliberate moments, not a general animation toolkit. */
+@import "tw-animate-css";
 
 :root, [data-theme="dark"] {
   color-scheme: dark;
@@ -7,8 +11,13 @@
   --gk-text: #F5F1F8; --gk-muted: rgba(245,241,248,.62);
   --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
   --gk-success: #7BC48A; --gk-warning: #E8B15C; --gk-destructive: #E5484D;
+  --gk-on-destructive: #FFFFFF;
   --gk-scrim: linear-gradient(to top, var(--gk-bg-0) 4%, rgba(14,11,19,.35) 55%, transparent);
   --gk-page: linear-gradient(165deg, var(--gk-bg-0) 0%, var(--gk-bg-1) 55%, var(--gk-bg-2) 100%);
+  /* Base radius (Task 2 addition): the 10px tier for cards and inputs.
+     Badges and small controls use the fixed 6px tier below; primary CTAs
+     and chips use rounded-full (999px pill), never this variable. */
+  --radius: 10px;
 }
 [data-theme="light"] {
   color-scheme: light;
@@ -17,6 +26,7 @@
   --gk-text: #1C1524; --gk-muted: rgba(28,21,36,.62);
   --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
   --gk-success: #2E7D43; --gk-warning: #9A6A1B; --gk-destructive: #C62A30;
+  --gk-on-destructive: #FFFFFF;
   --gk-page: #FAF7F2;
 }
 
@@ -31,6 +41,7 @@
     --gk-text: #1C1524; --gk-muted: rgba(28,21,36,.62);
     --gk-accent: #FF6B4A; --gk-on-accent: #2A0F0A;
     --gk-success: #2E7D43; --gk-warning: #9A6A1B; --gk-destructive: #C62A30;
+    --gk-on-destructive: #FFFFFF;
     --gk-page: #FAF7F2;
   }
 }
@@ -48,9 +59,17 @@
   --color-gk-success: var(--gk-success);
   --color-gk-warning: var(--gk-warning);
   --color-gk-destructive: var(--gk-destructive);
+  --color-gk-on-destructive: var(--gk-on-destructive);
 
   --font-syne: var(--font-syne);
   --font-sora: var(--font-sora);
+
+  /* Radius tiers (Task 2, src/ui theme pass). Cards and inputs use the
+     10px base radius variable; badges and small controls use the fixed
+     6px tier. The pill tier (primary CTAs and chips) is Tailwind's
+     built-in rounded-full and needs no token here. */
+  --radius-gk: var(--radius);
+  --radius-gk-sm: 6px;
 }
 
 html {
@@ -77,4 +96,23 @@ body {
 a {
   color: inherit;
   text-decoration: none;
+}
+
+/* Skeleton loaders (src/ui/skeleton.tsx) pulse to signal "loading", which is
+   a functional indicator rather than decorative motion, but it still must
+   respect prefers-reduced-motion: the shape stays visible, only the pulse
+   stops. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
+  }
+
+  /* Dialog/sheet/tooltip entrance and exit transitions (tw-animate-css,
+     imported above): the content still opens and closes, it just does so
+     instantly instead of fading/sliding. */
+  .animate-in,
+  .animate-out {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+  }
 }

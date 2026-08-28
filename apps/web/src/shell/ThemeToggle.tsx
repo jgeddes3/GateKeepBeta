@@ -1,7 +1,7 @@
 "use client";
 
-import { useLayoutEffect, useSyncExternalStore } from "react";
-import { Monitor, Moon, Sun, type Icon } from "@phosphor-icons/react";
+import { useLayoutEffect, useSyncExternalStore, type ComponentType } from "react";
+import { IconMonitor, IconMoon, IconSun, type IconProps } from "../ui/icons";
 
 export type ThemeChoice = "system" | "light" | "dark";
 
@@ -9,10 +9,10 @@ const STORAGE_KEY = "gk-theme";
 const CHANGE_EVENT = "gk-theme-change";
 const CYCLE: readonly ThemeChoice[] = ["system", "light", "dark"];
 
-const THEME_META: Record<ThemeChoice, { label: string; icon: Icon }> = {
-  system: { label: "System", icon: Monitor },
-  light: { label: "Light", icon: Sun },
-  dark: { label: "Dark", icon: Moon },
+const THEME_META: Record<ThemeChoice, { label: string; icon: ComponentType<IconProps> }> = {
+  system: { label: "System", icon: IconMonitor },
+  light: { label: "Light", icon: IconSun },
+  dark: { label: "Dark", icon: IconMoon },
 };
 
 // Client-only: React never calls this during server rendering, so no

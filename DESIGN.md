@@ -50,9 +50,13 @@ solid, borders-do-the-separating component system. Dial: **ENERGY 2 / RHYTHM 2 /
 - **Tailwind CSS v4** (CSS-first config: `@import "tailwindcss"` plus `@theme inline` in
   `apps/web/app/globals.css`). PostCSS wired via `apps/web/postcss.config.mjs` and
   `@tailwindcss/postcss`.
-- **shadcn/ui** components copied into `apps/web/src/ui/` (CLI, not a runtime dependency) and
-  themed to the tokens below. Never ship a shadcn default look; every copied component gets a theme
-  pass (task 2 of sub-project 9A).
+- **shadcn/ui** components copied into `apps/web/src/ui/` and themed to the tokens below (source
+  copied by hand following the shadcn/ui pattern, not a runtime dependency; the current `shadcn`
+  CLI major version forced an interactive preset picker bundling Lucide and Geist, both hard-banned
+  here, with no working non-interactive path, so task 2 copied component sources directly rather
+  than fight the CLI. `components.json` still records the intended alias config for future CLI
+  use). Never ship a shadcn default look; every copied component gets a theme pass (task 2 of
+  sub-project 9A).
 - **Fonts via `next/font/google`** (self-hosted at build, no request to Google at runtime): Syne
   and Sora. See "Typography" below.
 - **Icons: Phosphor** (`@phosphor-icons/react`), one weight product-wide. See "Icons" below.
@@ -81,6 +85,7 @@ reach for the `gk-*` utility or the `var(--gk-*)` custom property, never a hardc
 | `--gk-success` | `#7BC48A` | Success status tint |
 | `--gk-warning` | `#E8B15C` | Warning status tint |
 | `--gk-destructive` | `#E5484D` | Destructive status tint, destructive button fill |
+| `--gk-on-destructive` | `#FFFFFF` | Text/icon color on top of a solid `--gk-destructive` fill |
 | `--gk-scrim` | gradient, see below | Bottom-up night scrim over photography |
 | `--gk-page` | gradient, see below | Page-level background |
 
@@ -92,6 +97,22 @@ top of this: that is the harsh-gradient pattern the antislop filter rejects.
 Used over photography: hero carousel, gig cards, cover heroes. This is the one token that does not
 get a light-theme override (see "Light" below); it is deliberately always the night gradient in
 both themes, because it exists to keep photo captions legible, not to match page chrome.
+
+`--gk-on-destructive` (task 2 addition): every other status color pairs as a saturated
+text/icon/border tint over a soft background tint of itself (see "Status tints" below), but
+DESIGN.md's own accent note next door measures bare ember text as failing AA on light surfaces,
+and destructive red is a similarly saturated hue. A solid destructive button (`src/ui/button.tsx`
+`variant="destructive"`) needs white foreground text to clear AA, the same role `--gk-on-accent`
+plays for a solid ember fill, so it gets the same treatment: one fixed value, not re-derived per
+theme, because it only ever sits on top of the saturated `--gk-destructive` fill itself.
+
+`bg-gk-scrim` and `bg-gk-page` are **not** valid Tailwind classes: `--gk-scrim` and `--gk-page` are
+gradients (flat only in the light theme's `--gk-page`), and gradient-valued tokens are excluded
+from the `@theme inline` color mapping, so no `bg-gk-scrim` / `bg-gk-page` utility is generated.
+Apply them with `style={{ background: "var(--gk-scrim)" }}` (or the Tailwind arbitrary-value
+equivalent, `bg-[image:var(--gk-scrim)]`) instead. Every other token in the tables above (including
+`--gk-on-destructive`) is a flat color and does have a working `bg-gk-*` / `text-gk-*` /
+`border-gk-*` utility.
 
 ### Light ("before doors open")
 
@@ -109,6 +130,7 @@ both themes, because it exists to keep photo captions legible, not to match page
 | `--gk-success` | `#2E7D43` | Re-derived for AA on a light surface |
 | `--gk-warning` | `#9A6A1B` | Re-derived for AA on a light surface |
 | `--gk-destructive` | `#C62A30` | Re-derived for AA on a light surface |
+| `--gk-on-destructive` | `#FFFFFF` | Same as dark |
 | `--gk-page` | `#FAF7F2` | Flat warm paper, no gradient |
 
 `--gk-scrim` is not redefined in light: it inherits the dark gradient value from `:root` (see
@@ -165,11 +187,23 @@ Three tiers, deliberately, nothing rounded "because default":
 | `10px` | Cards and inputs |
 | `6px` | Small controls and badges |
 
+Implementation (task 2): `globals.css` defines a base radius variable, `--radius: 10px`, mirrored
+into `@theme inline` as `--radius-gk` and `--radius-gk-sm: 6px` (a fixed value, not derived from
+the base variable). That generates two Tailwind utilities, `rounded-gk` (10px) and `rounded-gk-sm`
+(6px), which every `src/ui/*` component reaches for instead of the default `rounded-md`/`rounded-lg`
+shadcn ships. The pill tier is Tailwind's built-in `rounded-full` and needs no token. The pill is
+reserved strictly for the primary button variant and chips, as the table says: `src/ui/switch.tsx`
+is a rounded-rect toggle (`rounded-gk-sm`) rather than the conventional pill switch shape for
+exactly this reason.
+
 ## Elevation and motion
 
 - **Elevation:** borders do the separating, not shadows. Shadows are reserved for overlays that
-  actually float above the page: dialogs, popovers, the mini-player. No "everything floats"
-  soft-shadow treatment anywhere else.
+  actually float above the page: dialogs, sheets, tooltips, popovers (including the
+  `src/ui/dropdown-menu.tsx` and `src/ui/select.tsx` floating content, which are Radix's popover
+  primitive under a different name), the mini-player. No "everything floats" soft-shadow treatment
+  anywhere else: `src/ui/card.tsx`, `button.tsx`, `input.tsx`, `badge.tsx`, and `switch.tsx` all
+  stay flat.
 - **Motion:** MOTION 1 (see "Design Read" above). Hover states and a short, named list of
   deliberate moments (sheet/dialog entrances, the hero carousel's slow auto-advance, the
   mini-player reveal). No endless loops. No scroll-triggered animation stacking. Respect
@@ -204,12 +238,37 @@ one of these three or gets a written exception here first.
 
 ## Icons
 
-Phosphor (`@phosphor-icons/react`), one weight product-wide, chosen once and never mixed. Sub-
-project 9A's task 2 renders a sample icon set at 16px and 20px in both duotone and regular, picks
-duotone unless it reads too busy at small sizes (in which case regular), and records the final
-choice in this section. Until that choice is recorded, treat the weight as undecided and do not
-hardcode a weight in new components; let the shared `Icon` re-export module (created in task 2)
-pin it in one place.
+Phosphor (`@phosphor-icons/react`), one weight product-wide, chosen once and never mixed.
+
+**Decision (task 2): duotone.** `/design` renders every icon the app is likely to need (shell nav,
+search/filter, status, transport controls, theme toggle, chrome glyphs) at 16px and 20px in both
+duotone and regular for direct comparison. Every content icon read clearly at both sizes in
+duotone; several (`ChatCircle`, `UserCircle`, `Info`, `Play`, `Pause`, `Wallet`, `CalendarCheck`)
+actually read *more* clearly than regular at 16px, because duotone's second fill layer gives the
+glyph more visual weight and a fuller silhouette rather than a thin single-stroke outline. None of
+the sample icons hit the documented fallback bar ("reads too busy at small sizes"); nothing tested
+as illegible or cluttered. Duotone's bolder, filled character also reads as a deliberate choice
+distinct from Lucide's uniform thin-stroke look, which the project bans specifically because it is
+the generic "AI product" tell (antislop R-04): the icon set is meant to look like a decision, not a
+default, and duotone gets there.
+
+One known trade-off, accepted rather than hidden: a handful of small geometric chrome glyphs
+(`X`/close, `Circle`, the `Caret*` family used for dropdown/select indicators) render in duotone as
+solid filled shapes rather than the thin outline a minimal chevron or ring conventionally uses.
+They stayed fully legible and functional in the same `/design` comparison, so this did not meet the
+"illegible at small sizes" bar for falling back to regular, and Phosphor's own solid-triangle carets
+are a recognized dropdown-affordance shape in their own right, not a broken rendering.
+
+Implementation: `apps/web/src/ui/icons.tsx` imports from Phosphor's `/ssr` subpath (so icons stay
+usable from React Server Components, not just client components) and re-exports a curated,
+`Icon`-prefixed set (`IconHouse`, `IconCheck`, `IconCaretDown`, and so on), each wrapped so its
+`weight` prop is fixed to `"duotone"` and cannot be overridden by a caller. No other file in the
+product imports `@phosphor-icons/react` directly. The one deliberate exception is
+`IconRadioDot`, a solid dot marker for `DropdownMenuRadioItem` that uses Phosphor's `"fill"` weight
+directly: at the ~8px size a radio indicator renders, duotone and regular both draw a thin ring,
+illegible as a filled bullet, so this one form-control glyph is not a content icon and does not go
+through the product's weight decision. `/design`'s own weight-comparison table is the other
+sanctioned exception, since its entire purpose is rendering multiple weights side by side.
 
 No Lucide icons, and no icon chosen for "looks like an AI product" reasons (sparkle, magic wand,
 generic orb). Every icon must be genuinely relevant to what it represents.
