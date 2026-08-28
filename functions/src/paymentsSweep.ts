@@ -162,7 +162,11 @@ export interface PaymentsSweepReport {
   transfersMade: number;           // earnings transfers (one per charged settlement)
   retriesAttempted: number;        // past_due docs handed to chargeSettlement this run
   // --- shared ---
-  delinquenciesDeclared: number;   // curator profiles newly flagged delinquent this run
+  // Curator profiles newly flagged delinquent this run — counted for BOTH
+  // declaring paths (step 3's exhausted birth deposit, and steps 5/6's
+  // exhausted settlement ladder), and only on the transition: a profile that
+  // was already flagged does not count again.
+  delinquenciesDeclared: number;
   expiredRefunds: number;          // step 7: future-dated deposits refunded off an expired booking
   // Per-step and per-anomaly failure counts — keyed, not fixed, so a new
   // anomaly gets a name instead of being folded into a neighbour's bucket.
@@ -974,6 +978,13 @@ async function runSettlementCharges(
         // race that landed mid-transfer reports `skipped` WITH `transferred`
         // true, and both facts matter. See settlementsRaced's own note.
         if (reason === "raced") report.settlementsRaced++;
+        // The 4th decline of the dunning ladder is still a decline, so it is
+        // already counted above; this counts the DELINQUENCY it declared,
+        // which the outcome cannot express. Only the transition reports it —
+        // recordSettlementFailure sets the reason off declareCuratorDelinquent's
+        // own "was it me who declared it" answer, so a profile already flagged
+        // by another occurrence is never double-counted.
+        if (reason === "delinquent") report.delinquenciesDeclared++;
         // Counted off what actually FIRED, not off the outcome: the earnings
         // transfer happens inside chargeSettlement (it needs the settlement
         // charge's own charge id as its sourceChargeId), and it can both be

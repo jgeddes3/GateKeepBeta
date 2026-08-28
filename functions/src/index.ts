@@ -21,5 +21,5 @@ export { stripeWebhook } from "./paymentsWebhook.js";
 export { paymentsSweep } from "./paymentsSweep.js";
 export {
   createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus, releaseStuckSaga,
-  confirmOccurrenceActuals,
+  confirmOccurrenceActuals, payPastDue,
 } from "./payments.js";

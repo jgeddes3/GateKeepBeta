@@ -548,6 +548,22 @@ export interface SettlementState {
   feeShareCents: number | null;
   trueUp: { extraMinutes: number; extraSongs: number; reportedAt: number } | null;
   intentId: string | null;
+  // SP5 Task 11 — the ON-SESSION intent `payPastDue` minted for this
+  // occurrence, mirrored out of `intentId` so the two can be told apart.
+  //
+  // LOAD-BEARING, not diagnostics. `intentId` alone cannot answer "is the
+  // outstanding intent one payPastDue may replace?", and getting that wrong is
+  // a double charge: an off-session settlement intent left `processing` (or
+  // one that succeeded against a doc whose payout was blocked) also lives in
+  // `intentId`, and minting a second, confirmable intent beside it would let
+  // the curator pay a night twice. payPastDue therefore refuses whenever
+  // `intentId != null && intentId !== payDueIntentId`, and otherwise re-issues
+  // under its own deterministic key — which REPLAYS its previous intent rather
+  // than creating a second one, so an abandoned attempt is resumable.
+  //
+  // Optional so every pre-Task-11 payment doc stays type-valid; readers must
+  // treat absent as null.
+  payDueIntentId?: string | null;
   attempts: number; nextRetryAt: number | null;
   lateFeeCents: number | null; lateFeeMusicianCents: number | null;
   // Explicit delinquency marker, set once (never cleared) when delinquency
