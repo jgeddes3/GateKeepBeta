@@ -540,6 +540,13 @@ export interface DepositState {
   // must treat absent as 0 / null respectively.
   depositAttempts?: number;
   depositNextRetryAt?: number | null;
+  // SP5 Task 11 — the ON-SESSION intent `payPastDue` minted to rescue this
+  // deposit after its retry schedule ran out, mirrored out of `intentId` for
+  // exactly the reason SettlementState.payDueIntentId is: `intentId` alone
+  // cannot say whether the outstanding charge is one payPastDue may replace,
+  // and an `unpaid` deposit can also be carrying a birth charge left
+  // `processing` by the sweep. Optional; absent means null.
+  payDueIntentId?: string | null;
 }
 export interface SettlementState {
   status: SettlementStatus;

@@ -14,7 +14,8 @@
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  computeDepositCents, computeExpectedTotalCents, computeFeeShareCents, DEFAULT_FEE_POLICY,
+  computeDepositCents, computeExpectedTotalCents, computeFeeShareCents,
+  DEFAULT_FEE_POLICY, SETTLEMENT_RETRY_OFFSETS_MS,
 } from "@gatekeep/shared";
 import type {
   AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositStatus, FeePolicy,
@@ -328,9 +329,9 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
 //
 // Never throws for a missing/already-terminal doc — callers log and continue.
 //
-// `skipRecompute` suppresses the trailing paymentSummary recompute for a
-// caller that is resolving SEVERAL docs of the SAME booking in a loop and will
-// run one recompute itself afterwards. The recompute reads the whole payments
+// `skipRecompute` suppresses the trailing paymentSummary recompute — and, with
+// it, the trailing delinquency lift — for a caller that is resolving SEVERAL
+// docs of the SAME booking in a loop and will run both itself afterwards. The recompute reads the whole payments
 // subcollection and rewrites one aggregate field, so doing it per-doc in a
 // loop is N reads to produce N-1 intermediate values nobody observes. Only
 // pass it if you actually run the recompute after the loop — the aggregate is
@@ -428,9 +429,23 @@ export async function resolveDepositPending(
   // Best-effort, exactly like every other recompute call site: a failure here
   // leaves a stale aggregate that the next payment transition re-derives
   // (self-healing), never a wrong terminal state on the doc above.
+  //
+  // THE DELINQUENCY LIFT LIVES HERE, once, for BOTH terminal paths. Reaching
+  // this line means the deposit is now `refunded` or `forfeited` — either way
+  // that obligation is extinguished, and if it was an exhausted birth deposit
+  // it was the very thing gating the curator. Doing it in the executor rather
+  // than at each caller is what makes it exhaustive: the cancellation paths,
+  // the no-show path, the two waive branches and the sweep's steps 2 and 7 all
+  // funnel through here.
+  //
+  // `skipRecompute` defers BOTH per-booking/per-profile tails — the batching
+  // caller (step 7) runs the recompute AND the lift itself, once, after its
+  // loop, instead of N times inside it.
   if (!opts.skipRecompute) {
     await recomputePaymentSummary(bookingId)
       .catch((e) => console.error(`resolveDepositPending: summary recompute failed for ${bookingId}`, e));
+    await clearDelinquencyIfSettled(p.curatorProfileId, now)
+      .catch((e) => console.error(`resolveDepositPending: delinquency clear failed for ${p.curatorProfileId}`, e));
   }
 }
 
@@ -534,15 +549,72 @@ export const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
 // (see requireCuratorChargeable's copy-hazard note), so a partial doc here
 // gates MORE, never less.
 //
-// Clearing is deliberately NOT here: Task 11 owns `clearDelinquencyIfSettled`
-// (a profile stops being delinquent only once EVERY outstanding obligation is
-// settled, which is a query this function has no business running).
+// The lifting half is `clearDelinquencyIfSettled` directly below — kept apart
+// because declaring is a single-doc fact while lifting is a question about the
+// profile's WHOLE obligation set.
 export async function declareCuratorDelinquent(profileId: string, now: number): Promise<boolean> {
   const ref = getFirestore().doc(`profiles/${profileId}/private/stripe`);
   const existing = (await ref.get()).data() as StripeProfileDoc | undefined;
   if (existing?.delinquent === true) return false;
   await ref.set({ delinquent: true, delinquentSince: now, updatedAt: now }, { merge: true });
   return true;
+}
+
+// Lifts the profile-level `delinquent` flag once the curator owes NOTHING —
+// the inverse of declareCuratorDelinquent above, and deliberately its
+// neighbour: the two paths that DECLARE delinquency are the settlement dunning
+// ladder and the birth-deposit dunning ladder, so the one that LIFTS it has to
+// ask about both kinds of debt or the gate becomes one-way.
+//
+// TWO QUESTIONS, both `limit(1)` — "does ANY debt remain?", never "list it":
+//  1. SETTLEMENT debt: any payment doc of any booking of this profile still
+//     `past_due` (rungs 1-3 of the ladder count, not just delinquency itself —
+//     an unpaid debt is an unpaid debt).
+//  2. DEPOSIT debt: any doc whose birth deposit is still `unpaid` after its
+//     retry schedule ran out. `depositAttempts` counts ATTEMPTS, and the
+//     schedule is exhausted once it runs past the end of
+//     SETTLEMENT_RETRY_OFFSETS_MS — the same terminator the sweep's step 3
+//     uses, expressed as a range filter.
+//
+// THE RANGE FILTER IS LOAD-BEARING, not a convenience: Firestore indexes only
+// documents that HAVE the field, so `depositAttempts >= n` cannot match a doc
+// that never carries it. Every accept-saga STAGED doc is exactly that (the
+// field is written only by step 3's own persist-before-charge, on a birth
+// deposit it is about to attempt), so rule 3's docs are excluded from this
+// query structurally rather than by a second condition someone could later
+// drop. A never-dunned birth deposit is excluded the same way.
+//
+// CALLED WHEREVER AN OBLIGATION IS EXTINGUISHED, not merely paid — a debt that
+// is waived, refunded or forfeited is just as gone as one that was settled, and
+// a curator left gated over a date nobody owes any more cannot book at all. The
+// call sites are: this file's resolveDepositPending tail (every terminal
+// refund/forfeit), finalizeSettlementSuccess's tail (every settled date),
+// payPastDue's two on-session paths, and the sweep's steps 3, 4 and 7.
+//
+// Reads the flag FIRST and returns early when it is not set: a curator who was
+// never delinquent must not have `delinquent: false` and a fresh `updatedAt`
+// written after every single money event, and the early return keeps both
+// collection-group queries off the hot path entirely.
+export async function clearDelinquencyIfSettled(curatorProfileId: string, now: number): Promise<void> {
+  const sp = await getStripeProfileDoc(curatorProfileId);
+  if (sp?.delinquent !== true) return;
+  const db = getFirestore();
+  // Backed by the cg composite index (curatorProfileId, settlement.status).
+  const openSettlement = await db.collectionGroup("payments")
+    .where("curatorProfileId", "==", curatorProfileId)
+    .where("settlement.status", "==", "past_due")
+    .limit(1).get();
+  if (!openSettlement.empty) return;
+  // Backed by the cg composite index
+  // (curatorProfileId, deposit.status, deposit.depositAttempts).
+  const openDeposit = await db.collectionGroup("payments")
+    .where("curatorProfileId", "==", curatorProfileId)
+    .where("deposit.status", "==", "unpaid")
+    .where("deposit.depositAttempts", ">=", SETTLEMENT_RETRY_OFFSETS_MS.length + 1)
+    .limit(1).get();
+  if (!openDeposit.empty) return;
+  await db.doc(`profiles/${curatorProfileId}/private/stripe`).set(
+    { delinquent: false, delinquentSince: null, updatedAt: now }, { merge: true });
 }
 
 // A `{ lastUpdateTime: ... }` precondition that lost its race. The Admin SDK

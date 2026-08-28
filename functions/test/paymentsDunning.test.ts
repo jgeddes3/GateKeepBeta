@@ -7,11 +7,12 @@ import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/fires
 import {
   computeDepositCents, computeEarningsCents, computeExpectedTotalCents, computeFeeShareCents,
   computeLateFeeSplit, DEFAULT_FEE_POLICY, SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
+  type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
   type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
-import { CURATOR_DELINQUENT_MESSAGE } from "../src/paymentsCore.js";
+import { CURATOR_DELINQUENT_MESSAGE, IDEMPOTENCY_WINDOW_MS } from "../src/paymentsCore.js";
+import { PAYDUE_CONFIRM_WINDOW_MS } from "../src/paymentsSettlement.js";
 import {
   PAY_PAST_DUE_NOT_OVERDUE_MESSAGE, PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE,
 } from "../src/payments.js";
@@ -40,6 +41,13 @@ const RATE_CENTS = 15_000;
 const DURATION_MINUTES = 90;
 const BASE_CENTS = computeExpectedTotalCents("perHour", RATE_CENTS, { durationMinutes: DURATION_MINUTES });
 const SLICE_CENTS = computeDepositCents(BASE_CENTS);
+// The DEPOSIT debt — what an exhausted birth deposit still owes.
+const DEPOSIT_FEE_CENTS = computeFeeShareCents(SLICE_CENTS, FEE.curatorFeePct);
+const DEPOSIT_CHARGE_CENTS = SLICE_CENTS + DEPOSIT_FEE_CENTS;
+// The attempts counter a birth deposit carries once its retry schedule has run
+// out — the same terminator the sweep's step 3 and clearDelinquencyIfSettled
+// both use, derived rather than transcribed.
+const EXHAUSTED_DEPOSIT_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
 
 // The no-true-up settlement of that fixture: what the ladder keeps failing to
 // charge, and therefore what the late fee is a percentage OF.
@@ -148,6 +156,43 @@ async function makeEndedBooking(prefix: string) {
   return { curator, musician, gigId, bookingId };
 }
 
+// A confirmed booking whose date is still a WEEK OUT — the shape a birth
+// deposit belongs to (deposits are owed before the night, settlements after).
+async function makeFutureBooking(prefix: string) {
+  const curator = await makeApprovedCuratorProfile(`${prefix}c`);
+  const musician = await makeApprovedMusicianProfile(`${prefix}m`);
+  await makeMoneyReady(curator, musician);
+  const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+  const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+    "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+  await callFn("acceptBooking", { bookingId }, curator.owner.user);
+  return { curator, musician, gigId, bookingId };
+}
+
+// SEEDED, not walked. Producing a genuinely exhausted birth deposit through the
+// app needs a whole-run series, the materializer, and four declining sweep runs
+// against a FUTURE date — minutes of fixture for a state that is four field
+// values. These cases are about what happens AFTER exhaustion (payPastDue and
+// the delinquency lift), so the state is written directly and the shape is
+// taken from the sweep's own dunning writer: `unpaid`, no intent, the attempts
+// counter past the end of the retry schedule, and no retry clock (exhaustion
+// nulls it, which is why the counter — not the clock — is the terminator).
+async function seedExhaustedBirthDeposit(bookingId: string, gigId: string): Promise<void> {
+  await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
+    "deposit.status": "unpaid", "deposit.intentId": null, "deposit.chargeId": null,
+    "deposit.chargedAt": null, "deposit.depositAttempts": EXHAUSTED_DEPOSIT_ATTEMPTS,
+    "deposit.depositNextRetryAt": null, updatedAt: Date.now(),
+  });
+}
+
+// ...and the flag that exhaustion would have raised (declareCuratorDelinquent's
+// exact write shape).
+async function seedDelinquent(profileId: string): Promise<void> {
+  const now = Date.now();
+  await adb.doc(`profiles/${profileId}/private/stripe`).set(
+    { delinquent: true, delinquentSince: now, updatedAt: now }, { merge: true });
+}
+
 async function getBooking(bookingId: string): Promise<BookingRequestDoc> {
   return (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
 }
@@ -197,6 +242,12 @@ async function accountBalanceCents(accountId: string): Promise<number> {
 
 async function idemUsed(key: string): Promise<boolean> {
   return (await adb.doc(`stripeFake/state/idem/${encodeURIComponent(key)}`).get()).exists;
+}
+
+// The durable escalation queue — a refusal that isn't recorded here is a
+// refusal nobody will ever action.
+async function adminAlert(alertId: string): Promise<AdminAlertDoc | undefined> {
+  return (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc | undefined;
 }
 
 async function ledgerRows(bookingId: string): Promise<LedgerEntry[]> {
@@ -473,9 +524,10 @@ describe("payPastDue — the way out", () => {
       { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
   });
 
-  it("refuses the musician side, a date that isn't past_due, and a date carrying someone else's intent", async () => {
+  it("refuses the musician side, a date that isn't past_due, someone else's intent, and a charge in flight", async () => {
     const { curator, musician, gigId, bookingId } = await makeEndedBooking("dunref");
     const customerId = await curatorCustomerId(curator.profileId);
+    const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
 
     await scheduleSettlement(bookingId, gigId);
     // Still `pending`: there is no overdue debt to pay yet.
@@ -501,13 +553,179 @@ describe("payPastDue — the way out", () => {
     // left processing is the real route; seeded here, since that state only
     // exists inside one awaited chargeSettlement call). Minting a second,
     // confirmable intent beside it would let the curator pay the night twice.
-    await adb.doc(`bookings/${bookingId}/payments/${gigId}`)
-      .update({ "settlement.intentId": "pi_someone_elses" });
+    await paymentRef.update({ "settlement.intentId": "pi_someone_elses" });
     await expect(callFn("payPastDue", { bookingId, gigId }, curator.owner.user))
       .rejects.toMatchObject({
         code: "functions/failed-precondition", message: PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE,
       });
     // Refused BEFORE any Stripe call: no paydue key was consumed.
     expect(await idemUsed(`${bookingId}:${gigId}:paydue:1`)).toBe(false);
+    await paymentRef.update({ "settlement.intentId": null });
+
+    // A CHARGE IN FLIGHT RIGHT NOW: a sweep run has claimed this doc and is
+    // inside its chargeOffSession call. An on-session intent minted beside it
+    // would be a second charge for the same debt.
+    await paymentRef.update({ "settlement.chargingSince": Date.now() });
+    await expect(callFn("payPastDue", { bookingId, gigId }, curator.owner.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE,
+      });
+    expect(await idemUsed(`${bookingId}:${gigId}:paydue:1`)).toBe(false);
+
+    // ...but that refusal is WINDOW-BOUNDED, and the bound is load-bearing. A
+    // claim older than Stripe's idempotency window is chargeSettlement's
+    // PERMANENT refusal; if it were permanent here too, the curator would be
+    // gated by a debt nothing will ever collect and which they cannot pay.
+    await paymentRef.update({ "settlement.chargingSince": Date.now() - IDEMPOTENCY_WINDOW_MS - 1000 });
+    const rescued = await callFn<{ bookingId: string; gigId: string }, { done: boolean }>(
+      "payPastDue", { bookingId, gigId }, curator.owner.user);
+    expect(rescued.done).toBe(true);
+    expect((await getPayment(bookingId, gigId))?.settlement.status).toBe("paid");
+  });
+
+  it("parks the retry clock instead of nulling it, escalates an abandoned attempt, and replays the SAME intent on a retry", async () => {
+    const { curator, musician, gigId, bookingId } = await makeEndedBooking("dunaband");
+    const customerId = await curatorCustomerId(curator.profileId);
+    const accountId = await musicianAccountId(musician.profileId);
+    const musicianStripeRef = adb.doc(`profiles/${musician.profileId}/private/stripe`);
+
+    await scheduleSettlement(bookingId, gigId);
+    await makeSettlementDue(bookingId, gigId);
+    try {
+      await setChargeKnob("declineCustomerIds", customerId, true);
+      await runPaymentsSweep(Date.now());
+    } finally {
+      await setChargeKnob("declineCustomerIds", customerId, false);
+    }
+    expect((await getPayment(bookingId, gigId))?.settlement.attempts).toBe(1);
+
+    // To OBSERVE the parked clock the settlement must not immediately finalize
+    // (the terminal write nulls `nextRetryAt` like any other). Removing the
+    // musician's payout account makes finalizeSettlementSuccess stop before the
+    // transfer — which is also the real shape of an attempt that gets stuck.
+    await musicianStripeRef.set({ accountId: null }, { merge: true });
+    const t0 = Date.now();
+    const parkedResult = await callFn<{ bookingId: string; gigId: string }, { done: boolean }>(
+      "payPastDue", { bookingId, gigId }, curator.owner.user);
+    expect(parkedResult.done).toBe(false);
+
+    const parked = await getPayment(bookingId, gigId);
+    expect(parked?.settlement.status).toBe("past_due");
+    // THE POINT: parked, NOT null. A null clock would drop this debt out of the
+    // sweep's step-6 query forever, silently ending dunning for it.
+    expect(parked?.settlement.nextRetryAt).not.toBeNull();
+    expect(parked?.settlement.nextRetryAt).toBeGreaterThanOrEqual(t0 + PAYDUE_CONFIRM_WINDOW_MS);
+    expect(parked?.settlement.nextRetryAt).toBeLessThan(Date.now() + PAYDUE_CONFIRM_WINDOW_MS + 1000);
+    const firstIntentId = parked!.settlement.intentId!;
+    expect(firstIntentId).toBeTruthy();
+    expect(parked?.settlement.payDueIntentId).toBe(firstIntentId);
+
+    // The curator walks away. An hour later the sweep re-selects the doc and
+    // must ESCALATE the abandoned intent — never charge past it, because a tab
+    // left open could still confirm it.
+    await makeRetryDue(bookingId, gigId);
+    const abandonedRun = await runPaymentsSweep(Date.now());
+    expect(abandonedRun.settlementsPending).toBeGreaterThanOrEqual(1);
+    expect((await getPayment(bookingId, gigId))?.settlement.status).toBe("past_due");
+    expect(await idemUsed(`${bookingId}:${gigId}:settle:1`)).toBe(false);
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    const alert = await adminAlert(`settlement-pending:${bookingId}:${gigId}`);
+    expect(alert?.kind).toBe("settlement_pending_stuck");
+    expect(alert?.detail).toContain("abandoned pay-now attempt");
+    expect(alert?.resolvedAt).toBeNull();
+
+    // The curator comes back. The key is deterministic per attempt, so Stripe
+    // REPLAYS the same intent rather than minting a rival one beside it — the
+    // property that makes overwriting `settlement.intentId` safe at all.
+    await musicianStripeRef.set({ accountId }, { merge: true });
+    const resumed = await callFn<{ bookingId: string; gigId: string }, { done: boolean; amountCents: number }>(
+      "payPastDue", { bookingId, gigId }, curator.owner.user);
+    expect(resumed.done).toBe(true);
+    expect(resumed.amountCents).toBe(OUTSTANDING_CENTS);   // rung 1: no late fee yet
+
+    const settled = await getPayment(bookingId, gigId);
+    expect(settled?.settlement.status).toBe("paid");
+    expect(settled?.settlement.intentId).toBe(firstIntentId);   // the SAME intent
+    expect(settled?.settlement.nextRetryAt).toBeNull();
+    expect(await accountBalanceCents(accountId)).toBe(EARNINGS_CENTS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A curator whose ONLY debt is a birth deposit that ran out its retry schedule
+// is delinquent exactly like one who failed a settlement — but leaves no
+// `past_due` settlement behind. Without a way to pay it, and without a lift
+// that asks about it, that curator could never book again.
+// ---------------------------------------------------------------------------
+
+describe("payPastDue — an exhausted birth deposit", () => {
+  it("charges the frozen slice + fee on-session, holds the escrow, and lifts the gate", async () => {
+    const { curator, musician, gigId, bookingId } = await makeFutureBooking("dundep");
+    await seedExhaustedBirthDeposit(bookingId, gigId);
+    await seedDelinquent(curator.profileId);
+
+    // The gate is live, and nothing about the SETTLEMENT is overdue — this
+    // curator's only debt is the deposit.
+    expect((await getPayment(bookingId, gigId))?.settlement.status).toBe("not_due");
+    const gatedGig = await createOpenGig(curator.profileId, curator.owner.user);
+    await expect(callFn("offerGig",
+      { gigId: gatedGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: CURATOR_DELINQUENT_MESSAGE });
+
+    const paid = await callFn<{ bookingId: string; gigId: string }, { done: boolean; amountCents: number }>(
+      "payPastDue", { bookingId, gigId }, curator.owner.user);
+    expect(paid.done).toBe(true);
+    // Slice + fee share, both frozen at staging — never re-derived from a live
+    // constant.
+    expect(paid.amountCents).toBe(DEPOSIT_CHARGE_CENTS);
+
+    const held = await getPayment(bookingId, gigId);
+    expect(held?.deposit.status).toBe("held");
+    expect(typeof held?.deposit.chargedAt).toBe("number");
+    expect(held?.deposit.depositNextRetryAt).toBeNull();
+    const intentId = held!.deposit.intentId!;
+    expect(intentId).toBeTruthy();
+    expect(held?.deposit.payDueIntentId).toBe(intentId);
+    expect(await fakeObject(intentId).then((i) => i?.amountCents)).toBe(DEPOSIT_CHARGE_CENTS);
+    // A key of its own: a pay-now deposit must never collide with — or replay —
+    // one of the sweep's off-session `deposit:` attempts.
+    expect(await idemUsed(`${bookingId}:${gigId}:paydue-deposit:${EXHAUSTED_DEPOSIT_ATTEMPTS}`)).toBe(true);
+    // The settlement is untouched: a deposit paid late is still just a deposit.
+    expect(held?.settlement.status).toBe("not_due");
+
+    const depositRow = (await ledgerRows(bookingId)).find((r) => r.kind === "deposit_charged" && r.stripeId === intentId);
+    expect(depositRow?.amountCents).toBe(DEPOSIT_CHARGE_CENTS);
+    expect(depositRow?.profileId).toBe(curator.profileId);
+    expect((await getBooking(bookingId)).paymentSummary?.heldCents).toBe(SLICE_CENTS);
+
+    // THE POINT: the lift asks the DEPOSIT question too, so the gate opens.
+    expect((await getStripeDoc(curator.profileId))?.delinquent).toBe(false);
+    const openGig = await createOpenGig(curator.profileId, curator.owner.user);
+    await callFn("offerGig",
+      { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
+  });
+
+  // Case B: the debt is extinguished by being CANCELLED rather than paid. A
+  // curator gated over a date nobody owes any more could otherwise never book.
+  it("lifts the gate when the occurrence is cancelled instead — an extinguished debt is not an unpaid one", async () => {
+    const { curator, musician, gigId, bookingId } = await makeFutureBooking("duncanc");
+    await seedExhaustedBirthDeposit(bookingId, gigId);
+    await seedDelinquent(curator.profileId);
+    expect((await getStripeDoc(curator.profileId))?.delinquent).toBe(true);
+
+    // The curator cancels a week out: a plain refund, and this deposit was
+    // never charged, so it resolves terminal with no Stripe call at all.
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+
+    const cancelled = await getPayment(bookingId, gigId);
+    expect(cancelled?.deposit.status).toBe("refunded");
+    expect(cancelled?.settlement.status).toBe("waived");
+    // Nothing is owed any more, so nothing gates.
+    const cleared = await getStripeDoc(curator.profileId);
+    expect(cleared?.delinquent).toBe(false);
+    expect(cleared?.delinquentSince).toBeNull();
+    const openGig = await createOpenGig(curator.profileId, curator.owner.user);
+    await callFn("offerGig",
+      { gigId: openGig, musicianProfileId: musician.profileId, offer: offerPayload() }, curator.owner.user);
   });
 });

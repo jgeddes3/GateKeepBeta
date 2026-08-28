@@ -58,7 +58,7 @@ import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
 } from "./stripeClient.js";
 import {
-  declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
+  clearDelinquencyIfSettled, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
   recomputePaymentSummary, recordAdminAlert, resolveDepositPending, writeLedger,
   IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
@@ -105,18 +105,28 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //    `settlement.chargingSince` alone (it carries its own timestamp, and its
 //    CAS baseline is the write result). Keeping it out of `updatedAt` is what
 //    lets the enumeration above stay exhaustive.
-//  - PAYMENT-DOC side, the one CALLABLE writer (Task 10 review, M2):
-//    `confirmOccurrenceActuals` bumps `updatedAt` on a payment doc every time
-//    a curator reports actuals. It is safe for BOTH guards, and not by luck:
-//    the callable refuses unless `settlement.status === "pending"`, which is
-//    disjoint from every state either guard measures. The deposit guard only
-//    ever looks at `refund_pending`/`forfeit_pending` docs, and a doc whose
-//    deposit is `*_pending` has had its settlement waived by whatever set it
-//    pending (markDepositsPendingInTx / step 4 / step 7 all do), so it can
-//    never also be settlement-`pending`; the saga guard reads BOOKINGS, not
-//    payment docs, and a staged saga's docs are settlement-`not_due` anyway.
-//    A true-up therefore cannot reset the clock on any refund/transfer key
-//    this sweep is deciding whether to replay.
+//  - PAYMENT-DOC side, the TWO CALLABLE writers (Task 10 review M2; Task 11
+//    review round 1). Neither can reset the clock on any refund/transfer key
+//    this sweep is deciding whether to replay, and in both cases that is
+//    structural rather than luck:
+//      * `confirmOccurrenceActuals` bumps `updatedAt` every time a curator
+//        reports actuals, but refuses unless `settlement.status === "pending"`.
+//        The deposit guard only ever looks at `refund_pending`/
+//        `forfeit_pending` docs, and a doc whose deposit is `*_pending` has had
+//        its settlement waived by whatever set it pending
+//        (markDepositsPendingInTx / step 4 / step 7 all do), so it can never
+//        also be settlement-`pending`.
+//      * `payPastDue` bumps `updatedAt` on both of its paths. Its SETTLEMENT
+//        path requires `settlement.status === "past_due"`, and a `past_due`
+//        settlement's deposit cannot be `*_pending` either — the same waive
+//        coupling holds (every path that marks a deposit pending waives a
+//        not-yet-terminal settlement with it, and the ones that don't waive a
+//        `past_due` settlement also leave the deposit alone). Its DEPOSIT path
+//        writes only to an `unpaid` doc, which is likewise not a state the
+//        deposit guard measures.
+//    The saga guard reads BOOKINGS, not payment docs, and a staged saga's docs
+//    are settlement-`not_due` with no `depositAttempts` at all, so neither
+//    callable can reach one.
 
 // Step 7's scan bound. An unwind older than this was either already refunded
 // by an earlier run of this step or needs a human — either way, re-scanning
@@ -779,10 +789,12 @@ async function chargeOneBirthDeposit(
     // a doc a cancellation had already claimed is money that moved but escrow
     // that never existed — it is counted in errors.birthDepositRaced instead.
     if (markedHeld) report.birthDepositsCharged++;
-    // TODO(Task 11): a successful charge after a dunning run deliberately does
-    // NOT clear the curator's profile-level `delinquent` flag here — that is
-    // `clearDelinquencyIfSettled`'s job, which can only answer "is EVERYTHING
-    // outstanding settled now?" by querying the whole obligation set.
+    // A charge that lands after a dunning run may have paid off the very debt
+    // that flagged this curator. Only a query over the whole obligation set can
+    // say so, which is what clearDelinquencyIfSettled is; it no-ops unless the
+    // flag is actually set, so the ordinary first-attempt charge pays one read.
+    await clearDelinquencyIfSettled(p.curatorProfileId, now)
+      .catch((ce) => console.error(`paymentsSweep: delinquency clear failed for ${p.curatorProfileId}`, ce));
   } catch (e) {
     if (e instanceof StripePaymentPendingError) {
       // The intent exists and is settling. Persist it so the money is never
@@ -914,10 +926,18 @@ async function resolveDueOccurrence(
     // One summary recompute per doc: accepted cost. Waived occurrences of ONE
     // booking normally arrive on different runs (their dates end days apart),
     // so batching per booking here would almost never have anything to batch.
+    // The executor also owns the delinquency lift for this path — one place
+    // per path (see resolveDepositPending's tail).
     await resolveDepositPending(at.bookingId, at.gigId);
   } else {
     await recomputePaymentSummary(at.bookingId)
       .catch((e) => console.error(`paymentsSweep: summary recompute failed for ${at.bookingId}`, e));
+    // The no-executor path: an `unpaid` deposit went straight to `refunded`
+    // just above (or there was nothing left to move). That still EXTINGUISHES
+    // the obligation — and an exhausted birth deposit is exactly the kind that
+    // gates a curator — so the lift belongs here, where no executor will run.
+    await clearDelinquencyIfSettled(p.curatorProfileId, now)
+      .catch((e) => console.error(`paymentsSweep: delinquency clear failed for ${p.curatorProfileId}`, e));
   }
 }
 
@@ -1085,6 +1105,12 @@ async function refundOneExpiredBooking(
   }
   await recomputePaymentSummary(bookingId)
     .catch((e) => console.error(`paymentsSweep: summary recompute failed for ${bookingId}`, e));
+  // The per-booking tail this loop's `skipRecompute` defers: ONE lift for the
+  // whole booking rather than one per refunded occurrence. An expired booking's
+  // future dates going back is an extinguished obligation like any other, and
+  // any of them could have been the exhausted birth deposit gating this curator.
+  await clearDelinquencyIfSettled(booking.curatorProfileId, now)
+    .catch((e) => console.error(`paymentsSweep: delinquency clear failed for ${booking.curatorProfileId}`, e));
 }
 
 async function refundExpiredBookingDeposits(

@@ -16,7 +16,9 @@ import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.
 //  - account.updated        -> Task 4 (cached gate flags)
 //  - payment_intent.succeeded -> dispatched by metadata.purpose (see
 //    paymentIntentSucceededHandlers below): "deposit" -> Task 6 (accept saga
-//    completion), "settlement" -> Task 10, "paydue" -> Task 11
+//    completion), "settlement" -> Task 10, "paydue" / "paydue-deposit" ->
+//    Task 11
+//  - payment_intent.payment_failed -> recorded no-op (see below)
 //  - payout.paid/payout.failed -> Task 13
 //  - transfer.reversed      -> Task 12 (ledger only)
 // Unknown/unhandled types: record the event doc, 200 OK (Stripe requires 2xx
@@ -46,6 +48,24 @@ webhookHandlers["payment_intent.succeeded"] = async (object, eventId) => {
     return;
   }
   await handler(object, eventId);
+};
+
+// RECORDED NO-OP, on purpose. Every decline SP5 cares about is handled
+// synchronously where it happens — chargeOffSession throws
+// StripeCardDeclinedError and the caller's own saga decides (unstage the
+// accept, dun the deposit, walk the settlement ladder) — so there is nothing
+// for an out-of-band handler to do, and an on-session intent the curator fails
+// to confirm simply stays unconfirmed.
+//
+// Registering it anyway buys two things: the spec's listed event set is
+// complete rather than silently falling through to the "no handler" branch,
+// and every delivery still lands a `stripeEvents/{id}` doc (written by the
+// claim machine above, before dispatch) so a dashboard can audit decline
+// volume. Deliberately writes NO ledger row — nothing moved.
+webhookHandlers["payment_intent.payment_failed"] = async (object, eventId) => {
+  const meta = object.metadata as Record<string, string> | undefined;
+  console.info(
+    `payment_intent.payment_failed: recorded, no action — intent=${String(object.id)}, purpose=${JSON.stringify(meta?.purpose ?? null)} (event ${eventId})`);
 };
 
 // Test-only handlers, registered ONLY inside the Functions emulator

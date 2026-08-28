@@ -41,9 +41,22 @@ import { getStripe, StripeCardDeclinedError, StripePaymentPendingError } from ".
 import { notifyProfileMembers } from "./notifications.js";
 import { paymentIntentSucceededHandlers } from "./paymentsWebhook.js";
 import {
-  declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition, recomputePaymentSummary,
-  recordAdminAlert, resolveDepositPending, writeLedger, IDEMPOTENCY_WINDOW_MS,
+  clearDelinquencyIfSettled, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
+  recomputePaymentSummary, recordAdminAlert, resolveDepositPending, writeLedger,
+  IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
+
+// How long `payPastDue` parks a `past_due` occurrence's `nextRetryAt` while the
+// curator confirms its on-session intent in the browser. Elements confirms in
+// MINUTES (or is abandoned outright), so an hour is a generous cover.
+//
+// Parking rather than nulling is the whole point (review round 1, defect 3b):
+// a null `nextRetryAt` removes the doc from the sweep's step-6 query FOREVER,
+// so an abandoned pay-now attempt would silently end dunning for that debt and
+// nobody would ever hear about it again. Parked, the sweep re-selects the doc
+// an hour later, finds the outstanding intent, and — because the intent is
+// still there and might yet capture — ESCALATES rather than charging.
+export const PAYDUE_CONFIRM_WINDOW_MS = 60 * 60 * 1000;
 
 // What a settlement charge attempt did, from the sweep's point of view.
 // "skipped" covers every "nothing to do / not chargeable yet" outcome so the
@@ -90,6 +103,20 @@ function ran(
   outcome: SettlementChargeOutcome, transferred = false, reason?: SettlementRunReason,
 ): SettlementRunResult {
   return reason ? { outcome, transferred, reason } : { outcome, transferred };
+}
+
+// Every notification in this file is best-effort: by the time anyone is told,
+// the money has already moved (or deliberately not), so a failed delivery must
+// never abort — or, worse, silently truncate — the path that produced it. Same
+// helper shape paymentsSweep.ts uses, for the same reason.
+async function notifySafely(
+  profileId: string, note: { kind: "booking"; refId: string; title: string; body: string }, context: string,
+): Promise<void> {
+  try {
+    await notifyProfileMembers(profileId, note);
+  } catch (e) {
+    console.error(`paymentsSettlement: notification failed (${context})`, e);
+  }
 }
 
 // The escalation queue's naming contract for this problem (one row per stuck
@@ -208,10 +235,18 @@ async function waiveUnlinkedSettlement(args: {
     return ran("skipped", false, "raced");
   }
   if (resolvePending) {
+    // The executor owns the aggregate AND the delinquency lift for this path
+    // (see resolveDepositPending's tail) — one place per path, not two.
     await resolveDepositPending(bookingId, gigId);
   } else {
     await recomputePaymentSummary(bookingId)
       .catch((e) => console.error(`chargeSettlement: summary recompute failed for ${bookingId}`, e));
+    // The no-executor path: a never-charged deposit went straight to
+    // `refunded` above (or there was no deposit left to move). An obligation
+    // was still EXTINGUISHED — including, possibly, the exhausted birth
+    // deposit that was gating this curator — so the lift belongs here.
+    await clearDelinquencyIfSettled(p.curatorProfileId, now)
+      .catch((e) => console.error(`chargeSettlement: delinquency clear failed for ${p.curatorProfileId}`, e));
   }
   return ran("waived");
 }
@@ -350,54 +385,21 @@ export async function recordSettlementFailure(args: {
     .catch((e) => console.error(`recordSettlementFailure: summary recompute failed for ${bookingId}`, e));
   // BOTH sides are told, and deliberately different things: the curator owes
   // money and is now gated, the musician is owed money and keeps most of the
-  // fee. Best-effort, like every notification in the money paths.
-  try {
-    await notifyProfileMembers(p.curatorProfileId, {
-      kind: "booking", refId: bookingId,
-      title: "Payment overdue",
-      body: `A ${feePolicy.lateFeePct}% late fee was added and booking is paused for this profile until it's paid.`,
-    });
-    await notifyProfileMembers(p.musicianProfileId, {
-      kind: "booking", refId: bookingId,
-      title: "Payment delayed",
-      body: "The curator's payment is overdue — a late fee (yours to keep most of) was added. We'll keep collecting.",
-    });
-  } catch (e) {
-    console.error(`recordSettlementFailure: delinquency notification failed for ${bookingId}/${gigId}`, e);
-  }
+  // fee. Wrapped INDEPENDENTLY (review round 1): one try/catch around both
+  // would let a failure delivering the curator's notice swallow the musician's
+  // entirely, and the musician being told their money is late is the half we
+  // least want to lose.
+  await notifySafely(p.curatorProfileId, {
+    kind: "booking", refId: bookingId,
+    title: "Payment overdue",
+    body: `A ${feePolicy.lateFeePct}% late fee was added and booking is paused for this profile until it's paid.`,
+  }, `delinquency ${bookingId}/${gigId}`);
+  await notifySafely(p.musicianProfileId, {
+    kind: "booking", refId: bookingId,
+    title: "Payment delayed",
+    body: "The curator's payment is overdue — a late fee (yours to keep most of) was added. We'll keep collecting.",
+  }, `delinquency ${bookingId}/${gigId}`);
   return ran("declined", false, declared ? "delinquent" : undefined);
-}
-
-// Clears the profile-level `delinquent` flag once NO payment doc of ANY
-// booking of this curator profile is still `past_due`. Called from
-// finalizeSettlementSuccess's tail — the single point every settlement caller
-// (the sweep, the webhook, payPastDue) converges on.
-//
-// Reads the flag FIRST and returns early when it is not set: a curator who was
-// never delinquent must not have `delinquent: false` and a fresh `updatedAt`
-// written onto their stripe doc after every single settlement, and the early
-// return also keeps the collection-group query off the hot path entirely.
-//
-// KNOWN LIMITATION, recorded rather than silently absorbed: this asks about
-// SETTLEMENT debt only. Task 9's birth-deposit dunning can also declare a
-// curator delinquent (an exhausted `unpaid` deposit — see
-// declareCuratorDelinquent's other caller), and that debt leaves no `past_due`
-// settlement behind, so a curator carrying one would be un-gated here by an
-// unrelated booking settling. Closing it needs a second obligation query over
-// exhausted birth deposits plus the composite index to back it.
-export async function clearDelinquencyIfSettled(curatorProfileId: string, now: number): Promise<void> {
-  const sp = await getStripeProfileDoc(curatorProfileId);
-  if (sp?.delinquent !== true) return;
-  // Backed by the cg composite index (curatorProfileId ASC, settlement.status
-  // ASC) in firestore.indexes.json. limit(1) — the question is "does ANY debt
-  // remain?", never "list the debts".
-  const open = await getFirestore().collectionGroup("payments")
-    .where("curatorProfileId", "==", curatorProfileId)
-    .where("settlement.status", "==", "past_due")
-    .limit(1).get();
-  if (!open.empty) return;
-  await getFirestore().doc(`profiles/${curatorProfileId}/private/stripe`).set(
-    { delinquent: false, delinquentSince: null, updatedAt: now }, { merge: true });
 }
 
 // The doc moved under a settlement whose money ALREADY MOVED. Records
@@ -794,24 +796,48 @@ export async function chargeSettlement(
   // — and Task 11's `payPastDue`.
   //
   // HOW payPastDue COOPERATES (this task's resolution of the old TODO): it
-  // persists its on-session intent id here AND nulls `nextRetryAt` in the same
-  // write, so step 6 stops selecting the doc altogether and this guard is
-  // never what a curator is waiting on. An ABANDONED payPastDue attempt is
-  // resumed by calling payPastDue again — its key is deterministic per attempt,
-  // so Stripe replays the SAME intent rather than minting a rival one, and the
-  // doc's `payDueIntentId` is what lets it prove the outstanding intent is its
-  // own to replace (an off-session settlement intent is refused instead).
+  // persists its on-session intent id here AND parks `nextRetryAt` one
+  // confirmation window out (PAYDUE_CONFIRM_WINDOW_MS) in the same write. The
+  // park is what keeps step 6 from charging the card off-session while the
+  // curator is confirming in the browser, WITHOUT removing the doc from the
+  // sweep's sight permanently — an abandoned attempt therefore comes back
+  // here an hour later and gets escalated instead of disappearing. A curator
+  // who simply retries gets the SAME intent back (the key is deterministic per
+  // attempt), and `payDueIntentId` is what lets payPastDue prove the
+  // outstanding intent is its own to replace — an off-session settlement
+  // intent is refused instead.
   //
   // TODO(Task 12): the restore re-run must clear `settlement.intentId` AND bump
   // `settlement.attempts` when it re-opens a clawed-back settlement — without
   // the clear this guard refuses it, and without the bump its `settle:`/`earn:`
   // keys replay consumed ones and no money moves.
   if (p.settlement.intentId != null) {
+    // WHOSE intent is it? An ABANDONED PAY-NOW attempt is a different problem
+    // from a stuck off-session charge, and it needs a different instruction:
+    // payPastDue minted an on-session intent the curator never confirmed, and
+    // parked `nextRetryAt` an hour out precisely so this run would find it
+    // (see PAYDUE_CONFIRM_WINDOW_MS). The intent is almost certainly dead, but
+    // "almost certainly" is not a licence to charge — it can still be
+    // confirmed from a tab left open — so this refuses like any other
+    // outstanding intent and tells the operator the specific unwind.
+    //
+    // THE PROPER FIX IS `StripeLike.cancelIntent` (future): with it, this
+    // branch could cancel the abandoned intent itself and clear
+    // `settlement.intentId`, returning the occurrence to the dunning ladder
+    // with no human involved. StripeLike has no cancel surface yet, so the
+    // implemented behavior is REFUSE + ESCALATE — the same posture step 2's
+    // stale-pending guard takes for its own missing Stripe surface.
+    const abandonedPayDue = p.settlement.payDueIntentId != null
+      && p.settlement.intentId === p.settlement.payDueIntentId
+      && (p.settlement.nextRetryAt == null || now >= p.settlement.nextRetryAt);
+    const detail = abandonedPayDue
+      ? `"${p.settlement.status}" settlement carries pay-now intent ${p.settlement.intentId}, unconfirmed past its`
+        + " confirmation window — abandoned pay-now attempt: cancel the intent in Stripe, then clear"
+        + " settlement.intentId to hand the date back to the dunning ladder. NEVER re-charged while it stands"
+      : `"${p.settlement.status}" settlement already carries intent ${p.settlement.intentId} — never re-charged; finalize it via the webhook or resolve the intent in Stripe`;
     const alertId = settlementPendingAlertId(bookingId, gigId);
     const shouldLog = await recordAdminAlert({
-      alertId, kind: "settlement_pending_stuck",
-      detail: `"${p.settlement.status}" settlement already carries intent ${p.settlement.intentId} — never re-charged; finalize it via the webhook or resolve the intent in Stripe`,
-      bookingId, gigId, now,
+      alertId, kind: "settlement_pending_stuck", detail, bookingId, gigId, now,
     });
     if (shouldLog) {
       console.error(
@@ -1006,6 +1032,72 @@ export async function chargeSettlement(
 // run before the webhook can ever fire. See this file's header for what breaks
 // if that import chain is ever severed.
 //
+// The DEPOSIT half of payPastDue, and the exact counterpart of
+// finalizeSettlementSuccess above: it turns a confirmed on-session intent into
+// held escrow for an occurrence whose BIRTH deposit exhausted its retry
+// schedule. Lives beside the settlement tail (rather than in paymentsCore with
+// the other deposit machinery) because both of its callers are here —
+// payPastDue's fake-Stripe path and the "paydue-deposit" webhook purpose — and
+// because it must reach clearDelinquencyIfSettled, which is exactly the point
+// of the whole path.
+//
+// IDEMPOTENT by CAS: it acts only on a doc still `unpaid` whose deposit either
+// carries no intent or carries THIS one. A redelivered webhook, or the webhook
+// arriving after the fake path already finalized inline, is a clean no-op —
+// never a second `held` write and never a second ledger row (writeLedger's
+// `{kind}:{stripeId}` id dedupes that too).
+//
+// Deliberately does NOT touch the settlement: a deposit paid late is still a
+// deposit, and the date it belongs to settles on its own schedule.
+export async function finalizeDepositPayDue(args: {
+  bookingId: string; gigId: string; intentId: string;
+  chargeId?: string | null; chargedCents?: number | null; now: number;
+}): Promise<"held" | "skipped"> {
+  const { bookingId, gigId, intentId, now } = args;
+  const ref = getFirestore().doc(`bookings/${bookingId}/payments/${gigId}`);
+  const snap = await ref.get();
+  const p = snap.data() as PaymentDoc | undefined;
+  if (!p) return "skipped";
+  if (p.deposit.status !== "unpaid") return "skipped";
+  if (p.deposit.intentId != null && p.deposit.intentId !== intentId) {
+    // Two live charges against one deposit — the same unconsumed-charge signal
+    // the settlement handler's mismatch check exists for.
+    console.error(
+      `finalizeDepositPayDue: ${bookingId}/${gigId} is awaiting intent ${p.deposit.intentId} but ${intentId} succeeded — unconsumed charge, needs reconciliation`);
+    return "skipped";
+  }
+  const amountCents = args.chargedCents ?? (p.deposit.sliceCents + p.deposit.feeShareCents);
+  try {
+    await ref.update({
+      "deposit.status": "held", "deposit.intentId": intentId,
+      "deposit.chargeId": args.chargeId ?? p.deposit.chargeId ?? null,
+      "deposit.chargedAt": now,
+      // The retry clock is already null (exhaustion cleared it); written again
+      // so a doc rescued from ANY rung of the ladder lands in the same shape.
+      "deposit.depositNextRetryAt": null,
+      updatedAt: now,
+    }, { lastUpdateTime: snap.updateTime! });
+  } catch (e) {
+    if (!isFailedPrecondition(e)) throw e;
+    // A racer moved the doc during this call — a cancellation marking it
+    // `*_pending` is the realistic one. Its decision stands, and the charge is
+    // still recorded below so the executor has an intent to refund against.
+    console.warn(`finalizeDepositPayDue: ${bookingId}/${gigId} changed under a pay-now deposit — left as the racer wrote it`);
+    await ref.update({ "deposit.intentId": intentId, "deposit.chargedAt": now, updatedAt: now })
+      .catch((we) => console.error(`finalizeDepositPayDue: failed to record intent ${intentId} on ${bookingId}/${gigId}`, we));
+  }
+  await writeLedger({
+    kind: "deposit_charged", amountCents, bookingId, gigId,
+    profileId: p.curatorProfileId, stripeId: intentId, detail: "deposit paid on-session (pay now)",
+  }).catch((e) => console.error(`finalizeDepositPayDue: deposit_charged ledger row failed for ${bookingId}/${gigId}`, e));
+  await recomputePaymentSummary(bookingId)
+    .catch((e) => console.error(`finalizeDepositPayDue: summary recompute failed for ${bookingId}`, e));
+  // The whole point: this is the obligation that was gating the curator.
+  await clearDelinquencyIfSettled(p.curatorProfileId, now)
+    .catch((e) => console.error(`finalizeDepositPayDue: delinquency clear failed for ${p.curatorProfileId}`, e));
+  return "held";
+}
+
 // ONE handler, TWO purposes, because the recovery is identical either way:
 //  - "settlement" is the recovery half of as-built contract #7 —
 //    chargeSettlement left an OFF-session intent `processing`, persisted its
@@ -1064,3 +1156,26 @@ const settlementIntentSucceeded = async (object: Record<string, unknown>): Promi
 
 paymentIntentSucceededHandlers["settlement"] = settlementIntentSucceeded;
 paymentIntentSucceededHandlers["paydue"] = settlementIntentSucceeded;
+
+// payPastDue's DEPOSIT half. Separate from the two above because it finalizes a
+// deposit, not a settlement — same metadata validation, different tail.
+paymentIntentSucceededHandlers["paydue-deposit"] = async (object) => {
+  const intentId = object.id as string | undefined;
+  const meta = object.metadata as Record<string, string> | undefined;
+  const bookingId = meta?.bookingId;
+  const gigId = meta?.gigId;
+  if (!intentId || !bookingId || !gigId || !isValidDocId(bookingId) || !isValidDocId(gigId)) {
+    console.warn(
+      `payment_intent.succeeded (paydue-deposit): unusable metadata — intent=${String(intentId)}, bookingId=${JSON.stringify(bookingId ?? null)}, gigId=${JSON.stringify(gigId ?? null)}`);
+    return;
+  }
+  const latestCharge = typeof object.latest_charge === "string" ? object.latest_charge : null;
+  const received = typeof object.amount_received === "number" ? object.amount_received
+    : typeof object.amount === "number" ? object.amount : null;
+  const result = await finalizeDepositPayDue({
+    bookingId, gigId, intentId, chargeId: latestCharge, chargedCents: received, now: Date.now(),
+  });
+  if (result === "skipped") {
+    console.info(`payment_intent.succeeded (paydue-deposit): ${bookingId}/${gigId} needed no deposit finalization`);
+  }
+};

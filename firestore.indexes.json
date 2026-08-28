@@ -153,6 +153,12 @@
     "fields": [
       { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
       { "fieldPath": "settlement.status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "deposit.status", "order": "ASCENDING" },
+      { "fieldPath": "deposit.depositAttempts", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
