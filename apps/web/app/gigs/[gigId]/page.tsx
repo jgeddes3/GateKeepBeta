@@ -10,6 +10,7 @@ import {
   DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, formatDuration, gigLocationLabel,
   type OfferState,
 } from "../../../src/bookings/BookingForms";
+import { GatePrompt } from "../../../src/payments/GatePrompt";
 import type { GigDoc, GigSeriesDoc, ProfileDoc, FillMode } from "@gatekeep/shared";
 
 type MusicianOption = { profileId: string; name: string };
@@ -115,11 +116,11 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
         </select>
       </label>
       <OfferFields structure={gig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />
-      {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-          {error}
-        </p>
-      )}
+      {/* SP5 Task 15: applyToGig's own gate (requireMusicianPayoutReady)
+          throws MUSICIAN_PAYOUTS_REQUIRED_MESSAGE verbatim — GatePrompt
+          links to /dashboard/earnings; any other error falls through to the
+          same plain warning line this used to render directly. */}
+      {error && <GatePrompt message={error} onRetry={submit} />}
       <button onClick={submit} disabled={busy}>{busy ? "Applying…" : "Apply"}</button>
       <p style={{ color: "#666", fontSize: 13, margin: 0 }}>{DEPOSIT_HONESTY_LINE}</p>
     </div>

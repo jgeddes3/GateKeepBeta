@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { BookingThread } from "../../../../src/bookings/BookingThread";
+import { PaymentsPanel } from "../../../../src/payments/PaymentsPanel";
 
 // The booking thread screen — deep-linked from both dashboards' inbox
 // sections (src/bookings/BookingInbox.tsx's BookingInbox) and from
@@ -28,6 +29,12 @@ export default function BookingThreadPage(props: { params: Promise<{ bookingId: 
           unmount (Next.js reuses this same page component instance across
           client-side navigations to the same route with different params). */}
       <BookingThread key={`${bookingId}-${user.uid}`} bookingId={bookingId} uid={user.uid} />
+      {/* Self-contained SP5 money surface — subscribes to its own
+          bookings/{id} + payments data and renders nothing until the accept
+          saga has staged the payments subcollection; both sides mount it,
+          it renders side-appropriately. Keyed the same as BookingThread
+          above, for the identical reset-on-route-or-identity-change reason. */}
+      <PaymentsPanel key={`payments-${bookingId}-${user.uid}`} bookingId={bookingId} uid={user.uid} />
     </main>
   );
 }

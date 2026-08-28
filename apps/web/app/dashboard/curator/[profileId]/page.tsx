@@ -7,6 +7,7 @@ import { getFirebase } from "../../../../src/lib/firebase";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { AboutForm, LocationForm, LookingForForm, AmenitiesForm, GalleryPhotosSection } from "../../../../src/curator/CuratorForms";
 import { BookingInbox } from "../../../../src/bookings/BookingInbox";
+import { DelinquencyBanner } from "../../../../src/payments/DelinquencyBanner";
 import { validateLookingFor, type ProfileDoc, type CuratorDetails, type CuratorSubtype } from "@gatekeep/shared";
 
 // Mirrors functions/src/profiles.ts's submitProfileForReview curator gate
@@ -109,6 +110,10 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
           <strong>Changes requested:</strong> {profile.rejectionReason ?? "(no reason provided)"}
         </div>
       )}
+      {/* SP5 Task 15 — only an approved curator profile can have bookings at
+          all (same gate the Bookings section below is already behind), so
+          only an approved profile can ever actually BE delinquent. */}
+      {profile.status === "approved" && <DelinquencyBanner profileId={profileId} />}
       {/* Every section below stays mounted and editable regardless of
           status (draft/pending_review/rejected/approved) — there's no
           separate "wizard" vs "editor" component split; the sections ARE
