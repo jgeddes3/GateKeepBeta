@@ -67,7 +67,17 @@ export function ContextSwitcher({ activeLabel, profiles }: { activeLabel: string
           <Link href="/join">+ Join as musician or curator</Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <ThemeToggle />
+        {/* Wrapped in a DropdownMenuItem (asChild), not a bare child: Radix's
+            dropdown content only registers Item/CheckboxItem/RadioItem/
+            SubTrigger in its roving-tabindex focus loop, so a plain <button>
+            child is reachable by mouse but skipped by arrow-key navigation.
+            onSelect calls preventDefault so cycling the theme (System ->
+            Light -> Dark) doesn't close the menu on every click the way a
+            normal item selection would; ThemeToggle's own onClick still
+            fires and does the actual write. */}
+        <DropdownMenuItem asChild onSelect={(e) => e.preventDefault()}>
+          <ThemeToggle />
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void signOutUser()}>Sign out</DropdownMenuItem>
       </DropdownMenuContent>

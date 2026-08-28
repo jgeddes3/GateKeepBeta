@@ -188,6 +188,22 @@ Every `focus-visible:ring-*` / `focus-visible:border-*` in `src/ui` reaches for 
 obligation on its own; the accompanying `ring-gk-focus/40` is a diluted supplementary glow layered
 on top of that already-compliant border, not a second independent claim to AA compliance.
 
+**Brand-mark text color (sub-project 9A task 3 addition).** The signed-in app shell
+(`src/shell/AppShell.tsx`) needed to render the "GateKeep" Syne wordmark in ember on the top bar,
+which (unlike the landing page's glass nav, always over a dark photo scrim) has to work on a light-
+theme surface too. Bare `--gk-accent` text fails AA there for the same reason the focus ring did
+(the accent note above measures it at 2.6-2.8:1 against light surfaces), and neither of the two
+named safe patterns for ember-as-text fits a wordmark: it is not a "price" or "active nav item"
+that can take the filled-chip treatment without changing what it visually is, and it is not always
+on a dark surface the way the accent note's other text exception requires. The shell reuses
+`--gk-focus` for this text instead of `--gk-accent`: dark theme resolves to ember itself (visually
+identical to the accent), light theme resolves to the same `#BF5038` computed above. At the
+wordmark's weight (`font-extrabold`, 800) and size (20px, Tailwind's `text-xl`), this clears the
+WCAG large-text 3:1 minimum with real margin (4.45-4.75:1, the same figures documented above): the
+18px size used elsewhere in this doc's mockup examples would have landed just under the 18.66px
+large-text threshold, so the shell's wordmark is deliberately sized at 20px rather than 18px
+wherever `--gk-focus` stands in for the accent as text color this way.
+
 ## Typography
 
 | Family | CSS variable | Weights | Role |

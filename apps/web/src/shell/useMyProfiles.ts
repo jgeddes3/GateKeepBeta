@@ -51,13 +51,24 @@ export function useMyProfiles(uid: string | null): ProfileSummary[] {
   return profiles;
 }
 
-// Same destination + label mapping as ProfilesList's editHref/editLabel: the
-// switcher and nav send someone to the exact same place clicking their name in
-// "Your profiles" already would, just from the shell instead of the page body.
+// Same destination as ProfilesList's editHref: the switcher and nav send
+// someone to the exact same place clicking their name in "Your profiles"
+// already would, just from the shell instead of the page body.
 export function profileHref(p: ProfileSummary): string {
   return p.type === "musician" ? `/dashboard/portfolio/${p.profileId}` : `/dashboard/curator/${p.profileId}`;
 }
 
+// NOT the same display as ProfilesList's editLabel, deliberately.
+// editLabel returns an action phrase ("finish setup", "revise and
+// resubmit", "edit portfolio") meant to stand alone as a page-level link's
+// full text. This is a status-noun suffix ("draft", "pending review") shown
+// after the profile's own name and type inside a compact multi-row switcher
+// item, matching the format apps/mobile/src/shell/ContextSwitcher.tsx
+// already uses for the same "profile name (type), status" switcher-row
+// shape, rather than the page's action-link convention. The destination
+// (profileHref above) is what the brief asked to keep identical; this label
+// is new display text for a UI surface (a global switcher) that didn't
+// exist on web before this task.
 export function profileStatusLabel(p: ProfileSummary): string | null {
   return p.status === "approved" ? null : p.status.replace("_", " ");
 }

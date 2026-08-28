@@ -87,13 +87,26 @@ function navItemsFor(context: NavContext): NavItem[] {
   return [dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }];
 }
 
-function isActive(pathname: string, href: string): boolean {
-  if (pathname === href) return true;
-  // "/dashboard" would otherwise prefix-match every dashboard sub-route,
-  // including ones already claimed by a more specific item (Bookings,
-  // Earnings): only Dashboard needs the exact-match guard, since it's the
-  // only href that is itself a prefix of other items' hrefs.
-  return href !== "/dashboard" && pathname.startsWith(`${href}/`);
+// Which single nav item, if any, is "active" for the current route. A
+// curator's Bookings href (/dashboard/curator/{id}) is a literal path
+// prefix of its own Gigs href (/dashboard/curator/{id}/gigs) and every
+// other sub-route under that profile (gigs/new, gigs/[gigId], musicians,
+// series/[id]): a naive "does href prefix-match pathname" per item made
+// BOTH Bookings and Gigs render active at once on the curator's gigs list.
+// Fixed by picking exactly one winner across the whole nav array: the
+// longest (most specific) href that matches, exact match or true path-
+// segment prefix (`${href}/`, so `/dashboard/curator/abc` never matches
+// `/dashboard/curator/abcdef` by bare string prefix). Longest-match also
+// makes the old "/dashboard is a prefix of everything" special case
+// unnecessary: Dashboard's short href only wins when nothing more specific
+// in the array also matches.
+function activeHref(pathname: string, items: NavItem[]): string | null {
+  let winner: string | null = null;
+  for (const item of items) {
+    const matches = pathname === item.href || pathname.startsWith(`${item.href}/`);
+    if (matches && (!winner || item.href.length > winner.length)) winner = item.href;
+  }
+  return winner;
 }
 
 function activeLabel(context: NavContext, profiles: ProfileSummary[], email: string | null | undefined): string {
@@ -115,6 +128,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const context = resolveContext(pathname, profiles);
   const navItems = navItemsFor(context);
   const label = activeLabel(context, profiles, user?.email);
+  const active = activeHref(pathname, navItems);
 
   return (
     <>
@@ -137,8 +151,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                 the mock) and to the same-hue, AA-safe #BF5038 in light
                 theme, DESIGN.md's own fix for this exact bare-ember-text
                 problem elsewhere, reused here rather than inventing a new
-                token for what is the same underlying color decision. */}
-            <Link href="/dashboard" className="shrink-0 font-syne text-lg font-extrabold text-gk-focus">
+                token for what is the same underlying color decision.
+                text-xl (20px), not text-lg (18px): --gk-focus vs --gk-page
+                measures 4.45:1, short of the 4.5:1 normal-text AA minimum
+                by a hair, but comfortably clears the 3:1 large-text minimum
+                (18.66px+ bold). font-extrabold (800) already qualifies as
+                bold; bumping the size is the cheaper fix over re-deriving
+                the color again. Documented in DESIGN.md. */}
+            <Link href="/dashboard" className="shrink-0 font-syne text-xl font-extrabold text-gk-focus">
               GateKeep
             </Link>
             <nav aria-label="Primary" className="hidden items-center gap-1 md:flex">
@@ -155,7 +175,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                     // --gk-on-accent text, not colored text on its own. The
                     // pill radius matches DESIGN.md's tier table, which
                     // reserves 999px for "primary CTAs and chips".
-                    isActive(pathname, item.href)
+                    item.href === active
                       ? "bg-gk-accent font-semibold text-gk-on-accent"
                       : "text-gk-muted hover:text-gk-text",
                   )}
@@ -179,8 +199,13 @@ export function AppShell({ children }: { children: ReactNode }) {
               </SheetTrigger>
               <SheetContent side="left" className="w-3/4 sm:max-w-xs">
                 <SheetHeader>
-                  {/* Same text-gk-focus reasoning as the header brand mark above. */}
-                  <SheetTitle className="text-gk-focus">GateKeep</SheetTitle>
+                  {/* Same text-gk-focus + text-xl/font-extrabold reasoning
+                      as the header brand mark above: SheetTitle's own
+                      defaults are text-lg/font-semibold, which (like the
+                      header's original text-lg) sit a hair under the
+                      large-text AA threshold, so both are overridden here
+                      too rather than relying on the component default. */}
+                  <SheetTitle className="text-xl font-extrabold text-gk-focus">GateKeep</SheetTitle>
                   <SheetDescription className="sr-only">Site navigation</SheetDescription>
                 </SheetHeader>
                 <nav aria-label="Primary" className="flex flex-col gap-1 px-4 pb-4">
@@ -198,7 +223,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                             // family (DESIGN.md "Status tints"), and a tint
                             // this light would still leave bare ember text
                             // under AA on a light surface.
-                            isActive(pathname, item.href)
+                            item.href === active
                               ? "bg-gk-accent text-gk-on-accent"
                               : "text-gk-muted hover:bg-gk-border/30 hover:text-gk-text",
                           )}

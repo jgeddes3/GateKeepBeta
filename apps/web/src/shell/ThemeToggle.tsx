@@ -1,6 +1,10 @@
 "use client";
 
-import { useLayoutEffect, useSyncExternalStore, type ComponentType } from "react";
+import {
+  forwardRef, useLayoutEffect, useSyncExternalStore,
+  type ComponentProps, type ComponentType, type MouseEvent,
+} from "react";
+import { cn } from "@/src/lib/utils";
 import { IconMonitor, IconMoon, IconSun, type IconProps } from "../ui/icons";
 
 export type ThemeChoice = "system" | "light" | "dark";
@@ -56,8 +60,21 @@ function writeTheme(theme: ThemeChoice) {
  * key before first paint, so there is no flash of the wrong theme on load;
  * useSyncExternalStore (with a fixed "system" server snapshot) is what
  * keeps this component's own render free of hydration mismatches.
+ *
+ * Forwards a ref and accepts (and merges) standard button props: sub-project
+ * 9A task 3 mounts this inside a Radix DropdownMenuItem via `asChild`
+ * (ContextSwitcher.tsx) so keyboard arrow-navigation reaches it: Radix's
+ * asChild clones the child element with its own injected props (role,
+ * tabIndex, a ref for imperative focus, onClick/onKeyDown for its
+ * roving-focus and select handling) merged on top, which only works if the
+ * child component actually forwards a ref and spreads through the props it
+ * doesn't otherwise care about, rather than rendering a fixed, prop-less
+ * button the way this component did before that mount existed.
  */
-export function ThemeToggle() {
+export const ThemeToggle = forwardRef<HTMLButtonElement, ComponentProps<"button">>(function ThemeToggle(
+  { className, onClick, ...props },
+  ref,
+) {
   const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   // Keeps <html data-theme> in sync with the resolved theme. Belt and
@@ -81,20 +98,30 @@ export function ThemeToggle() {
   const current = THEME_META[theme];
   const CurrentIcon = current.icon;
 
-  function handleClick() {
+  // Composes with an incoming onClick (Radix's own item-select handler,
+  // when this is used inside a DropdownMenuItem asChild) rather than
+  // replacing it: both the theme write and whatever the wrapping context
+  // needs to happen on click must fire.
+  function handleClick(event: MouseEvent<HTMLButtonElement>) {
     writeTheme(next);
+    onClick?.(event);
   }
 
   return (
     <button
+      ref={ref}
       type="button"
       onClick={handleClick}
       aria-label={`Theme: ${current.label}. Switch to ${THEME_META[next].label}.`}
       title={`Theme: ${current.label}`}
-      className="flex w-full items-center gap-2 rounded-gk-sm px-2 py-1.5 text-left font-sora text-sm text-gk-text outline-none hover:bg-gk-border/40 focus-visible:ring-2 focus-visible:ring-gk-focus"
+      className={cn(
+        "flex w-full items-center gap-2 rounded-gk-sm px-2 py-1.5 text-left font-sora text-sm text-gk-text outline-none hover:bg-gk-border/40 focus-visible:ring-2 focus-visible:ring-gk-focus",
+        className,
+      )}
+      {...props}
     >
       <CurrentIcon size={16} className="text-gk-muted" aria-hidden="true" />
       <span>Theme: {current.label}</span>
     </button>
   );
-}
+});
