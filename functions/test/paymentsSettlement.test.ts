@@ -9,15 +9,15 @@ import {
   computeSettlementBaseCents, DEFAULT_FEE_POLICY,
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
   type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
-  type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
+  type PaymentDoc, type ProfileDraftInput, type ReliabilityDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 // The sweep drives steps 5/6; chargeSettlement is invoked DIRECTLY for the
 // cases whose preconditions can't be produced through the app's own callables
 // (a deposit slice larger than the date is worth). Same direct-invoke style as
 // paymentsSweep.test.ts.
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
-import { IDEMPOTENCY_WINDOW_MS } from "../src/paymentsCore.js";
-import { chargeSettlement } from "../src/paymentsSettlement.js";
+import { clawbackAlertId, IDEMPOTENCY_WINDOW_MS } from "../src/paymentsCore.js";
+import { chargeSettlement, clawbackSettledOccurrence } from "../src/paymentsSettlement.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -66,6 +66,15 @@ const FLAT_DUE_CENTS = BASE_CENTS - SLICE_CENTS;
 const FLAT_FEE_CENTS = computeFeeShareCents(FLAT_DUE_CENTS, FEE.curatorFeePct);
 const FLAT_CHARGE_CENTS = FLAT_DUE_CENTS + FLAT_FEE_CENTS;
 const FLAT_EARNINGS_CENTS = computeEarningsCents(BASE_CENTS, FEE.musicianFeePct);
+
+// Task 12: what the SAME date costs when NO deposit slice is credited against
+// it — the shape both a post-clawback restore re-run and an absorbed deposit
+// settle on. The full base plus commission on the full base, which is strictly
+// more than FLAT_CHARGE_CENTS above (the slice is no longer paying for part of
+// the night). The musician's earnings are unchanged either way: they are a
+// percentage of the base, not of what the card happened to be charged.
+const FULL_FEE_CENTS = computeFeeShareCents(BASE_CENTS, FEE.curatorFeePct);
+const FULL_CHARGE_CENTS = BASE_CENTS + FULL_FEE_CENTS;
 
 // ---------- fixtures (mirroring paymentsSweep.test.ts's) ----------
 
@@ -874,5 +883,271 @@ describe("settlement — a declined charge (Task 11 owns the ladder from here)",
     expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
     expect((await getBooking(bookingId)).paymentSummary?.state).toBe("current");
     expect((await notificationsFor(musician.owner.uid)).some((n) => n.title === "You've been paid")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 12 — the post-transfer no-show clawback and its mark-removal re-run
+// ---------------------------------------------------------------------------
+
+// A booking taken all the way through the ordinary pipeline: charged at T+3 and
+// the earnings transferred. The starting position for every clawback case —
+// the clawback only exists for money that has ALREADY moved in both directions.
+async function settleFully(prefix: string) {
+  const f = await makeEndedBooking(prefix);
+  await scheduleSettlement(f.bookingId, f.gigId);
+  await makeSettlementDue(f.bookingId, f.gigId);
+  await runPaymentsSweep(Date.now());
+  const paid = (await getPayment(f.bookingId, f.gigId))!;
+  expect(paid.settlement.status).toBe("paid");
+  expect(paid.transfer.status).toBe("transferred");
+  return { ...f, paid, accountId: await musicianAccountId(f.musician.profileId) };
+}
+
+async function reliabilityFor(profileId: string): Promise<ReliabilityDoc | undefined> {
+  return (await adb.doc(`profiles/${profileId}/private/reliability`).get()).data() as ReliabilityDoc | undefined;
+}
+
+describe("settlement — the post-transfer no-show clawback", () => {
+  it("reverses the transfer, refunds the settlement AND the applied deposit, then re-settles in full when an admin reverses the report", async () => {
+    const { curator, musician, gigId, bookingId, paid, accountId } = await settleFully("clawpipe");
+    const settleIntentId = paid.settlement.intentId!;
+    const depositIntentId = paid.deposit.intentId!;
+    const transferId = paid.transfer.id!;
+    expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
+
+    // R1's precondition: the sweep has already resolved this booking to
+    // "completed" and credited it once. Seeded directly — scheduled.test.ts
+    // owns step 7 itself; this case is about what the report does to that.
+    await adb.doc(`bookings/${bookingId}`).update({ status: "completed", resolvedAt: Date.now() });
+    await adb.doc(`profiles/${musician.profileId}/private/reliability`)
+      .set({ marks: [], completedCount: 1, updatedAt: Date.now() });
+
+    // --- the report, inside the 14-day window, AFTER the money moved ---
+    await callFn("reportNoShow",
+      { bookingId, reason: "They never turned up — and I've already been billed for it." }, curator.owner.user);
+
+    const clawed = await getPayment(bookingId, gigId);
+    expect(clawed?.settlement.status).toBe("waived");
+    expect(clawed?.transfer.status).toBe("reversed");
+    // The reversed transfer's own record is deliberately KEPT — it is what the
+    // reversal undid, and the ledger row keys off the reversal's own id.
+    expect(clawed?.transfer.id).toBe(transferId);
+    expect(clawed?.transfer.amountCents).toBe(FLAT_EARNINGS_CENTS);
+    expect(clawed?.deposit.status).toBe("refunded");
+    expect(typeof clawed?.deposit.resolvedAt).toBe("number");
+    // The consumed charge handle stays until the RESTORE clears it (the
+    // outstanding-intent guard's contract) — the clawback never clears it.
+    expect(clawed?.settlement.intentId).toBe(settleIntentId);
+    expect(clawed?.settlement.chargingSince).toBeNull();
+
+    // THE MONEY, both directions. The musician's balance is debited by exactly
+    // what they were paid, and the curator gets back the settlement charge AND
+    // the deposit that rode the same economics.
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await fakeObject(transferId).then((t) => t?.reversed)).toBe(true);
+    expect(await fakeObject(settleIntentId).then((i) => i?.refundedCents)).toBe(FLAT_CHARGE_CENTS);
+    expect(await fakeObject(depositIntentId).then((i) => i?.refundedCents)).toBe(DEPOSIT_CHARGE_CENTS);
+    expect(await idemUsed(`${bookingId}:${gigId}:clawback`)).toBe(true);
+    expect(await idemUsed(`${bookingId}:${gigId}:clawback-refund`)).toBe(true);
+    expect(await idemUsed(`${bookingId}:${gigId}:clawback-deposit`)).toBe(true);
+
+    // Three audit rows for three Stripe objects.
+    const rows = await ledgerRows(bookingId);
+    const reversalRow = rows.find((r) => r.kind === "transfer_reversal");
+    expect(reversalRow?.amountCents).toBe(FLAT_EARNINGS_CENTS);
+    expect(reversalRow?.profileId).toBe(musician.profileId);
+    expect(reversalRow?.gigId).toBe(gigId);
+    const refunds = rows.filter((r) => r.kind === "refund");
+    expect(refunds.map((r) => r.amountCents).sort((a, b) => a - b))
+      .toEqual([DEPOSIT_CHARGE_CENTS, FLAT_CHARGE_CENTS].sort((a, b) => a - b));
+    expect(refunds.every((r) => r.profileId === curator.profileId)).toBe(true);
+
+    // Nothing of this booking's money is outstanding any more.
+    expect((await getBooking(bookingId)).paymentSummary)
+      .toEqual({ state: "current", heldCents: 0, paidCents: 0, transferredCents: 0 });
+    // SP4 R1 is intact underneath: the report clawed the completion credit back.
+    expect((await reliabilityFor(musician.profileId))?.completedCount).toBe(0);
+    expect((await getBooking(bookingId)).status).toBe("cancelled_by_musician");
+
+    // A SECOND clawback is a silent no-op — the CAS refuses a doc that is no
+    // longer paid/transferred, so nothing moves and no ticket is raised.
+    await clawbackSettledOccurrence(bookingId, gigId, Date.now());
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await fakeObject(settleIntentId).then((i) => i?.refundedCents)).toBe(FLAT_CHARGE_CENTS);
+    expect(await adminAlert(clawbackAlertId(bookingId, gigId))).toBeUndefined();
+
+    // Stripe's own `transfer.reversed` for the reversal WE made: both rows key
+    // off the reversal object's id, so the webhook's is deduped away.
+    expect((await postWebhook(fakeEvent("transfer.reversed", {
+      id: transferId, amount: FLAT_EARNINGS_CENTS, amount_reversed: FLAT_EARNINGS_CENTS,
+      metadata: { bookingId, gigId, purpose: "earnings" },
+      reversals: { data: [{ id: reversalRow!.stripeId }] },
+    }))).status).toBe(200);
+    expect((await ledgerRows(bookingId)).filter((r) => r.kind === "transfer_reversal").length).toBe(1);
+
+    // --- the report was FALSE: an admin removes the mark (SP4 F4) ---
+    const admin = await makeAdminUser("clawpipea");
+    await callFn("removeReliabilityMark",
+      { musicianProfileId: musician.profileId, bookingId, kind: "reported_no_show" }, admin.user);
+
+    expect((await getBooking(bookingId)).status).toBe("completed");
+    expect((await reliabilityFor(musician.profileId))?.completedCount).toBe(1);
+
+    // ...and the MONEY is re-opened with it: the date is due again, on a fresh
+    // attempt so its Stripe keys are new, with the pre-clawback late-fee
+    // bookkeeping cleared and the refunded deposit left refunded.
+    const reopened = await getPayment(bookingId, gigId);
+    expect(reopened?.settlement.status).toBe("pending");
+    expect(reopened?.settlement.settleAfter).toBeLessThanOrEqual(Date.now());
+    expect(reopened?.settlement.intentId).toBeNull();
+    expect(reopened?.settlement.attempts).toBe(1);
+    expect(reopened?.settlement.nextRetryAt).toBeNull();
+    expect(reopened?.settlement.chargingSince).toBeNull();
+    expect(reopened?.settlement.lateFeeCents).toBeNull();
+    expect(reopened?.settlement.lateFeeMusicianCents).toBeNull();
+    expect(reopened?.settlement.delinquentAt).toBeNull();
+    expect(reopened?.deposit.status).toBe("refunded");
+    expect(reopened?.transfer.status).toBe("reversed");
+
+    // --- and the next sweep settles it all over again, from scratch ---
+    const rerun = await runPaymentsSweep(Date.now());
+    expect(rerun.settlementsCharged).toBeGreaterThanOrEqual(1);
+    expect(rerun.transfersMade).toBeGreaterThanOrEqual(1);
+
+    const resettled = await getPayment(bookingId, gigId);
+    expect(resettled?.settlement.status).toBe("paid");
+    // THE FULL BASE, with no slice credit: that deposit went back in the
+    // clawback, so there is no escrow left to count against the date.
+    expect(resettled?.settlement.computedCents).toBe(BASE_CENTS);
+    expect(resettled?.settlement.feeShareCents).toBe(FULL_FEE_CENTS);
+    expect(resettled?.settlement.intentId).not.toBe(settleIntentId);
+    expect(await fakeObject(resettled!.settlement.intentId!).then((i) => i?.amountCents)).toBe(FULL_CHARGE_CENTS);
+    // Fresh, attempt-scoped keys on both legs — without the attempts bump these
+    // would replay the consumed originals and no money would move.
+    expect(await idemUsed(`${bookingId}:${gigId}:settle:1`)).toBe(true);
+    expect(await idemUsed(`${bookingId}:${gigId}:earn:1`)).toBe(true);
+    // The musician is paid the same earnings again, on a genuinely new transfer.
+    expect(resettled?.transfer.status).toBe("transferred");
+    expect(resettled?.transfer.id).not.toBe(transferId);
+    expect(resettled?.transfer.amountCents).toBe(FLAT_EARNINGS_CENTS);
+    expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
+    // The deposit is never re-applied — claiming escrow that came back would be
+    // a second, phantom credit against the same date.
+    expect(resettled?.deposit.status).toBe("refunded");
+    expect(await fakeObject(depositIntentId).then((i) => i?.refundedCents)).toBe(DEPOSIT_CHARGE_CENTS);
+    expect((await getBooking(bookingId)).paymentSummary?.transferredCents).toBe(FLAT_EARNINGS_CENTS);
+  });
+
+  it("issues NO second deposit refund when the settlement had already absorbed the deposit", async () => {
+    const { curator, musician, gigId, bookingId } = await makeEndedBooking("clawabs");
+    const accountId = await musicianAccountId(musician.profileId);
+    const depositIntentId = (await getPayment(bookingId, gigId))!.deposit.intentId!;
+
+    // The ABSORPTION shape: an `unpaid` deposit carrying no intent by the time
+    // the date settles (a birth deposit the sweep never got to). settlementMath
+    // credits no slice, so the settlement charges the FULL base and
+    // finalizeSettlementSuccess retires the deposit as `refunded` with no money
+    // moving. Seeded, because the app cannot produce it on a past-dated
+    // occurrence — step 3 only charges future-dated deposits.
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
+      "deposit.status": "unpaid", "deposit.intentId": null,
+      "deposit.chargeId": null, "deposit.chargedAt": null,
+    });
+    await runPaymentsSweep(Date.now());                    // step 4 schedules it
+    expect((await getPayment(bookingId, gigId))?.settlement.status).toBe("pending");
+    await makeSettlementDue(bookingId, gigId);
+    await runPaymentsSweep(Date.now());                    // step 5 charges + transfers
+
+    const paid = await getPayment(bookingId, gigId);
+    expect(paid?.settlement.status).toBe("paid");
+    expect(paid?.settlement.computedCents).toBe(BASE_CENTS);   // the full base was charged
+    expect(paid?.deposit.status).toBe("refunded");             // absorbed, not applied
+    expect(paid?.transfer.status).toBe("transferred");
+    expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
+
+    await callFn("reportNoShow", { bookingId, reason: "Nobody showed." }, curator.owner.user);
+
+    const clawed = await getPayment(bookingId, gigId);
+    expect(clawed?.settlement.status).toBe("waived");
+    expect(clawed?.transfer.status).toBe("reversed");
+    expect(clawed?.deposit.status).toBe("refunded");
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    // The settlement refund already covered the WHOLE date...
+    expect(await fakeObject(paid!.settlement.intentId!).then((i) => i?.refundedCents)).toBe(FULL_CHARGE_CENTS);
+    // ...so the deposit's own accept-time charge is untouched. A second refund
+    // here would be a refund of money this occurrence never kept.
+    expect(await fakeObject(depositIntentId).then((i) => i?.refundedCents)).toBe(0);
+    expect(await idemUsed(`${bookingId}:${gigId}:clawback-deposit`)).toBe(false);
+    expect((await ledgerRows(bookingId)).filter((r) => r.kind === "refund").length).toBe(1);
+  });
+
+  it("escalates instead of moving money when Stripe refuses the reversal", async () => {
+    const { curator, gigId, bookingId, paid, accountId } = await settleFully("clawdbl");
+    const alertId = clawbackAlertId(bookingId, gigId);
+
+    await callFn("reportNoShow", { bookingId, reason: "Did not play." }, curator.owner.user);
+    expect((await getPayment(bookingId, gigId))?.transfer.status).toBe("reversed");
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await adminAlert(alertId)).toBeUndefined();
+
+    // The shape the CAS cannot see: the doc is back to paid/transferred (an
+    // operator's repair, a restored backup) against a transfer Stripe has
+    // ALREADY reversed — and with the key that would replay our own reversal
+    // expired, exactly as real Stripe drops it after 24h.
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
+      "settlement.status": "paid", "transfer.status": "transferred", "deposit.status": "applied",
+    });
+    await expireIdemKey(`${bookingId}:${gigId}:clawback`);
+    await clawbackSettledOccurrence(bookingId, gigId, Date.now());
+
+    const alert = await adminAlert(alertId);
+    expect(alert?.kind).toBe("clawback_failed");
+    expect(alert?.detail).toContain("already been reversed");
+    expect(alert?.bookingId).toBe(bookingId);
+    expect(alert?.gigId).toBe(gigId);
+    expect(alert?.resolvedAt).toBeNull();
+    // NOTHING moved on the failed run: the refusal comes before either refund.
+    const after = await getPayment(bookingId, gigId);
+    expect(after?.settlement.status).toBe("paid");
+    expect(after?.transfer.status).toBe("transferred");
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await fakeObject(paid.settlement.intentId!).then((i) => i?.refundedCents)).toBe(FLAT_CHARGE_CENTS);
+    expect(await fakeObject(paid.deposit.intentId!).then((i) => i?.refundedCents)).toBe(DEPOSIT_CHARGE_CENTS);
+  });
+
+  it("records a FOREIGN transfer.reversed as a ledger row only, and dedupes every replay of it", async () => {
+    const { musician, gigId, bookingId, paid } = await settleFully("clawwh");
+    const transferId = paid.transfer.id!;
+    // A reversal nothing in this codebase made — an operator reversing our
+    // transfer by hand in the Stripe dashboard.
+    const reversalId = `trr_dashboard_${Date.now()}`;
+    const object = {
+      id: transferId, amount: FLAT_EARNINGS_CENTS, amount_reversed: FLAT_EARNINGS_CENTS,
+      metadata: { bookingId, gigId, purpose: "earnings" },
+      reversals: { data: [{ id: reversalId }] },
+    };
+    const evt = fakeEvent("transfer.reversed", object);
+    expect((await postWebhook(evt)).status).toBe(200);
+
+    const row = (await ledgerRows(bookingId)).find((r) => r.kind === "transfer_reversal");
+    expect(row?.amountCents).toBe(FLAT_EARNINGS_CENTS);
+    expect(row?.stripeId).toBe(reversalId);
+    expect(row?.profileId).toBe(musician.profileId);
+    expect(row?.gigId).toBe(gigId);
+
+    // LEDGER ONLY: the payment doc is deliberately untouched — half-applying
+    // someone else's decision (flipping the transfer while leaving the curator
+    // charged) is worse than recording it and saying so.
+    const after = await getPayment(bookingId, gigId);
+    expect(after?.settlement.status).toBe("paid");
+    expect(after?.transfer.status).toBe("transferred");
+
+    // Same event id: the claim machine dedupes it before the handler runs.
+    expect((await postWebhook(evt)).text).toBe("duplicate");
+    // A FRESH event id carrying the same reversal DOES reach the handler — and
+    // the deterministic ledger id collapses it into the row above.
+    expect((await postWebhook(fakeEvent("transfer.reversed", object))).status).toBe(200);
+    expect((await ledgerRows(bookingId)).filter((r) => r.kind === "transfer_reversal").length).toBe(1);
   });
 });

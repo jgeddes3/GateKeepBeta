@@ -20,7 +20,9 @@ import { getStripe, stripeSecretKey, stripeWebhookSecret } from "./stripeClient.
 //    Task 11
 //  - payment_intent.payment_failed -> recorded no-op (see below)
 //  - payout.paid/payout.failed -> Task 13
-//  - transfer.reversed      -> Task 12 (ledger only)
+//  - transfer.reversed      -> Task 12, registered in paymentsSettlement.ts
+//    beside the clawback whose reversals it dedupes against (ledger only —
+//    it writes no document state)
 // Unknown/unhandled types: record the event doc, 200 OK (Stripe requires 2xx
 // or it retries forever).
 export type WebhookHandler = (object: Record<string, unknown>, eventId: string) => Promise<void>;

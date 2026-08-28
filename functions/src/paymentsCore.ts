@@ -717,7 +717,7 @@ const ALERT_LOG_THROTTLE_MS = 24 * 60 * 60 * 1000;
 
 // ---------- the adminAlerts id vocabulary ----------
 //
-// EVERY alert id in SP5 is built by one of these seven functions, and they all
+// EVERY alert id in SP5 is built by one of these eight functions, and they all
 // live here rather than beside their raisers (review round 3, I3). Three
 // reasons, and the third is the one that bites:
 //  - the ids are DETERMINISTIC per underlying problem, so an hourly sweep
@@ -769,6 +769,15 @@ export function settlementPendingAlertId(bookingId: string, gigId: string): stri
 // fix is Express onboarding, not an intent.
 export function settlementPayoutAlertId(bookingId: string, gigId: string): string {
   return `settlement-payout:${bookingId}:${gigId}`;
+}
+// Task 12: a post-transfer no-show clawback that could not complete. SHARED by
+// the clawback's own three failure routes (a Stripe refusal, a lost terminal
+// write, a `paid` occurrence with no transfer to reverse) and by reportNoShow's
+// defensive catch around the call — all four mean "this occurrence's money did
+// not come back and a human must finish it", which is one problem for one
+// operator, not four rows.
+export function clawbackAlertId(bookingId: string, gigId: string): string {
+  return `clawback:${bookingId}:${gigId}`;
 }
 
 // The durable "a human has to look at this" queue (adminAlerts/{alertId}).

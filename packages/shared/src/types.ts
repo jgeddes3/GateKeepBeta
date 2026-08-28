@@ -723,7 +723,16 @@ export type AdminAlertKind =
   // escrow that does not exist. The deposit twin of `settlement_raced`: the
   // ledger row is written from Stripe's own attested amount so the charge is
   // never invisible, and the unwind (refund it) is an operator's call.
-  | "deposit_raced";
+  | "deposit_raced"
+  // SP5 Task 12: the post-transfer no-show CLAWBACK could not complete. Three
+  // shapes, one ticket, because an operator resolves them the same way (look at
+  // what Stripe actually holds for this occurrence, then finish the unwind by
+  // hand): the transfer reversal or one of the two refunds threw; the terminal
+  // write lost its race after the money had already come back; or the reported
+  // occurrence is `paid` with NO transfer to reverse, so the automatic unwind
+  // has no handle on it at all. The curator has been charged for a date they
+  // report never happened, so this is never merely logged.
+  | "clawback_failed";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;

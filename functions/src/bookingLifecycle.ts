@@ -10,6 +10,10 @@ import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
 import { markDepositsPendingInTx, resolveDepositPending } from "./paymentsCore.js";
+// SP5 Task 12. The two settlement transitions a no-show report and its reversal
+// drive — see paymentsSettlement.ts's header for why this leg of the import
+// graph exists and why it is only these two symbols.
+import { clawbackSettledOccurrence, reopenSettlementForRestore } from "./paymentsSettlement.js";
 
 // Same "already started" message for both the whole-booking and
 // single-occurrence cancel paths — a caller who missed the cancellation
@@ -801,6 +805,12 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
     // startsAt can be edited afterwards) and handled explicitly below.
     const depositsToResolve = markDepositsPendingInTx(
       tx, futurePaymentsSnap.docs.filter((d) => d.id !== occurrenceGigId), null, now);
+    // SP5 Task 12: set below when the reported date's money has ALREADY moved
+    // in both directions, so the post-commit clawback has to run. Declared out
+    // here (rather than derived from the returned doc later) because this
+    // transaction's own read is the one that saw the pre-report state — a
+    // re-read after the commit would race the very unwind it is deciding on.
+    let clawbackNeeded = false;
     const reportedPayment = reportedPaymentSnap.data() as PaymentDoc | undefined;
     if (reportedPayment) {
       const reportedUpdate: { [key: string]: unknown } = { updatedAt: now };
@@ -837,21 +847,28 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
       // Only a deposit flip needs the executor — a settlement-only waive
       // moves no money and has nothing for resolveDepositPending to do.
       if (flipsDeposit) depositsToResolve.push(occurrenceGigId);
-      // Task 12's DISCOVERY HOOK. An `applied` deposit on the reported date
-      // means the escrow was already released into a settlement — money has
-      // very likely reached the musician for a show that (per this report)
-      // never happened. Nothing here can undo that (it needs a transfer
-      // reversal, not a refund), and waiving a still-unsettled settlement
-      // alongside it leaves a deliberately half-unwound doc. Logged loudly so
-      // the case is findable before Task 12 lands, and so it shows up in
-      // production logs if Task 12 ever misses one.
-      if (reportedPayment.deposit.status === "applied") {
+      // TASK 12's HAND-OFF (this is what the Task 8 discovery warn became). A
+      // `paid` settlement on the reported date means the money has ALREADY
+      // moved in both directions — the curator was charged at T+3 and the
+      // musician was paid — for a show this report says never happened. The
+      // unwind is a transfer reversal plus refunds, so it cannot live in here
+      // (it calls Stripe, and this is a transaction); it runs post-commit,
+      // against the terminal states the guards above deliberately left standing.
+      clawbackNeeded = reportedPayment.settlement.status === "paid";
+      if (!clawbackNeeded && reportedPayment.deposit.status === "applied") {
+        // An `applied` deposit whose settlement is NOT `paid` is a shape SP5
+        // does not produce — finalizeSettlementSuccess writes both in one
+        // update — so it means escrow was released into a settlement that then
+        // lost its terminal write, and the clawback has no `paid` doc to act
+        // on. Kept as a loud log for exactly that: the case is real enough to
+        // find, and rare enough not to automate.
         console.warn(`reportNoShow: reported occurrence ${bookingId}/${occurrenceGigId} has an APPLIED deposit`
-          + `${waivesSettlement ? " (settlement waived)" : ""} — post-transfer clawback required (Task 12)`);
+          + ` under a "${reportedPayment.settlement.status}" settlement`
+          + `${waivesSettlement ? " (settlement waived)" : ""} — released escrow with no paid settlement to claw back`);
       }
     }
 
-    return { occurrenceGigId, depositsToResolve };
+    return { occurrenceGigId, depositsToResolve, clawbackNeeded };
   });
 
   // SP5 Task 8: the money, post-commit — see executeCancellation's identical
@@ -859,6 +876,20 @@ export const reportNoShow = onCall<ReportNoShowInput>({ region: "us-central1" },
   for (const gigIdToResolve of result.depositsToResolve) {
     await resolveDepositPending(bookingId, gigIdToResolve).catch((e) =>
       console.error(`reportNoShow: deposit resolution failed for ${bookingId}/${gigIdToResolve} (sweep will retry)`, e));
+  }
+
+  // SP5 Task 12: the POST-TRANSFER unwind, for the one occurrence whose money
+  // had already moved. Post-commit for the same reason the deposit executor is:
+  // the transaction records the DECISION, the Stripe calls are the effect.
+  // clawbackSettledOccurrence never throws — every failure route inside it ends
+  // in a durable `clawback_failed` alert — so this catch only covers the
+  // unexpected, and it swallows rather than propagates for the same reason
+  // every other post-commit money step here does: the no-show report has
+  // already committed, and failing the caller now would tell the curator their
+  // report did not land when it did.
+  if (result.clawbackNeeded) {
+    await clawbackSettledOccurrence(bookingId, result.occurrenceGigId, now).catch((e) =>
+      console.error(`reportNoShow: clawback failed for ${bookingId}/${result.occurrenceGigId}`, e));
   }
 
   await recomputeReliability(booking.musicianProfileId);
@@ -902,11 +933,19 @@ interface RemoveReliabilityMarkInput {
 //      (the caller below gates the call on kind === "reported_no_show").
 // completedCount increments here mirror scheduled.ts step 7's own idiom
 // exactly (read-modify-write, merge:true) — it's the exact credit the false
-// report stole. Deposit/acceptedTerms are left completely untouched (the
-// terms of the deal never changed, only whether the show is credited as
-// having happened).
+// report stole. acceptedTerms are left completely untouched (the terms of the
+// deal never changed, only whether the show is credited as having happened).
+//
+// SP5 TASK 12 EXTENDS THIS TO THE MONEY. The false report did not only steal
+// the completion credit: it waived the date's settlement (and, if the date had
+// already settled, clawed the whole thing back — the charge refunded, the
+// earnings transfer reversed). Restoring the booking without re-opening that
+// leaves the musician unpaid for a show the platform has just re-affirmed
+// happened. `reportedGigId` is the MARK's own gigId — the exact occurrence the
+// report was measured against — passed in by the caller rather than re-derived
+// here, so the money re-opened is provably the money the report unwound.
 async function restoreFalselyReportedBooking(
-  db: FirebaseFirestore.Firestore, bookingId: string, now: number,
+  db: FirebaseFirestore.Firestore, bookingId: string, reportedGigId: string, now: number,
 ): Promise<{ restored: boolean; curatorProfileId: string | null; musicianProfileId: string | null }> {
   const bookingRef = db.doc(`bookings/${bookingId}`);
   const bookingSnap = await bookingRef.get();
@@ -949,6 +988,30 @@ async function restoreFalselyReportedBooking(
     await recomputeReliability(booking.musicianProfileId);
   }
 
+  // THE MONEY, re-opened. Runs LAST and best-effort on purpose: the status and
+  // credit restores above are SP4's and must never be held hostage to a
+  // payments failure, and this is a self-contained re-arming of one payment doc
+  // — a no-op for a booking that never had one (pre-SP5) or whose settlement
+  // was not waived. The re-run itself is the sweep's: this only sets the date
+  // due again, and chargeSettlement reprices it from the frozen terms, charges
+  // the FULL base (the deposit went back in the clawback, so there is no slice
+  // credit left to apply) and re-transfers the earnings on fresh keys.
+  try {
+    const reopened = await reopenSettlementForRestore(bookingId, reportedGigId, now);
+    if (reopened) {
+      console.info(
+        `restoreFalselyReportedBooking: re-opened the settlement for ${bookingId}/${reportedGigId} — the next sweep run will re-charge and re-transfer it`);
+    }
+  } catch (e) {
+    // The booking is already restored, so throwing here would abort the
+    // audit row and both notifications for work that DID happen. Logged with
+    // the exact recovery instead: the doc is one field-set away from correct.
+    console.error(
+      `restoreFalselyReportedBooking: failed to re-open the settlement for ${bookingId}/${reportedGigId} — the booking is`
+      + " restored but the date will NOT re-settle; set settlement.status=pending, settleAfter=now, intentId=null and bump"
+      + " settlement.attempts on that payment doc to hand it back to the sweep", e);
+  }
+
   return { restored: true, curatorProfileId: booking.curatorProfileId, musicianProfileId: booking.musicianProfileId };
 }
 
@@ -967,7 +1030,12 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
   // Read-modify-write transaction (mirrors flagAccount's rationale) —
   // audit-preserving: flips removedByAdmin on the matching entry, never
   // splices it out of the array.
-  await db.runTransaction(async (tx) => {
+  // Returns the removed mark's OWN gigId — the occurrence the report was
+  // measured against, which SP5 Task 12's restore needs to find the money the
+  // report unwound. Taken from the mark rather than re-queried, because the
+  // "most recent past occurrence" query reportNoShow used to pick it can
+  // legitimately select a different date by the time an admin reverses this.
+  const removedMarkGigId = await db.runTransaction(async (tx) => {
     const snap = await tx.get(reliabilityRef);
     const marks = (snap.data() as ReliabilityDoc | undefined)?.marks ?? [];
     // First non-removed match — if an admin already removed one prior mark
@@ -979,6 +1047,7 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
     if (idx === -1) throw new HttpsError("not-found", "No matching reliability mark found.");
     const nextMarks = marks.map((m, i) => (i === idx ? { ...m, removedByAdmin: true } : m));
     tx.update(reliabilityRef, { marks: nextMarks, updatedAt: now });
+    return marks[idx].gigId;
   });
 
   await recomputeReliability(musicianProfileId);
@@ -987,7 +1056,7 @@ export const removeReliabilityMark = onCall<RemoveReliabilityMarkInput>({ region
   // a late_cancel removal only ever changes the MARK judgment, never the
   // (genuinely real) cancellation itself.
   const { restored, curatorProfileId } = kind === "reported_no_show"
-    ? await restoreFalselyReportedBooking(db, bookingId, now)
+    ? await restoreFalselyReportedBooking(db, bookingId, removedMarkGigId, now)
     : { restored: false, curatorProfileId: null };
 
   await writeAudit({
