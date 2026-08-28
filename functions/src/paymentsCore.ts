@@ -1,13 +1,17 @@
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  computeDepositCents, computeExpectedTotalCents, computeFeeShareCents, DEFAULT_FEE_POLICY,
+  computeDepositCents, computeEarningsCents, computeExpectedTotalCents, computeFeeShareCents,
+  computeSettlementBaseCents, resolveFeePolicy, isValidDocId,
+  DEFAULT_FEE_POLICY, SETTLEMENT_RETRY_OFFSETS_MS,
 } from "@gatekeep/shared";
 import type {
-  BookingRequestDoc, BudgetStructure, DepositStatus, FeePolicy, LedgerEntry, PaymentDoc,
-  PaymentSummary, StripeProfileDoc,
+  AdminAlertDoc, AdminAlertKind, BookingRequestDoc, BudgetStructure, DepositStatus, FeePolicy,
+  GigDoc, LedgerEntry, PaymentDoc, PaymentSummary, StripeProfileDoc,
 } from "@gatekeep/shared";
-import { getStripe } from "./stripeClient.js";
+import { getStripe, StripeCardDeclinedError, StripePaymentPendingError } from "./stripeClient.js";
+import { notifyProfileMembers } from "./notifications.js";
+import { paymentIntentSucceededHandlers } from "./paymentsWebhook.js";
 
 // profiles/{profileId}/private/stripe — the payment-identity doc. Shared
 // helper so every SP5 callable/handler that needs the cached Stripe identity
@@ -532,26 +536,577 @@ export async function declareCuratorDelinquent(profileId: string, now: number): 
   return true;
 }
 
+// A `{ lastUpdateTime: ... }` precondition that lost its race. The Admin SDK
+// surfaces the underlying gRPC status as a numeric code (9 =
+// FAILED_PRECONDITION); the string forms are a defensive fallback, not the
+// expected shape. Mirrors isAlreadyExists above.
+//
+// Lives here (rather than in paymentsSweep.ts, where Task 9 first wrote it)
+// because Task 10's settlement writes use the identical optimistic-CAS idiom
+// and paymentsSweep imports paymentsCore, never the other way round.
+export function isFailedPrecondition(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === 9 || code === "failed-precondition" || code === "FAILED_PRECONDITION";
+}
+
+const ALERT_LOG_THROTTLE_MS = 24 * 60 * 60 * 1000;
+
+// The durable "a human has to look at this" queue (adminAlerts/{alertId}).
+// Every SP5 path that deliberately REFUSES to move money — because moving it
+// would risk moving it twice — upserts a row here keyed on the underlying
+// PROBLEM (not the run), and throttles its console.error to once per UTC day.
+// The row is the signal; the log is a convenience.
+//
+// Moved here from paymentsSweep.ts in Task 10: chargeSettlement escalates the
+// same way the sweep does (a settlement whose terminal write lost a race to a
+// no-show waive), and the import direction only permits sharing in this
+// direction.
+//
+// Returns whether the caller should log this observation.
+export async function recordAdminAlert(a: {
+  alertId: string; kind: AdminAlertKind; detail: string;
+  bookingId: string; gigId: string | null; now: number;
+}): Promise<boolean> {
+  const ref = getFirestore().doc(`adminAlerts/${a.alertId}`);
+  try {
+    const existing = (await ref.get()).data() as AdminAlertDoc | undefined;
+    if (!existing) {
+      const doc: AdminAlertDoc = {
+        kind: a.kind, detail: a.detail, bookingId: a.bookingId, gigId: a.gigId,
+        firstSeenAt: a.now, lastSeenAt: a.now, runCount: 1, resolvedAt: null,
+      };
+      await ref.set(doc);
+      return true;
+    }
+    // `resolvedAt: null` on every recurrence: an operator marking this
+    // resolved while the condition still exists must not silence it forever —
+    // the next observation reopens the row. `firstSeenAt` is deliberately NOT
+    // re-stamped (see AdminAlertDoc): it measures the episode, not the ticket.
+    await ref.update({
+      kind: a.kind, detail: a.detail, lastSeenAt: a.now,
+      runCount: FieldValue.increment(1), resolvedAt: null,
+    });
+    // Log once per UTC day — OR whenever the KIND changes, however recently we
+    // logged. A booking moving from `stuck_saga_marker` to
+    // `expired_booking_saga_marker` (or a staged saga aging into
+    // `stale_accept_saga`) is the condition genuinely changing shape, which is
+    // exactly the transition an operator reading logs needs to see; throttling
+    // it away would leave the last line they saw describing the wrong problem.
+    return existing.kind !== a.kind
+      || Math.floor(existing.lastSeenAt / ALERT_LOG_THROTTLE_MS) !== Math.floor(a.now / ALERT_LOG_THROTTLE_MS);
+  } catch (e) {
+    // The escalation itself failed. Log UNTHROTTLED — losing the durable row
+    // is exactly when the noisy log is worth having.
+    console.error(`recordAdminAlert: failed to record admin alert ${a.alertId}`, e);
+    return true;
+  }
+}
+
+// ---------- Task 10: settlement (true-ups, T+3 charge, earnings transfer) ----------
+
 // What a settlement charge attempt did, from the sweep's point of view.
 // "skipped" covers every "nothing to do / not chargeable yet" outcome so the
 // sweep's counters stay honest about what actually moved.
-export type SettlementChargeOutcome = "skipped" | "charged" | "declined";
+export type SettlementChargeOutcome =
+  | "skipped" | "charged" | "declined" | "pending" | "waived";
 
-// STUB — Task 10 implements the body (true-ups, the T+3 charge, the earnings
-// transfer, the past_due/attempts/delinquency bookkeeping). It exists NOW,
-// with this signature, because Task 9 lands the two sweep loops that call it
-// (due settlements + past_due retries): landing the loops against a no-op
-// keeps the sweep's step structure, pagination, error isolation and counters
-// under test from the start, so Task 10 only has to fill in this function
-// rather than also inventing where it gets called from.
+// The escalation queue's naming contract for this problem (one row per stuck
+// occurrence, not one per sweep run) — mirrors paymentsSweep.ts's own
+// `stuck-saga:` / `stale-pending:` id builders.
+function settlementRacedAlertId(bookingId: string, gigId: string): string {
+  return `settlement-raced:${bookingId}:${gigId}`;
+}
+
+// Everything one occurrence's settlement owes, derived ENTIRELY from
+// server-held state: the booking's FROZEN accepted terms, the occurrence's own
+// gig duration, the curator-reported true-up on the payment doc, and the
+// booking's fee-policy snapshot. No client input reaches this (spec §4) — the
+// true-up callable writes only validated integer extras, and everything else
+// comes off documents only the server writes.
+interface SettlementMath {
+  finalBase: number;      // what the date is finally worth (terms + true-up)
+  creditsDeposit: boolean;// does the held/applied deposit slice count against it?
+  sliceCredit: number;    // the slice actually credited (0 for a refunded deposit)
+  due: number;            // finalBase - sliceCredit; NEGATIVE only in the defensive R8 case
+  feeShare: number;       // curator commission on `due` (0 when nothing is due)
+  lateFee: number;        // Task 11's delinquency fee, once attached
+  chargeTotal: number;    // what the card is charged this run
+  earnings: number;       // what the musician receives
+}
+
+function settlementMath(p: PaymentDoc, booking: BookingRequestDoc, gig: GigDoc): SettlementMath {
+  // resolveFeePolicy, never a hand-rolled fallback (money.ts's own warning):
+  // the accept-time snapshot and the default must not drift apart.
+  const feePolicy = resolveFeePolicy(booking.feePolicy);
+  const terms = booking.acceptedTerms!;
+  const finalBase = computeSettlementBaseCents(booking.structure, terms.amountCents, {
+    // THIS occurrence's own duration — an occurrence detached from its series
+    // template with an edited duration settles on its own (sp4-rulings).
+    durationMinutes: gig.durationMinutes,
+    extraMinutes: p.settlement.trueUp?.extraMinutes ?? 0,
+    songCount: terms.expectedQuantity,
+    extraSongs: p.settlement.trueUp?.extraSongs ?? 0,
+  });
+  // The deposit only counts against the settlement while it is actually the
+  // curator's money sitting in escrow. A `refunded` deposit — the post-clawback
+  // restore case (Task 12) — has already gone back, so the re-run charges the
+  // FULL base with no slice credit.
+  const creditsDeposit = p.deposit.status === "applied" || p.deposit.status === "held";
+  const sliceCredit = creditsDeposit ? p.deposit.sliceCents : 0;
+  const due = finalBase - sliceCredit;
+  const feeShare = due > 0 ? computeFeeShareCents(due, feePolicy.curatorFeePct) : 0;
+  const lateFee = p.settlement.lateFeeCents ?? 0;   // present only once delinquent (Task 11)
+  const earnings = computeEarningsCents(finalBase, feePolicy.musicianFeePct)
+    + (p.settlement.lateFeeMusicianCents ?? 0);
+  return {
+    finalBase, creditsDeposit, sliceCredit, due, feeShare, lateFee,
+    chargeTotal: due + feeShare + lateFee, earnings,
+  };
+}
+
+// The defense-in-depth waive (spec §4): a date that no longer belongs to this
+// booking is owed nothing, so the settlement is waived and whatever deposit is
+// still outstanding goes back. Deliberately identical in shape to the sweep's
+// step-4 waive branch — the only difference is WHEN the linkage broke (before
+// scheduling vs. after it).
 //
-// Contract for Task 10: must be safe to call zero, one or many times for the
-// same (bookingId, gigId) — the sweep re-runs whatever is still due — and must
-// own its own attempts/nextRetryAt/delinquency writes (the sweep never touches
-// settlement dunning fields itself).
+// Rule 3 (a staged accept saga's `unpaid` docs are step 1's alone) needs no
+// check here: chargeSettlement only ever reaches this for a `pending`/
+// `past_due` settlement, and a staged doc's settlement is `not_due`.
+async function waiveUnlinkedSettlement(
+  bookingId: string, gigId: string, p: PaymentDoc,
+  baseline: FirebaseFirestore.Timestamp, now: number,
+): Promise<SettlementChargeOutcome> {
+  const ref = getFirestore().doc(`bookings/${bookingId}/payments/${gigId}`);
+  const updates: Record<string, unknown> = {
+    "settlement.status": "waived", "settlement.nextRetryAt": null, updatedAt: now,
+  };
+  let resolvePending = false;
+  if (p.deposit.status === "held" || (p.deposit.status === "unpaid" && p.deposit.intentId != null)) {
+    // Held escrow — or an unpaid doc whose birth charge is still in flight —
+    // goes back through the pending state, so the executor (here, or the
+    // sweep's step 2 on a later run if the refund fails) is what actually
+    // moves the money.
+    updates["deposit.status"] = "refund_pending";
+    resolvePending = true;
+  } else if (p.deposit.status === "unpaid") {
+    // Never charged and nothing in flight: no money to send back.
+    updates["deposit.status"] = "refunded";
+    updates["deposit.resolvedAt"] = now;
+    updates["deposit.depositNextRetryAt"] = null;
+  }
+  // Every other deposit status is deliberately untouched: `applied` is Task
+  // 12's clawback territory, a `*_pending` doc already has an executor, and a
+  // terminal one is done. Only the SETTLEMENT is waived for those.
+  try {
+    await ref.update(updates, { lastUpdateTime: baseline });
+  } catch (e) {
+    if (!isFailedPrecondition(e)) throw e;
+    // Someone else moved this doc between the read and here. Nothing was
+    // charged on this path, so there is no money to account for — leave their
+    // decision standing.
+    console.warn(`chargeSettlement: ${bookingId}/${gigId} changed under an unlinked-gig waive — left as the racer wrote it`);
+    return "skipped";
+  }
+  if (resolvePending) {
+    await resolveDepositPending(bookingId, gigId);
+  } else {
+    await recomputePaymentSummary(bookingId)
+      .catch((e) => console.error(`chargeSettlement: summary recompute failed for ${bookingId}`, e));
+  }
+  return "waived";
+}
+
+// STUB — Task 11 owns the real dunning ladder (retries at +1d/+2d/+2d, then
+// delinquency: the 10% late fee split 7/3, the profile-level `delinquent`
+// flag, `delinquentAt`, and both sides' notifications). What lands here now is
+// only the FIRST rung, so a decline is never silently swallowed: the
+// occurrence goes `past_due` with one attempt recorded and the first retry
+// scheduled, which is exactly what the sweep's step 6 picks back up.
+//
+// `booking` is unused by the stub and deliberately kept in the signature: the
+// real version needs it for the late-fee math (`feePolicy` + `acceptedTerms`),
+// so Task 11 replaces a BODY rather than also re-threading a call site.
+//
+// `baseline` is the payment doc's updateTime from BEFORE the charge attempt:
+// a racer (reportNoShow waiving this very occurrence) must not have a
+// `past_due` debt written back over its waive.
+export async function recordSettlementFailure(
+  bookingId: string, gigId: string, p: PaymentDoc, booking: BookingRequestDoc,
+  baseline: FirebaseFirestore.Timestamp, now: number,
+): Promise<SettlementChargeOutcome> {
+  void booking;   // see the signature note above — Task 11's late-fee math needs it
+  const attempts = p.settlement.attempts + 1;
+  try {
+    await getFirestore().doc(`bookings/${bookingId}/payments/${gigId}`).update({
+      "settlement.status": "past_due", "settlement.attempts": attempts,
+      "settlement.nextRetryAt": now + SETTLEMENT_RETRY_OFFSETS_MS[0], updatedAt: now,
+    }, { lastUpdateTime: baseline });
+  } catch (e) {
+    if (!isFailedPrecondition(e)) throw e;
+    // No money moved on a decline, so there is nothing to account for — and no
+    // dunning to do for a settlement that is no longer owed.
+    console.warn(`recordSettlementFailure: ${bookingId}/${gigId} changed under a declined charge — dunning skipped`);
+    return "skipped";
+  }
+  await recomputePaymentSummary(bookingId)
+    .catch((e) => console.error(`recordSettlementFailure: summary recompute failed for ${bookingId}`, e));
+  return "declined";
+}
+
+// The doc moved under a settlement whose money ALREADY MOVED. Records what
+// moved (never a status the racer owns) and escalates: a waived-but-charged
+// occurrence needs a human to decide whether to refund or re-settle it, and
+// nothing automatic can make that call.
+async function recordRacedSettlement(args: {
+  bookingId: string; gigId: string; intentId: string | null;
+  transfer: { id: string; amountCents: number } | null; detail: string; now: number;
+}): Promise<void> {
+  const { bookingId, gigId, intentId, transfer, detail, now } = args;
+  // Merge-only, and deliberately WITHOUT `settlement.status`/`deposit.status`
+  // — the racer's terminal decision stands (mirrors the sweep's birth-charge
+  // raced path). `transfer.*` is not the racer's field: nothing that waives a
+  // settlement writes it, so recording the transfer that genuinely happened
+  // adds information rather than overwriting any.
+  const updates: Record<string, unknown> = { updatedAt: now };
+  if (intentId) updates["settlement.intentId"] = intentId;
+  if (transfer) {
+    updates["transfer.status"] = "transferred";
+    updates["transfer.id"] = transfer.id;
+    updates["transfer.amountCents"] = transfer.amountCents;
+    updates["transfer.transferredAt"] = now;
+  }
+  await getFirestore().doc(`bookings/${bookingId}/payments/${gigId}`).update(updates)
+    .catch((e) => console.error(`chargeSettlement: failed to record raced settlement money for ${bookingId}/${gigId}`, e));
+  const alertId = settlementRacedAlertId(bookingId, gigId);
+  const shouldLog = await recordAdminAlert({
+    alertId, kind: "settlement_raced", detail, bookingId, gigId, now,
+  });
+  if (shouldLog) {
+    console.error(
+      `chargeSettlement: ${bookingId}/${gigId} — ${detail}; needs admin attention (see adminAlerts/${alertId})`);
+  }
+}
+
+// The POST-CHARGE tail of a settlement, shared by three callers:
+//  - chargeSettlement's synchronous path (the charge just succeeded, or there
+//    was nothing to charge because the deposit covered the whole date);
+//  - the `payment_intent.succeeded` webhook, when the charge came back
+//    `processing` and finalized out-of-band (as-built contract #7);
+//  - Task 11's `payPastDue`, whose on-session intent finalizes the same way.
+//
+// It transfers the musician's earnings, writes the terminal state, the ledger
+// rows and the aggregate, and tells the musician. Safe to call zero, one or
+// many times: an already-`paid` doc is a no-op, and the earnings transfer's
+// idempotency key is attempt-scoped per occurrence, so a redelivery inside
+// Stripe's key window replays the original transfer rather than paying twice.
+//
+// `baseline` is the CAS baseline the caller wants the terminal write held to.
+// The synchronous path passes the updateTime it read BEFORE its Stripe call,
+// so the precondition spans the whole non-transactional charge window; a
+// webhook caller has no such read and lets this function use its own.
+export async function finalizeSettlementSuccess(args: {
+  bookingId: string; gigId: string; intentId: string | null;
+  chargeId?: string | null; now: number; baseline?: FirebaseFirestore.Timestamp;
+}): Promise<SettlementChargeOutcome> {
+  const { bookingId, gigId, intentId, now } = args;
+  const db = getFirestore();
+  const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
+  const [pSnap, bookingSnap, gigSnap] = await Promise.all([
+    ref.get(), db.doc(`bookings/${bookingId}`).get(), db.doc(`gigs/${gigId}`).get(),
+  ]);
+  const p = pSnap.data() as PaymentDoc | undefined;
+  const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+  const gig = gigSnap.data() as GigDoc | undefined;
+  if (!p || !booking?.acceptedTerms || !gig) return "skipped";
+  // Idempotence: a redelivered webhook, or a sweep run racing the webhook that
+  // finalized the same intent, must not transfer a second time.
+  if (p.settlement.status === "paid") return "skipped";
+  if (p.settlement.status !== "pending" && p.settlement.status !== "past_due") {
+    // Waived (or otherwise terminal) under us, and a charge exists for it.
+    // Nothing has been transferred yet on this path, so only the charge is
+    // recorded — the escalation is what gets the money resolved.
+    if (intentId) {
+      await recordRacedSettlement({
+        bookingId, gigId, intentId, transfer: null, now,
+        detail: `settlement charged on intent ${intentId} but the occurrence is now "${p.settlement.status}" — no transfer was made`,
+      });
+    }
+    return "skipped";
+  }
+
+  const math = settlementMath(p, booking, gig);
+  const musicianStripe = await getStripeProfileDoc(p.musicianProfileId);
+  if (math.earnings > 0 && !musicianStripe?.accountId) {
+    // Unreachable in normal flow (accept is gated on a payout-ready musician).
+    // The doc is LEFT `pending`/`past_due` on purpose: the sweep re-runs it on
+    // the SAME attempt-scoped key, so the charge replays rather than doubling,
+    // and the musician's money is never dropped by flipping to a terminal
+    // state with no transfer behind it.
+    console.error(
+      `finalizeSettlementSuccess: no Stripe account for ${p.musicianProfileId} — ${bookingId}/${gigId} left unsettled for the next run`);
+    return "skipped";
+  }
+
+  // As-built contract #3: a transfer backed by a FRESH charge passes that
+  // charge's id so it draws on those funds instead of the platform's aggregate
+  // available balance (a not-yet-settled charge would otherwise fail
+  // `balance_insufficient` in live mode). A zero-charge settlement — the
+  // deposit covered the whole date — has no fresh charge, so it falls back to
+  // the DEPOSIT's charge, which is the money it is actually consuming.
+  const sourceChargeId = args.chargeId ?? (math.chargeTotal > 0 ? null : p.deposit.chargeId);
+  const transfer = math.earnings > 0
+    ? await getStripe().transferToAccount({
+      accountId: musicianStripe!.accountId!, amountCents: math.earnings,
+      // Attempt-scoped like the charge key: Task 12's restore re-run bumps
+      // `settlement.attempts` when it re-opens a clawed-back settlement, and
+      // without that the transfer key would silently replay the consumed
+      // original and no money would move.
+      idempotencyKey: `${bookingId}:${gigId}:earn:${p.settlement.attempts}`,
+      meta: { bookingId, gigId, purpose: "earnings" },
+      ...(sourceChargeId ? { sourceChargeId } : {}),
+    })
+    : null;
+
+  const updates: Record<string, unknown> = {
+    "settlement.status": "paid",
+    // Never negative: the R8 below-deposit case refunds the difference rather
+    // than recording a negative obligation.
+    "settlement.computedCents": Math.max(0, math.due),
+    "settlement.feeShareCents": math.feeShare,
+    "settlement.intentId": intentId ?? p.settlement.intentId ?? null,
+    "settlement.nextRetryAt": null,
+    updatedAt: now,
+  };
+  // ONLY when the deposit actually funded part of this settlement. A deposit
+  // that was refunded (Task 12's clawback, then a restore re-run) stays
+  // `refunded` — "applied" would claim escrow that no longer exists.
+  if (math.creditsDeposit) {
+    updates["deposit.status"] = "applied";
+    updates["deposit.resolvedAt"] = now;
+  }
+  if (transfer) {
+    updates["transfer.status"] = "transferred";
+    updates["transfer.id"] = transfer.id;
+    updates["transfer.amountCents"] = math.earnings;
+    updates["transfer.transferredAt"] = now;
+  }
+  try {
+    await ref.update(updates, { lastUpdateTime: args.baseline ?? pSnap.updateTime! });
+  } catch (e) {
+    if (!isFailedPrecondition(e)) throw e;
+    await recordRacedSettlement({
+      bookingId, gigId, intentId, now,
+      transfer: transfer ? { id: transfer.id, amountCents: math.earnings } : null,
+      detail: "the occurrence was waived while its settlement was being charged/transferred — money moved but the terminal write was refused",
+    });
+    return "skipped";
+  }
+
+  if (intentId && math.chargeTotal > 0) {
+    await writeLedger({
+      kind: "settlement_charged", amountCents: math.chargeTotal, bookingId, gigId,
+      profileId: p.curatorProfileId, stripeId: intentId, detail: "settlement charge",
+    }).catch((e) => console.error(`finalizeSettlementSuccess: settlement_charged ledger row failed for ${bookingId}/${gigId}`, e));
+  }
+  if (transfer) {
+    await writeLedger({
+      kind: "earnings_transfer", amountCents: math.earnings, bookingId, gigId,
+      profileId: p.musicianProfileId, stripeId: transfer.id,
+      detail: "earnings transfer (net of the musician fee, incl. any late-fee share)",
+    }).catch((e) => console.error(`finalizeSettlementSuccess: earnings_transfer ledger row failed for ${bookingId}/${gigId}`, e));
+  }
+  await recomputePaymentSummary(bookingId)
+    .catch((e) => console.error(`finalizeSettlementSuccess: summary recompute failed for ${bookingId}`, e));
+  // TODO(Task 11): a successful settlement does NOT clear the curator's
+  // profile-level `delinquent` flag here — that is
+  // `clearDelinquencyIfSettled(p.curatorProfileId, now)`'s job, which can only
+  // answer "is EVERYTHING outstanding settled now?" by querying the whole
+  // obligation set. Wire it in at exactly this point.
+  try {
+    await notifyProfileMembers(p.musicianProfileId, {
+      kind: "booking", refId: bookingId,
+      title: "You've been paid",
+      body: "A settlement landed in your balance — cash out from your Earnings page.",
+    });
+  } catch (e) {
+    // Best-effort: the money has already moved, so a failed delivery must
+    // never surface as a settlement failure.
+    console.error(`finalizeSettlementSuccess: notification failed for ${bookingId}/${gigId}`, e);
+  }
+  return "charged";
+}
+
+// The T+3 (or dunning-retry) settlement move for ONE occurrence: compute the
+// final amount from the frozen terms + the curator's true-up + the gig's own
+// duration, charge `final − deposit slice` + commission (+ any late fee), then
+// transfer the musician's earnings. Returns what happened so the sweep can
+// count it.
+//
+// Safe to call zero, one or many times for the same (bookingId, gigId): the
+// CAS at the top acts only on `pending`/`past_due`, and every Stripe key is
+// attempt-scoped, so a re-run inside the idempotency window replays rather
+// than re-charging.
+//
+// NEVER GATED ON THE PARENT BOOKING'S STATUS (sweep rule 1). A cancelled,
+// expired or completed booking can still own a past-start occurrence that
+// legitimately settles — the musician performed that night; only the paperwork
+// moved on. The defense-in-depth check is the GIG's own linkage, never
+// `booking.status`.
 export async function chargeSettlement(
   params: { bookingId: string; gigId: string; now: number },
 ): Promise<SettlementChargeOutcome> {
-  void params;
-  return "skipped";
+  const { bookingId, gigId, now } = params;
+  const db = getFirestore();
+  const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
+  // FRESH reads: the sweep hands this function ids, not snapshots, and by the
+  // time a doc's turn comes the page it arrived in can be minutes old — and
+  // this CHARGES A CARD off what it reads. The payment doc's updateTime is
+  // also the CAS baseline for the terminal write, captured BEFORE the Stripe
+  // call so the precondition spans the whole non-transactional charge window.
+  const [pSnap, bookingSnap, gigSnap] = await Promise.all([
+    ref.get(), db.doc(`bookings/${bookingId}`).get(), db.doc(`gigs/${gigId}`).get(),
+  ]);
+  const p = pSnap.data() as PaymentDoc | undefined;
+  const booking = bookingSnap.data() as BookingRequestDoc | undefined;
+  const gig = gigSnap.data() as GigDoc | undefined;
+  if (!p || !booking?.acceptedTerms) return "skipped";
+  // THE CAS. Anything else — already `paid` (a racer, or the webhook, got
+  // here first), `waived`, or `not_due` (its date hasn't been resolved yet) —
+  // is deliberately untouched.
+  if (p.settlement.status !== "pending" && p.settlement.status !== "past_due") return "skipped";
+  const baseline = pSnap.updateTime;
+  if (!baseline) {
+    // Only a non-existent doc has no updateTime (already excluded). Explicit
+    // because `{ lastUpdateTime: undefined }` is not a weaker precondition, it
+    // is NO precondition — and refusing to charge is the right answer.
+    console.error(`chargeSettlement: ${bookingId}/${gigId} has no updateTime — refusing to charge without a CAS baseline`);
+    return "skipped";
+  }
+
+  if (!gig) {
+    // The gig doc is gone outright (deleteProfile's cascade). Its duration is
+    // what prices this date, so there is nothing to charge — and deliberately
+    // no automatic waive either: forgiving a real, already-scheduled debt is
+    // an operator's call, not this function's. The sweep's step 4 already
+    // waives a vanished gig BEFORE scheduling, so reaching here means the doc
+    // disappeared afterwards, which is an anomaly worth a log every run.
+    console.error(`chargeSettlement: ${bookingId}/${gigId} — the gig doc is gone; cannot price the settlement, left for an operator`);
+    return "skipped";
+  }
+  // Defense in depth (spec §4): a date that no longer belongs to this booking
+  // settles waived. Note this reads the GIG's linkage, never booking.status.
+  if (gig.bookingId !== bookingId || gig.status !== "filled") {
+    return await waiveUnlinkedSettlement(bookingId, gigId, p, baseline, now);
+  }
+
+  const math = settlementMath(p, booking, gig);
+  let intentId = p.settlement.intentId;
+  let chargeId: string | null = null;
+
+  if (math.due < 0) {
+    // R8, the defensive below-deposit rule (spec §4): UNREACHABLE with
+    // increase-only true-ups (the slice is a fraction of the base, and the
+    // base only grows), so this exists so that a future change which makes it
+    // reachable refunds the difference instead of silently charging a negative
+    // amount. `lateFee` cannot coexist with it — a late fee only attaches
+    // after a failed charge, which requires something to have been due.
+    if (p.deposit.intentId) {
+      const r = await getStripe().refund({
+        intentId: p.deposit.intentId, amountCents: -math.due,
+        idempotencyKey: `${bookingId}:${gigId}:settle-down`,
+        meta: { bookingId, gigId, purpose: "below_deposit_refund" },
+      });
+      await writeLedger({
+        kind: "refund", amountCents: -math.due, bookingId, gigId,
+        profileId: p.curatorProfileId, stripeId: r.id, detail: "below-deposit settlement refund",
+      }).catch((e) => console.error(`chargeSettlement: below-deposit refund ledger row failed for ${bookingId}/${gigId}`, e));
+    } else {
+      console.error(
+        `chargeSettlement: ${bookingId}/${gigId} settles below its deposit slice but the deposit was never charged — nothing to refund`);
+    }
+  } else if (math.chargeTotal > 0) {
+    const curatorStripe = await getStripeProfileDoc(p.curatorProfileId);
+    if (!curatorStripe?.customerId) {
+      console.error(`chargeSettlement: curator ${p.curatorProfileId} has no Stripe customer — ${bookingId}/${gigId} not charged`);
+      return "skipped";
+    }
+    try {
+      const r = await getStripe().chargeOffSession({
+        customerId: curatorStripe.customerId, amountCents: math.chargeTotal,
+        // ATTEMPT-SCOPED (as-built contract #2): both real Stripe and the fake
+        // CACHE a decline under its key, so a retry after a decline must carry
+        // a different one or it replays the decline forever. A crash between
+        // the charge and recording it re-derives the SAME key next run, which
+        // is what makes the replay safe.
+        idempotencyKey: `${bookingId}:${gigId}:settle:${p.settlement.attempts}`,
+        meta: { bookingId, gigId, purpose: "settlement" },
+      });
+      intentId = r.id;
+      chargeId = r.chargeId;
+    } catch (e) {
+      if (e instanceof StripePaymentPendingError) {
+        // Not a failure: the intent exists and is settling, and a same-key
+        // retry is IMPOSSIBLE for it (the cached `processing` outcome replays
+        // forever — as-built contract #7). Persist the handle, leave the
+        // settlement exactly as it is, and let payment_intent.succeeded run
+        // finalizeSettlementSuccess out-of-band.
+        await ref.update({ "settlement.intentId": e.intentId, updatedAt: now })
+          .catch((we) => console.error(`chargeSettlement: failed to record pending intent ${e.intentId} on ${bookingId}/${gigId}`, we));
+        return "pending";
+      }
+      if (e instanceof StripeCardDeclinedError) {
+        return await recordSettlementFailure(bookingId, gigId, p, booking, baseline, now);
+      }
+      throw e;
+    }
+  }
+  // else: a ZERO-charge settlement — the deposit slice covered the whole date
+  // exactly. Nothing to charge, but the musician is still owed their earnings,
+  // so this falls through to the same tail as a charged one.
+
+  return await finalizeSettlementSuccess({ bookingId, gigId, intentId, chargeId, now, baseline });
 }
+
+// Registered HERE rather than in paymentsWebhook.ts for the same reason
+// payments.ts registers `account.updated` there: paymentsCore already imports
+// the registry, and index.ts importing this module (transitively, via
+// payments.ts and paymentsSweep.ts) is what guarantees the registration has
+// run before the webhook can ever fire.
+//
+// This is the recovery half of as-built contract #7: chargeSettlement left an
+// intent `processing`, persisted its id, and returned "pending". When Stripe
+// confirms it, the settlement finishes exactly as the synchronous path would
+// have — transfer, terminal write, ledger, aggregate, notification.
+paymentIntentSucceededHandlers["settlement"] = async (object) => {
+  const intentId = object.id as string | undefined;
+  const meta = object.metadata as Record<string, string> | undefined;
+  const bookingId = meta?.bookingId;
+  const gigId = meta?.gigId;
+  // Event payloads are signature-verified but never shape-validated, so
+  // metadata is untrusted input — validate before building a doc path from it
+  // (mirrors the `deposit` handler's identical guard in bookings.ts).
+  if (!intentId || !bookingId || !gigId || !isValidDocId(bookingId) || !isValidDocId(gigId)) {
+    console.warn(
+      `payment_intent.succeeded (settlement): unusable metadata — intent=${String(intentId)}, bookingId=${JSON.stringify(bookingId ?? null)}, gigId=${JSON.stringify(gigId ?? null)}`);
+    return;
+  }
+  const p = (await getFirestore().doc(`bookings/${bookingId}/payments/${gigId}`).get())
+    .data() as PaymentDoc | undefined;
+  if (!p) return;
+  // A DIFFERENT intent than the one this occurrence is waiting on: two live
+  // charges exist for one settlement, and this one will never be consumed.
+  // Not silently ignorable — it is precisely the stuck-money signal an
+  // operator needs (same reasoning as the `deposit` handler's mismatch check).
+  if (p.settlement.intentId != null && p.settlement.intentId !== intentId) {
+    console.error(
+      `payment_intent.succeeded (settlement): ${bookingId}/${gigId} is awaiting intent ${p.settlement.intentId} but ${intentId} succeeded — unconsumed charge, needs reconciliation`);
+    return;
+  }
+  // `latest_charge` is the charge behind the intent, when Stripe sends it —
+  // it makes the earnings transfer draw on those exact funds (contract #3).
+  const latestCharge = typeof object.latest_charge === "string" ? object.latest_charge : null;
+  await finalizeSettlementSuccess({
+    bookingId, gigId, intentId, chargeId: latestCharge, now: Date.now(),
+  });
+};

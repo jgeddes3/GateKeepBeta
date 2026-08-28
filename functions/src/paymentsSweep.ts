@@ -6,10 +6,10 @@
  * by a date the materializer only just created, a settlement that becomes due
  * while nobody is looking, and the expired-booking refund backstop.
  *
- * MONEY MOVES IN STEPS 1, 2, 3, 4 AND 7 — step 4 is easy to misread as
- * bookkeeping because its headline job is scheduling, but its waive branch
- * refunds a deposit outright. (Steps 5/6 will move money once Task 10 fills in
- * `chargeSettlement`; today they are wired loops over a no-op.)
+ * MONEY MOVES IN EVERY STEP — step 4 is easy to misread as bookkeeping
+ * because its headline job is scheduling, but its waive branch refunds a
+ * deposit outright, and steps 5/6 charge the settlement and transfer the
+ * musician's earnings (inside `chargeSettlement`, paymentsCore.ts).
  *
  * Shape follows `runDailySweep`'s philosophy exactly (see scheduled.ts):
  *  - all behavior lives in the exported, clock-injected `runPaymentsSweep`, so
@@ -48,19 +48,19 @@
  */
 
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldPath } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type AdminAlertDoc, type AdminAlertKind,
   type BookingRequestDoc, type GigDoc, type PaymentDoc,
 } from "@gatekeep/shared";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
 } from "./stripeClient.js";
 import {
-  chargeSettlement, declareCuratorDelinquent, getStripeProfileDoc, recomputePaymentSummary,
-  resolveDepositPending, writeLedger, IDEMPOTENCY_WINDOW_MS,
+  chargeSettlement, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
+  recomputePaymentSummary, recordAdminAlert, resolveDepositPending, writeLedger,
+  IDEMPOTENCY_WINDOW_MS,
 } from "./paymentsCore.js";
 import {
   abortAcceptAfterFailedCommit, commitAcceptAfterCharge, detectSelfDeal, runAcceptPostCommit,
@@ -121,11 +121,16 @@ export interface PaymentsSweepReport {
   birthDepositsPending: number;    // intent left `processing` — never re-charged, needs admin attention
   // --- step 4: settlements scheduled once their occurrence has ended ---
   settlementsScheduled: number;    // not_due -> pending (the date was performed)
-  settlementsWaived: number;       // not_due -> waived (taken down / reopened / re-owned / gig gone)
-  // --- steps 5/6: settlement charges + past_due retries (Task 10 owns the money) ---
+  // not_due -> waived (taken down / reopened / re-owned / gig gone) in step 4,
+  // PLUS pending/past_due -> waived in steps 5/6, when the gig's linkage broke
+  // after the settlement was already scheduled. One counter: it is the same
+  // "this date is owed nothing" outcome either way.
+  settlementsWaived: number;
+  // --- steps 5/6: settlement charges + past_due retries ---
   settlementsCharged: number;
   settlementsDeclined: number;
-  transfersMade: number;           // Task 10 increments (the earnings transfer lives in chargeSettlement)
+  settlementsPending: number;      // charge left `processing` — the webhook finalizes it, not us
+  transfersMade: number;           // earnings transfers (one per charged settlement)
   retriesAttempted: number;        // past_due docs handed to chargeSettlement this run
   // --- shared ---
   delinquenciesDeclared: number;   // curator profiles newly flagged delinquent this run
@@ -145,7 +150,8 @@ function emptyReport(): PaymentsSweepReport {
     pendingDepositsResolved: 0, pendingDepositsStale: 0,
     birthDepositsCharged: 0, birthDepositsDeclined: 0, birthDepositsPending: 0,
     settlementsScheduled: 0, settlementsWaived: 0,
-    settlementsCharged: 0, settlementsDeclined: 0, transfersMade: 0, retriesAttempted: 0,
+    settlementsCharged: 0, settlementsDeclined: 0, settlementsPending: 0,
+    transfersMade: 0, retriesAttempted: 0,
     delinquenciesDeclared: 0, expiredRefunds: 0,
     errors: {},
   };
@@ -153,15 +159,6 @@ function emptyReport(): PaymentsSweepReport {
 
 function bumpError(report: PaymentsSweepReport, key: string): void {
   report.errors[key] = (report.errors[key] ?? 0) + 1;
-}
-
-// A `{ lastUpdateTime: ... }` precondition that lost its race. The Admin SDK
-// surfaces the underlying gRPC status as a numeric code (9 =
-// FAILED_PRECONDITION); the string forms are a defensive fallback, not the
-// expected shape. Mirrors paymentsCore.ts's identical isAlreadyExists helper.
-function isFailedPrecondition(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code;
-  return code === 9 || code === "failed-precondition" || code === "FAILED_PRECONDITION";
 }
 
 // A payment doc's (bookingId, gigId) taken from its own PATH rather than its
@@ -203,48 +200,10 @@ async function notifySafely(
 // escalation either (it is 24 identical lines a day that nobody is paged on).
 //
 // So each absorbing branch upserts a durable `adminAlerts` row keyed on the
-// underlying PROBLEM (not the run), and its console.error is throttled to once
-// per UTC day. The row is the signal; the log is a convenience.
-//
-// Returns whether the caller should log this observation.
-async function recordAdminAlert(a: {
-  alertId: string; kind: AdminAlertKind; detail: string;
-  bookingId: string; gigId: string | null; now: number;
-}): Promise<boolean> {
-  const ref = getFirestore().doc(`adminAlerts/${a.alertId}`);
-  try {
-    const existing = (await ref.get()).data() as AdminAlertDoc | undefined;
-    if (!existing) {
-      const doc: AdminAlertDoc = {
-        kind: a.kind, detail: a.detail, bookingId: a.bookingId, gigId: a.gigId,
-        firstSeenAt: a.now, lastSeenAt: a.now, runCount: 1, resolvedAt: null,
-      };
-      await ref.set(doc);
-      return true;
-    }
-    // `resolvedAt: null` on every recurrence: an operator marking this
-    // resolved while the condition still exists must not silence it forever —
-    // the next observation reopens the row. `firstSeenAt` is deliberately NOT
-    // re-stamped (see AdminAlertDoc): it measures the episode, not the ticket.
-    await ref.update({
-      kind: a.kind, detail: a.detail, lastSeenAt: a.now,
-      runCount: FieldValue.increment(1), resolvedAt: null,
-    });
-    // Log once per UTC day — OR whenever the KIND changes, however recently we
-    // logged. A booking moving from `stuck_saga_marker` to
-    // `expired_booking_saga_marker` (or a staged saga aging into
-    // `stale_accept_saga`) is the condition genuinely changing shape, which is
-    // exactly the transition an operator reading logs needs to see; throttling
-    // it away would leave the last line they saw describing the wrong problem.
-    return existing.kind !== a.kind
-      || Math.floor(existing.lastSeenAt / DAY_MS) !== Math.floor(a.now / DAY_MS);
-  } catch (e) {
-    // The escalation itself failed. Log UNTHROTTLED — losing the durable row
-    // is exactly when the noisy log is worth having.
-    console.error(`paymentsSweep: failed to record admin alert ${a.alertId}`, e);
-    return true;
-  }
-}
+// underlying PROBLEM (not the run) via paymentsCore's `recordAdminAlert`
+// (which lives there, not here, because Task 10's settlement path escalates
+// the same way and paymentsCore cannot import this file). The ids below are
+// this file's half of that naming contract.
 
 function stuckSagaAlertId(bookingId: string): string { return `stuck-saga:${bookingId}`; }
 function stalePendingAlertId(bookingId: string, gigId: string): string {
@@ -953,11 +912,14 @@ async function resolveDueOccurrences(
 // ---------------------------------------------------------------------------
 // Steps 5 & 6 — CHARGE due settlements, RETRY past_due ones
 // ---------------------------------------------------------------------------
-// The loops are real; the money is not, yet. `chargeSettlement` is Task 10's
-// (currently a "skipped" no-op — see paymentsCore.ts), which owns the true-up
-// read, the charge, the earnings transfer and all of the attempts/nextRetryAt/
-// delinquency bookkeeping. Landing the loops here means Task 10 fills in one
-// function rather than also re-deriving where it gets called from.
+// MONEY MOVES HERE. `chargeSettlement` (paymentsCore.ts) owns everything about
+// one occurrence's settlement — the true-up read, the T+3 charge, the earnings
+// transfer, and all of the attempts/nextRetryAt/delinquency bookkeeping. These
+// loops only find the due docs, isolate per-doc failures, and count outcomes.
+//
+// Queried on settlement fields ALONE (rule 1): a cancelled or expired
+// booking's past-start occurrence settles here exactly like any other — the
+// musician performed that night.
 
 async function runSettlementCharges(
   db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
@@ -975,8 +937,15 @@ async function runSettlementCharges(
       try {
         if (spec.countRetry) report.retriesAttempted++;
         const outcome = await chargeSettlement({ bookingId: at.bookingId, gigId: at.gigId, now });
-        if (outcome === "charged") report.settlementsCharged++;
-        else if (outcome === "declined") report.settlementsDeclined++;
+        if (outcome === "charged") {
+          report.settlementsCharged++;
+          // The earnings transfer happens INSIDE chargeSettlement (it needs
+          // the settlement charge's own charge id as the transfer's
+          // sourceChargeId), so "charged" is the sweep's only handle on it.
+          report.transfersMade++;
+        } else if (outcome === "declined") report.settlementsDeclined++;
+        else if (outcome === "pending") report.settlementsPending++;
+        else if (outcome === "waived") report.settlementsWaived++;
       } catch (e) {
         console.error(`paymentsSweep: settlement charge failed for ${at.bookingId}/${at.gigId}`, e);
         bumpError(report, spec.errorKey);

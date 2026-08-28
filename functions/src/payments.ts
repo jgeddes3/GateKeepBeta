@@ -1,7 +1,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
-  isValidDocId,
+  isValidDocId, MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS,
   type AdminAlertDoc, type BookingRequestDoc, type PaymentDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember } from "./guards.js";
@@ -11,6 +11,7 @@ import {
   StripeAccountMissingError, StripeSetupIntentMismatchError, type StripeAccountState,
 } from "./stripeClient.js";
 import { getStripeProfileDoc, IDEMPOTENCY_WINDOW_MS } from "./paymentsCore.js";
+import { resolveBookingSideStrict } from "./bookingLifecycle.js";
 import { webhookHandlers } from "./paymentsWebhook.js";
 
 export function emptyStripeProfile(now: number): StripeProfileDoc {
@@ -419,4 +420,94 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
       .catch(() => { /* no alert row (released before a sweep ever saw it) — nothing to resolve */ });
 
     return { ok: true, deletedStagedDocs: removed.length };
+  });
+
+// ---------- SP5 Task 10: the curator's true-up ----------
+
+export interface ConfirmOccurrenceActualsInput {
+  bookingId: string; gigId: string; extraMinutes?: number; extraSongs?: number;
+}
+
+// Curator-only, INCREASE-ONLY true-up of what actually happened on one booked
+// date, reported during the T+3 settlement window.
+//
+// Three properties make this safe to expose to a client at all:
+//  1. It writes EXTRAS ONLY — never an amount. The money is still computed
+//     server-side from the booking's frozen `acceptedTerms` and the gig's own
+//     duration (see chargeSettlement); this call can only move the quantity
+//     the frozen rate is applied to.
+//  2. It only ever moves that quantity UP (validated against the previous
+//     report), so a curator can never talk their own bill down after the fact,
+//     and a repeated call REPLACES rather than accumulates — the payload is
+//     the cumulative total, so a retried/duplicated request is idempotent.
+//  3. It is refused once the settlement leaves `pending`, and once a charge
+//     has been initiated at all (`settlement.intentId`) — a pending
+//     PaymentIntent is still `pending`-status, and letting the true-up move
+//     under it would settle the doc for an amount that was never charged.
+//
+// Structure-aware: perHour bookings true-up minutes, perSong bookings true-up
+// songs, and perSet bookings are flat — there is nothing to report.
+export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
+  { region: "us-central1" }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { bookingId, gigId, extraMinutes: rawMinutes, extraSongs: rawSongs } =
+      req.data ?? ({} as ConfirmOccurrenceActualsInput);
+    if (!isValidDocId(bookingId) || !isValidDocId(gigId)) {
+      throw new HttpsError("invalid-argument", "Booking and gig ids are required.");
+    }
+    // Untrusted onCall payload: the declared param types only bind trusted
+    // callers, so both extras are re-checked as non-negative whole numbers
+    // inside their caps (which also bound the settlement base — spec §4).
+    const extraMinutes = rawMinutes ?? 0;
+    const extraSongs = rawSongs ?? 0;
+    if (!Number.isInteger(extraMinutes) || extraMinutes < 0 || extraMinutes > MAX_TRUE_UP_EXTRA_MINUTES
+      || !Number.isInteger(extraSongs) || extraSongs < 0 || extraSongs > MAX_TRUE_UP_EXTRA_SONGS
+      || (extraMinutes === 0 && extraSongs === 0)) {
+      throw new HttpsError("invalid-argument", "Report extra minutes and/or extra songs as positive whole numbers.");
+    }
+
+    const db = getFirestore();
+    const bookingSnap = await db.doc(`bookings/${bookingId}`).get();
+    if (!bookingSnap.exists) throw new HttpsError("not-found", "Booking not found.");
+    const booking = bookingSnap.data() as BookingRequestDoc;
+    // Side-DEPENDENT money action ⇒ the strict resolver (a member of BOTH
+    // profiles is refused rather than silently resolved to one side).
+    // Deliberately NOT gated on booking.status: a cancelled or expired booking
+    // can still own a past-start date that was genuinely performed and still
+    // settles (the same rule the settlement sweeps are built around).
+    const side = await resolveBookingSideStrict(booking, uid);
+    if (side !== "curator") throw new HttpsError("permission-denied", "Only the curator side can report actuals.");
+    if (booking.structure === "perSet") {
+      throw new HttpsError("failed-precondition", "Per-set bookings settle flat — nothing to report.");
+    }
+    if (booking.structure === "perHour" && extraSongs > 0) {
+      throw new HttpsError("invalid-argument", "This booking bills per hour — report extra minutes.");
+    }
+    if (booking.structure === "perSong" && extraMinutes > 0) {
+      throw new HttpsError("invalid-argument", "This booking bills per song — report extra songs.");
+    }
+
+    const now = Date.now();
+    // Transactional: the read that validates "still reportable / only
+    // increasing" and the write that acts on it must not be separated by a
+    // sweep run that charges the settlement in between.
+    await db.runTransaction(async (tx) => {
+      const ref = db.doc(`bookings/${bookingId}/payments/${gigId}`);
+      const snap = await tx.get(ref);
+      const p = snap.data() as PaymentDoc | undefined;
+      if (!p) throw new HttpsError("not-found", "No payment record for that date.");
+      if (p.settlement.status !== "pending" || p.settlement.intentId != null) {
+        throw new HttpsError("failed-precondition", "Actuals can only be reported during the settlement window.");
+      }
+      const prev = p.settlement.trueUp;
+      if (prev && (extraMinutes < prev.extraMinutes || extraSongs < prev.extraSongs)) {
+        throw new HttpsError("failed-precondition", "Reported actuals can only increase.");
+      }
+      tx.update(ref, {
+        "settlement.trueUp": { extraMinutes, extraSongs, reportedAt: now },
+        updatedAt: now,
+      });
+    });
+    return { ok: true };
   });

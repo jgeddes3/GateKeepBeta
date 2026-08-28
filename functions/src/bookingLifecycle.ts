@@ -51,7 +51,12 @@ function validateCancelReason(reason: unknown): string {
 // (curator forfeits, musician gets marked) purely from which side the
 // caller resolves to — silently picking one side for a dual-member would
 // let that member choose their own favorable outcome. Refuse instead.
-async function resolveBookingSideStrict(booking: BookingRequestDoc, uid: string): Promise<BookingSide> {
+//
+// Exported (SP5 Task 10) for `confirmOccurrenceActuals` in payments.ts, which
+// is side-DEPENDENT in exactly the same way — the curator reports the actuals
+// that decide what the curator is charged, so a dual-member must not be able
+// to slip through as "the curator side" by resolution order.
+export async function resolveBookingSideStrict(booking: BookingRequestDoc, uid: string): Promise<BookingSide> {
   const db = getFirestore();
   const [musicianMember, curatorMember] = await Promise.all([
     db.doc(`profiles/${booking.musicianProfileId}/members/${uid}`).get(),

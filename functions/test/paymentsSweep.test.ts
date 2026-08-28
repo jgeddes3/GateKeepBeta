@@ -5,6 +5,7 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
+  computeEarningsCents, computeFeeShareCents, DEFAULT_FEE_POLICY,
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
   type AdminAlertDoc, type BookingRequestDoc, type GigDoc, type LedgerEntry, type NotificationDoc,
   type PaymentDoc, type ProfileDraftInput, type StripeProfileDoc,
@@ -38,9 +39,15 @@ const DAY_MS = 24 * HOUR_MS;
 
 // perHour $150/hr over 90 minutes, the standard fixture across the SP5 suites:
 // base 22500, deposit slice ceil(35%) = 7875, curator fee share ceil(11%) = 867.
+const BASE_CENTS = 22_500;
 const SLICE_CENTS = 7875;
 const FEE_SHARE_CENTS = 867;
 const CHARGE_CENTS = SLICE_CENTS + FEE_SHARE_CENTS;
+// ...and what the SAME fixture settles for with no true-up reported (Task 10).
+// Derived, so a fee-constant change moves the assertion with the money layer.
+const SETTLE_DUE_CENTS = BASE_CENTS - SLICE_CENTS;
+const SETTLE_FEE_CENTS = computeFeeShareCents(SETTLE_DUE_CENTS, DEFAULT_FEE_POLICY.curatorFeePct);
+const EARNINGS_CENTS = computeEarningsCents(BASE_CENTS, DEFAULT_FEE_POLICY.musicianFeePct);
 
 // ---------- fixtures (mirroring payments.test.ts's, this suite's subject is
 // the sweep, not profile/booking mechanics) ----------
@@ -930,22 +937,27 @@ describe("payments sweep — settlement scheduling (step 4)", () => {
 });
 
 describe("payments sweep — settlement charge loops (steps 5/6)", () => {
-  // Task 10 owns the money; this task owns the WIRING. The queries, the
-  // pagination, the per-doc isolation and the counters are all live now, so
-  // Task 10 only has to fill in chargeSettlement's body — and this test is
-  // what will catch it if the loops ever stop reaching it.
-  it("hands due `pending` and due `past_due` occurrences to chargeSettlement (a no-op stub today: nothing moves)", async () => {
-    const { bookingId, gigId } = await makeConfirmedSingleBooking("swloops");
+  // This task owns the WIRING — the queries, the pagination, the per-doc
+  // isolation and the counters; `chargeSettlement` (Task 10, paymentsCore.ts)
+  // owns the money. The settlement pipeline itself is covered end-to-end in
+  // paymentsSettlement.test.ts; what this asserts is that BOTH loops still
+  // reach it, and that each maps its outcome onto the right counter.
+  it("hands due `pending` and due `past_due` occurrences to chargeSettlement, and counts what each one did", async () => {
+    const { musician, bookingId, gigId } = await makeConfirmedSingleBooking("swloops");
+    const accountId = await musicianAccountId(musician.profileId);
     const pastDueGigId = `swloopspd${Date.now()}`;
     await seedBirthDeposit(bookingId, pastDueGigId, Date.now() - 2 * DAY_MS);
 
     const now = Date.now();
-    // Due for its T+3 settlement charge (step 5).
+    // Due for its T+3 settlement charge (step 5). Its gig is real, still
+    // `filled` and still linked to this booking, so it settles for real.
     await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
       "settlement.status": "pending", "settlement.settleAfter": now - 1000,
     });
     // Already tried and failed, and its retry is due (step 6). `held` so the
-    // birth-deposit step ignores it; past-dated so step 4 does too.
+    // birth-deposit step ignores it; past-dated so step 4 does too. Its gig id
+    // names no gig at all — the "the gig doc is gone" branch, which cannot
+    // price a settlement and therefore refuses rather than charging.
     await adb.doc(`bookings/${bookingId}/payments/${pastDueGigId}`).update({
       "deposit.status": "held", "deposit.intentId": "pi_loops_fixture",
       "settlement.status": "past_due", "settlement.nextRetryAt": now - 1000, "settlement.attempts": 1,
@@ -953,23 +965,31 @@ describe("payments sweep — settlement charge loops (steps 5/6)", () => {
 
     const report = await runPaymentsSweep(now);
 
-    // The retry loop reached the doc...
+    // Step 5 charged and transferred; step 6 reached its doc and refused it.
+    expect(report.settlementsCharged).toBeGreaterThanOrEqual(1);
+    expect(report.transfersMade).toBeGreaterThanOrEqual(1);
     expect(report.retriesAttempted).toBeGreaterThanOrEqual(1);
-    // ...and the stub reported "skipped", so no money is claimed anywhere.
-    expect(report.settlementsCharged).toBe(0);
-    expect(report.settlementsDeclined).toBe(0);
-    expect(report.transfersMade).toBe(0);
     expect(report.errors.chargeSettlement ?? 0).toBe(0);
     expect(report.errors.retrySettlement ?? 0).toBe(0);
 
-    // Both docs are exactly as they were — a no-op stub must be a no-op.
     const due = await getPayment(bookingId, gigId);
-    expect(due?.settlement.status).toBe("pending");
-    expect(due?.deposit.status).toBe("held");
+    expect(due?.settlement.status).toBe("paid");
+    expect(due?.settlement.computedCents).toBe(SETTLE_DUE_CENTS);
+    expect(due?.settlement.feeShareCents).toBe(SETTLE_FEE_CENTS);
+    expect(due?.deposit.status).toBe("applied");
+    expect(due?.transfer.amountCents).toBe(EARNINGS_CENTS);
+    expect(await accountBalanceCents(accountId)).toBe(EARNINGS_CENTS);
+    expect(await fakeObject(due!.settlement.intentId!).then((i) => i?.amountCents))
+      .toBe(SETTLE_DUE_CENTS + SETTLE_FEE_CENTS);
+    expect((await ledgerRows(bookingId)).some((r) => r.kind === "settlement_charged")).toBe(true);
+
+    // The un-priceable doc is left exactly as it was — no charge, no dunning,
+    // no terminal write. It needs an operator, not a guess.
     const pastDue = await getPayment(bookingId, pastDueGigId);
     expect(pastDue?.settlement.status).toBe("past_due");
     expect(pastDue?.settlement.attempts).toBe(1);
-    expect((await ledgerRows(bookingId)).some((r) => r.kind === "settlement_charged")).toBe(false);
+    expect(pastDue?.deposit.status).toBe("held");
+    expect(await idemUsed(`${bookingId}:${pastDueGigId}:settle:1`)).toBe(false);
   });
 });
 

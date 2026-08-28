@@ -604,7 +604,12 @@ export type AdminAlertKind =
   | "stuck_saga_marker"            // marker set on a booking that is no longer `open`
   | "stale_accept_saga"            // staged >24h — its charge key can no longer be replayed
   | "expired_booking_saga_marker"  // an expired booking whose deposits are still a live saga's
-  | "stale_pending_deposit";       // `*_pending` >24h — its refund/transfer key can no longer be re-issued
+  | "stale_pending_deposit"        // `*_pending` >24h — its refund/transfer key can no longer be re-issued
+  // SP5 Task 10: a settlement's money moved (charge and/or earnings transfer)
+  // but its terminal write lost a race to a concurrent waive — a post-transfer
+  // reportNoShow is the one path that can do this. Nothing automatic can
+  // decide whether to refund it or re-settle it, so it is escalated.
+  | "settlement_raced";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
