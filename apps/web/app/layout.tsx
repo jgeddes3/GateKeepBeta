@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Syne, Sora } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "../src/auth/AuthProvider";
+import { AppShell } from "../src/shell/AppShell";
 
 const syne = Syne({
   variable: "--font-syne",
@@ -45,7 +46,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
   );

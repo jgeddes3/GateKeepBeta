@@ -135,11 +135,11 @@ export default function Dashboard() {
     <main style={{ maxWidth: 760, margin: "40px auto" }}>
       <h1>Dashboard</h1>
       <p><a href="/dashboard/earnings">Earnings &amp; payouts</a></p>
-      <p>
-        {user.email} · <button onClick={signOutUser}>Sign out</button>
-        {" · "}
-        <button onClick={deleteAccount} style={{ color: "#dc2626" }}>Delete account</button>
-      </p>
+      {/* Sign out moved into the shell's account/switcher menu (sub-project
+          9A task 3): this page kept only the account action the shell
+          doesn't cover, since account deletion is a deliberate, page-level
+          action rather than everyday nav chrome. */}
+      <p><button onClick={deleteAccount} style={{ color: "#dc2626" }}>Delete account</button></p>
       <h2>Your profiles</h2>
       {/* Pre-existing bug fixed in passing (found live during this task's
           browser walkthrough, not introduced by it — see git blame): both

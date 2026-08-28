@@ -91,9 +91,10 @@ export function ThemeToggle() {
       onClick={handleClick}
       aria-label={`Theme: ${current.label}. Switch to ${THEME_META[next].label}.`}
       title={`Theme: ${current.label}`}
+      className="flex w-full items-center gap-2 rounded-gk-sm px-2 py-1.5 text-left font-sora text-sm text-gk-text outline-none hover:bg-gk-border/40 focus-visible:ring-2 focus-visible:ring-gk-focus"
     >
-      <CurrentIcon size={18} aria-hidden="true" />
-      <span>{current.label}</span>
+      <CurrentIcon size={16} className="text-gk-muted" aria-hidden="true" />
+      <span>Theme: {current.label}</span>
     </button>
   );
 }
