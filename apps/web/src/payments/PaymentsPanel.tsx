@@ -8,10 +8,9 @@ import { useRole, useOccurrences } from "../bookings/BookingThread";
 import { SaveCardModal } from "./SaveCardModal";
 import { TrueUpForm } from "./TrueUpForm";
 import { PayPastDueButton } from "./PayPastDueButton";
-import type { StripeStatusResult } from "./types";
 import {
   PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
-  type BookingRequestDoc, type PaymentDoc, type PaymentRowKind,
+  type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
 
 // SP5 Task 15 — the booking detail page's money surface: subscribes to

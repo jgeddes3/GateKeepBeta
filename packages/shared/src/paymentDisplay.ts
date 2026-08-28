@@ -87,3 +87,16 @@ export function paymentRowKind(row: Pick<PaymentDoc, "deposit" | "settlement">):
   if (row.deposit.status === "held" || row.deposit.status === "applied") return "depositHeld";
   return "depositUnpaid";
 }
+
+// Response shape of the getStripeStatus callable — client-shared so web and
+// mobile render the SAME contract (moved from apps/web/src/payments/types.ts
+// in SP5b; the null-balance rule in the comment below is binding on both).
+export interface StripeStatusResult {
+  hasCard: boolean; cardBrand: string | null; cardLast4: string | null;
+  hasAccount: boolean; transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
+  delinquent: boolean;
+  // 0 means "asked, nothing there"; null means "Stripe couldn't be read just
+  // now" — MUST render as "balance unavailable", never $0.00.
+  availableBalanceCents: number | null;
+  instantAvailableBalanceCents: number | null;
+}

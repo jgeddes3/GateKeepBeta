@@ -4,7 +4,7 @@ import Link from "next/link";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
-import type { StripeStatusResult } from "./types";
+import type { StripeStatusResult } from "@gatekeep/shared";
 
 // SP5 Task 15 — mounted on the curator profile editor (the closest thing
 // this app has to a "curator dashboard shell": it's where a curator's own

@@ -9,11 +9,10 @@ import { bookingHistoryLabel, depositLine } from "./BookingInbox";
 import { OfferForm } from "./OfferForm";
 import { CancelDialog } from "./CancelDialog";
 import { GatePrompt } from "../payments/GatePrompt";
-import { depositChargePreviewCents } from "../payments/fees";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
   NO_SHOW_REPORT_WINDOW_DAYS, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
-  DEPOSIT_PERCENT, CANCEL_GRACE_MS,
+  DEPOSIT_PERCENT, CANCEL_GRACE_MS, depositChargePreviewCents,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
 

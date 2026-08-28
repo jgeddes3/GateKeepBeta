@@ -4,3 +4,4 @@ export * from "./storagePaths.js";
 export * from "./money.js";
 export * from "./paymentDisplay.js";
 export * from "./messages.js";
+export * from "./feePreviews.js";

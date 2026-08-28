@@ -3,10 +3,9 @@ import { useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents } from "../gigs/GigForms";
-import { trueUpDeltaPreviewCents } from "./fees";
 import {
   MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS, TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage,
-  TRUE_UP_INCREASE_ONLY_MESSAGE,
+  TRUE_UP_INCREASE_ONLY_MESSAGE, trueUpDeltaPreviewCents,
   type BudgetStructure, type FeePolicy,
 } from "@gatekeep/shared";
 

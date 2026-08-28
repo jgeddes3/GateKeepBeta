@@ -4,12 +4,11 @@ import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "f
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
-import { instantFeePreviewCents } from "./fees";
 import { rememberOnboardingProfileId } from "./onboardingRedirect";
-import type { StripeStatusResult } from "./types";
 import {
   PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
-  type PaymentDoc,
+  instantFeePreviewCents,
+  type PaymentDoc, type StripeStatusResult,
 } from "@gatekeep/shared";
 
 // SP5 Task 14 — the musician's payouts surface. House idiom throughout (see
