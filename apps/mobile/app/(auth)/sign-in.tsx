@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { View, Text, TextInput, Pressable, Platform, Alert } from "react-native";
+import { View, Platform, Alert } from "react-native";
 import { Link } from "expo-router";
 import {
   signInWithEmailAndPassword, GoogleAuthProvider, OAuthProvider, signInWithCredential,
@@ -9,6 +9,9 @@ import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
 import { getFirebase } from "../../src/lib/firebase";
 import { GOOGLE_WEB_CLIENT_ID } from "../../src/auth/config";
+import { Text, Button, Input, PageBackground } from "../../src/ui";
+import { useTokens } from "../../src/theme/ThemeProvider";
+import { tokens } from "../../src/theme/tokens";
 
 GoogleSignin.configure({ webClientId: GOOGLE_WEB_CLIENT_ID });
 
@@ -46,11 +49,21 @@ async function accountExistsMessage(auth: Auth, e: any): Promise<string> {
 export default function SignIn() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // Presentation-only: mirrors the message an already-existing catch block
+  // hands to Alert.alert, so the same failure also renders as a branded
+  // inline banner. Does not change what triggers a catch, what message is
+  // computed, or that the alert still fires.
+  const [error, setError] = useState<string | null>(null);
   const { auth } = getFirebase();
+  const t = useTokens();
 
   const emailSignIn = async () => {
     try { await signInWithEmailAndPassword(auth, email.trim(), password); }
-    catch (e: any) { Alert.alert("Sign in", authMessage(e?.code ?? "")); }
+    catch (e: any) {
+      const msg = authMessage(e?.code ?? "");
+      setError(msg);
+      Alert.alert("Sign in", msg);
+    }
   };
   const googleSignIn = async () => {
     try {
@@ -78,7 +91,7 @@ export default function SignIn() {
       const provider = new OAuthProvider("apple.com");
       await signInWithCredential(auth, provider.credential({ idToken: cred.identityToken }));
     } catch (e: any) {
-      // User dismissed the native Apple sheet — not an error worth surfacing.
+      // User dismissed the native Apple sheet: not an error worth surfacing.
       if (e?.code === "ERR_REQUEST_CANCELED") return;
       console.warn("sign-in error", e?.code);
       if (e?.code === "auth/account-exists-with-different-credential") {
@@ -90,31 +103,34 @@ export default function SignIn() {
   };
 
   return (
-    <View style={{ flex: 1, justifyContent: "center", padding: 24, gap: 12 }}>
-      <Text style={{ fontSize: 28, fontWeight: "700" }}>GateKeep</Text>
-      <TextInput placeholder="Email" autoCapitalize="none" keyboardType="email-address"
-        value={email} onChangeText={setEmail} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
-      <TextInput placeholder="Password" secureTextEntry
-        value={password} onChangeText={setPassword} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
-      <Pressable onPress={emailSignIn} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>Sign in</Text>
-      </Pressable>
-      <Pressable onPress={googleSignIn} style={{ borderWidth: 1, padding: 14, borderRadius: 8 }}>
-        <Text style={{ textAlign: "center" }}>Continue with Google</Text>
-      </Pressable>
-      {Platform.OS === "ios" && (
-        <Pressable onPress={appleSignIn} style={{ borderWidth: 1, padding: 14, borderRadius: 8 }}>
-          <Text style={{ textAlign: "center" }}>Continue with Apple</Text>
-        </Pressable>
-      )}
-      <Pressable onPress={async () => {
-        if (!email.trim()) { Alert.alert("Reset password", "Enter your email above first."); return; }
-        const { sendPasswordResetEmail } = await import("firebase/auth");
-        try { await sendPasswordResetEmail(auth, email.trim());
-              Alert.alert("Reset password", "Reset link sent — check your email."); }
-        catch { Alert.alert("Reset password", "Couldn't send the reset email."); }
-      }}><Text>Forgot password?</Text></Pressable>
-      <Link href="/(auth)/sign-up"><Text>New here? Create an account</Text></Link>
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <View style={{ flex: 1, justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
+        <Text variant="display">GateKeep</Text>
+        {error ? (
+          <View style={{ borderWidth: 1, borderColor: t.destructive, borderRadius: tokens.radius.card,
+            padding: tokens.space.md, backgroundColor: t.surface }}>
+            <Text color={t.destructive}>{error}</Text>
+          </View>
+        ) : null}
+        <Input placeholder="Email" autoCapitalize="none" keyboardType="email-address"
+          value={email} onChangeText={setEmail} />
+        <Input placeholder="Password" secureTextEntry
+          value={password} onChangeText={setPassword} />
+        <Button title="Sign in" onPress={() => { setError(null); void emailSignIn(); }} />
+        <Button title="Continue with Google" variant="secondary" onPress={googleSignIn} />
+        {Platform.OS === "ios" && (
+          <Button title="Continue with Apple" variant="secondary" onPress={appleSignIn} />
+        )}
+        <Button title="Forgot password?" variant="ghost" onPress={async () => {
+          if (!email.trim()) { Alert.alert("Reset password", "Enter your email above first."); return; }
+          const { sendPasswordResetEmail } = await import("firebase/auth");
+          try { await sendPasswordResetEmail(auth, email.trim());
+                Alert.alert("Reset password", "Reset link sent, check your email."); }
+          catch { Alert.alert("Reset password", "Couldn't send the reset email."); }
+        }} />
+        <Link href="/(auth)/sign-up"><Text color={t.accent}>New here? Create an account</Text></Link>
+      </View>
     </View>
   );
 }
