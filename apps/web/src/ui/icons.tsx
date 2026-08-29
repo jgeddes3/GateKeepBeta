@@ -1,4 +1,5 @@
 import {
+  AppleLogo,
   ArrowRight,
   CalendarCheck,
   CaretDown,
@@ -10,6 +11,7 @@ import {
   Circle,
   DotsThreeVertical,
   FunnelSimple,
+  GoogleLogo,
   House,
   Info,
   List,
@@ -80,6 +82,14 @@ export const IconPause = pin(Pause);
 export const IconMonitor = pin(Monitor);
 export const IconMoon = pin(Moon);
 export const IconSun = pin(Sun);
+
+// Sub-project 9A task 5: sign-in/sign-up's provider buttons ("Continue with
+// Google"/"Continue with Apple") need an icon that genuinely identifies the
+// provider, not a generic glyph (antislop R-04). Phosphor ships both as
+// real logo marks with duotone paths, so they go through the same pin()
+// pipeline as every other content icon rather than a one-off import.
+export const IconGoogle = pin(GoogleLogo);
+export const IconApple = pin(AppleLogo);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At
