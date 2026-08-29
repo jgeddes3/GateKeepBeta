@@ -1,6 +1,8 @@
 import {
   AppleLogo,
   ArrowRight,
+  Bell,
+  Buildings,
   CalendarCheck,
   CaretDown,
   CaretLeft,
@@ -90,6 +92,19 @@ export const IconSun = pin(Sun);
 // pipeline as every other content icon rather than a one-off import.
 export const IconGoogle = pin(GoogleLogo);
 export const IconApple = pin(AppleLogo);
+
+// Sub-project 9A task 6: the dashboard home's profile cards need a type
+// marker distinguishing a musician profile from a curator one at a glance.
+// Musicians reuse IconGigs (MusicNotes already means "music" everywhere
+// else it appears, the Gigs nav item included, so this is the same glyph
+// carrying the same real meaning, not a second unrelated icon). Buildings
+// stands in for "curator" (venues are the marketplace's primary curator
+// subtype, and planner/individual-host profiles still represent an
+// organizing entity rather than a performer), paired with the profile's own
+// type label so the icon is never the sole signal. Bell marks the
+// notifications section, which previously had no icon at all.
+export const IconBuildings = pin(Buildings);
+export const IconBell = pin(Bell);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At
