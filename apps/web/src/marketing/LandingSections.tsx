@@ -71,7 +71,7 @@ export function MusicianStorySection() {
       imageSrc="/marketing/artist-page.jpg"
       imageAlt="A musician's public artist page on GateKeep, showing the Syne name, genre and act-size chips, and the about section on the dark night-scrim background."
       imageWidth={1568}
-      imageHeight={556}
+      imageHeight={340}
     />
   );
 }
@@ -88,7 +88,7 @@ export function CuratorStorySection() {
       imageSrc="/marketing/find-gigs-browse.jpg"
       imageAlt="The Find gigs browse page on GateKeep, showing city and genre filters above the open-gigs list."
       imageWidth={1568}
-      imageHeight={557}
+      imageHeight={380}
       reverse
     />
   );

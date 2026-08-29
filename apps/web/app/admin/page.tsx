@@ -105,6 +105,17 @@ async function resolveProfileOwnerUid(profileId: string): Promise<string | null>
 // busy/error). `extra` is an optional slot for a call-site-specific control
 // rendered between the textarea and the error banner (QueueRow's "also flag
 // this account" toggle is the one user).
+//
+// The maxLength=500 default (and every caller's own trimmed-length 1-500
+// check before calling onSubmit) mirrors the identical 1-500 bound
+// reviewProfile/reviewTrack/takedownGig already enforce server-side
+// (functions/src/review.ts, tracks.ts, gigs.ts): this is a friendlier
+// client-side echo of an existing server rule, not a new one, so the
+// persisted `rejectionReason`/takedown reason is unaffected either way.
+// Where a caller's pre-restyle window.prompt() flow had a looser or no
+// client check (several only tested for non-empty), the server's own
+// validation was always the real backstop; see task 12's report for the
+// per-call-site diff.
 function ReasonCard({
   title, warning, maxLength = 500, placeholder = "Reason (required)",
   reason, onReasonChange, busy, error, onSubmit, onCancel, submitLabel, busyLabel, extra,
@@ -260,6 +271,11 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
           const ownerUid = await resolveProfileOwnerUid(p.id);
           if (!ownerUid) throw new Error("Could not find an account on this profile to flag.");
           await httpsCallable(functions, "flagAccount")({ uid: ownerUid, text: trimmedFlagNote });
+          // Only clear the flag fields once the flag itself actually landed.
+          // The reject above already committed regardless of what happens
+          // here, so a flagAccount failure below must not erase the note the
+          // admin typed: they still need it to retry.
+          setFlagChecked(false); setFlagNote("");
         } catch (flagError) {
           window.alert(
             `The review was submitted, but the account flag failed: ${
@@ -268,7 +284,10 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
           );
         }
       }
-      setShowReject(false); setReason(""); setFlagChecked(false); setFlagNote("");
+      // The reject decision itself is final either way, so the reason panel
+      // always closes here: this reset is unconditional on the OUTER
+      // reviewProfile call succeeding, independent of the flag outcome above.
+      setShowReject(false); setReason("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not submit the review, try again.");
     } finally {
