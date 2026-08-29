@@ -1,4 +1,4 @@
-import { View, Text } from "react-native";
+import { View } from "react-native";
 import {
   GENRES, ACT_SIZES, SERIES_CADENCES, LAUNCH_TIMEZONE,
   type GigContentInput, type GigBudget, type GigDoc, type GigStatus, type SeriesStatus,
@@ -68,14 +68,6 @@ export const GIG_STATUS_TONE: Record<GigStatus, StatusTone> = {
 export const SERIES_STATUS_TONE: Record<SeriesStatus, StatusTone> = {
   active: "success", paused: "warning", ended: "neutral",
 };
-
-export function Badge({ label, bg, fg = "#111" }: { label: string; bg: string; fg?: string }) {
-  return (
-    <View style={{ backgroundColor: bg, borderRadius: 10, paddingVertical: 2, paddingHorizontal: 8, alignSelf: "flex-start" }}>
-      <Text style={{ color: fg, fontSize: 12 }}>{label}</Text>
-    </View>
-  );
-}
 
 // A gig's `startsAt` is a bare epoch ms, pinning the rendered wall time to
 // LAUNCH_TIMEZONE (rather than each device's own clock) is what keeps a

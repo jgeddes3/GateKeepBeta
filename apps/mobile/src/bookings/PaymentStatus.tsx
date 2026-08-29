@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { View, Text, Pressable } from "react-native";
+import { View, Pressable } from "react-native";
 import { collection, doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { useRouter } from "expo-router";
 import { getFirebase } from "../lib/firebase";
-import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
+import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { useRole, useOccurrences } from "./BookingThread";
 import { SaveCardSheet } from "../payments/SaveCardSheet";
 import { PayPastDueButton } from "../payments/PayPastDueButton";
@@ -13,15 +13,18 @@ import {
   PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
   type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
+import { Text, Card, StatusBadge, type StatusTone } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
+import { tokens } from "../theme/tokens";
 
-// SP5 Task 16 — mobile's money surfaces. PaymentStatus is the per-occurrence
+// SP5 Task 16, mobile's money surfaces. PaymentStatus is the per-occurrence
 // status chips for one booking, mounted under BookingThread by
 // app/booking/[bookingId].tsx. An RN port of
 // apps/web/src/payments/PaymentsPanel.tsx: the row-state ladder and the
 // paidCents membership test are literally the same code (@gatekeep/shared's
 // `paymentRowKind` / `PAID_DEPOSIT_STATUSES`), and the surrounding totals
 // arithmetic mirrors that panel's field-for-field, INCLUDING its
-// review-round fixes. SP5 shipped this read-only (spec §1, "Platforms" —
+// review-round fixes. SP5 shipped this read-only (spec §1, "Platforms",
 // native payment sheets needed @stripe/stripe-react-native and a new EAS dev
 // build, which was sub-5b); SP5b wires the curator actions up: a
 // card-on-file row (SaveCardSheet), a native pay-past-due button
@@ -34,14 +37,14 @@ import {
 // renders inside a curator-gated block); mobile reaches the musician side
 // too, so it shows the escrow line to both and the "total paid, including
 // service fees" line only to the curator, whose bill that is. (SP5's other
-// divergence — the two past-due labels reading "pay on the web" — is
+// divergence, the two past-due labels reading "pay on the web", is
 // REMOVED by SP5b: the curator labels now match web's action-bearing copy,
 // since there's a button to press again.)
 //
 // This file used to also hold EarningsCard, the musician dashboard's
 // read-only balance headline. SP5b Task 7 replaced it with the full
 // EarningsPanel (Stripe onboarding + cash-out) at
-// src/payments/EarningsPanel.tsx, so it's gone from here — the musician
+// src/payments/EarningsPanel.tsx, so it's gone from here, the musician
 // footer line below now links out to that panel instead of describing a
 // web-only workflow.
 
@@ -67,25 +70,25 @@ function usePaymentRows(bookingId: string): Row[] {
   return rows;
 }
 
-// Chip palette, reusing the colors this app already assigns these meanings
-// (GigForms' STATUS_BG / BookingInbox's "your turn" badge): amber =
-// in-flight or attention, red = debt, green = done, indigo = scheduled,
-// grey = nothing owed / nothing yet. `fg` omitted where Badge's own default
-// (#111) is already the right ink.
-const CHIP: Record<PaymentRowKind, { bg: string; fg?: string }> = {
-  forfeited: { bg: "#fef3c7", fg: "#92400e" },
-  paid: { bg: "#dcfce7", fg: "#166534" },
-  refunded: { bg: "#f3f4f6", fg: "#374151" },
-  waived: { bg: "#f3f4f6", fg: "#374151" },
-  settlementPastDue: { bg: "#fee2e2", fg: "#991b1b" },
-  depositPastDue: { bg: "#fee2e2", fg: "#991b1b" },
-  settlementPending: { bg: "#e0e7ff" },
-  depositHeld: { bg: "#e0e7ff" },
-  depositUnpaid: { bg: "#f3f4f6", fg: "#374151" },
+// StatusBadge tone per row kind, reusing the meanings this app already
+// assigns these states: warning = in-flight or attention, destructive =
+// debt, success = done, neutral = scheduled / nothing owed / nothing yet.
+// The badge's displayed WORD still comes from rowLabel below; this only
+// picks the color family.
+const CHIP_TONE: Record<PaymentRowKind, StatusTone> = {
+  forfeited: "warning",
+  paid: "success",
+  refunded: "neutral",
+  waived: "neutral",
+  settlementPastDue: "destructive",
+  depositPastDue: "destructive",
+  settlementPending: "neutral",
+  depositHeld: "neutral",
+  depositUnpaid: "neutral",
 };
 
-// Web's strings for the same states, side-framed the same way — kept
-// identical so a musician reading "Forfeited deposit — received 100% (…)" on
+// Web's strings for the same states, side-framed the same way, kept
+// identical so a musician reading "Forfeited deposit: received 100% (…)" on
 // the web Earnings page sees that exact sentence on their phone too,
 // including the two past-due lines: SP5b wires up a real Pay Now button next
 // to them (below), so the curator copy matches web's action-bearing wording
@@ -93,7 +96,7 @@ const CHIP: Record<PaymentRowKind, { bg: string; fg?: string }> = {
 function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): string {
   switch (kind) {
     case "forfeited": {
-      // forfeit_pending is IN PROGRESS — the cancellation committed but the
+      // forfeit_pending is IN PROGRESS, the cancellation committed but the
       // transfer to the musician hasn't landed yet (DepositStatus's state
       // machine in types.ts). Only terminal "forfeited" gets paid/received
       // copy.
@@ -101,19 +104,19 @@ function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): strin
         return isCuratorSide ? "Forfeiting to the musician…" : "Forfeiting to you…";
       }
       return isCuratorSide
-        ? `Forfeited — ${formatCents(row.deposit.sliceCents)} paid to the musician`
-        : `Forfeited deposit — received 100% (${formatCents(row.deposit.sliceCents)})`;
+        ? `Forfeited: ${formatCents(row.deposit.sliceCents)} paid to the musician`
+        : `Forfeited deposit: received 100% (${formatCents(row.deposit.sliceCents)})`;
     }
     case "paid": {
       const totalCents = (row.settlement.computedCents ?? 0) + (row.settlement.feeShareCents ?? 0) + (row.settlement.lateFeeCents ?? 0);
       return isCuratorSide
-        ? `Paid — ${formatCents(totalCents)}`
+        ? `Paid: ${formatCents(totalCents)}`
         : (row.transfer.amountCents != null ? `Paid ${formatCents(row.transfer.amountCents)}` : "Paid");
     }
     case "refunded": return "Refunded";
-    case "waived": return "Waived — nothing owed on this date";
-    case "settlementPastDue": return isCuratorSide ? "Past due — pay now" : "Curator payment delayed";
-    case "depositPastDue": return isCuratorSide ? "Deposit past due — pay now" : "Payment delayed";
+    case "waived": return "Waived: nothing owed on this date";
+    case "settlementPastDue": return isCuratorSide ? "Past due: pay now" : "Curator payment delayed";
+    case "depositPastDue": return isCuratorSide ? "Deposit past due: pay now" : "Payment delayed";
     case "settlementPending": {
       // "Settles"/"Pays out" is settlement.settleAfter (gig END + the T+3
       // delay), NOT the occurrence's own start date. settleAfter is set once
@@ -125,7 +128,7 @@ function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): strin
     case "depositHeld": return isCuratorSide ? "Deposit held" : "Deposit held in escrow";
     case "depositUnpaid": return "Charges when the date is confirmed";
     default: {
-      // Exhaustiveness guard, not a dead fallback — a new PaymentRowKind
+      // Exhaustiveness guard, not a dead fallback, a new PaymentRowKind
       // member fails to compile here (and in web's identical guard) until
       // both platforms handle it.
       const exhaustive: never = kind;
@@ -134,15 +137,14 @@ function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): strin
   }
 }
 
-const rowStyle = { borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding: 10, gap: 6 };
-
 // Mounted by app/booking/[bookingId].tsx beneath BookingThread. Subscribes
-// to the booking doc independently of BookingThread's own subscription —
-// the same ACCEPTED double listener web's PaymentsPanel keeps beside
+// to the booking doc independently of BookingThread's own subscription, the
+// same ACCEPTED double listener web's PaymentsPanel keeps beside
 // BookingThread's, for the same reason: these are self-contained surfaces,
 // and one extra doc listener per booking screen is not worth coupling them
 // through a shared parent context.
 export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: string }) {
+  const t = useTokens();
   const router = useRouter();
   const [booking, setBooking] = useState<BookingRequestDoc | "loading" | "unavailable">("loading");
   const [openTrueUpFor, setOpenTrueUpFor] = useState<string | null>(null);
@@ -159,7 +161,7 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
 
   const musicianProfileId = booking !== "loading" && booking !== "unavailable" ? booking.musicianProfileId : undefined;
   const curatorProfileId = booking !== "loading" && booking !== "unavailable" ? booking.curatorProfileId : undefined;
-  // Hooks run unconditionally, in the same order, every render — the early
+  // Hooks run unconditionally, in the same order, every render, the early
   // returns below happen AFTER all three.
   const role = useRole(musicianProfileId, curatorProfileId, uid);
   const occurrences = useOccurrences(bookingId);
@@ -170,7 +172,7 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
     if (!isCuratorSide || !curatorProfileId) return;
     let cancelled = false;
     // No synchronous setStripeStatus("loading") here (react-hooks/set-state
-    // -in-effect) — same idiom as web's PaymentsPanel: the initial
+    // -in-effect), same idiom as web's PaymentsPanel: the initial
     // useState("loading") already covers first mount, and a reload just
     // leaves the PREVIOUS status on screen until the new one resolves,
     // rather than flashing back to "loading".
@@ -182,16 +184,16 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
 
   if (booking === "loading" || booking === "unavailable" || role === "loading" || role === "none") return null;
   // Nothing to show before acceptBooking's saga staged the payments
-  // subcollection at all (an open/negotiating booking) — no empty panel.
+  // subcollection at all (an open/negotiating booking), no empty panel.
   if (rows.length === 0) return null;
 
   // Task 5's true-up mount keys a settlementPending row's occurrence back to
-  // its own durationMinutes — same lookup web's PaymentsPanel builds from
+  // its own durationMinutes, same lookup web's PaymentsPanel builds from
   // the same useOccurrences hook.
   const durationByGigId = new Map(occurrences.map((o) => [o.id, o.durationMinutes]));
 
   // Mirrors recomputePaymentSummary's per-status table field-for-field, as
-  // web's panel does: heldCents is ESCROW ONLY ("held" — the one status
+  // web's panel does: heldCents is ESCROW ONLY ("held", the one status
   // meaning the platform is currently sitting on this money unreleased),
   // while paidCents is broader (every status where the card was charged at
   // all, whether or not that money has since moved on). feesCents rides
@@ -211,51 +213,52 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
   }
 
   return (
-    <View style={{ gap: 10, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Payments</Text>
+    <View style={{ gap: tokens.space.md, borderTopWidth: 1, borderTopColor: t.border, paddingTop: tokens.space.lg }}>
+      <Text variant="title">Payments</Text>
 
       {isCuratorSide && curatorProfileId && (
-        <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 8, padding: 12, gap: 8 }}>
+        <Card style={{ padding: tokens.space.md, gap: tokens.space.sm }}>
           {showSaveCard ? (
             <SaveCardSheet profileId={curatorProfileId}
               onSaved={() => { setShowSaveCard(false); setStripeReloadKey((k) => k + 1); }}
               onClose={() => setShowSaveCard(false)} />
           ) : stripeStatus === "loading" ? (
-            <Text style={{ color: "#666" }}>Loading card status…</Text>
+            <Text muted>Loading card status…</Text>
           ) : stripeStatus === "error" ? (
-            <View style={{ gap: 4 }}>
-              <Text style={{ color: "#92400e" }}>Couldn&apos;t load your card status.</Text>
+            <View style={{ gap: tokens.space.xs }}>
+              <Text color={t.warning}>Couldn&apos;t load your card status.</Text>
               <Pressable onPress={() => setStripeReloadKey((k) => k + 1)}>
-                <Text style={{ color: "#92400e", textDecorationLine: "underline" }}>Retry</Text>
+                <Text color={t.warning} style={{ textDecorationLine: "underline" }}>Retry</Text>
               </Pressable>
             </View>
           ) : (
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
               <Text>
                 {stripeStatus.hasCard
                   ? `Card on file: ${stripeStatus.cardBrand ?? "card"} •••• ${stripeStatus.cardLast4 ?? "----"}`
                   : "No card on file"}
               </Text>
               <Pressable onPress={() => setShowSaveCard(true)}>
-                <Text style={{ color: "#111", textDecorationLine: "underline" }}>
+                <Text style={{ textDecorationLine: "underline" }}>
                   {stripeStatus.hasCard ? "Update card" : "Add a card"}
                 </Text>
               </Pressable>
             </View>
           )}
-        </View>
+        </Card>
       )}
 
-      <View style={{ gap: 8 }}>
+      <View style={{ gap: tokens.space.sm }}>
         {rows.map((row) => {
           const kind = paymentRowKind(row);
-          const chip = CHIP[kind];
+          const tone = CHIP_TONE[kind];
           return (
-            <View key={row.id} style={rowStyle}>
-              <Text style={{ fontWeight: "700" }}>{formatGigDateTime(row.occurrenceStartsAt)}</Text>
-              {/* Badge sets its own alignSelf: "flex-start", so it sizes to
-                  its text without a wrapper row. */}
-              <Badge label={rowLabel(kind, row, isCuratorSide)} bg={chip.bg} fg={chip.fg} />
+            <View key={row.id} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+              padding: tokens.space.md, gap: tokens.space.sm }}>
+              <Text variant="label">{formatGigDateTime(row.occurrenceStartsAt)}</Text>
+              {/* StatusBadge sets its own alignSelf: "flex-start", so it sizes
+                  to its text without a wrapper row. */}
+              <StatusBadge label={rowLabel(kind, row, isCuratorSide)} status={tone} />
               {isCuratorSide && (kind === "settlementPastDue" || kind === "depositPastDue") && (
                 <PayPastDueButton bookingId={bookingId} gigId={row.id} onDone={() => setStripeReloadKey((k) => k + 1)} />
               )}
@@ -270,7 +273,7 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
                   />
                 ) : (
                   <Pressable onPress={() => setOpenTrueUpFor(row.id)} style={{ alignSelf: "flex-start" }}>
-                    <Text style={{ fontSize: 13, textDecorationLine: "underline" }}>Report actuals</Text>
+                    <Text variant="meta" style={{ textDecorationLine: "underline" }}>Report actuals</Text>
                   </Pressable>
                 )
               )}
@@ -278,16 +281,16 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
           );
         })}
       </View>
-      <View style={{ gap: 2 }}>
+      <View style={{ gap: tokens.space.xs }}>
         {/* Neutral on purpose for BOTH sides: heldCents is the escrow GROSS
             (the deposit slice the curator was charged), and the musician's
-            eventual share of it is that minus the 2% commission — or, on a
+            eventual share of it is that minus the 2% commission, or, on a
             forfeit, all of it. "Held in escrow for you" would state a net
             the musician will not actually receive. */}
-        <Text style={{ color: "#666", fontSize: 13 }}>Held in escrow: {formatCents(heldCents)}</Text>
-        {/* The bill, so curator-side only — a musician has no "total paid". */}
+        <Text variant="meta" muted>Held in escrow: {formatCents(heldCents)}</Text>
+        {/* The bill, so curator-side only, a musician has no "total paid". */}
         {isCuratorSide && (
-          <Text style={{ color: "#666", fontSize: 13 }}>
+          <Text variant="meta" muted>
             Total paid so far: {formatCents(paidCents)} (includes {formatCents(feesCents)} in service fees)
           </Text>
         )}
@@ -297,7 +300,7 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
             EarningsPanel (Task 7) instead of pointing to the web app. */}
         {!isCuratorSide && (
           <Pressable onPress={() => router.push("/(musician)/dashboard")}>
-            <Text style={{ color: "#111", fontSize: 13, textDecorationLine: "underline" }}>Manage payouts →</Text>
+            <Text variant="meta" style={{ textDecorationLine: "underline" }}>Manage payouts →</Text>
           </Pressable>
         )}
       </View>
