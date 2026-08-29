@@ -13,9 +13,10 @@
 // suspenders, in case a future react-native-svg version reverses course.
 // The plain <View> (light branch) has no such split: RN's own View honors
 // both forms, so the top-level prop there needs no cast.
+import type { ReactNode } from "react";
 import { View } from "react-native";
 import Svg, { Defs, LinearGradient, Stop, Rect, type SvgProps } from "react-native-svg";
-import { useThemeChoice } from "../theme/ThemeProvider";
+import { useThemeChoice, useTokens } from "../theme/ThemeProvider";
 import { PAGE_DARK_STOPS, SCRIM_STOPS, tokens } from "../theme/tokens";
 
 // Cast-past-the-Omit helper: SvgProps strips `pointerEvents` from its type
@@ -71,5 +72,42 @@ export function PhotoScrim() {
       </Defs>
       <Rect x="0" y="0" width="100%" height="100%" fill="url(#scrim)" />
     </Svg>
+  );
+}
+
+// Branded stand-in for a card's cover photo when no real image is wired
+// through (both browse grids render this, never a Storage image: see the
+// task's Part A note). A 155deg surface -> border gradient built from theme
+// tokens (never the page-level bg gradient), with a centered muted context
+// icon naming what the slot is for (a gig vs. an artist). Fills its parent
+// absolutely and never eats touches, so the card's own Pressable stays
+// tappable through it. `pointerEvents` is the discrete top-level prop on both
+// the wrapper View and the <Svg> fill for the same reason PhotoScrim/
+// PageBackground set it that way (see the file header note).
+export function PhotoPlaceholder({ icon }: { icon: ReactNode }) {
+  const t = useTokens();
+  return (
+    <View
+      pointerEvents="none"
+      style={{ position: "absolute", inset: 0, alignItems: "center", justifyContent: "center" }}
+    >
+      <Svg
+        {...svgNoTouch}
+        style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+        width="100%"
+        height="100%"
+      >
+        <Defs>
+          {/* objectBoundingBox coords approximating CSS linear-gradient(155deg):
+              start (surface) top-left-ish, end (border) bottom-right-ish. */}
+          <LinearGradient id="photoPlaceholder" x1="0.29" y1="0.05" x2="0.71" y2="0.95">
+            <Stop offset="0%" stopColor={t.surface} stopOpacity={1} />
+            <Stop offset="100%" stopColor={t.border} stopOpacity={1} />
+          </LinearGradient>
+        </Defs>
+        <Rect x="0" y="0" width="100%" height="100%" fill="url(#photoPlaceholder)" />
+      </Svg>
+      {icon}
+    </View>
   );
 }

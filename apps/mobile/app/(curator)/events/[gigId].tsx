@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ScrollView, View, Text, Pressable, Alert } from "react-native";
+import { ScrollView, View, Alert } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, getDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -7,15 +7,19 @@ import { getFirebase } from "../../../src/lib/firebase";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, OneOffDateTimeFields,
-  contentFrom, provisionsFrom, budgetFrom, oneOffDateTimeFrom, oneOffDateTimeToMs, MAX_ADDRESS_LENGTH, GIG_STATUS_LABEL,
+  contentFrom, provisionsFrom, budgetFrom, oneOffDateTimeFrom, oneOffDateTimeToMs, MAX_ADDRESS_LENGTH,
+  GIG_STATUS_LABEL, GIG_STATUS_TONE,
   type ContentState, type ProvisionsState, type BudgetState, type LocationValue, type UpdateGigPayload,
 } from "../../../src/gigs/GigForms";
 import {
   validateGigContent, validateBudget,
   type ProfileDoc, type CuratorSubtype, type GigDoc, type GigPrivateLocation, type GigContentInput, type GigBudget,
 } from "@gatekeep/shared";
+import { Text, Button, Card, StatusBadge, PageBackground, Skeleton, SkeletonCard, ErrorBanner } from "../../../src/ui";
+import { useTokens } from "../../../src/theme/ThemeProvider";
+import { tokens } from "../../../src/theme/tokens";
 
-// The actual content editor — keyed by gigId (not gig.updatedAt) by the
+// The actual content editor, keyed by gigId (not gig.updatedAt) by the
 // parent below, so it seeds its local state ONCE from the first snapshot and
 // never again: neither a live update from elsewhere (e.g. runDailySweep
 // closing this gig) nor this form's own save (which echoes right back
@@ -59,7 +63,7 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
     if (trimmedAddress.length > MAX_ADDRESS_LENGTH) { setError(`Address must be at most ${MAX_ADDRESS_LENGTH} characters.`); return; }
     // Omit `location` entirely (rather than resending an unchanged one) when
     // the curator neither typed a new address nor picked a different
-    // visibility — updateGig treats an omitted location as "leave it
+    // visibility, updateGig treats an omitted location as "leave it
     // untouched," skipping a redundant re-geocode + private-doc rewrite.
     const locationChanged = trimmedAddress.length > 0 || location.visibility !== gig.location.addressVisibility;
 
@@ -84,20 +88,14 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
       <OneOffDateTimeFields value={dateTime} onChange={setDateTime} />
       <ProvisionsFields value={provisions} onChange={setProvisions} />
       <LocationFields isVenue={isVenue} addressRequired={false} currentLabel={currentLabel} value={location} onChange={setLocation} />
-      {error && (
-        <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-          {error}
-        </Text>
-      )}
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save changes"}</Text>
-      </Pressable>
+      <ErrorBanner message={error} />
+      <Button title={busy ? "Saving…" : "Save changes"} disabled={busy} onPress={() => void save()} />
     </View>
   );
 }
 
 // Both a standalone one-off gig's editor AND the destination "occurrence
-// edit routes to the gig editor" sends a series occurrence to — updateGig
+// edit routes to the gig editor" sends a series occurrence to, updateGig
 // treats both identically (same callable, same detachment side effect for
 // anything with a seriesId), so one screen correctly serves both.
 export default function GigEditor() {
@@ -105,6 +103,7 @@ export default function GigEditor() {
   const gigId = rawGigId ?? "";
   const { user } = useAuth();
   const router = useRouter();
+  const t = useTokens();
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
   const [gig, setGig] = useState<GigDoc | null>(null);
   const [privateLoc, setPrivateLoc] = useState<GigPrivateLocation | null | "loading">("loading");
@@ -129,12 +128,12 @@ export default function GigEditor() {
       () => setGig(null));
   }, [gigId]);
   // The gig's OWN curatorProfileId, not whichever profile happens to be
-  // "active" in the global ContextSwitcher — those are independent, and a
+  // "active" in the global ContextSwitcher, those are independent, and a
   // curator can switch their active profile while this screen (reached by a
   // Stack push) stays mounted in the background on the "events" tab. Keying
   // off activeContext instead would let this screen briefly show a DIFFERENT
   // curator's subtype/venue-address (wrong isVenue, wrong "currently on
-  // file" fallback) after such a switch — this is a correctness issue, not
+  // file" fallback) after such a switch, this is a correctness issue, not
   // just a staleness race, so there's no safe way to derive it from
   // anywhere but the gig doc itself. Only transitions when gigId itself
   // changes (already handled by the render-time reset above), so no extra
@@ -151,7 +150,7 @@ export default function GigEditor() {
     if (!gigId) return;
     const { db } = getFirebase();
     // `cancelled` guards a stale WRITE the same way (curator)/dashboard.tsx's
-    // effects do: navigating gig A's editor -> gig B's can let A's getDoc
+    // effects do: navigating gig A's editor to gig B's can let A's getDoc
     // resolve after B's effect has already started.
     let cancelled = false;
     void getDoc(doc(db, `gigs/${gigId}/private/location`))
@@ -161,8 +160,16 @@ export default function GigEditor() {
   }, [gigId]);
 
   if (!user || !gig || !profile || privateLoc === "loading") {
-    return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>Loading…</Text></View>;
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
+          <Skeleton height={28} width="60%" />
+          <SkeletonCard />
+          <SkeletonCard />
+        </View>
+      </View>
+    );
   }
 
   const subtype = profile.subtype as CuratorSubtype;
@@ -170,7 +177,7 @@ export default function GigEditor() {
   const currentLabel = privateLoc
     ? `Currently on file: ${privateLoc.address} (${gig.location.addressVisibility === "public" ? "shown publicly" : "neighborhood only, publicly"})`
     : "No exact address on file.";
-  // Mirrors updateGig's own gate exactly — cancelled/taken_down gigs reject
+  // Mirrors updateGig's own gate exactly, cancelled/taken_down gigs reject
   // the callable outright, so the edit form is hidden rather than left live
   // and doomed to a failed-precondition on save. "closed" (auto-closed past
   // gigs) is deliberately still editable, matching the server.
@@ -182,7 +189,7 @@ export default function GigEditor() {
       await httpsCallable(getFirebase().functions, "publishGig")({ gigId });
     } catch (e) {
       // The MAX_OPEN_GIGS_PER_PROFILE cap error (resource-exhausted) lands
-      // here verbatim — this is the one place that error can ever surface.
+      // here verbatim, this is the one place that error can ever surface.
       setPublishError(e instanceof Error ? e.message : "Could not publish.");
     } finally {
       setPublishBusy(false);
@@ -204,43 +211,38 @@ export default function GigEditor() {
   };
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 16 }} keyboardShouldPersistTaps="handled">
-      <Text style={{ fontSize: 22, fontWeight: "700" }}>{gig.title || "Untitled gig"}</Text>
-      <Text>Status: <Text style={{ fontWeight: "700" }}>{GIG_STATUS_LABEL[gig.status]}</Text></Text>
-      {gig.seriesId && (
-        <View style={{ backgroundColor: gig.detachedFromTemplate ? "#f3f4f6" : "#fef3c7",
-          borderWidth: 1, borderColor: "#e5e7eb", borderRadius: 8, padding: 12, gap: 6 }}>
-          <Text>
-            {gig.detachedFromTemplate
-              ? "This date was edited directly and no longer follows its series' template."
-              : "Part of a recurring series — saving any change here will detach this date from the series; future template edits won't apply to it anymore."}
-          </Text>
-          <Pressable onPress={() => router.push({ pathname: "/(curator)/events/series/[seriesId]", params: { seriesId: gig.seriesId! } })}>
-            <Text style={{ color: "#2563eb" }}>View series →</Text>
-          </Pressable>
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.lg }} keyboardShouldPersistTaps="handled">
+        <Text variant="heading">{gig.title || "Untitled gig"}</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text variant="label" muted>Status</Text>
+          <StatusBadge label={GIG_STATUS_LABEL[gig.status]} status={GIG_STATUS_TONE[gig.status]} />
         </View>
-      )}
-      {!editable && <Text style={{ color: "#666" }}>This gig is {GIG_STATUS_LABEL[gig.status].toLowerCase()} and can no longer be edited.</Text>}
-      {editable && <GigEditForm key={gigId} gigId={gigId} gig={gig} isVenue={isVenue} currentLabel={currentLabel} />}
-      {gig.status === "draft" && (
-        <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
-          <Pressable onPress={() => void publish()} disabled={publishBusy}
-            style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: publishBusy ? 0.6 : 1 }}>
-            <Text style={{ color: "#fff", textAlign: "center" }}>{publishBusy ? "Publishing…" : "Publish"}</Text>
-          </Pressable>
-          {publishError && (
-            <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-              {publishError}
+        {gig.seriesId && (
+          <Card style={{ gap: 8 }}>
+            <Text muted={gig.detachedFromTemplate} color={gig.detachedFromTemplate ? undefined : t.warning}>
+              {gig.detachedFromTemplate
+                ? "This date was edited directly and no longer follows its series' template."
+                : "Part of a recurring series. Saving any change here will detach this date from the series; future template edits won't apply to it anymore."}
             </Text>
-          )}
-        </View>
-      )}
-      {(gig.status === "draft" || gig.status === "open") && (
-        <Pressable onPress={cancel} disabled={cancelBusy}
-          style={{ borderWidth: 1, borderColor: "#fca5a5", borderRadius: 6, padding: 10, alignSelf: "flex-start" }}>
-          <Text style={{ color: "#dc2626" }}>{cancelBusy ? "Cancelling…" : "Cancel this gig"}</Text>
-        </Pressable>
-      )}
-    </ScrollView>
+            <Button title="View series →" variant="secondary"
+              onPress={() => router.push({ pathname: "/(curator)/events/series/[seriesId]", params: { seriesId: gig.seriesId! } })} />
+          </Card>
+        )}
+        {!editable && <Text muted>This gig is {GIG_STATUS_LABEL[gig.status].toLowerCase()} and can no longer be edited.</Text>}
+        {editable && <GigEditForm key={gigId} gigId={gigId} gig={gig} isVenue={isVenue} currentLabel={currentLabel} />}
+        {gig.status === "draft" && (
+          <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
+            <Button title={publishBusy ? "Publishing…" : "Publish"} disabled={publishBusy} onPress={() => void publish()} />
+            <ErrorBanner message={publishError} />
+          </View>
+        )}
+        {(gig.status === "draft" || gig.status === "open") && (
+          <Button title={cancelBusy ? "Cancelling…" : "Cancel this gig"} variant="destructive"
+            disabled={cancelBusy} onPress={cancel} style={{ alignSelf: "flex-start" }} />
+        )}
+      </ScrollView>
+    </View>
   );
 }

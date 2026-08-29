@@ -3,7 +3,7 @@ import { tokens } from "../theme/tokens";
 import { useTokens } from "../theme/ThemeProvider";
 import { Text } from "./Text";
 
-type Status = "success" | "warning" | "destructive" | "neutral";
+export type StatusTone = "success" | "warning" | "destructive" | "neutral";
 
 // 14% is the ONE soft-tint opacity figure for the status color family
 // (DESIGN.md). `hex + "24"` appends the 0x24 alpha byte (36/255 ~= 14%) to a
@@ -20,7 +20,7 @@ function tint(hex: string) {
   return hex + "24";
 }
 
-export function StatusBadge({ label, status }: { label: string; status: Status }) {
+export function StatusBadge({ label, status }: { label: string; status: StatusTone }) {
   const t = useTokens();
   const c = status === "neutral" ? t.muted : t[status];
   return (

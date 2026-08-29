@@ -1,10 +1,10 @@
-import { View, Text, Pressable } from "react-native";
+import { View, Text } from "react-native";
 import {
   GENRES, ACT_SIZES, SERIES_CADENCES, LAUNCH_TIMEZONE,
   type GigContentInput, type GigBudget, type GigDoc, type GigStatus, type SeriesStatus,
   type BudgetStructure, type ActSize, type SeriesCadence, type FillMode, type AddressVisibility, type GigRecurrence,
 } from "@gatekeep/shared";
-import { Text as UiText, Input, TextArea, Chip as UiChip } from "../ui";
+import { Text as UiText, Input, TextArea, Chip as UiChip, type StatusTone } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 
 // RN port of ../../web/src/gigs/GigForms.tsx, sub-project 3's gig/series
@@ -55,23 +55,19 @@ export const FILL_MODE_LABEL: Record<FillMode, string> = {
 };
 export const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-// Shared badge/chip + status-hex maps: still consumed by browse/events (task 7) and booking/payment (task 9); migrated to src/ui + removed there.
-// taken_down is a MODERATION action (admin-issued), distinct amber/orange
-// pair from cancelled's red so it doesn't read as just another flavor of the
-// curator's own routine cancellation, matching web's badge distinction.
-export const STATUS_BG: Record<GigStatus, string> = {
-  draft: "#fef9c3", open: "#dcfce7", filled: "#dbeafe", closed: "#e5e7eb", cancelled: "#fee2e2", taken_down: "#fed7aa",
+// Status -> StatusBadge tone maps (task 7): the color SOURCE moved to the
+// themed StatusBadge (no hex here), while GIG_STATUS_LABEL/SERIES_STATUS_LABEL
+// above still own every displayed word. taken_down stays visually distinct
+// from cancelled (warning vs. destructive) so a moderation take-down does not
+// read as just another flavor of the curator's own routine cancellation,
+// matching web's badge distinction. Consumers render
+// <StatusBadge label={GIG_STATUS_LABEL[x]} status={GIG_STATUS_TONE[x]} />.
+export const GIG_STATUS_TONE: Record<GigStatus, StatusTone> = {
+  draft: "neutral", open: "success", filled: "neutral", closed: "neutral", cancelled: "destructive", taken_down: "warning",
 };
-export const STATUS_FG: Partial<Record<GigStatus, string>> = { taken_down: "#9a3412" };
-
-export function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  return (
-    <Pressable onPress={onPress} accessibilityRole="button" style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
-      borderWidth: 1, borderColor: "#bbb", backgroundColor: active ? "#111" : "#fff" }}>
-      <Text style={{ color: active ? "#fff" : "#111" }}>{label}</Text>
-    </Pressable>
-  );
-}
+export const SERIES_STATUS_TONE: Record<SeriesStatus, StatusTone> = {
+  active: "success", paused: "warning", ended: "neutral",
+};
 
 export function Badge({ label, bg, fg = "#111" }: { label: string; bg: string; fg?: string }) {
   return (
