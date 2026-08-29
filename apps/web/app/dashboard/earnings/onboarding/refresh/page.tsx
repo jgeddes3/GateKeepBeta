@@ -1,14 +1,18 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../../src/lib/firebase";
 import { readOnboardingProfileId } from "../../../../../src/payments/onboardingRedirect";
+import { Button } from "../../../../../src/ui/button";
+import { Card, CardContent } from "../../../../../src/ui/card";
+import { IconWarning } from "../../../../../src/ui/icons";
 
-// Stripe's refresh_url for account_onboarding — hit when a previously issued
+// Stripe's refresh_url for account_onboarding, hit when a previously issued
 // account link has EXPIRED (Stripe's own expired-link contract: the hosted
 // flow redirects here instead of completing, and the fix is simply to mint a
 // fresh link and send the browser straight back). Deliberately does NOT
-// clear the stashed profileId (see onboardingRedirect.ts) — the eventual
+// clear the stashed profileId (see onboardingRedirect.ts): the eventual
 // return_url hit is still the terminal step of this same attempt and needs
 // it.
 export default function OnboardingRefreshPage() {
@@ -21,7 +25,7 @@ export default function OnboardingRefreshPage() {
     (async () => {
       const profileId = readOnboardingProfileId();
       if (!profileId) {
-        if (!cancelled) setError("We couldn't tell which profile this was for — start payout setup again from the Earnings page.");
+        if (!cancelled) setError("We couldn't tell which profile this was for. Start payout setup again from the Earnings page.");
         return;
       }
       try {
@@ -36,15 +40,24 @@ export default function OnboardingRefreshPage() {
   }, []);
 
   return (
-    <main style={{ maxWidth: 560, margin: "40px auto", display: "grid", gap: 16 }}>
-      <h1>Payout setup</h1>
-      {!error && <p>Getting a fresh setup link…</p>}
-      {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-          {error}
-        </p>
-      )}
-      <p><a href="/dashboard/earnings">Back to Earnings</a></p>
+    <main className="flex flex-1 flex-col items-center justify-center px-4 py-16 sm:py-24">
+      <div className="w-full max-w-sm">
+        <Button asChild variant="link" className="mb-8 h-auto p-0">
+          <Link href="/dashboard/earnings">&larr; Back to Earnings</Link>
+        </Button>
+        <Card>
+          <CardContent className="grid gap-3">
+            <h1 className="font-syne text-2xl font-bold text-gk-text">Payout setup</h1>
+            {!error && <p className="font-sora text-sm text-gk-muted">Getting a fresh setup link…</p>}
+            {error && (
+              <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                {error}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </main>
   );
 }

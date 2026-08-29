@@ -17,10 +17,24 @@ import { IconBookings, IconEarnings, IconGigs, IconHouse, IconMenu, type IconPro
 // authenticated app (spec section 3's "one shell for all signed-in pages").
 // The landing page (app/page.tsx, its own variant lands in Task 4) and
 // /sign-in (Task 5 restyles it; it stands alone today) are deliberately left
-// out; see the task 3 report for the full mount-point rationale. /gigs and
-// /u/[handle] are public browse/profile pages with their own future-task
-// anatomies (spec section 6.3/6.4) and are also left bare for now.
-const SHELL_PREFIXES = ["/dashboard", "/admin", "/join"];
+// out; see the task 3 report for the full mount-point rationale. /u/[handle]
+// is a public profile page with its own future-task anatomy (spec section
+// 6.4) and is also left bare for now.
+//
+// Post-launch review fix: /gigs joined this list. It's a public browse
+// page, but it's also the one primary-nav destination ("Gigs") every
+// signed-in nav array already points at (see navItemsFor below), so a
+// signed-in visitor browsing it lost the shell entirely, an inconsistency
+// the review flagged. isShellRoute has no signed-in check of its own
+// (below), and neither does anything it renders: ContextSwitcher already
+// falls back to a plain "Sign in" link when `user` is null (its own file),
+// useMyProfiles already returns [] for a null uid, and resolveContext's
+// empty-profiles fallback already lands on the generic nav (Dashboard,
+// Gigs). /admin (gated separately, post-shell, by AdminGate) already
+// proves the shell mounts safely ahead of a signed-in check elsewhere on
+// the page, so /gigs's own signed-out visitors get that same brand + "Sign
+// in" treatment for free, no other change needed here.
+const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs"];
 
 function isShellRoute(pathname: string): boolean {
   return SHELL_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));

@@ -95,7 +95,7 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
         <p className="font-sora text-sm text-gk-text">
           {affected.map((id, i) => (
             <span key={id}>
-              <Link href={`/dashboard/bookings/${id}`} className="text-gk-text underline underline-offset-4 hover:text-gk-accent">
+              <Link href={`/dashboard/bookings/${id}`} className="text-gk-text underline underline-offset-4 hover:text-gk-focus">
                 Go to the overdue booking{affected.length > 1 ? ` (${i + 1})` : ""}
               </Link>
               {i < affected.length - 1 ? ", " : ""}
@@ -104,7 +104,7 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
         </p>
       ) : (
         <p className="font-sora text-sm text-gk-text">
-          <Link href="/dashboard" className="text-gk-text underline underline-offset-4 hover:text-gk-accent">Go to your bookings</Link>
+          <Link href="/dashboard" className="text-gk-text underline underline-offset-4 hover:text-gk-focus">Go to your bookings</Link>
         </p>
       )}
     </WarnBox>

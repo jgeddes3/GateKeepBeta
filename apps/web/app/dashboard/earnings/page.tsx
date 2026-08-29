@@ -52,7 +52,7 @@ function MusicianProfilesList({ uid }: { uid: string }) {
       <p className="flex items-start gap-2 font-sora text-sm text-gk-muted">
         <IconEarnings size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
         No musician profiles yet.{" "}
-        <a href="/join" className="text-gk-text underline underline-offset-4 hover:text-gk-accent">Create one</a>
+        <a href="/join" className="text-gk-text underline underline-offset-4 hover:text-gk-focus">Create one</a>
         {" "}to start getting booked and paid.
       </p>
     );

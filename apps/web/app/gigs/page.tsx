@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { GigBrowse } from "../../src/bookings/GigBrowse";
-import { Footer } from "../../src/shell/Footer";
 
 export const metadata: Metadata = {
   title: "Find gigs · GateKeep",
@@ -15,23 +13,22 @@ export const metadata: Metadata = {
 // its own comment for why that's the provable shape under firestore.rules).
 //
 // Sub-project 9A task 8: standalone route, same as /sign-in and /join.
-// AppShell deliberately does not wrap /gigs (see src/shell/AppShell.tsx's
-// SHELL_PREFIXES comment: it's a public browse page with its own anatomy,
-// spec section 6.3), so this page carries its own back link and Footer.
+//
+// Post-launch review fix: AppShell now wraps /gigs (see src/shell/
+// AppShell.tsx's SHELL_PREFIXES comment), so signed-in primary nav stays
+// inside the shell here too, and the shell already renders both its own
+// "&larr; GateKeep" brand mark (plus a "Sign in" link for a signed-out
+// visitor, same fallback /admin already relied on pre-review) and a Footer.
+// This page's own former back link and Footer duplicated those, so both are
+// removed here now that the shell supplies them.
 export default function GigsPage() {
   return (
-    <>
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
-        <Link href="/" className="font-sora text-sm text-gk-muted hover:text-gk-text">
-          &larr; GateKeep
-        </Link>
-        <h1 className="mt-4 font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Find gigs</h1>
-        <p className="mt-2 font-sora text-sm text-gk-muted">Open gigs looking for an act, updated as curators post them.</p>
-        <div className="mt-8">
-          <GigBrowse />
-        </div>
-      </main>
-      <Footer />
-    </>
+    <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+      <h1 className="font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Find gigs</h1>
+      <p className="mt-2 font-sora text-sm text-gk-muted">Open gigs looking for an act, updated as curators post them.</p>
+      <div className="mt-8">
+        <GigBrowse />
+      </div>
+    </main>
   );
 }

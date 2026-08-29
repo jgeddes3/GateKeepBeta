@@ -285,7 +285,7 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
           <ul className="grid gap-2">
             {occurrences.map((occ) => (
               <li key={occ.id} className="flex flex-wrap items-center gap-2 rounded-gk border border-gk-border bg-gk-surface px-4 py-3">
-                <Link href={`/dashboard/curator/${profileId}/gigs/${occ.id}`} className="font-syne text-sm font-semibold text-gk-text hover:text-gk-accent">
+                <Link href={`/dashboard/curator/${profileId}/gigs/${occ.id}`} className="font-syne text-sm font-semibold text-gk-text hover:text-gk-focus">
                   {formatGigDateTime(occ.startsAt)}
                 </Link>
                 <Badge variant={GIG_STATUS_BADGE[occ.status]}>{GIG_STATUS_LABEL[occ.status]}</Badge>

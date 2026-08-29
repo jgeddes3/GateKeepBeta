@@ -12,7 +12,7 @@ import { Button } from "../../src/ui/button";
 import { Input } from "../../src/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../src/ui/card";
 import { Footer } from "../../src/shell/Footer";
-import { IconApple, IconGoogle, IconWarning } from "../../src/ui/icons";
+import { IconApple, IconCheck, IconGoogle, IconWarning } from "../../src/ui/icons";
 
 // Firebase auth error codes -> human messages (mirrors apps/mobile's authMessage()).
 function authMessage(code: string, mode: "in" | "up"): string {
@@ -53,6 +53,14 @@ export default function SignInPage() {
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState<"in" | "up">("in");
   const [error, setError] = useState("");
+  // Post-launch review fix: this box used to render every message here
+  // (real errors AND the "reset link sent" confirmation) in the destructive
+  // red tint below, since both shared the one `error` string. `error` is
+  // still the single message shown; this just tracks which status tint it
+  // gets. Defaults to "error" so every existing setError(...) call site
+  // that never mentions this new state keeps its current look with zero
+  // other changes.
+  const [errorKind, setErrorKind] = useState<"error" | "success">("error");
   // Restyle addition (task 5 brief: "every async submit gets a busy state").
   // Purely a UI affordance layered around the existing calls below: it does
   // not change which Firebase functions run, their arguments, their order,
@@ -73,6 +81,7 @@ export default function SignInPage() {
       router.push("/dashboard");
     } catch (e) {
       setError(authMessage((e as AuthError)?.code ?? "", mode));
+      setErrorKind("error");
       setBusy(false);
     }
   };
@@ -86,10 +95,12 @@ export default function SignInPage() {
       const err = e as AuthError;
       if (err?.code === "auth/account-exists-with-different-credential") {
         setError(await accountExistsMessage(auth, err));
+        setErrorKind("error");
         setBusy(false);
         return;
       }
       setError("Sign-in didn't complete.");
+      setErrorKind("error");
       setBusy(false);
     }
   };
@@ -146,7 +157,16 @@ export default function SignInPage() {
                 />
               </div>
 
-              {error && (
+              {error && errorKind === "success" && (
+                <div
+                  role="status"
+                  className="flex items-start gap-2 rounded-gk border border-gk-success/40 bg-gk-success/14 px-3.5 py-2.5 font-sora text-sm text-gk-success"
+                >
+                  <IconCheck size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                  <p>{error}</p>
+                </div>
+              )}
+              {error && errorKind === "error" && (
                 <div
                   role="alert"
                   className="flex items-start gap-2 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-2.5 font-sora text-sm text-gk-destructive"
@@ -191,10 +211,20 @@ export default function SignInPage() {
                   variant="link"
                   className="h-auto p-0 text-gk-muted"
                   onClick={async () => {
-                    if (!email.trim()) { setError("Enter your email above, then press Forgot password."); return; }
+                    if (!email.trim()) {
+                      setError("Enter your email above, then press Forgot password.");
+                      setErrorKind("error");
+                      return;
+                    }
                     const { sendPasswordResetEmail } = await import("firebase/auth");
-                    try { await sendPasswordResetEmail(auth, email.trim()); setError("Reset link sent: check your email."); }
-                    catch { setError("Couldn't send the reset email."); }
+                    try {
+                      await sendPasswordResetEmail(auth, email.trim());
+                      setError("Reset link sent: check your email.");
+                      setErrorKind("success");
+                    } catch {
+                      setError("Couldn't send the reset email.");
+                      setErrorKind("error");
+                    }
                   }}
                 >
                   Forgot password?

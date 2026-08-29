@@ -97,7 +97,7 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
               You have no open gigs to offer right now.{" "}
               <a
                 href={`/dashboard/curator/${curatorProfileId}/gigs/new`}
-                className="text-gk-text underline underline-offset-4 hover:text-gk-accent"
+                className="text-gk-text underline underline-offset-4 hover:text-gk-focus"
               >
                 Post a gig
               </a>.

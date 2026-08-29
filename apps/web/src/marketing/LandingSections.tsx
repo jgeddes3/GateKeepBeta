@@ -128,7 +128,14 @@ export function HowItWorksSection() {
         <ol className="mt-10 grid gap-x-10 gap-y-10 sm:grid-cols-2">
           {steps.map((step) => (
             <li key={step.n}>
-              <span className="font-syne text-2xl font-extrabold text-gk-accent">{step.n}</span>
+              {/* Post-launch review fix: this section sits below the fold on
+                  the normal page background (not the always-dark hero
+                  scrim), so it follows whatever theme the visitor has
+                  chosen. Bare ember text fails AA on a light-theme surface
+                  (DESIGN.md's accessibility note, ~2.6-2.8:1); text-gk-focus
+                  is the branch's established AA-safe substitute, ember
+                  itself in dark theme and the same-hue #BF5038 in light. */}
+              <span className="font-syne text-2xl font-extrabold text-gk-focus">{step.n}</span>
               <h3 className="mt-2 font-syne text-lg font-semibold text-gk-text">{step.title}</h3>
               <p className="mt-1 font-sora text-sm leading-relaxed text-gk-muted">{step.body}</p>
             </li>

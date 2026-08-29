@@ -191,6 +191,7 @@ function ConfirmedRow({ row }: { row: BookingRow }) {
           dateMs={next.startsAt}
           title={title}
           subtitle={formatGigDateTime(next.startsAt)}
+          subtitleHasDate
           detail={depositDetail && <span className="block max-w-28 whitespace-normal">{depositDetail}</span>}
           className="border border-gk-border bg-gk-surface px-3 hover:border-gk-accent/50 hover:bg-gk-surface"
         />

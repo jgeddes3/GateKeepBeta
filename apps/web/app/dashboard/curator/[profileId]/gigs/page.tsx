@@ -34,7 +34,7 @@ function GigListItem({ profileId, gig }: { profileId: string; gig: GigRow }) {
   return (
     <li className="rounded-gk border border-gk-border bg-gk-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Link href={`/dashboard/curator/${profileId}/gigs/${gig.id}`} className="font-syne text-sm font-semibold text-gk-text hover:text-gk-accent">
+        <Link href={`/dashboard/curator/${profileId}/gigs/${gig.id}`} className="font-syne text-sm font-semibold text-gk-text hover:text-gk-focus">
           {gig.title || "Untitled gig"}
         </Link>
         <Badge variant={GIG_STATUS_BADGE[gig.status]}>{GIG_STATUS_LABEL[gig.status]}</Badge>
@@ -180,7 +180,7 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
               {series.map((s) => (
                 <li key={s.id} className="rounded-gk border border-gk-border bg-gk-surface px-4 py-3">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Link href={`/dashboard/curator/${profileId}/series/${s.id}`} className="font-syne text-sm font-semibold text-gk-text hover:text-gk-accent">
+                    <Link href={`/dashboard/curator/${profileId}/series/${s.id}`} className="font-syne text-sm font-semibold text-gk-text hover:text-gk-focus">
                       {s.template.title || "Untitled series"}
                     </Link>
                     <Badge variant={SERIES_STATUS_BADGE[s.status]}>{SERIES_STATUS_LABEL[s.status]}</Badge>

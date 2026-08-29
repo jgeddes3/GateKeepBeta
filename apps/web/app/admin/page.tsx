@@ -375,7 +375,7 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
                 <p className="flex flex-wrap gap-3">
                   {links.map((l) => (
                     <a key={`${l.kind}:${l.url}`} href={l.url} target="_blank" rel="noopener noreferrer nofollow"
-                      className="text-gk-text underline hover:text-gk-accent">
+                      className="text-gk-text underline hover:text-gk-focus">
                       {l.kind}
                     </a>
                   ))}
@@ -928,7 +928,7 @@ function ReliabilityPanel({ profileId }: { profileId: string }) {
                   <td className="px-3 py-2 text-gk-text">{m.kind === "late_cancel" ? "Late cancel" : "No-show"}</td>
                   <td className="px-3 py-2 text-gk-muted">{new Date(m.at).toLocaleString()}</td>
                   <td className="px-3 py-2">
-                    <a href={`/dashboard/bookings/${m.bookingId}`} target="_blank" rel="noopener noreferrer" className="text-gk-text underline hover:text-gk-accent">
+                    <a href={`/dashboard/bookings/${m.bookingId}`} target="_blank" rel="noopener noreferrer" className="text-gk-text underline hover:text-gk-focus">
                       {m.bookingId}
                     </a>
                   </td>
@@ -1588,7 +1588,14 @@ function AdminAlertRow({ a }: { a: AlertRow }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-syne text-sm font-semibold text-gk-text">{ALERT_KIND_LABEL[a.kind]}</span>
         <span className="font-sora text-xs text-gk-muted">
-          first seen {new Date(a.firstSeenAt).toLocaleString()} · seen {a.runCount}x
+          {/* Post-launch review fix: this was new Date(...).toLocaleString(),
+              the visiting admin's own browser timezone. Every other
+              LAUNCH_TIMEZONE-pinned timestamp in the product (gig start
+              times, booking dates) goes through this same formatGigDateTime
+              helper, already imported above for the gigs table; an alert's
+              "first seen" is a display-only string with no other reader, so
+              switching it to the product's one canonical formatter is safe. */}
+          first seen {formatGigDateTime(a.firstSeenAt)} · seen {a.runCount}x
         </span>
       </div>
       <p className="font-sora text-sm text-gk-text">{a.detail}</p>
@@ -1640,7 +1647,7 @@ function AdminAlerts() {
   }, []);
   if (alerts.length === 0) return null;
   return (
-    <section className="grid gap-3 rounded-gk border border-gk-warning/40 bg-gk-warning/[0.06] p-4">
+    <section className="grid gap-3 rounded-gk border border-gk-warning/40 bg-gk-warning/14 p-4">
       <h2 className="flex items-center gap-2 font-syne text-lg font-semibold text-gk-text">
         <IconWarning size={18} className="text-gk-warning" aria-hidden="true" />
         Needs a human ({alerts.length})

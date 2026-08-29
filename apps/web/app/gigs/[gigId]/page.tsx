@@ -17,7 +17,6 @@ import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../../src/ui/select";
 import { Skeleton } from "../../../src/ui/skeleton";
-import { Footer } from "../../../src/shell/Footer";
 import { IconWarning } from "../../../src/ui/icons";
 
 type MusicianOption = { profileId: string; name: string };
@@ -92,7 +91,7 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
     return (
       <p className="font-sora text-sm text-gk-muted">
         You need an approved musician profile to apply.{" "}
-        <Link href="/dashboard" className="text-gk-text underline underline-offset-4 hover:text-gk-accent">Set one up</Link>.
+        <Link href="/dashboard" className="text-gk-text underline underline-offset-4 hover:text-gk-focus">Set one up</Link>.
       </p>
     );
   }
@@ -215,21 +214,18 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
   if (gig === "loading") return <GigDetailSkeleton />;
   if (gig === "unavailable" || !gig) {
     return (
-      <>
-        <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-16 text-center sm:px-6">
-          <span className="mx-auto flex size-10 items-center justify-center rounded-full bg-gk-border/50 text-gk-muted">
-            <IconWarning size={20} aria-hidden="true" />
-          </span>
-          <p className="mt-3 font-syne text-lg font-semibold text-gk-text">This gig isn&apos;t available anymore</p>
-          <p className="mx-auto mt-1 max-w-sm font-sora text-sm text-gk-muted">
-            It may have been filled, closed, or taken down since you found it.
-          </p>
-          <Button asChild className="mt-4">
-            <Link href="/gigs">Find other gigs</Link>
-          </Button>
-        </main>
-        <Footer />
-      </>
+      <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-16 text-center sm:px-6">
+        <span className="mx-auto flex size-10 items-center justify-center rounded-full bg-gk-border/50 text-gk-muted">
+          <IconWarning size={20} aria-hidden="true" />
+        </span>
+        <p className="mt-3 font-syne text-lg font-semibold text-gk-text">This gig isn&apos;t available anymore</p>
+        <p className="mx-auto mt-1 max-w-sm font-sora text-sm text-gk-muted">
+          It may have been filled, closed, or taken down since you found it.
+        </p>
+        <Button asChild className="mt-4">
+          <Link href="/gigs">Find other gigs</Link>
+        </Button>
+      </main>
     );
   }
 
@@ -245,71 +241,68 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
     : "Part of a recurring series";
 
   return (
-    <>
-      <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
-        <Link href="/gigs" className="font-sora text-sm text-gk-muted hover:text-gk-text">
-          &larr; Find gigs
-        </Link>
-        <h1 className="mt-4 font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">{gig.title || "Untitled gig"}</h1>
-        {curatorName && <p className="mt-1 font-sora text-sm text-gk-muted">Posted by {curatorName}</p>}
+    <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+      <Link href="/gigs" className="font-sora text-sm text-gk-muted hover:text-gk-text">
+        &larr; Find gigs
+      </Link>
+      <h1 className="mt-4 font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">{gig.title || "Untitled gig"}</h1>
+      {curatorName && <p className="mt-1 font-sora text-sm text-gk-muted">Posted by {curatorName}</p>}
 
+      <div className="mt-6 grid gap-1.5">
+        <p className="font-sora text-sm text-gk-text">
+          {formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}
+        </p>
+        {/* Filled pill, not bare ember text: same DESIGN.md accessibility
+            note as GigCard's price (bare text-gk-accent on this page's
+            gk-page/gk-surface fails AA in light theme; the prescribed
+            fix is a filled chip/pill, ember fill + on-accent text,
+            which Badge's "default" variant already is). */}
+        <Badge variant="default" className="w-fit font-syne text-base font-semibold">
+          {formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
+        </Badge>
+        <p className="font-sora text-sm text-gk-muted">{gigLocationLabel(gig.location)}</p>
+      </div>
+
+      {gig.seriesId != null && (
+        <Badge variant="outline" className="mt-4 w-fit">{seriesLine}</Badge>
+      )}
+
+      {gig.description && (
+        <p className="mt-6 whitespace-pre-wrap font-sora text-sm text-gk-text">{gig.description}</p>
+      )}
+
+      {lookingForLine && (
         <div className="mt-6 grid gap-1.5">
-          <p className="font-sora text-sm text-gk-text">
-            {formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}
-          </p>
-          {/* Filled pill, not bare ember text: same DESIGN.md accessibility
-              note as GigCard's price (bare text-gk-accent on this page's
-              gk-page/gk-surface fails AA in light theme; the prescribed
-              fix is a filled chip/pill, ember fill + on-accent text,
-              which Badge's "default" variant already is). */}
-          <Badge variant="default" className="w-fit font-syne text-base font-semibold">
-            {formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
-          </Badge>
-          <p className="font-sora text-sm text-gk-muted">{gigLocationLabel(gig.location)}</p>
+          <span className="font-sora text-sm font-medium text-gk-text">Looking for</span>
+          <p className="font-sora text-sm text-gk-muted">{lookingForLine}</p>
         </div>
+      )}
 
-        {gig.seriesId != null && (
-          <Badge variant="outline" className="mt-4 w-fit">{seriesLine}</Badge>
-        )}
+      {provisionsLine && (
+        <p className="mt-4 font-sora text-sm text-gk-muted">{provisionsLine}</p>
+      )}
 
-        {gig.description && (
-          <p className="mt-6 whitespace-pre-wrap font-sora text-sm text-gk-text">{gig.description}</p>
-        )}
-
-        {lookingForLine && (
-          <div className="mt-6 grid gap-1.5">
-            <span className="font-sora text-sm font-medium text-gk-text">Looking for</span>
-            <p className="font-sora text-sm text-gk-muted">{lookingForLine}</p>
-          </div>
-        )}
-
-        {provisionsLine && (
-          <p className="mt-4 font-sora text-sm text-gk-muted">{provisionsLine}</p>
-        )}
-
-        {gig.status !== "open" ? (
-          <p className="mt-8 border-t border-gk-border pt-6 font-sora text-sm text-gk-muted">
-            This gig is no longer accepting applications.
-          </p>
-        ) : !user ? (
-          <p className="mt-8 border-t border-gk-border pt-6 font-sora text-sm text-gk-muted">
-            <Link href="/sign-in" className="text-gk-text underline underline-offset-4 hover:text-gk-accent">Sign in</Link>
-            {" "}to apply for this gig.
-          </p>
-        ) : (
-          <section className="mt-8 grid gap-3 border-t border-gk-border pt-8">
-            <h2 className="font-syne text-lg font-semibold text-gk-text">Apply for this gig</h2>
-            {/* Keyed by uid: resets every Apply-panel field the instant the
-                signed-in identity changes, mirroring app/dashboard/page.tsx's
-                ProfilesList/NotificationsList key={user.uid} pattern: without
-                it, a sign-out/sign-in on this same page would leave the
-                PREVIOUS user's musician-profile picker and in-progress offer
-                showing under the new identity until a full reload. */}
-            <ApplyPanel key={user.uid} gigId={gigId} gig={gig} uid={user.uid} />
-          </section>
-        )}
-      </main>
-      <Footer />
-    </>
+      {gig.status !== "open" ? (
+        <p className="mt-8 border-t border-gk-border pt-6 font-sora text-sm text-gk-muted">
+          This gig is no longer accepting applications.
+        </p>
+      ) : !user ? (
+        <p className="mt-8 border-t border-gk-border pt-6 font-sora text-sm text-gk-muted">
+          <Link href="/sign-in" className="text-gk-text underline underline-offset-4 hover:text-gk-focus">Sign in</Link>
+          {" "}to apply for this gig.
+        </p>
+      ) : (
+        <section className="mt-8 grid gap-3 border-t border-gk-border pt-8">
+          <h2 className="font-syne text-lg font-semibold text-gk-text">Apply for this gig</h2>
+          {/* Keyed by uid: resets every Apply-panel field the instant the
+              signed-in identity changes, mirroring app/dashboard/page.tsx's
+              ProfilesList/NotificationsList key={user.uid} pattern: without
+              it, a sign-out/sign-in on this same page would leave the
+              PREVIOUS user's musician-profile picker and in-progress offer
+              showing under the new identity until a full reload. */}
+          <ApplyPanel key={user.uid} gigId={gigId} gig={gig} uid={user.uid} />
+        </section>
+      )}
+    </main>
   );
 }

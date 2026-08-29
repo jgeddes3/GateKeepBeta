@@ -11,6 +11,17 @@ import { cn } from "../lib/utils";
 // task). GigCard/MusicianCard are its sibling locked skeletons, so this
 // lives alongside them.
 
+// Post-launch review fix: DateChip is aria-hidden (it's a purely visual
+// month/day glyph, no year), so a screen-reader visitor got no date at all
+// on any DateBlockRow row, only whatever the caller's own subtitle happens
+// to spell out (frequently just a time, per each call site below). This
+// full date, WITH the year, also resolves the sibling "multi-year
+// ambiguity" minor: DateChip's own month/day-only display can't distinguish
+// two shows that share a month and day across different years.
+function fullDateForScreenReaders(dateMs: number): string {
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeZone: LAUNCH_TIMEZONE }).format(new Date(dateMs));
+}
+
 function DateChip({ dateMs }: { dateMs: number }) {
   const date = new Date(dateMs);
   const month = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: LAUNCH_TIMEZONE }).format(date).toUpperCase();
@@ -34,18 +45,26 @@ function DateChip({ dateMs }: { dateMs: number }) {
   );
 }
 
-export function DateBlockRow({ dateMs, title, subtitle, detail, href, className }: {
+export function DateBlockRow({ dateMs, title, subtitle, detail, href, className, subtitleHasDate }: {
   dateMs: number;
   title: string;
   subtitle: string;
   detail?: ReactNode;
   href?: string;
   className?: string;
+  // Post-launch review fix: set true only when `subtitle` itself already
+  // spells out a full date (BookingInbox's ConfirmedRow passes
+  // formatGigDateTime as its subtitle), so the row's own sr-only date below
+  // doesn't announce the same date twice. Every other call site's subtitle
+  // is time/location only, so this defaults to false (render the sr-only
+  // date) everywhere else.
+  subtitleHasDate?: boolean;
 }) {
   const body = (
     <>
       <DateChip dateMs={dateMs} />
       <div className="min-w-0 flex-1">
+        {!subtitleHasDate && <span className="sr-only">{fullDateForScreenReaders(dateMs)}. </span>}
         <p className="truncate font-syne text-sm font-semibold text-gk-text">{title}</p>
         <p className="truncate font-sora text-xs text-gk-muted">{subtitle}</p>
       </div>

@@ -741,6 +741,9 @@ before a real launch:
    (a visible banner on each page says so). Have counsel review and replace the placeholder prose
    in `apps/web/app/terms/page.tsx` and `apps/web/app/privacy/page.tsx` with the real Terms of
    Service and Privacy Policy before launch.
+3. **Footer contact address**: the site footer's contact link (`CONTACT_EMAIL` in
+   `apps/web/src/shell/Footer.tsx`) is a placeholder, `hello@gatekeep.app`. The operator must own
+   that mailbox or change it to a real one before launch.
 
 ### Manual smoke walkthrough (real Stripe test mode)
 
