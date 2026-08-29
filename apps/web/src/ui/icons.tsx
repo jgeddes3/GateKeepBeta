@@ -1,6 +1,8 @@
 import {
   AppleLogo,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
   Bell,
   Buildings,
   CalendarCheck,
@@ -15,7 +17,9 @@ import {
   FunnelSimple,
   GoogleLogo,
   House,
+  Image,
   Info,
+  LinkSimple,
   List,
   MagnifyingGlass,
   MapPin,
@@ -23,8 +27,12 @@ import {
   Moon,
   MusicNotes,
   Pause,
+  PencilSimple,
   Play,
+  Plus,
   Sun,
+  Trash,
+  UploadSimple,
   UserCircle,
   Wallet,
   Warning,
@@ -105,6 +113,20 @@ export const IconApple = pin(AppleLogo);
 // notifications section, which previously had no icon at all.
 export const IconBuildings = pin(Buildings);
 export const IconBell = pin(Bell);
+
+// Sub-project 9A task 7: profile editors (musician portfolio, curator
+// profile). Upload zones (photos, tracks) get a real "drop a file here"
+// glyph rather than a bare file input; track/link rows get functional row
+// actions (reorder, rename, remove); the photo slot itself gets a filled
+// placeholder icon instead of an empty grey box.
+export const IconUpload = pin(UploadSimple);
+export const IconImage = pin(Image);
+export const IconTrash = pin(Trash);
+export const IconPencil = pin(PencilSimple);
+export const IconPlus = pin(Plus);
+export const IconArrowUp = pin(ArrowUp);
+export const IconArrowDown = pin(ArrowDown);
+export const IconLink = pin(LinkSimple);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At

@@ -1,25 +1,61 @@
 "use client";
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { cn } from "../lib/utils";
 import {
   GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
   type PortfolioData, type BookingDoc, type BookingVisibility,
   type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { IconCheck, IconLink, IconPlus, IconTrash, IconUpload } from "../ui/icons";
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
-  catch (e) { window.alert(e instanceof Error ? e.message : "Save failed — try again."); return false; }
+  catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
 };
+
+// Reskins a raw option code ("hip-hop", "bar_club") into a readable chip
+// label ("Hip Hop", "Bar Club") for display only. Every caller still
+// passes the raw code (never this formatted string) into toggle/save
+// logic, so the value the server sees is byte-identical to before this
+// restyle.
+export function formatChipLabel(code: string): string {
+  return code.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Restyle-only chip button (Task 5 join-wizard precedent: secondary variant
+// at rest, ember "default" variant when active, forced to the pill radius
+// since DESIGN.md only gives Button's "default" variant the 999px pill by
+// default and a chip is the radius table's other named pill use).
+export function Chip({ active, onClick, disabled, children }:
+  { active: boolean; onClick: () => void; disabled?: boolean; children: ReactNode }) {
+  return (
+    <Button
+      type="button"
+      variant={active ? "default" : "secondary"}
+      size="sm"
+      disabled={disabled}
+      className="rounded-full"
+      onClick={onClick}
+    >
+      {children}
+    </Button>
+  );
+}
 
 export function BioGenresForm({ profileId, initial, onSaved }:
   { profileId: string; initial: PortfolioData | undefined; onSaved?: () => void }) {
   const [bio, setBio] = useState(initial?.bio ?? "");
   const [genres, setGenres] = useState<string[]>(initial?.genres ?? []);
-  // Tracks what the SERVER currently holds, not just the mount-time value —
-  // select 2 → save → deselect all → save must hit the guard below even
+  // Tracks what the SERVER currently holds, not just the mount-time value:
+  // select 2, save, deselect all, save must hit the guard below even
   // though `initial` still says zero.
   const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
   const [busy, setBusy] = useState(false);
@@ -30,17 +66,17 @@ export function BioGenresForm({ profileId, initial, onSaved }:
       // Genres were saved before and the musician has now deselected all of
       // them. The omit-when-empty branch below exists for the never-set-yet
       // case (a bio-only save while onboarding); reusing it here would
-      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
-      // omitting the key just leaves the OLD genres in place server-side —
+      // silently no-op: validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side,
       // which looks to the musician like their change was saved (the chips
       // show empty) when it wasn't. Block it with an explicit message
       // instead.
-      window.alert("Keep at least one genre — it's required for review.");
+      window.alert("Keep at least one genre. It's required for review.");
       return;
     }
     // Omit genres entirely (rather than sending []) when none are picked
-    // yet — a bio-only save has to work while a musician is still filling
-    // in the rest of the form; validatePortfolioUpdate (and the server)
+    // yet: a bio-only save has to work while a musician is still filling
+    // in the rest of the form. validatePortfolioUpdate (and the server)
     // both treat an omitted field as "leave it alone", but an explicit []
     // fails the 1-3-genres check.
     const payload = genres.length > 0 ? { profileId, bio, genres } : { profileId, bio };
@@ -54,21 +90,33 @@ export function BioGenresForm({ profileId, initial, onSaved }:
     setBusy(false);
   };
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>Bio & genres</h2>
-      <textarea rows={6} maxLength={2000} value={bio} placeholder="Tell curators and fans who you are…"
-        onChange={(e) => setBio(e.target.value)} />
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {GENRES.map((g) => (
-          <button key={g} type="button" onClick={() => toggleGenre(g)}
-            style={{ padding: "4px 10px", borderRadius: 12, border: "1px solid #bbb",
-              background: genres.includes(g) ? "#111" : "#fff", color: genres.includes(g) ? "#fff" : "#111" }}>
-            {g}
-          </button>
-        ))}
-      </div>
-      <button onClick={save} disabled={busy}>Save bio & genres</button>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>Bio &amp; genres</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <Textarea
+          rows={6}
+          maxLength={2000}
+          value={bio}
+          placeholder="Tell curators and fans who you are…"
+          onChange={(e) => setBio(e.target.value)}
+        />
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Genres (up to 3)</span>
+          <div className="flex flex-wrap gap-2">
+            {GENRES.map((g) => (
+              <Chip key={g} active={genres.includes(g)} onClick={() => toggleGenre(g)}>
+                {formatChipLabel(g)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+          {busy ? "Saving…" : "Save bio & genres"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -88,34 +136,80 @@ export function LinksForm({ profileId, initial }:
     return ok;
   };
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>Links</h2>
-      {links.map((l, i) => (
-        <p key={`${l.kind}-${l.url}-${i}`} style={{ margin: 0 }}>
-          {l.kind}: {l.url}{" "}
-          <button disabled={busy} onClick={() => void save(links.filter((_, j) => j !== i))}>Remove</button>
-        </p>
-      ))}
-      <div style={{ display: "flex", gap: 6 }}>
-        <select value={kind} disabled={busy} onChange={(e) => setKind(e.target.value as ExternalLinkKind)}>
-          <option value="spotify">Spotify</option><option value="youtube">YouTube</option>
-          <option value="instagram">Instagram</option><option value="website">Website</option>
-        </select>
-        <input placeholder="https://…" value={url} disabled={busy} onChange={(e) => setUrl(e.target.value)} style={{ flex: 1 }} />
-        <button disabled={busy} onClick={async () => {
-          if (!url) return;
-          // Clear the input only once the save actually succeeds — clearing
-          // unconditionally (as before) silently threw away what the
-          // musician typed on a validation failure or a network error.
-          if (await save([...links, { kind, url }])) setUrl("");
-        }}>Add</button>
-      </div>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>Links</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {links.length > 0 && (
+          <ul className="grid gap-2">
+            {links.map((l, i) => (
+              <li
+                key={`${l.kind}-${l.url}-${i}`}
+                className="flex items-center gap-2 rounded-gk-sm border border-gk-border px-3 py-2"
+              >
+                <IconLink size={16} className="shrink-0 text-gk-muted" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate font-sora text-sm text-gk-text">
+                  <span className="font-medium capitalize">{l.kind}</span>
+                  <span className="text-gk-muted"> &middot; </span>
+                  {l.url}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={busy}
+                  aria-label={`Remove ${l.kind} link`}
+                  onClick={() => void save(links.filter((_, j) => j !== i))}
+                >
+                  <IconTrash size={16} aria-hidden="true" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={kind} disabled={busy} onValueChange={(v) => setKind(v as ExternalLinkKind)}>
+            <SelectTrigger className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="spotify">Spotify</SelectItem>
+              <SelectItem value="youtube">YouTube</SelectItem>
+              <SelectItem value="instagram">Instagram</SelectItem>
+              <SelectItem value="website">Website</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            placeholder="https://…"
+            value={url}
+            disabled={busy}
+            onChange={(e) => setUrl(e.target.value)}
+            className="min-w-[200px] flex-1"
+          />
+          <Button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              if (!url) return;
+              // Clear the input only once the save actually succeeds:
+              // clearing unconditionally (as before this component existed)
+              // silently threw away what the musician typed on a validation
+              // failure or a network error.
+              if (await save([...links, { kind, url }])) setUrl("");
+            }}
+          >
+            <IconPlus size={16} aria-hidden="true" />
+            Add
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
 // Off-screen but still in the layout/tab order (unlike display:none, which
-// pulls the element out of tab order entirely) — the visible label text
+// pulls the element out of tab order entirely): the visible label text
 // stays clickable via <label>/<input> association, but keyboard users can
 // still Tab to and activate the file input directly.
 const VISUALLY_HIDDEN_INPUT: CSSProperties = {
@@ -123,22 +217,22 @@ const VISUALLY_HIDDEN_INPUT: CSSProperties = {
   overflow: "hidden", whiteSpace: "nowrap", border: 0, opacity: 0,
 };
 
-// Sub-project 3 widened `kind` to accept "gallery" (curator profiles) —
-// the upload/staging/awaiting-pipeline mechanics below are unchanged and
-// work identically for it: a caller managing a LIST rather than a single
-// slot (curator's photoPaths array) passes a `currentPath` that's really a
+// Sub-project 3 widened `kind` to accept "gallery" (curator profiles): the
+// upload/staging/awaiting-pipeline mechanics below are unchanged and work
+// identically for it. A caller managing a LIST rather than a single slot
+// (curator's photoPaths array) passes a `currentPath` that's really a
 // fingerprint of the list (e.g. its length) instead of one path, so the
-// exact same "baseline moved -> awaiting cleared" logic still detects
-// completion — see CuratorForms.tsx's GalleryPhotosSection.
+// exact same "baseline moved, awaiting cleared" logic still detects
+// completion, see CuratorForms.tsx's GalleryPhotosSection.
 export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   { profileId: string; uid: string; kind: PhotoKind; currentPath: string | null; disabled?: boolean }) {
   const [busy, setBusy] = useState(false);
   // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
-  // seconds after the storage upload lands — we don't know its eventual
-  // value client-side, so instead we keep showing "Processing…" until the
+  // seconds after the storage upload lands. We don't know its eventual
+  // value client-side, so instead we keep showing "Processing..." until the
   // `currentPath` PROP itself moves. `baseline` tracks the last path we've
   // actually seen; when it disagrees with the incoming prop we're mid-render
-  // with fresh data, so we adjust state right here (not in a useEffect —
+  // with fresh data, so we adjust state right here (not in a useEffect:
   // this is React's documented "adjust state while rendering" escape hatch
   // for resetting state when a prop changes: since it runs synchronously
   // before commit, React just re-renders once more with the corrected
@@ -156,7 +250,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   // Bounds the wait: some failures never write ANYTHING back to the profile
   // doc (an oversized/corrupt image the resize step rejects outright before
   // ever reaching a write, for instance), so `currentPath` would never move
-  // and `awaiting` — and the disabled input — would otherwise deadlock
+  // and `awaiting`, and the disabled input, would otherwise deadlock
   // permanently. This is a legitimate useEffect (subscribing to an external
   // timer and calling setState from ITS callback, not synchronously in the
   // effect body), unlike the render-time adjustment above.
@@ -185,28 +279,46 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   };
   const processing = awaiting;
   const label = kind === "avatar" ? "profile photo" : kind === "cover" ? "cover photo" : "photo";
+  const locked = busy || processing || disabled;
   return (
-    <>
-      <label style={{ display: "inline-block" }}>
-        {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${label}`}
-        {/* The checkmark reads as "this slot is filled" — meaningful for
+    <div className="grid gap-1.5">
+      <label
+        className={cn(
+          "group relative flex size-28 flex-col items-center justify-center gap-1.5 rounded-gk border border-dashed border-gk-border bg-gk-surface px-2 text-center transition-colors",
+          locked ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:border-gk-focus",
+        )}
+      >
+        <IconUpload size={20} className="text-gk-muted" aria-hidden="true" />
+        <span className="font-sora text-xs font-medium leading-tight text-gk-text">
+          {busy ? "Uploading…" : processing ? "Processing…" : `Upload ${label}`}
+        </span>
+        {/* The checkmark reads as "this slot is filled": meaningful for
             avatar/cover's single-slot model, misleading for gallery (where
             currentPath is a length fingerprint, not a real path, and the
             list already renders its own thumbnails). */}
-        {currentPath && !processing && kind !== "gallery" && <span style={{ color: "#16a34a" }}> ✓</span>}
-        <input type="file" accept="image/jpeg,image/png,image/webp" style={VISUALLY_HIDDEN_INPUT} disabled={busy || processing || disabled}
+        {currentPath && !processing && kind !== "gallery" && (
+          <span className="absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full bg-gk-success/14 text-gk-success">
+            <IconCheck size={11} aria-hidden="true" />
+          </span>
+        )}
+        <input
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          style={VISUALLY_HIDDEN_INPUT}
+          disabled={locked}
           onChange={(e) => {
             const f = e.target.files?.[0];
             e.target.value = ""; // allows re-picking the same file (e.g. after a failed upload)
             if (f) void upload(f);
-          }} />
+          }}
+        />
       </label>
       {timedOut && (
-        <span style={{ display: "block", color: "#92400e", fontSize: 12 }}>
-          Still processing — if your photo doesn&apos;t appear, try a smaller one.
+        <span className="w-28 font-sora text-xs text-gk-warning">
+          Still processing. If your photo doesn&apos;t appear, try a smaller one.
         </span>
       )}
-    </>
+    </div>
   );
 }
 
@@ -224,11 +336,17 @@ const DEFAULT_BOOKING_VISIBILITY: BookingVisibility = {
   perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
 };
 
+// Radix's Select requires every item's value to be a non-empty string, so
+// each "no selection yet" field below is threaded through this sentinel
+// rather than "", mapped back to `null` (the field's real empty value) on
+// the way out, so the state this form saves is unaffected.
+const UNSET = "unset";
+
 export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
   // Raw strings, not derived cents: converting dollars -> cents -> back to a
   // display string on every keystroke (the old approach) fights the user
-  // mid-entry — e.g. typing "1.50" round-trips through 150 cents and
+  // mid-entry, e.g. typing "1.50" round-trips through 150 cents and
   // re-renders as "1.5", dropping the trailing zero and disrupting the
   // cursor. Conversion now happens exactly once, in save().
   const [rateInputs, setRateInputs] = useState<Record<RateKey, RateInput>>({
@@ -242,15 +360,28 @@ export function BookingForm({ profileId, initial }:
   const [busy, setBusy] = useState(false);
 
   const rateField = (key: RateKey, label: string) => (
-    <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-      <span style={{ width: 120 }}>{label}</span>
-      $<input type="number" min={0} step="0.01" style={{ width: 100 }}
-        value={rateInputs[key].amount}
-        onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: e.target.value } }))} />
-      <input placeholder="note (optional)" maxLength={200} style={{ flex: 1 }}
-        value={rateInputs[key].note ?? ""} disabled={rateInputs[key].amount.trim() === ""}
-        onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: e.target.value || null } }))} />
-    </label>
+    <div key={key} className="flex flex-wrap items-center gap-3">
+      <span className="w-28 shrink-0 font-sora text-sm font-medium text-gk-text">{label}</span>
+      <div className="flex items-center gap-1.5">
+        <span className="font-sora text-sm text-gk-muted">$</span>
+        <Input
+          type="number"
+          min={0}
+          step="0.01"
+          className="w-24"
+          value={rateInputs[key].amount}
+          onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: e.target.value } }))}
+        />
+      </div>
+      <Input
+        placeholder="Note (optional)"
+        maxLength={200}
+        className="min-w-[160px] flex-1"
+        value={rateInputs[key].note ?? ""}
+        disabled={rateInputs[key].amount.trim() === ""}
+        onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: e.target.value || null } }))}
+      />
+    </div>
   );
 
   const save = async () => {
@@ -258,7 +389,7 @@ export function BookingForm({ profileId, initial }:
       { perHour: null, perSong: null, perSet: null };
     for (const key of ["perHour", "perSong", "perSet"] as const) {
       const raw = rateInputs[key].amount.trim();
-      if (raw === "") continue; // stays null — field left blank on purpose
+      if (raw === "") continue; // stays null: field left blank on purpose
       const dollars = Number(raw);
       if (!Number.isFinite(dollars) || dollars <= 0) {
         window.alert("Rates must be more than $0, or leave the field blank.");
@@ -278,58 +409,121 @@ export function BookingForm({ profileId, initial }:
   };
 
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>Rates & preferences</h2>
-      <p style={{ color: "#666", margin: 0 }}>
-        Visible to curators only — never on your public page. Offer any mix of the three.
-      </p>
-      {rateField("perHour", "Per hour")}
-      {rateField("perSong", "Per song")}
-      {rateField("perSet", "Per set (flat)")}
-      <h3 style={{ marginBottom: 0 }}>Gig preferences</h3>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {GIG_TYPES.map((g) => (
-          <button key={g} type="button"
-            onClick={() => setPrefs((p) => ({ ...p, gigTypes: p.gigTypes.includes(g)
-              ? p.gigTypes.filter((x) => x !== g) : [...p.gigTypes, g] }))}
-            style={{ padding: "4px 10px", borderRadius: 12, border: "1px solid #bbb",
-              background: prefs.gigTypes.includes(g) ? "#111" : "#fff",
-              color: prefs.gigTypes.includes(g) ? "#fff" : "#111" }}>
-            {g.replace("_", " ")}
-          </button>
-        ))}
-      </div>
-      <label>Travel radius (km): <input type="number" min={0} max={3000} step={1} style={{ width: 90 }}
-        value={prefs.travelRadiusKm ?? ""}
-        onChange={(e) => setPrefs((p) => ({ ...p,
-          travelRadiusKm: e.target.value === "" ? null : Math.round(Number(e.target.value)) }))} />
-        <span style={{ color: "#666", fontSize: 12 }}> (whole numbers only)</span></label>
-      <label>Act size:{" "}
-        <select value={prefs.actSize ?? ""} onChange={(e) => setPrefs((p) => ({ ...p,
-          actSize: (e.target.value || null) as typeof p.actSize }))}>
-          <option value="">—</option><option value="solo">Solo</option>
-          <option value="duo">Duo</option><option value="band">Band</option>
-        </select></label>
-      <label>Typical set (minutes): <input type="number" min={15} max={480} step={1} style={{ width: 90 }}
-        value={prefs.typicalSetMinutes ?? ""}
-        onChange={(e) => setPrefs((p) => ({ ...p,
-          typicalSetMinutes: e.target.value === "" ? null : Math.round(Number(e.target.value)) }))} />
-        <span style={{ color: "#666", fontSize: 12 }}> (whole numbers only)</span></label>
-      <label>Bring own PA:{" "}
-        <select value={prefs.bringsOwnPA === null ? "" : String(prefs.bringsOwnPA)}
-          onChange={(e) => setPrefs((p) => ({ ...p,
-            bringsOwnPA: e.target.value === "" ? null : e.target.value === "true" }))}>
-          <option value="">—</option><option value="true">Yes</option><option value="false">No</option>
-        </select></label>
-      <label>Availability:{" "}
-        <select value={prefs.availabilityPattern ?? ""}
-          onChange={(e) => setPrefs((p) => ({ ...p,
-            availabilityPattern: (e.target.value || null) as typeof p.availabilityPattern }))}>
-          <option value="">—</option><option value="weekends">Weekends</option>
-          <option value="weeknights">Weeknights</option><option value="anytime">Anytime</option>
-          <option value="limited">Limited</option>
-        </select></label>
-      <button onClick={save} disabled={busy}>Save rates & preferences</button>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>Rates &amp; preferences</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-5">
+        <p className="font-sora text-sm text-gk-muted">
+          Visible to curators only, never on your public page. Offer any mix of the three.
+        </p>
+        <div className="grid gap-3">
+          {rateField("perHour", "Per hour")}
+          {rateField("perSong", "Per song")}
+          {rateField("perSet", "Per set (flat)")}
+        </div>
+
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Gig preferences</span>
+          <div className="flex flex-wrap gap-2">
+            {GIG_TYPES.map((g) => (
+              <Chip
+                key={g}
+                active={prefs.gigTypes.includes(g)}
+                onClick={() => setPrefs((p) => ({ ...p, gigTypes: p.gigTypes.includes(g)
+                  ? p.gigTypes.filter((x) => x !== g) : [...p.gigTypes, g] }))}
+              >
+                {formatChipLabel(g)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Act size</span>
+          <div className="flex flex-wrap gap-2">
+            {(["solo", "duo", "band"] as const).map((s) => (
+              <Chip
+                key={s}
+                active={prefs.actSize === s}
+                // Reclicking the active chip clears it back to "not set",
+                // the same null the old blank select option produced.
+                onClick={() => setPrefs((p) => ({ ...p, actSize: p.actSize === s ? null : s }))}
+              >
+                {formatChipLabel(s)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="grid gap-1.5">
+            <span className="font-sora text-sm font-medium text-gk-text">Travel radius (km)</span>
+            <Input
+              type="number"
+              min={0}
+              max={3000}
+              step={1}
+              value={prefs.travelRadiusKm ?? ""}
+              onChange={(e) => setPrefs((p) => ({ ...p,
+                travelRadiusKm: e.target.value === "" ? null : Math.round(Number(e.target.value)) }))}
+            />
+            <span className="font-sora text-xs text-gk-muted">Whole numbers only</span>
+          </label>
+          <label className="grid gap-1.5">
+            <span className="font-sora text-sm font-medium text-gk-text">Typical set (minutes)</span>
+            <Input
+              type="number"
+              min={15}
+              max={480}
+              step={1}
+              value={prefs.typicalSetMinutes ?? ""}
+              onChange={(e) => setPrefs((p) => ({ ...p,
+                typicalSetMinutes: e.target.value === "" ? null : Math.round(Number(e.target.value)) }))}
+            />
+            <span className="font-sora text-xs text-gk-muted">Whole numbers only</span>
+          </label>
+          <label className="grid gap-1.5">
+            <span className="font-sora text-sm font-medium text-gk-text">Brings own PA</span>
+            <Select
+              value={prefs.bringsOwnPA === null ? UNSET : String(prefs.bringsOwnPA)}
+              onValueChange={(v) => setPrefs((p) => ({ ...p, bringsOwnPA: v === UNSET ? null : v === "true" }))}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Not set" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={UNSET}>Not set</SelectItem>
+                <SelectItem value="true">Yes</SelectItem>
+                <SelectItem value="false">No</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="grid gap-1.5">
+            <span className="font-sora text-sm font-medium text-gk-text">Availability</span>
+            <Select
+              value={prefs.availabilityPattern ?? UNSET}
+              onValueChange={(v) => setPrefs((p) => ({ ...p,
+                availabilityPattern: (v === UNSET ? null : v) as typeof p.availabilityPattern }))}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Not set" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={UNSET}>Not set</SelectItem>
+                <SelectItem value="weekends">Weekends</SelectItem>
+                <SelectItem value="weeknights">Weeknights</SelectItem>
+                <SelectItem value="anytime">Anytime</SelectItem>
+                <SelectItem value="limited">Limited</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+        </div>
+
+        <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+          {busy ? "Saving…" : "Save rates & preferences"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }

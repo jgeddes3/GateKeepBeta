@@ -3,24 +3,31 @@ import { useEffect, useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
-import { PhotoUploader } from "../portfolio/PortfolioForms";
+import { Chip, formatChipLabel, PhotoUploader } from "../portfolio/PortfolioForms";
 import {
   GENRES, ACT_SIZES, MAX_CURATOR_PHOTOS, validateLookingFor,
   MAX_ABOUT_LENGTH, MAX_ADDRESS_LENGTH, MAX_CITY_LENGTH, MAX_AMENITY_NOTES_LENGTH, MAX_CAPACITY,
   type LookingFor, type ActSize, type CuratorDetails, type CuratorSubtype,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { Switch } from "../ui/switch";
+import { IconTrash } from "../ui/icons";
 
-// Sub-project 3's curator equivalent of ../portfolio/PortfolioForms.tsx —
+// Sub-project 3's curator equivalent of ../portfolio/PortfolioForms.tsx:
 // same shapes (busy-locked save, alert-on-failure, seed-once-from-`initial`
 // local state) applied to CuratorDetails' fields instead of PortfolioData's.
 // Kept in its own file (mirrors functions/src/curator.ts being split from
 // portfolio.ts server-side) rather than folded into PortfolioForms.tsx,
 // which is SP2-owned and shared verbatim (only PhotoUploader's `kind` type
-// was widened there — see its comment).
+// was widened there, plus the Chip/formatChipLabel restyle helpers this
+// file now reuses too, see their comments).
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
-  catch (e) { window.alert(e instanceof Error ? e.message : "Save failed — try again."); return false; }
+  catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
 };
 
 export function AboutForm({ profileId, initial }: { profileId: string; initial: string | undefined }) {
@@ -32,13 +39,23 @@ export function AboutForm({ profileId, initial }: { profileId: string; initial: 
     setBusy(false);
   };
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>About</h2>
-      <textarea rows={6} maxLength={MAX_ABOUT_LENGTH} value={about}
-        placeholder="Tell musicians what makes this a good gig — the room, the crowd, what you're building…"
-        onChange={(e) => setAbout(e.target.value)} />
-      <button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save about"}</button>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>About</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <Textarea
+          rows={6}
+          maxLength={MAX_ABOUT_LENGTH}
+          value={about}
+          placeholder="Tell musicians what makes this a good gig: the room, the crowd, what you're building…"
+          onChange={(e) => setAbout(e.target.value)}
+        />
+        <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+          {busy ? "Saving…" : "Save about"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -59,7 +76,7 @@ export function LocationForm({ profileId, subtype, initial }:
       return;
     }
     setBusy(true);
-    // Planners/hosts must NOT send an address — updateCuratorProfile rejects
+    // Planners/hosts must NOT send an address: updateCuratorProfile rejects
     // a non-empty one from a non-venue with "Only venues can set a street
     // address." This form never renders the address input for them, so
     // there's nothing typed to accidentally send, but the payload is built
@@ -70,29 +87,43 @@ export function LocationForm({ profileId, subtype, initial }:
     setBusy(false);
   };
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>Location</h2>
-      {isVenue ? (
-        <>
-          <p style={{ color: "#666", margin: 0 }}>Venues show a full street address publicly.</p>
-          <input placeholder="Street address" maxLength={MAX_ADDRESS_LENGTH} value={address}
-            onChange={(e) => setAddress(e.target.value)} />
-        </>
-      ) : (
-        <p style={{ color: "#666", margin: 0 }}>Only your city is shown publicly — never a precise address.</p>
-      )}
-      <input placeholder="City" maxLength={MAX_CITY_LENGTH} value={city} onChange={(e) => setCity(e.target.value)} />
-      {/* Reflects the SERVER's resolved value (post-geocode, which can
-          normalize what was typed — e.g. "nyc" -> "New York") rather than
-          local state, so it stays live across saves without fighting this
-          form's seed-once-on-mount convention (see PortfolioEditor's
-          identical BioGenresForm/LinksForm comment for why that convention
-          exists). */}
-      <p style={{ color: "#666", fontSize: 13, margin: 0 }}>
-        Currently saved: {initial?.city || "none yet"}{initial?.neighborhood ? ` (${initial.neighborhood})` : ""}
-      </p>
-      <button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save location"}</button>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>Location</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {isVenue ? (
+          <div className="grid gap-1.5">
+            <p className="font-sora text-sm text-gk-muted">Venues show a full street address publicly.</p>
+            <Input
+              placeholder="Street address"
+              maxLength={MAX_ADDRESS_LENGTH}
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+            />
+          </div>
+        ) : (
+          <p className="font-sora text-sm text-gk-muted">Only your city is shown publicly, never a precise address.</p>
+        )}
+        <div className="grid gap-1.5">
+          <label htmlFor="curator-city" className="font-sora text-sm font-medium text-gk-text">City</label>
+          <Input id="curator-city" placeholder="City" maxLength={MAX_CITY_LENGTH} value={city}
+            onChange={(e) => setCity(e.target.value)} />
+        </div>
+        {/* Reflects the SERVER's resolved value (post-geocode, which can
+            normalize what was typed, e.g. "nyc" -> "New York") rather than
+            local state, so it stays live across saves without fighting this
+            form's seed-once-on-mount convention (see PortfolioEditor's
+            identical BioGenresForm/LinksForm comment for why that convention
+            exists). */}
+        <p className="font-sora text-xs text-gk-muted">
+          Currently saved: {initial?.city || "none yet"}{initial?.neighborhood ? ` (${initial.neighborhood})` : ""}
+        </p>
+        <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+          {busy ? "Saving…" : "Save location"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -105,7 +136,7 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
   const toggleActSize = (a: ActSize) => setActSizes((cur) => cur.includes(a) ? cur.filter((x) => x !== a) : [...cur, a]);
   const save = async () => {
     const input: LookingFor = { genres, actSizes, notes: notes.trim() || null };
-    // The one shared validator this task's brief calls out by name — same
+    // The one shared validator this task's brief calls out by name: same
     // rule the server enforces (>=1 genre, >=1 act size, notes <=500 chars),
     // run here first so a curator gets the exact server-worded reason
     // (e.g. "Pick at least one genre.") without a round-trip.
@@ -116,45 +147,53 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
     setBusy(false);
   };
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>What you&apos;re looking for</h2>
-      <p style={{ color: "#666", margin: 0 }}>Genres</p>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {GENRES.map((g) => (
-          <button key={g} type="button" onClick={() => toggleGenre(g)}
-            style={{ padding: "4px 10px", borderRadius: 12, border: "1px solid #bbb",
-              background: genres.includes(g) ? "#111" : "#fff", color: genres.includes(g) ? "#fff" : "#111" }}>
-            {g}
-          </button>
-        ))}
-      </div>
-      <p style={{ color: "#666", margin: 0 }}>Act sizes</p>
-      <div style={{ display: "flex", gap: 6 }}>
-        {ACT_SIZES.map((a) => (
-          <button key={a} type="button" onClick={() => toggleActSize(a)}
-            style={{ padding: "4px 10px", borderRadius: 12, border: "1px solid #bbb",
-              background: actSizes.includes(a) ? "#111" : "#fff", color: actSizes.includes(a) ? "#fff" : "#111" }}>
-            {a}
-          </button>
-        ))}
-      </div>
-      <textarea rows={3} maxLength={500} value={notes}
-        placeholder="Anything else musicians should know (optional)"
-        onChange={(e) => setNotes(e.target.value)} />
-      <button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save preferences"}</button>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>What you&apos;re looking for</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Genres</span>
+          <div className="flex flex-wrap gap-2">
+            {GENRES.map((g) => (
+              <Chip key={g} active={genres.includes(g)} onClick={() => toggleGenre(g)}>
+                {formatChipLabel(g)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Act sizes</span>
+          <div className="flex flex-wrap gap-2">
+            {ACT_SIZES.map((a) => (
+              <Chip key={a} active={actSizes.includes(a)} onClick={() => toggleActSize(a)}>
+                {formatChipLabel(a)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        <Textarea
+          rows={3}
+          maxLength={500}
+          value={notes}
+          placeholder="Anything else musicians should know (optional)"
+          onChange={(e) => setNotes(e.target.value)}
+        />
+        <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+          {busy ? "Saving…" : "Save preferences"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
-// Mirrors functions/src/curator.ts's INDOOR_OUTDOOR_VALUES — an enum, not a
+// Mirrors functions/src/curator.ts's INDOOR_OUTDOOR_VALUES: an enum, not a
 // soft-cap constant, so it stays a local UX mirror; the server remains
 // authoritative. MAX_CAPACITY / MAX_AMENITY_NOTES_LENGTH come from shared
 // (see import above).
 const INDOOR_OUTDOOR_VALUES = ["indoor", "outdoor", "both"] as const;
 type IndoorOutdoor = (typeof INDOOR_OUTDOOR_VALUES)[number];
 type Tri = boolean | null;
-
-const triFromSelect = (v: string): Tri => (v === "" ? null : v === "true");
 
 export function AmenitiesForm({ profileId, initial, initialAdvertising }:
   { profileId: string; initial: CuratorDetails["amenities"] | undefined; initialAdvertising: boolean | undefined }) {
@@ -182,7 +221,7 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
       return;
     }
     setBusy(true);
-    // Both fields land in one updateCuratorProfile call — the brief groups
+    // Both fields land in one updateCuratorProfile call: the brief groups
     // "amenities + advertising toggle" as a single section/save, and the
     // callable already accepts them as independent partial-update keys.
     await callOrAlert("updateCuratorProfile", {
@@ -194,36 +233,69 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
   };
 
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>Amenities</h2>
-      <label>Capacity: <input type="number" min={0} max={MAX_CAPACITY} step={1} style={{ width: 100 }}
-        value={capacity} onChange={(e) => setCapacity(e.target.value)} /></label>
-      <label>Has a PA system:{" "}
-        <select value={hasPA === null ? "" : String(hasPA)} onChange={(e) => setHasPA(triFromSelect(e.target.value))}>
-          <option value="">—</option><option value="true">Yes</option><option value="false">No</option>
-        </select></label>
-      <label>Has backline:{" "}
-        <select value={hasBackline === null ? "" : String(hasBackline)} onChange={(e) => setHasBackline(triFromSelect(e.target.value))}>
-          <option value="">—</option><option value="true">Yes</option><option value="false">No</option>
-        </select></label>
-      <label>Indoor/outdoor:{" "}
-        <select value={indoorOutdoor ?? ""} onChange={(e) => setIndoorOutdoor((e.target.value || null) as IndoorOutdoor | null)}>
-          <option value="">—</option>
-          {INDOOR_OUTDOOR_VALUES.map((v) => <option key={v} value={v}>{v[0]!.toUpperCase() + v.slice(1)}</option>)}
-        </select></label>
-      <textarea rows={3} maxLength={MAX_AMENITY_NOTES_LENGTH} value={notes}
-        placeholder="Other amenities (optional)" onChange={(e) => setNotes(e.target.value)} />
-      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <input type="checkbox" checked={advertisingInterest} onChange={(e) => setAdvertisingInterest(e.target.checked)} />
-        Interested in advertising opportunities on GateKeep
-      </label>
-      <button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save amenities"}</button>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>Amenities</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <label className="grid max-w-40 gap-1.5">
+          <span className="font-sora text-sm font-medium text-gk-text">Capacity</span>
+          <Input type="number" min={0} max={MAX_CAPACITY} step={1} value={capacity}
+            onChange={(e) => setCapacity(e.target.value)} />
+        </label>
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Has a PA system</span>
+          <div className="flex gap-2">
+            {/* Reclicking the active chip clears it back to "not set", the
+                same null the old blank select option produced. */}
+            <Chip active={hasPA === true} onClick={() => setHasPA((cur) => (cur === true ? null : true))}>Yes</Chip>
+            <Chip active={hasPA === false} onClick={() => setHasPA((cur) => (cur === false ? null : false))}>No</Chip>
+          </div>
+        </div>
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Has backline</span>
+          <div className="flex gap-2">
+            <Chip active={hasBackline === true} onClick={() => setHasBackline((cur) => (cur === true ? null : true))}>
+              Yes
+            </Chip>
+            <Chip active={hasBackline === false} onClick={() => setHasBackline((cur) => (cur === false ? null : false))}>
+              No
+            </Chip>
+          </div>
+        </div>
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Indoor / outdoor</span>
+          <div className="flex flex-wrap gap-2">
+            {INDOOR_OUTDOOR_VALUES.map((v) => (
+              <Chip key={v} active={indoorOutdoor === v} onClick={() => setIndoorOutdoor((cur) => (cur === v ? null : v))}>
+                {formatChipLabel(v)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        <Textarea
+          rows={3}
+          maxLength={MAX_AMENITY_NOTES_LENGTH}
+          value={notes}
+          placeholder="Other amenities (optional)"
+          onChange={(e) => setNotes(e.target.value)}
+        />
+        <div className="flex items-center gap-3">
+          <Switch id="curator-advertising" checked={advertisingInterest} onCheckedChange={setAdvertisingInterest} />
+          <label htmlFor="curator-advertising" className="font-sora text-sm text-gk-text">
+            Interested in advertising opportunities on GateKeep
+          </label>
+        </div>
+        <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+          {busy ? "Saving…" : "Save amenities"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
 // One gallery tile: fetches its own display URL (public/photos/... objects
-// are publicly gettable per storage.rules — no auth needed) and owns its own
+// are publicly gettable per storage.rules, no auth needed) and owns its own
 // remove action independently of its siblings. Unlike TrackManager's shared
 // busy lock (justified there because reorderTracks touches TWO rows at
 // once), removeCuratorPhoto only ever affects the ONE path it's called
@@ -244,7 +316,7 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
     setBusy(true);
     try {
       await httpsCallable(getFirebase().functions, "removeCuratorPhoto")({ profileId, path });
-      // No local state update needed on success — the parent editor's
+      // No local state update needed on success: the parent editor's
       // profile subscription delivers the shrunk photoPaths array, which
       // drops this path from the list and unmounts this tile (keyed by
       // path) on its own.
@@ -254,35 +326,49 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
     }
   };
   return (
-    <div style={{ display: "grid", gap: 4, width: 120 }}>
+    <div className="grid w-28 gap-1.5">
       {url
-        ? <img src={url} alt="" style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8 }} />
-        : <div style={{ width: 120, height: 120, borderRadius: 8, background: "#eee" }} aria-hidden />}
-      <button onClick={remove} disabled={busy} style={{ color: "#dc2626" }}>{busy ? "Removing…" : "Remove"}</button>
+        ? <img src={url} alt="" className="size-28 rounded-gk object-cover" />
+        : <div className="size-28 rounded-gk bg-gk-border" aria-hidden="true" />}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        disabled={busy}
+        className="justify-start px-2 text-gk-destructive hover:bg-gk-destructive/14"
+        onClick={remove}
+      >
+        <IconTrash size={14} aria-hidden="true" />
+        {busy ? "Removing…" : "Remove"}
+      </Button>
     </div>
   );
 }
 
 // Curator equivalent of PhotoUploader's avatar/cover slots, but for the
 // append-only curator.photoPaths list (cap MAX_CURATOR_PHOTOS). Reuses
-// PhotoUploader as-is (kind="gallery") — see its comment in PortfolioForms.tsx
+// PhotoUploader as-is (kind="gallery"), see its comment in PortfolioForms.tsx
 // for how a list is threaded through the single-slot `currentPath` prop via
 // a length fingerprint instead of a real path.
 export function GalleryPhotosSection({ profileId, uid, photoPaths }:
   { profileId: string; uid: string; photoPaths: string[] }) {
   const atCap = photoPaths.length >= MAX_CURATOR_PHOTOS;
   return (
-    <section style={{ display: "grid", gap: 8 }}>
-      <h2>Photos ({photoPaths.length}/{MAX_CURATOR_PHOTOS})</h2>
-      {photoPaths.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-          {photoPaths.map((path) => <GalleryPhoto key={path} path={path} profileId={profileId} />)}
-        </div>
-      )}
-      {atCap
-        ? <p style={{ color: "#92400e", margin: 0 }}>Gallery is full — remove a photo to add another.</p>
-        : <PhotoUploader profileId={profileId} uid={uid} kind="gallery" currentPath={String(photoPaths.length)} />}
-      <p style={{ color: "#666", margin: 0 }}>New photos appear here a few seconds after upload.</p>
-    </section>
+    <Card>
+      <CardHeader>
+        <CardTitle>Photos ({photoPaths.length}/{MAX_CURATOR_PHOTOS})</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {photoPaths.length > 0 && (
+          <div className="flex flex-wrap gap-4">
+            {photoPaths.map((path) => <GalleryPhoto key={path} path={path} profileId={profileId} />)}
+          </div>
+        )}
+        {atCap
+          ? <p className="font-sora text-sm text-gk-warning">Gallery is full. Remove a photo to add another.</p>
+          : <PhotoUploader profileId={profileId} uid={uid} kind="gallery" currentPath={String(photoPaths.length)} />}
+        <p className="font-sora text-sm text-gk-muted">New photos appear here a few seconds after upload.</p>
+      </CardContent>
+    </Card>
   );
 }
