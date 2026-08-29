@@ -15,9 +15,13 @@ import { PhotoPlaceholder } from "./GigCard";
 // gives GigCard's photo a badge; it says nothing of the sort for this
 // card), so the photo area is photo/placeholder + scrim only.
 
-// Exported (Task 9): the artist page hero's own act-size chip needs the
-// exact same label, so it reuses this instead of a second, driftable copy.
-export const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
+// Task 9 review fix: NOT exported for reuse across the RSC boundary. This
+// file is "use client"; a Server Component (MusicianProfile.tsx) that
+// imported this and indexed it (SUBTYPE_LABEL[subtype]) silently read
+// `undefined` from the client-reference stub instead of the real object.
+// MusicianProfile.tsx now declares its own identical local copy instead
+// (matching CuratorProfile.tsx's own SUBTYPE_LABEL precedent).
+const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
 
 export type MusicianCardProfile = {
   id: string;

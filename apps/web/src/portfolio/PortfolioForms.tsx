@@ -15,20 +15,21 @@ import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { IconCheck, IconLink, IconPlus, IconTrash, IconUpload } from "../ui/icons";
+// Task 9 review fix: moved to a plain (non-"use client") module so a Server
+// Component (app/u/[handle]/MusicianProfile.tsx) can call it directly
+// without hitting the client-reference stub a Server Component gets when it
+// imports a plain value from a "use client" file. Imported (for this file's
+// own use below) AND re-exported (a plain `export {x} from "mod"` re-export
+// does NOT create a local binding, so both are needed) so every existing
+// "use client" importer of this name (GigCard.tsx, MusicianCard.tsx,
+// MusicianBrowse.tsx) keeps working unchanged.
+import { formatChipLabel } from "../../app/u/[handle]/chipLabel";
+export { formatChipLabel };
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
   catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
 };
-
-// Reskins a raw option code ("hip-hop", "bar_club") into a readable chip
-// label ("Hip Hop", "Bar Club") for display only. Every caller still
-// passes the raw code (never this formatted string) into toggle/save
-// logic, so the value the server sees is byte-identical to before this
-// restyle.
-export function formatChipLabel(code: string): string {
-  return code.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
 
 // Restyle-only chip button (Task 5 join-wizard precedent: secondary variant
 // at rest, ember "default" variant when active, forced to the pill radius

@@ -7,9 +7,8 @@ import { type ActSize, type AvailabilityPattern, type ExternalLinkKind, type Mus
 import { DateBlockRow } from "../../../src/components/DateBlockRow";
 import { MiniPlayer } from "../../../src/components/MiniPlayer";
 import { PhotoPlaceholder } from "../../../src/components/GigCard";
-import { ACT_SIZE_LABEL as SUBTYPE_LABEL } from "../../../src/components/MusicianCard";
 import { OfferGigButton } from "../../../src/bookings/OfferGigButton";
-import { formatChipLabel } from "../../../src/portfolio/PortfolioForms";
+import { formatChipLabel } from "./chipLabel";
 import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
 import { IconInstagram, IconLink, IconSpotify, IconUser, IconWebsite, IconYoutube } from "../../../src/ui/icons";
@@ -28,6 +27,15 @@ import { IconInstagram, IconLink, IconSpotify, IconUser, IconWebsite, IconYoutub
 // curator/venue page gets its own restyle in a later task, spec section 6.6)
 // still import it, so it stays, trimmed to just what those two still use
 // (see that file's own trim note).
+
+// Task 9 review fix: declared locally, matching CuratorProfile.tsx's own
+// SUBTYPE_LABEL (same file's sibling, line 13) rather than imported from
+// MusicianCard.tsx ("use client"). A Server Component that imports a plain
+// object from a "use client" module gets a client-reference stub with none
+// of the real properties, so `SUBTYPE_LABEL[subtype]` silently read
+// `undefined` (the act-size chip, an explicit owner amendment, rendered
+// empty) instead of throwing, which is what made this bug easy to miss.
+const SUBTYPE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
 
 const ACT_SIZE_LABEL: Record<ActSize, string> = { solo: "Solo", duo: "Duo", band: "Band" };
 const AVAILABILITY_LABEL: Record<AvailabilityPattern, string> = {
