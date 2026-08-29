@@ -2,14 +2,21 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect } from "react";
 import type { ReactElement, ReactNode } from "react";
 import * as Sentry from "@sentry/react-native";
+import * as SplashScreen from "expo-splash-screen";
 import { setAudioModeAsync } from "expo-audio";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
 import { ProfileProvider } from "../src/shell/ProfileContext";
 import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
+import { ThemeProvider } from "../src/theme/ThemeProvider";
+import { useAppFonts } from "../src/theme/fonts";
 
 // Crash reporting: no-op in dev, and a no-op in production too until
 // EXPO_PUBLIC_SENTRY_DSN is set (see README manual follow-ups).
 Sentry.init({ dsn: process.env.EXPO_PUBLIC_SENTRY_DSN ?? "", enabled: !__DEV__ });
+
+// Held until useAppFonts() resolves below, so Syne/Sora are loaded before the
+// first paint (avoids a flash of the system font on brand-forward screens).
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 // Renders children bare when keyless — the provider (and the native module
 // behind it) never loads in emulator dev or on a dev client from before this
@@ -67,11 +74,20 @@ export default function RootLayout() {
       try {
         await setAudioModeAsync({ playsInSilentMode: true });
       } catch (e) {
-        console.warn("setAudioModeAsync failed — rebuild the dev client if this is a fresh install", e);
+        console.warn("setAudioModeAsync failed, rebuild the dev client if this is a fresh install", e);
       }
     })();
   }, []);
+
+  const fontsLoaded = useAppFonts();
+  useEffect(() => {
+    if (fontsLoaded) SplashScreen.hideAsync().catch(() => {});
+  }, [fontsLoaded]);
+  if (!fontsLoaded) return null;
+
   return (
-    <AuthProvider><ProfileProvider><MaybeStripeProvider><Gate /></MaybeStripeProvider></ProfileProvider></AuthProvider>
+    <ThemeProvider>
+      <AuthProvider><ProfileProvider><MaybeStripeProvider><Gate /></MaybeStripeProvider></ProfileProvider></AuthProvider>
+    </ThemeProvider>
   );
 }
