@@ -24,7 +24,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     // adding new, unproven "was there a user before" bookkeeping state
     // that isn't otherwise needed. The effect's uid-swap path (a member
     // switching accounts without logging out) is deliberately NOT covered
-    // by this branch — see the onSnapshot below, which itself resolves the
+    // by this branch. See the onSnapshot below, which itself resolves the
     // new uid's profiles once it arrives, matching web's equivalent
     // behavior of not clearing stale data mid-swap.
     // eslint-disable-next-line react-hooks/set-state-in-effect

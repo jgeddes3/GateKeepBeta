@@ -20,7 +20,7 @@ Sentry.init({ dsn: process.env.EXPO_PUBLIC_SENTRY_DSN ?? "", enabled: !__DEV__ }
 // first paint (avoids a flash of the system font on brand-forward screens).
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
-// Renders children bare when keyless — the provider (and the native module
+// Renders children bare when keyless: the provider (and the native module
 // behind it) never loads in emulator dev or on a dev client from before this
 // module existed. Lazy require for the same reason stripe.ts documents.
 function MaybeStripeProvider({ children }: { children: ReactNode }) {
@@ -88,14 +88,14 @@ export default function RootLayout() {
   // Silent preview on iOS: without this, TrimUploader's clip preview and
   // /artist/[handle]'s track playback are silent on a device with the
   // ringer switch off, which looks like a broken player rather than an
-  // unset audio mode. Set once at app start, not per-screen — expo-audio's
+  // unset audio mode. Set once at app start, not per-screen: expo-audio's
   // audio mode is process-global. Run from an effect, not module scope: a
   // dev client built before Task 13's native modules were linked in (or any
   // environment missing expo-audio's native module) throws here, and doing
   // that at module-evaluation time crashed the whole app at launch with an
   // error pointing at the JS bundle instead of the actual cause. try/catch
   // + a warning keeps a missing/broken native module from taking down
-  // everything else — the rest of the app still works, just silently.
+  // everything else: the rest of the app still works, just silently.
   useEffect(() => {
     (async () => {
       try {

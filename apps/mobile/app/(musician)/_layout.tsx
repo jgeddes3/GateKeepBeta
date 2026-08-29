@@ -9,13 +9,13 @@ export default function MusicianTabs() {
     <Tabs screenOptions={useShellScreenOptions()}>
       <Tabs.Screen name="dashboard" options={{ title: "Dashboard",
         tabBarIcon: ({ color }) => <IconHouse color={color} size={22} /> }} />
-      {/* SP4 Task 12: was a "Coming in a later phase" placeholder — now the
+      {/* SP4 Task 12: was a "Coming in a later phase" placeholder, now the
           GigBrowse "Find gigs" screen (public open-gigs browse + Apply). */}
       <Tabs.Screen name="gigs" options={{ title: "Find Gigs",
         tabBarIcon: ({ color }) => <IconCalendarCheck color={color} size={22} /> }} />
       <Tabs.Screen name="portfolio" options={{ title: "Portfolio",
         tabBarIcon: ({ color }) => <IconMusicNotes color={color} size={22} /> }} />
-      {/* SP4 Task 12: BookingInbox for this musician profile's own threads —
+      {/* SP4 Task 12: BookingInbox for this musician profile's own threads,
           mirrors web's inbox section on the portfolio editor page, split
           into its own tab per this app's mobile-idiom convention. */}
       <Tabs.Screen name="bookings" options={{ title: "Bookings",

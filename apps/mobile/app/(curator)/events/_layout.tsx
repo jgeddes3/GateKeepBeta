@@ -5,7 +5,7 @@ import { ContextSwitcher } from "../../../src/shell/ContextSwitcher";
 // editor -> series detail). The outer Tabs navigator hides its own header
 // for this tab (see ../_layout.tsx) so this Stack fully owns headers/back
 // navigation for every screen below. Only the list screen ("index") gets the
-// ContextSwitcher in its header — sub-screens rely on the Stack's native
+// ContextSwitcher in its header. Sub-screens rely on the Stack's native
 // back button instead, matching the outer Tabs' "one switcher, on the
 // landing screen of each section" convention.
 export default function EventsStack() {
