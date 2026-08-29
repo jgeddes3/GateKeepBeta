@@ -116,7 +116,7 @@ const musicianProfileId = await ensureApprovedProfile(musician.uid, {
   // (packages/shared/src/types.ts).
   details: {
     portfolio: {
-      bio: "Seeded test act — solo singer-songwriter for UI testing.",
+      bio: "Seeded test act: solo singer-songwriter for UI testing.",
       genres: ["indie", "singer-songwriter"],
       externalLinks: [],
       avatarPhotoPath: null,
@@ -134,7 +134,7 @@ const curatorProfileId = await ensureApprovedProfile(curator.uid, {
   // renders realistically. photoPaths stays empty (no storage objects seeded).
   details: {
     curator: {
-      about: "Seeded test venue — a small listening room for UI testing.",
+      about: "Seeded test venue: a small listening room for UI testing.",
       lookingFor: { genres: ["indie", "folk", "jazz"], actSizes: ["solo", "duo"], notes: null },
       amenities: { capacity: 80, hasPA: true, hasBackline: false, indoorOutdoor: "indoor", notes: null },
       advertisingInterest: false,
