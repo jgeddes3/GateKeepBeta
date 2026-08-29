@@ -730,6 +730,18 @@ before a real launch:
 5. `APP_ORIGIN` must be set on deployed functions before testing onboarding from a device (the
    Stripe return/refresh pages live on web).
 
+### Sub-project 9A launch checklist (web UI/UX)
+
+1. **Hero carousel photos**: `apps/web/public/hero/` currently holds three placeholder
+   gradient/color-field JPGs (generated with ffmpeg's `gradients` lavfi filter, not real
+   photography). Replace them with the owner's real concert photo folder (2560x1440, 16:9, subject
+   in the middle 60%, per the web UI/UX spec section 9) and update
+   `apps/web/src/marketing/heroImages.ts`'s `HERO_IMAGES` list to point at the new files.
+2. **`/terms` and `/privacy`**: both pages currently render clearly-labeled placeholder legal text
+   (a visible banner on each page says so). Have counsel review and replace the placeholder prose
+   in `apps/web/app/terms/page.tsx` and `apps/web/app/privacy/page.tsx` with the real Terms of
+   Service and Privacy Policy before launch.
+
 ### Manual smoke walkthrough (real Stripe test mode)
 
 The emulator suite covers the sagas against `FakeStripe`; this walkthrough is the one thing it

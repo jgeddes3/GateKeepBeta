@@ -1,10 +1,34 @@
-import Link from "next/link";
+import type { Metadata } from "next";
+import { LandingHero } from "../src/marketing/LandingHero";
+import {
+  MusicianStorySection, CuratorStorySection, HowItWorksSection, MoneySection,
+  CityStorySection, ClosingCtaSection,
+} from "../src/marketing/LandingSections";
+import { SignedInRedirect } from "../src/marketing/SignedInRedirect";
+import { Footer } from "../src/shell/Footer";
+
+export const metadata: Metadata = {
+  title: "GateKeep: Find the music. Book the night.",
+  description: "Where this city's musicians and venues find each other.",
+};
+
+// The advertising page (spec section 5). AppShell (src/shell/AppShell.tsx)
+// deliberately does not wrap "/": this route builds its own glass nav
+// variant inside LandingHero instead of the signed-in slim top bar.
 export default function Home() {
   return (
-    <main style={{ maxWidth: 640, margin: "80px auto" }}>
-      <h1>GateKeep</h1>
-      <p>Find the music. Book the night.</p>
-      <p><Link href="/sign-in">Sign in</Link> · <Link href="/dashboard">Dashboard</Link> · <Link href="/gigs">Find gigs</Link></p>
-    </main>
+    <>
+      <SignedInRedirect />
+      <LandingHero />
+      <main>
+        <MusicianStorySection />
+        <CuratorStorySection />
+        <HowItWorksSection />
+        <MoneySection />
+        <CityStorySection />
+        <ClosingCtaSection />
+      </main>
+      <Footer />
+    </>
   );
 }
