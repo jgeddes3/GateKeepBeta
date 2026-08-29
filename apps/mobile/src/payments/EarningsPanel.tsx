@@ -341,7 +341,7 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
               <View style={{ gap: tokens.space.xs }}>
                 <Text variant="meta" muted>Available balance</Text>
                 <Text variant="display">
-                  {status.availableBalanceCents == null ? "Balance unavailable, try again shortly" : formatCents(status.availableBalanceCents)}
+                  {status.availableBalanceCents == null ? "Balance unavailable: try again shortly" : formatCents(status.availableBalanceCents)}
                 </Text>
                 {status.availableBalanceCents != null && status.instantAvailableBalanceCents != null
                   && status.instantAvailableBalanceCents !== status.availableBalanceCents && (
@@ -362,9 +362,9 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
                 />
               </View>
               <View style={{ flexDirection: "row", gap: tokens.space.sm, flexWrap: "wrap" }}>
-                <Button title="Standard (free, 1-3 business days)" variant="secondary"
+                <Button title="Standard (free, 1–3 business days)" variant="secondary"
                   onPress={() => void submitPayout("standard")} disabled={payoutBusy} />
-                <Button title={`Instant${previewCents != null && previewFeeCents != null ? `: fee ${formatCents(previewFeeCents)}` : ""}`}
+                <Button title={`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
                   variant="secondary" onPress={() => void submitPayout("instant")} disabled={instantDisabled} />
               </View>
               {instantHint && <Text variant="meta" muted>{instantHint}</Text>}

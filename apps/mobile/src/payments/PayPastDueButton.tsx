@@ -85,7 +85,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
   // rather than implying the delinquency banner/card row already reflects
   // it (mirrors web's identical review-round comment).
   if (done) {
-    return <Text color={t.success}>Payment sent, clearing any overdue status may take a moment.</Text>;
+    return <Text color={t.success}>Payment sent. Clearing any overdue status may take a moment.</Text>;
   }
   return (
     <View style={{ gap: tokens.space.sm }}>

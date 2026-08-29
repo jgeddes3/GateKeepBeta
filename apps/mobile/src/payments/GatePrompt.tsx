@@ -158,8 +158,8 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
       <Callout tone="warning">
         <Text color={t.warning}>
           {message === CURATOR_DELINQUENT_MESSAGE
-            ? "The curator has an overdue payment to resolve before this booking can be confirmed, they've been notified."
-            : "The curator needs to finish payment setup before this booking can be confirmed, they've been notified."}
+            ? "The curator has an overdue payment to resolve before this booking can be confirmed. They've been notified."
+            : "The curator needs to finish payment setup before this booking can be confirmed. They've been notified."}
         </Text>
       </Callout>
     );
@@ -174,7 +174,7 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
       </WarnBox>
     ) : (
       <Callout tone="warning">
-        <Text color={t.warning}>The musician hasn&apos;t finished payout setup yet, they&apos;ve been notified.</Text>
+        <Text color={t.warning}>The musician hasn&apos;t finished payout setup yet. They&apos;ve been notified.</Text>
       </Callout>
     );
   }

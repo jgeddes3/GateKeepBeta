@@ -43,7 +43,7 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
     <View style={{ backgroundColor: t.destructive + "24", borderWidth: 1, borderColor: t.destructive,
       borderRadius: tokens.radius.card, padding: tokens.space.md, gap: tokens.space.sm }}>
       <Text variant="label" color={t.destructive}>
-        This profile has an overdue payment, you can&apos;t book new musicians until it&apos;s settled.
+        This profile has an overdue payment. You can&apos;t book new musicians until it&apos;s settled.
       </Text>
       {affected === "loading" ? (
         <Text color={t.destructive}>Checking which booking is affected…</Text>

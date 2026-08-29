@@ -181,7 +181,7 @@ export function launchTzNextDayStartMs(dateInput: string): number | null {
 // already see.
 export function gigLocationLabel(location: GigPublicLocation): string {
   if (location.addressVisibility === "public") {
-    return location.venueName ? `${location.venueName}, ${location.address}` : (location.address ?? location.city);
+    return location.venueName ? `${location.venueName} · ${location.address}` : (location.address ?? location.city);
   }
   return location.neighborhood ? `${location.neighborhood}, ${location.city}` : location.city;
 }

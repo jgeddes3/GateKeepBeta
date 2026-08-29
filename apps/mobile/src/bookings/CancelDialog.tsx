@@ -47,11 +47,11 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
   const depositRef = depositAmountCents != null ? ` (${formatCents(depositAmountCents)})` : "";
   const warning = hoursBeforeStart == null ? "Checking the cancellation window…" : side === "curator"
     ? (hoursBeforeStart < CURATOR_FORFEIT_WINDOW_HOURS
-        ? `Cancelling now forfeits your deposit${depositRef}, the gig is in ${hoursLabel}h.`
-        : `Cancelling now refunds your deposit${depositRef}, this is outside the ${CURATOR_FORFEIT_WINDOW_HOURS}h forfeiture window.`)
+        ? `Cancelling now forfeits your deposit${depositRef}. The gig is in ${hoursLabel}h.`
+        : `Cancelling now refunds your deposit${depositRef}. This is outside the ${CURATOR_FORFEIT_WINDOW_HOURS}h forfeiture window.`)
     : (hoursBeforeStart < MUSICIAN_MARK_WINDOW_HOURS
-        ? "This will add a no-show mark to your reliability record, the gig is less than 24 hours away."
-        : "Cancelling now, the curator's deposit will be refunded, and no reliability mark will be applied.");
+        ? "This will add a no-show mark to your reliability record. The gig is less than 24 hours away."
+        : "Cancelling now: the curator's deposit will be refunded, and no reliability mark will be applied.");
 
   const submit = async () => {
     const trimmed = reason.trim();

@@ -102,12 +102,12 @@ export function TrueUpForm({
           style={{ width: 90 }} />
       </View>
       <Text variant="meta" muted>
-        Actuals can only increase, this replaces any previous report for this date.
+        Actuals can only increase: this replaces any previous report for this date.
       </Text>
       {preview && preview.deltaBaseCents > 0 && (
         <Text variant="meta" color={t.success}>
           The musician will receive an extra {formatCents(preview.musicianDeltaCents)}
-          {", "}you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
+          {", and "}you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
         </Text>
       )}
       {error && <Callout tone="warning"><Text color={t.warning}>{error}</Text></Callout>}
