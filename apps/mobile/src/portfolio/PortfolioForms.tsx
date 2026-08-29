@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, Text, TextInput, Pressable, Alert } from "react-native";
+import { View, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
@@ -9,8 +9,10 @@ import {
   type PortfolioData, type BookingDoc, type BookingPreferences, type BookingRates, type BookingVisibility,
   type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
 } from "@gatekeep/shared";
+import { Text, Button, Input, TextArea, Chip } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
 
-// RN ports of the web portfolio forms — same callables, same validation,
+// RN ports of the web portfolio forms: same callables, same validation,
 // same field set. Expo Router's stack navigator reuses screen instances
 // across param changes exactly like Next's App Router does: each of these
 // components seeds its local state from `initial` ONLY ONCE, on mount
@@ -24,20 +26,11 @@ const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   catch (e) { Alert.alert("Save failed", e instanceof Error ? e.message : "Try again."); return false; }
 };
 
-function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  return (
-    <Pressable onPress={onPress} accessibilityRole="button" style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
-      borderWidth: 1, borderColor: "#bbb", backgroundColor: active ? "#111" : "#fff" }}>
-      <Text style={{ color: active ? "#fff" : "#111" }}>{label}</Text>
-    </Pressable>
-  );
-}
-
 export function BioGenresForm({ profileId, initial, onSaved }:
   { profileId: string; initial: PortfolioData | undefined; onSaved?: () => void }) {
   const [bio, setBio] = useState(initial?.bio ?? "");
   const [genres, setGenres] = useState<string[]>(initial?.genres ?? []);
-  // Tracks what the SERVER currently holds, not just the mount-time value —
+  // Tracks what the SERVER currently holds, not just the mount-time value:
   // select 2 -> save -> deselect all -> save must hit the guard below even
   // though `initial` still says zero.
   const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
@@ -50,8 +43,8 @@ export function BioGenresForm({ profileId, initial, onSaved }:
       // Genres were saved before and the musician has now deselected all of
       // them. The omit-when-empty branch below exists for the never-set-yet
       // case (a bio-only save while onboarding); reusing it here would
-      // silently no-op — validatePortfolioUpdate rejects an explicit [], so
-      // omitting the key just leaves the OLD genres in place server-side —
+      // silently no-op: validatePortfolioUpdate rejects an explicit [], so
+      // omitting the key just leaves the OLD genres in place server-side,
       // which looks to the musician like their change was saved (the chips
       // show empty) when it wasn't. Block it with an explicit message
       // instead.
@@ -59,7 +52,7 @@ export function BioGenresForm({ profileId, initial, onSaved }:
       return;
     }
     // Omit genres entirely (rather than sending []) when none are picked
-    // yet — a bio-only save has to work while a musician is still filling
+    // yet: a bio-only save has to work while a musician is still filling
     // in the rest of the form; validatePortfolioUpdate (and the server)
     // both treat an omitted field as "leave it alone", but an explicit []
     // fails the 1-3-genres check.
@@ -76,22 +69,21 @@ export function BioGenresForm({ profileId, initial, onSaved }:
 
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Bio & genres</Text>
-      <TextInput multiline numberOfLines={5} maxLength={2000} value={bio} onChangeText={setBio}
+      <Text variant="title">Bio & genres</Text>
+      <TextArea numberOfLines={5} maxLength={2000} value={bio} onChangeText={setBio}
         placeholder="Tell curators and fans who you are…"
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 100, textAlignVertical: "top" }} />
+        style={{ minHeight: 100 }} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GENRES.map((g) => <Chip key={g} label={g} active={genres.includes(g)} onPress={() => toggle(g)} />)}
       </View>
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save bio & genres"}</Text>
-      </Pressable>
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save bio & genres"} />
     </View>
   );
 }
 
 export function LinksForm({ profileId, initial }:
   { profileId: string; initial: PortfolioData | undefined }) {
+  const t = useTokens();
   const [links, setLinks] = useState<ExternalLink[]>(initial?.externalLinks ?? []);
   const [kind, setKind] = useState<ExternalLinkKind>("spotify");
   const [url, setUrl] = useState("");
@@ -109,12 +101,12 @@ export function LinksForm({ profileId, initial }:
 
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Links</Text>
+      <Text variant="title">Links</Text>
       {links.map((l, i) => (
         <View key={`${l.kind}-${l.url}-${i}`} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
           <Text style={{ flex: 1 }} numberOfLines={1}>{l.kind}: {l.url}</Text>
           <Pressable disabled={busy} onPress={() => void save(links.filter((_, j) => j !== i))}>
-            <Text style={{ color: "#dc2626" }}>Remove</Text>
+            <Text color={t.destructive}>Remove</Text>
           </Pressable>
         </View>
       ))}
@@ -123,40 +115,39 @@ export function LinksForm({ profileId, initial }:
           <Chip key={k} label={k} active={kind === k} onPress={() => setKind(k)} />)}
       </View>
       <View style={{ flexDirection: "row", gap: 6 }}>
-        <TextInput placeholder="https://…" autoCapitalize="none" editable={!busy} value={url} onChangeText={setUrl}
-          style={{ borderWidth: 1, borderRadius: 8, padding: 10, flex: 1 }} />
-        <Pressable disabled={busy} style={{ borderWidth: 1, borderRadius: 8, padding: 10 }}
+        <Input placeholder="https://…" autoCapitalize="none" editable={!busy} value={url} onChangeText={setUrl}
+          style={{ flex: 1 }} />
+        <Button variant="secondary" disabled={busy} title="Add"
           onPress={async () => {
             if (!url) return;
-            // Clear the input only once the save actually succeeds —
+            // Clear the input only once the save actually succeeds:
             // clearing unconditionally would silently throw away what the
             // musician typed on a validation failure or a network error.
             if (await save([...links, { kind, url }])) setUrl("");
-          }}>
-          <Text>Add</Text>
-        </Pressable>
+          }} />
       </View>
     </View>
   );
 }
 
-// Sub-project 3 widened `kind` to accept "gallery" (curator profiles) — the
+// Sub-project 3 widened `kind` to accept "gallery" (curator profiles): the
 // upload/staging/awaiting-pipeline mechanics below are unchanged and work
 // identically for it: a caller managing a LIST rather than a single slot
 // (curator's photoPaths array) passes a `currentPath` that's really a
 // fingerprint of the list (e.g. its length) instead of one path, so the same
-// "baseline moved -> awaiting cleared" logic still detects completion — see
+// "baseline moved -> awaiting cleared" logic still detects completion, see
 // src/curator/CuratorForms.tsx's GalleryPhotosSection. Mirrors web's Task 9
 // widening of ../../web/src/portfolio/PortfolioForms.tsx's PhotoUploader.
 export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   { profileId: string; uid: string; kind: PhotoKind; currentPath: string | null; disabled?: boolean }) {
+  const tok = useTokens();
   const [busy, setBusy] = useState(false);
   // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
-  // seconds after the storage upload lands — we don't know its eventual
+  // seconds after the storage upload lands: we don't know its eventual
   // value client-side, so instead we keep showing "Processing…" until the
   // `currentPath` PROP itself moves. `baseline` tracks the last path we've
   // actually seen; when it disagrees with the incoming prop we're mid-render
-  // with fresh data, so we adjust state right here (not in a useEffect —
+  // with fresh data, so we adjust state right here (not in a useEffect,
   // this is React's documented "adjust state while rendering" escape hatch
   // for resetting state when a prop changes: since it runs synchronously
   // before commit, React just re-renders once more with the corrected
@@ -174,7 +165,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   // Bounds the wait: some failures never write ANYTHING back to the profile
   // doc (an oversized/corrupt image the resize step rejects outright before
   // ever reaching a write, for instance), so `currentPath` would never move
-  // and `awaiting` — and the disabled button — would otherwise deadlock
+  // and `awaiting` (and the disabled button) would otherwise deadlock
   // permanently. This is a legitimate useEffect (subscribing to an external
   // timer and calling setState from ITS callback, not synchronously in the
   // effect body), unlike the render-time adjustment above.
@@ -193,7 +184,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
     setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
-      // RN has no crypto.randomUUID — timestamp+random nonce is fine (uniqueness, not secrecy of THIS value).
+      // RN has no crypto.randomUUID: timestamp+random nonce is fine (uniqueness, not secrecy of THIS value).
       const nonce = `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
       const blob = await (await fetch(a.uri)).blob();
       await uploadBytes(storageRef(storage, stagingPhotoPath(uid, profileId, kind, nonce)), blob,
@@ -216,16 +207,16 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
     <View style={{ gap: 4 }}>
       <Pressable onPress={() => void upload()} disabled={busy || processing || disabled}
         accessibilityRole="button" accessibilityLabel={`Upload ${photoLabel}`}
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10, alignSelf: "flex-start", opacity: disabled ? 0.5 : 1 }}>
-        {/* The checkmark reads as "this slot is filled" — meaningful for
+        style={{ borderWidth: 1, borderColor: tok.border, borderRadius: 8, padding: 10, alignSelf: "flex-start", opacity: disabled ? 0.5 : 1 }}>
+        {/* The checkmark reads as "this slot is filled", meaningful for
             avatar/cover's single-slot model, misleading for gallery (where
             currentPath is a length fingerprint, not a real path, and the
             gallery grid already renders its own thumbnails). */}
         <Text>{label}{currentPath && !processing && kind !== "gallery" ? " ✓" : ""}</Text>
       </Pressable>
       {timedOut && (
-        <Text style={{ color: "#92400e", fontSize: 12 }}>
-          Still processing — if your photo doesn&#39;t appear, try a smaller one.
+        <Text variant="meta" color={tok.warning}>
+          Still processing, if your photo doesn&#39;t appear, try a smaller one.
         </Text>
       )}
     </View>
@@ -255,7 +246,7 @@ export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
   // Raw strings, not derived cents: converting dollars -> cents -> back to a
   // display string on every keystroke (the naive approach) fights the user
-  // mid-entry — e.g. typing "1.50" round-trips through 150 cents and
+  // mid-entry, e.g. typing "1.50" round-trips through 150 cents and
   // re-renders as "1.5", dropping the trailing zero and disrupting the
   // cursor. Conversion now happens exactly once, in save().
   const [rateInputs, setRateInputs] = useState<Record<RateKey, RateInput>>({
@@ -267,30 +258,30 @@ export function BookingForm({ profileId, initial }:
   const [busy, setBusy] = useState(false);
 
   const numField = (value: number | null, set: (n: number | null) => void, placeholder: string) => (
-    <TextInput keyboardType="number-pad" placeholder={placeholder}
+    <Input keyboardType="number-pad" placeholder={placeholder}
       value={value === null ? "" : String(value)}
       onChangeText={(t) => set(t === "" ? null : Math.round(Number(t)))}
-      style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 100 }} />
+      style={{ width: 100 }} />
   );
   const rateRow = (key: RateKey, label: string) => (
     <View key={key} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
       <Text style={{ width: 100 }}>{label}</Text>
       <Text>$</Text>
-      <TextInput keyboardType="decimal-pad" placeholder="—"
+      <Input keyboardType="decimal-pad" placeholder="-"
         value={rateInputs[key].amount}
         onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: t } }))}
-        style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 90 }} />
-      <TextInput placeholder="note (optional)" maxLength={200} editable={rateInputs[key].amount.trim() !== ""}
+        style={{ width: 90 }} />
+      <Input placeholder="note (optional)" maxLength={200} editable={rateInputs[key].amount.trim() !== ""}
         value={rateInputs[key].note ?? ""}
         onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: t || null } }))}
-        style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
+        style={{ flex: 1 }} />
     </View>
   );
   const save = async () => {
     const rates: BookingRates = { perHour: null, perSong: null, perSet: null };
     for (const key of ["perHour", "perSong", "perSet"] as const) {
       const raw = rateInputs[key].amount.trim();
-      if (raw === "") continue; // stays null — field left blank on purpose
+      if (raw === "") continue; // stays null: field left blank on purpose
       const dollars = Number(raw);
       if (!Number.isFinite(dollars) || dollars <= 0) {
         Alert.alert("Check your rates", "Rates must be more than $0, or leave the field blank.");
@@ -311,12 +302,12 @@ export function BookingForm({ profileId, initial }:
 
   return (
     <View style={{ gap: 10 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Rates & preferences</Text>
-      <Text style={{ color: "#666" }}>Visible to curators only — never on your public page. Offer any mix of the three.</Text>
+      <Text variant="title">Rates & preferences</Text>
+      <Text muted>Visible to curators only, never on your public page. Offer any mix of the three.</Text>
       {rateRow("perHour", "Per hour")}
       {rateRow("perSong", "Per song")}
       {rateRow("perSet", "Per set (flat)")}
-      <Text style={{ fontWeight: "700" }}>Gig types</Text>
+      <Text variant="label">Gig types</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GIG_TYPES.map((g) => <Chip key={g} label={g.replace("_", " ")} active={prefs.gigTypes.includes(g)}
           onPress={() => setPrefs((p) => ({ ...p, gigTypes: p.gigTypes.includes(g)
@@ -324,33 +315,31 @@ export function BookingForm({ profileId, initial }:
       </View>
       <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
         <Text>Travel radius (km)</Text>
-        {numField(prefs.travelRadiusKm, (n) => setPrefs((p) => ({ ...p, travelRadiusKm: n })), "—")}
+        {numField(prefs.travelRadiusKm, (n) => setPrefs((p) => ({ ...p, travelRadiusKm: n })), "-")}
       </View>
       <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
         <Text>Typical set (min)</Text>
-        {numField(prefs.typicalSetMinutes, (n) => setPrefs((p) => ({ ...p, typicalSetMinutes: n })), "—")}
+        {numField(prefs.typicalSetMinutes, (n) => setPrefs((p) => ({ ...p, typicalSetMinutes: n })), "-")}
       </View>
-      <Text style={{ fontWeight: "700" }}>Act size</Text>
+      <Text variant="label">Act size</Text>
       <View style={{ flexDirection: "row", gap: 6 }}>
         {(["solo", "duo", "band"] as const).map((s) => <Chip key={s} label={s} active={prefs.actSize === s}
           onPress={() => setPrefs((p) => ({ ...p, actSize: p.actSize === s ? null : s }))} />)}
       </View>
-      <Text style={{ fontWeight: "700" }}>Bring own PA</Text>
+      <Text variant="label">Bring own PA</Text>
       <View style={{ flexDirection: "row", gap: 6 }}>
         <Chip label="Yes" active={prefs.bringsOwnPA === true}
           onPress={() => setPrefs((p) => ({ ...p, bringsOwnPA: p.bringsOwnPA === true ? null : true }))} />
         <Chip label="No" active={prefs.bringsOwnPA === false}
           onPress={() => setPrefs((p) => ({ ...p, bringsOwnPA: p.bringsOwnPA === false ? null : false }))} />
       </View>
-      <Text style={{ fontWeight: "700" }}>Availability</Text>
+      <Text variant="label">Availability</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {(["weekends", "weeknights", "anytime", "limited"] as const).map((a) =>
           <Chip key={a} label={a} active={prefs.availabilityPattern === a}
             onPress={() => setPrefs((p) => ({ ...p, availabilityPattern: p.availabilityPattern === a ? null : a }))} />)}
       </View>
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save rates & preferences"}</Text>
-      </Pressable>
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save rates & preferences"} />
     </View>
   );
 }

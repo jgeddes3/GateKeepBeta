@@ -1,29 +1,35 @@
 import { useEffect, useMemo, useState } from "react";
-import { View, Text, TextInput, Pressable, Modal, ScrollView } from "react-native";
+import { View, Pressable, Modal, ScrollView } from "react-native";
 import { collection, getDocs, orderBy, query, where, type QueryConstraint } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { GENRES, type GigDoc, type BudgetStructure } from "@gatekeep/shared";
-import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL, Chip, Badge } from "../gigs/GigForms";
+import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import {
-  DEPOSIT_HONESTY_LINE, ErrorBox, OfferFields, buildOfferPayload, emptyOffer, errorCode,
+  DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode,
   formatDuration, gigLocationLabel, launchTzDayStartMs, launchTzNextDayStartMs, type OfferState,
 } from "./BookingForms";
 import { useProfileContext } from "../shell/ProfileContext";
 import { GatePrompt } from "../payments/GatePrompt";
+import {
+  Text, Button, Card, Chip, Input, StatusBadge, PageBackground, PhotoScrim, PhotoPlaceholder,
+  SkeletonCard, ErrorBanner, IconMusicNotes, IconX,
+} from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
+import { tokens } from "../theme/tokens";
 
 // RN port of ../../../web/src/bookings/GigBrowse.tsx (+ the gig detail
-// page's ApplyPanel, app/gigs/[gigId]/page.tsx) — SP4 Task 12. Mounted as
+// page's ApplyPanel, app/gigs/[gigId]/page.tsx), SP4 Task 12. Mounted as
 // the musician "Find gigs" tab (apps/mobile/app/(musician)/gigs.tsx).
 //
 // Deviations from web, all task-sanctioned:
 // - Filters are chip-toggles for genre/structure + a simple YYYY-MM-DD
-//   from/to text entry (SP3 ruling 14 precedent) — no city filter (not
+//   from/to text entry (SP3 ruling 14 precedent), no city filter (not
 //   listed in Task 12's brief, unlike web's).
 // - Gig detail is a Modal on this same screen (mobile-appropriate) instead
-//   of a separate route — includes the Apply flow inline.
+//   of a separate route, includes the Apply flow inline.
 // - Series badge is ALWAYS the softer "Part of a recurring series" copy
-//   derived from seriesId != null alone — no gigSeries fetch anywhere on
+//   derived from seriesId != null alone, no gigSeries fetch anywhere on
 //   this screen (mobile explicitly skips the fillMode reveal web's separate
 //   gig-detail page attempts for members).
 // - The Apply panel's musician-profile picker reuses ProfileContext's
@@ -34,6 +40,7 @@ type GigRow = GigDoc & { id: string };
 
 function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
   const { myProfiles } = useProfileContext();
+  const t = useTokens();
   const musicianProfiles = useMemo(
     () => myProfiles.filter((p) => p.type === "musician" && p.status === "approved"),
     [myProfiles],
@@ -53,8 +60,8 @@ function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
 
   if (musicianProfiles.length === 0) {
     return (
-      <Text style={{ color: "#666" }}>
-        You need an approved musician profile to apply — switch to one, or join as a musician from the account tab.
+      <Text muted>
+        You need an approved musician profile to apply. Switch to one, or join as a musician from the account tab.
       </Text>
     );
   }
@@ -76,12 +83,12 @@ function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
     }
   };
 
-  if (applied) return <Text style={{ color: "#16a34a" }}>Application sent! The curator has been notified.</Text>;
-  if (alreadyApplied) return <Text style={{ color: "#666" }}>There&apos;s already an open booking between this act and this gig.</Text>;
+  if (applied) return <Text color={t.success}>Application sent! The curator has been notified.</Text>;
+  if (alreadyApplied) return <Text muted>There&apos;s already an open booking between this act and this gig.</Text>;
 
   return (
     <View style={{ gap: 10 }}>
-      <Text style={{ fontWeight: "700" }}>Applying as</Text>
+      <Text variant="label">Applying as</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {musicianProfiles.map((m) => (
           <Chip key={m.profileId} label={m.name} active={selected === m.profileId} onPress={() => setSelectedOverride(m.profileId)} />
@@ -89,37 +96,38 @@ function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
       </View>
       <OfferFields structure={gig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />
       {error && <GatePrompt message={error} viewerIsMusician onRetry={() => void submit()} />}
-      <Pressable onPress={() => void submit()} disabled={busy}
-        style={{ backgroundColor: "#111", paddingVertical: 12, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Applying…" : "Apply"}</Text>
-      </Pressable>
-      <Text style={{ color: "#666", fontSize: 12 }}>{DEPOSIT_HONESTY_LINE}</Text>
+      <Button title={busy ? "Applying…" : "Apply"} disabled={busy} onPress={() => void submit()} />
+      <Text variant="meta" muted>{DEPOSIT_HONESTY_LINE}</Text>
     </View>
   );
 }
 
 function GigDetailModal({ gig, onClose }: { gig: GigRow | null; onClose: () => void }) {
+  const t = useTokens();
   return (
     <Modal visible={gig != null} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: "#00000099", justifyContent: "flex-end" }}>
-        <View style={{ maxHeight: "85%", backgroundColor: "#fff", borderTopLeftRadius: 16, borderTopRightRadius: 16 }}>
-          <ScrollView contentContainerStyle={{ padding: 16, gap: 10 }} keyboardShouldPersistTaps="handled">
-            <Pressable onPress={onClose}><Text style={{ color: "#666" }}>✕ Close</Text></Pressable>
+      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+        <View style={{ maxHeight: "85%", backgroundColor: t.surface, borderTopLeftRadius: tokens.radius.card, borderTopRightRadius: tokens.radius.card, borderColor: t.border, borderWidth: 1 }}>
+          <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: 10 }} keyboardShouldPersistTaps="handled">
+            <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel="Close" style={{ flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start" }}>
+              <IconX size={18} color={t.muted} />
+              <Text muted>Close</Text>
+            </Pressable>
             {gig && (
               <>
-                <Text style={{ fontSize: 20, fontWeight: "700" }}>{gig.title || "Untitled gig"}</Text>
-                <Text style={{ color: "#666" }}>{formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}</Text>
+                <Text variant="heading">{gig.title || "Untitled gig"}</Text>
+                <Text muted>{formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}</Text>
                 <Text>{formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}</Text>
                 {!!gig.description && <Text>{gig.description}</Text>}
                 {(gig.wants.genres.length > 0 || gig.wants.actSizes.length > 0) && (
-                  <Text style={{ color: "#666" }}>
+                  <Text muted>
                     Looking for: {[gig.wants.genres.join(", "), gig.wants.actSizes.join(", ")].filter(Boolean).join(" · ")}
                   </Text>
                 )}
-                <Text style={{ color: "#666" }}>{gigLocationLabel(gig.location)}</Text>
-                {gig.seriesId != null && <Badge label="Part of a recurring series" bg="#e0e7ff" />}
-                <View style={{ borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 12, gap: 8 }}>
-                  <Text style={{ fontSize: 16, fontWeight: "700" }}>Apply for this gig</Text>
+                <Text muted>{gigLocationLabel(gig.location)}</Text>
+                {gig.seriesId != null && <StatusBadge label="Part of a recurring series" status="neutral" />}
+                <View style={{ borderTopWidth: 1, borderTopColor: t.border, paddingTop: 12, gap: 8 }}>
+                  <Text variant="title">Apply for this gig</Text>
                   <ApplyPanel key={gig.id} gig={gig} gigId={gig.id} />
                 </View>
               </>
@@ -131,30 +139,51 @@ function GigDetailModal({ gig, onClose }: { gig: GigRow | null; onClose: () => v
   );
 }
 
+// Photo-forward card (9A parity): a fixed-height cover showing the branded
+// PhotoPlaceholder (no real photo is wired through here, and none may be
+// added without a new Storage read, exactly as on web's browse grid) under
+// the standard dark scrim, with the title in Syne and the price in the ember
+// treatment sitting on the scrim; the meta (date, looking-for, location,
+// series) sits in the card body below.
 function GigCard({ gig, onPress }: { gig: GigRow; onPress: () => void }) {
+  const t = useTokens();
   return (
-    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12, gap: 6 }}>
-      <Text style={{ fontWeight: "700" }}>{gig.title || "Untitled gig"}</Text>
-      <Text style={{ color: "#666", fontSize: 13 }}>{formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}</Text>
-      <Text style={{ fontSize: 13 }}>
-        {formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
-      </Text>
-      {(gig.wants.genres.length > 0 || gig.wants.actSizes.length > 0) && (
-        <Text style={{ color: "#666", fontSize: 13 }}>
-          Looking for: {[gig.wants.genres.join(", "), gig.wants.actSizes.join(", ")].filter(Boolean).join(" · ")}
-        </Text>
-      )}
-      <Text style={{ color: "#666", fontSize: 13 }}>{gigLocationLabel(gig.location)}</Text>
-      {gig.seriesId != null && <Badge label="Part of a recurring series" bg="#e0e7ff" />}
+    <Pressable onPress={onPress}>
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <View style={{ height: 144 }}>
+          <PhotoPlaceholder icon={<IconMusicNotes size={28} color={t.muted} />} />
+          <PhotoScrim />
+          <View style={{ position: "absolute", left: 12, right: 12, bottom: 10, flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
+            <Text variant="title" color={tokens.dark.text} numberOfLines={1} style={{ flex: 1 }}>
+              {gig.title || "Untitled gig"}
+            </Text>
+            <View style={{ backgroundColor: t.accent, borderRadius: tokens.radius.pill, paddingVertical: 4, paddingHorizontal: 10 }}>
+              <Text variant="label" color={t.onAccent}>
+                {formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
+              </Text>
+            </View>
+          </View>
+        </View>
+        <View style={{ padding: tokens.space.lg, gap: 6 }}>
+          <Text variant="meta" muted>{formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}</Text>
+          {(gig.wants.genres.length > 0 || gig.wants.actSizes.length > 0) && (
+            <Text variant="meta" muted>
+              Looking for: {[gig.wants.genres.join(", "), gig.wants.actSizes.join(", ")].filter(Boolean).join(" · ")}
+            </Text>
+          )}
+          <Text variant="meta" muted>{gigLocationLabel(gig.location)}</Text>
+          {gig.seriesId != null && <StatusBadge label="Part of a recurring series" status="neutral" />}
+        </View>
+      </Card>
     </Pressable>
   );
 }
 
 // status=="open" ordered startsAt is the one query shape firestore.rules
-// can prove without a membership/admin disjunct — mirrors web's identical
+// can prove without a membership/admin disjunct, mirrors web's identical
 // query. Genre/structure are pure client-side filters over that result; the
 // date range is mapped onto the query itself as a range on the
-// already-indexed startsAt field (gigs(status,startsAt) — no new index
+// already-indexed startsAt field (gigs(status,startsAt), no new index
 // needed).
 export function GigBrowse() {
   const [gigs, setGigs] = useState<GigRow[] | "loading">("loading");
@@ -166,14 +195,14 @@ export function GigBrowse() {
   const [selectedGigId, setSelectedGigId] = useState<string | null>(null);
 
   // SP4 (Task 13 item 9): the effect below depends on the PARSED boundaries,
-  // not the raw fromDate/toDate strings — those change on every keystroke
+  // not the raw fromDate/toDate strings, those change on every keystroke
   // (onChangeText fires per character), but launchTzDayStartMs/
   // launchTzNextDayStartMs return null for every incomplete/invalid
   // intermediate value (see their own "round-trip-validated" contracts in
   // BookingForms.tsx) and only produce a genuinely NEW numeric boundary once
   // a full valid "YYYY-MM-DD" lands. Memoizing them means the query effect's
   // dependency array only changes (and re-fetches) when the actual bound
-  // does — typing "2026-08-25" one character at a time no longer re-queries
+  // does, typing "2026-08-25" one character at a time no longer re-queries
   // on every one of those keystrokes.
   const fromMs = useMemo(() => launchTzDayStartMs(fromDate), [fromDate]);
   const toMs = useMemo(() => launchTzNextDayStartMs(toDate), [toDate]);
@@ -207,39 +236,53 @@ export function GigBrowse() {
   const selectedGig = selectedGigId && gigs !== "loading" ? (gigs.find((g) => g.id === selectedGigId) ?? null) : null;
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 16 }} keyboardShouldPersistTaps="handled">
-      <Text style={{ fontSize: 22, fontWeight: "700" }}>Find gigs</Text>
-      <View style={{ gap: 8 }}>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-          <Chip label="All genres" active={genre === null} onPress={() => setGenre(null)} />
-          {GENRES.map((g) => <Chip key={g} label={g} active={genre === g} onPress={() => setGenre(genre === g ? null : g)} />)}
-        </View>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-          <Chip label="Any structure" active={structure === "any"} onPress={() => setStructure("any")} />
-          {(["perHour", "perSong", "perSet"] as const).map((s) => (
-            <Chip key={s} label={BUDGET_STRUCTURE_LABEL[s]} active={structure === s} onPress={() => setStructure(s)} />
-          ))}
-        </View>
-        <View style={{ flexDirection: "row", gap: 12 }}>
-          <View style={{ gap: 4 }}>
-            <Text>From (YYYY-MM-DD)</Text>
-            <TextInput value={fromDate} onChangeText={(t) => setFromDate(t.replace(/[^0-9-]/g, ""))}
-              placeholder="YYYY-MM-DD" maxLength={10} style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 130 }} />
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.lg }} keyboardShouldPersistTaps="handled">
+        <Text variant="heading">Find gigs</Text>
+        <View style={{ gap: 8 }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            <Chip label="All genres" active={genre === null} onPress={() => setGenre(null)} />
+            {GENRES.map((g) => <Chip key={g} label={g} active={genre === g} onPress={() => setGenre(genre === g ? null : g)} />)}
           </View>
-          <View style={{ gap: 4 }}>
-            <Text>To (YYYY-MM-DD)</Text>
-            <TextInput value={toDate} onChangeText={(t) => setToDate(t.replace(/[^0-9-]/g, ""))}
-              placeholder="YYYY-MM-DD" maxLength={10} style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 130 }} />
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            <Chip label="Any structure" active={structure === "any"} onPress={() => setStructure("any")} />
+            {(["perHour", "perSong", "perSet"] as const).map((s) => (
+              <Chip key={s} label={BUDGET_STRUCTURE_LABEL[s]} active={structure === s} onPress={() => setStructure(s)} />
+            ))}
+          </View>
+          <View style={{ flexDirection: "row", gap: 12 }}>
+            <View style={{ gap: 4 }}>
+              <Text variant="meta">From (YYYY-MM-DD)</Text>
+              <Input value={fromDate} onChangeText={(t) => setFromDate(t.replace(/[^0-9-]/g, ""))}
+                placeholder="YYYY-MM-DD" maxLength={10} style={{ width: 130 }} />
+            </View>
+            <View style={{ gap: 4 }}>
+              <Text variant="meta">To (YYYY-MM-DD)</Text>
+              <Input value={toDate} onChangeText={(t) => setToDate(t.replace(/[^0-9-]/g, ""))}
+                placeholder="YYYY-MM-DD" maxLength={10} style={{ width: 130 }} />
+            </View>
           </View>
         </View>
-      </View>
-      {error && <ErrorBox message={`Could not load gigs: ${error}`} />}
-      {gigs === "loading" && <Text>Loading…</Text>}
-      {gigs !== "loading" && filtered.length === 0 && !error && <Text style={{ color: "#666" }}>No open gigs match these filters.</Text>}
-      <View style={{ gap: 10 }}>
-        {filtered.map((g) => <GigCard key={g.id} gig={g} onPress={() => setSelectedGigId(g.id)} />)}
-      </View>
-      <GigDetailModal gig={selectedGig} onClose={() => setSelectedGigId(null)} />
-    </ScrollView>
+        {error && <ErrorBanner message={`Could not load gigs: ${error}`} />}
+        {gigs === "loading" && (
+          <View style={{ gap: 10 }}>
+            <SkeletonCard />
+            <SkeletonCard />
+            <SkeletonCard />
+          </View>
+        )}
+        {gigs !== "loading" && filtered.length === 0 && !error && (
+          <Card style={{ alignItems: "center", gap: 6 }}>
+            <Text variant="title">No matching gigs</Text>
+            <Text muted style={{ textAlign: "center" }}>No open gigs match these filters.</Text>
+          </Card>
+        )}
+        <View style={{ gap: 10 }}>
+          {filtered.map((g) => <GigCard key={g.id} gig={g} onPress={() => setSelectedGigId(g.id)} />)}
+        </View>
+        <GigDetailModal gig={selectedGig} onClose={() => setSelectedGigId(null)} />
+      </ScrollView>
+    </View>
   );
 }

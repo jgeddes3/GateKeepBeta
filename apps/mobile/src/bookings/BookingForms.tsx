@@ -1,23 +1,25 @@
-import { View, Text, TextInput } from "react-native";
+import { View } from "react-native";
 import {
   validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type BudgetStructure, type GigPublicLocation,
 } from "@gatekeep/shared";
+import { Text, Input, TextArea, Callout } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
 
-// RN port of ../../../web/src/bookings/BookingForms.tsx (SP4 Task 12) —
+// RN port of ../../../web/src/bookings/BookingForms.tsx (SP4 Task 12):
 // booking-domain field-groups + pure formatters shared by GigBrowse's Apply
 // flow, MusicianBrowse's inline offer composer, and BookingThread's counter
 // form (OfferForm.tsx). Mirrors ../gigs/GigForms.tsx's split: dumb
 // value/onChange RN components + pure functions, no save button of their
 // own. Booking-status DISPLAY helpers (bookingHistoryLabel/depositLine) and
 // the inbox lists live in BookingInbox.tsx; the render-safe `useNow` hook
-// lives in BookingThread.tsx — same file split web settled on after its
+// lives in BookingThread.tsx, same file split web settled on after its
 // Task 10 review.
 
-// Exact copy web uses for the pre-acceptance surfaces (Apply / Offer a gig)
-// — no computed dollar amount exists yet at this point.
-// Final-review fix wave — mirrors web's SP5 Task 15 review round 1 fix
-// (medium #6): payments are LIVE as of that sub-project — "will be
+// Exact copy web uses for the pre-acceptance surfaces (Apply / Offer a gig),
+// no computed dollar amount exists yet at this point.
+// Final-review fix wave, mirrors web's SP5 Task 15 review round 1 fix
+// (medium #6): payments are LIVE as of that sub-project, "will be
 // collected... when payments launch" was accurate pre-SP5 and is now simply
 // false (acceptBooking fires a real Stripe charge the moment it commits).
 // DEPOSIT_PERCENT templated in rather than a hardcoded "35%" literal, so
@@ -32,7 +34,7 @@ export interface OfferPayload { amountCents: number; expectedQuantity: number | 
 
 // Converts the dollar-string UI state into the integer-cents callable
 // payload and runs the SAME validator applyToGig/offerGig/counterBooking run
-// server-side (validateOfferInput) — a malformed offer is caught here, with
+// server-side (validateOfferInput), a malformed offer is caught here, with
 // the identical error copy the server would otherwise return.
 export function buildOfferPayload(
   structure: BudgetStructure, state: OfferState,
@@ -48,7 +50,7 @@ export function buildOfferPayload(
     if (state.quantity.trim() === "" || !Number.isFinite(q)) {
       return { payload: null, error: "Enter a song count." };
     }
-    // Not Math.trunc'd — a fractional entry (e.g. "3.5") passes through
+    // Not Math.trunc'd, a fractional entry (e.g. "3.5") passes through
     // as-is so validateOfferInput's own integer check catches it and
     // returns its real error, rather than silently rounding down to a
     // value the musician never actually typed.
@@ -60,7 +62,7 @@ export function buildOfferPayload(
   return { payload: { amountCents, expectedQuantity, note }, error: null };
 }
 
-// Amount + (perSong only) song count + note-with-counter — the exact input
+// Amount + (perSong only) song count + note-with-counter, the exact input
 // set applyToGig/offerGig/counterBooking accept. RN TextInputs replace
 // web's <input type=number>/<textarea> (mirrors ../gigs/GigForms.tsx's
 // BudgetFields keyboardType idiom).
@@ -73,24 +75,24 @@ export function OfferFields({ structure, value, onChange, disabled }: {
       <Text>Your offer ({unitLabel})</Text>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         <Text>$</Text>
-        <TextInput keyboardType="decimal-pad" editable={!disabled} value={value.amount}
+        <Input keyboardType="decimal-pad" editable={!disabled} value={value.amount}
           onChangeText={(t) => onChange({ ...value, amount: t })}
-          style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 100 }} />
+          style={{ width: 100 }} />
       </View>
       {structure === "perSong" && (
         <View style={{ gap: 4 }}>
           <Text>Song count</Text>
-          <TextInput keyboardType="number-pad" editable={!disabled} value={value.quantity}
+          <Input keyboardType="number-pad" editable={!disabled} value={value.quantity}
             placeholder={`1-${MAX_OFFER_SONG_COUNT}`}
             onChangeText={(t) => onChange({ ...value, quantity: t.replace(/[^0-9.]/g, "") })}
-            style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 90 }} />
+            style={{ width: 90 }} />
         </View>
       )}
       <View style={{ gap: 4 }}>
-        <TextInput multiline numberOfLines={3} maxLength={MAX_OFFER_NOTE_LENGTH} editable={!disabled}
+        <TextArea numberOfLines={3} maxLength={MAX_OFFER_NOTE_LENGTH} editable={!disabled}
           placeholder="Note (optional)" value={value.note} onChangeText={(t) => onChange({ ...value, note: t })}
-          style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 64, textAlignVertical: "top" }} />
-        <Text style={{ fontSize: 12, color: "#666" }}>{value.note.length}/{MAX_OFFER_NOTE_LENGTH}</Text>
+          style={{ minHeight: 64 }} />
+        <Text variant="meta" muted>{value.note.length}/{MAX_OFFER_NOTE_LENGTH}</Text>
       </View>
     </View>
   );
@@ -104,12 +106,12 @@ export function formatDuration(minutes: number): string {
 }
 
 // Offset (in ms) between UTC and `timeZone`'s wall clock AT a given UTC
-// instant — derived per-instant (not a constant) so it's correct on both
+// instant, derived per-instant (not a constant) so it's correct on both
 // sides of a DST transition. Byte-identical math to web's tzOffsetMs, but
 // wrapped in try/catch: unlike web's browser guarantee, Hermes's
 // Intl.DateTimeFormat timeZone/formatToParts support on Expo 57 is not
 // independently verified on-device in this (Windows, no simulator)
-// environment — see ../gigs/GigForms.tsx's formatGigDateTime for the same
+// environment, see ../gigs/GigForms.tsx's formatGigDateTime for the same
 // defensive pattern already established here. A failure here degrades to
 // "no date-range filter applied" (launchTzDayStartMs below returns null),
 // never a crash.
@@ -132,7 +134,7 @@ function tzOffsetMs(timeZone: string, utcMs: number): number | null {
 // typed in the filter must be bucketed by LAUNCH_TIMEZONE midnight, not UTC
 // midnight. Byte-identical technique to web's launchTzDayStartMs (round-trip
 // validated, DST-aware via tzOffsetMs above); returns null for an
-// empty/malformed input OR an Intl failure — both treated identically by
+// empty/malformed input OR an Intl failure, both treated identically by
 // GigBrowse (no date constraint applied), never a thrown error.
 export function launchTzDayStartMs(dateInput: string): number | null {
   if (!dateInput) return null;
@@ -159,7 +161,7 @@ export function launchTzDayStartMs(dateInput: string): number | null {
 }
 
 // The exclusive upper bound for a "To" date filter: LAUNCH_TIMEZONE
-// midnight that STARTS the day after `dateInput` — derived from the actual
+// midnight that STARTS the day after `dateInput`, derived from the actual
 // next calendar date (timezone-agnostic Y-M-D arithmetic) rather than a
 // fixed +24h, which would be wrong by an hour across LAUNCH_TIMEZONE's own
 // DST transition days. Mirrors web's launchTzNextDayStartMs exactly.
@@ -172,32 +174,33 @@ export function launchTzNextDayStartMs(dateInput: string): number | null {
   return launchTzDayStartMs(nextInput);
 }
 
-// Public-precision location label — byte-identical logic to web's
+// Public-precision location label, byte-identical logic to web's
 // gigLocationLabel (BookingForms.tsx): `address` is present on the doc ONLY
 // when addressVisibility=='public' (functions/src/gigs.ts nulls it out
 // otherwise), so this never branches on anything the client couldn't
 // already see.
 export function gigLocationLabel(location: GigPublicLocation): string {
   if (location.addressVisibility === "public") {
-    return location.venueName ? `${location.venueName} — ${location.address}` : (location.address ?? location.city);
+    return location.venueName ? `${location.venueName} · ${location.address}` : (location.address ?? location.city);
   }
   return location.neighborhood ? `${location.neighborhood}, ${location.city}` : location.city;
 }
 
-// Shared error-message box style — every busy composer/dialog in this
+// Shared error-message box style, every busy composer/dialog in this
 // directory (GigBrowse's Apply panel, MusicianBrowse's offer composer,
 // OfferForm, CancelDialog, BookingThread) surfaces the server's verbatim
 // error the same way, matching the amber warning-box color already
 // established by ../gigs/GigForms.tsx and ../curator/CuratorForms.tsx.
 export function ErrorBox({ message }: { message: string }) {
+  const t = useTokens();
   return (
-    <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-      {message}
-    </Text>
+    <Callout tone="warning">
+      <Text color={t.warning}>{message}</Text>
+    </Callout>
   );
 }
 
-// Duck-typed Firebase callable error code extraction — mirrors web's
+// Duck-typed Firebase callable error code extraction, mirrors web's
 // `typeof (e as { code?: unknown }).code === "string" ? ... : undefined`
 // idiom used at every "already-exists" special-case (applyToGig/offerGig
 // dedupe) across this directory.

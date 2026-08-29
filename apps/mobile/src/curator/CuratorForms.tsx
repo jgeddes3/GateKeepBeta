@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, Text, TextInput, Pressable, Alert, Image } from "react-native";
+import { View, Pressable, Alert, Image } from "react-native";
 import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
@@ -9,39 +9,32 @@ import {
   MAX_ABOUT_LENGTH, MAX_ADDRESS_LENGTH, MAX_CITY_LENGTH, MAX_AMENITY_NOTES_LENGTH, MAX_CAPACITY,
   type LookingFor, type ActSize, type CuratorDetails, type CuratorSubtype,
 } from "@gatekeep/shared";
+import { Text, Button, Input, TextArea, Chip, Skeleton } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
 
-// RN port of ../../web/src/curator/CuratorForms.tsx — sub-project 3's curator
+// RN port of ../../web/src/curator/CuratorForms.tsx, sub-project 3's curator
 // equivalent of ./../portfolio/PortfolioForms.tsx (SP2-owned), applied to
 // CuratorDetails' fields instead of PortfolioData's. Kept in its own file for
 // the same reason the web version is: functions/src/curator.ts is split from
 // portfolio.ts server-side. Only PhotoUploader is reused as-is from
-// PortfolioForms.tsx (its `kind` was widened there to accept "gallery" — see
+// PortfolioForms.tsx (its `kind` was widened there to accept "gallery", see
 // that file's comment).
 //
 // DO-NOT-COPY checklist (SP2 plan Tasks 13/14) applied here:
 // - every save is busy-locked and alert-on-failure (callOrAlert below).
 // - no crypto.randomUUID anywhere in this file (PhotoUploader owns the only
 //   upload nonce, already using the Date.now()+Math.random() pattern).
-// - no Intl.ListFormat (this file has no missing-items sentence — that lives
+// - no Intl.ListFormat (this file has no missing-items sentence, that lives
 //   in the editor screen, which uses a plain join(", ") per the same note).
 // - every form here is meant to be mounted with `key={\`<section>-${profileId}\`}`
 //   by its caller (the curator dashboard tab) so switching the active
-//   curator profile remounts these instead of leaking stale state — same
+//   curator profile remounts these instead of leaking stale state, same
 //   contract as BioGenresForm/LinksForm/BookingForm.
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
   try { await httpsCallable(getFirebase().functions, name)(data); return true; }
   catch (e) { Alert.alert("Save failed", e instanceof Error ? e.message : "Try again."); return false; }
 };
-
-function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  return (
-    <Pressable onPress={onPress} accessibilityRole="button" style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12,
-      borderWidth: 1, borderColor: "#bbb", backgroundColor: active ? "#111" : "#fff" }}>
-      <Text style={{ color: active ? "#fff" : "#111" }}>{label}</Text>
-    </Pressable>
-  );
-}
 
 export function AboutForm({ profileId, initial }: { profileId: string; initial: string | undefined }) {
   const [about, setAbout] = useState(initial ?? "");
@@ -53,13 +46,11 @@ export function AboutForm({ profileId, initial }: { profileId: string; initial: 
   };
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>About</Text>
-      <TextInput multiline numberOfLines={6} maxLength={MAX_ABOUT_LENGTH} value={about} onChangeText={setAbout}
-        placeholder="Tell musicians what makes this a good gig — the room, the crowd, what you're building…"
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 120, textAlignVertical: "top" }} />
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save about"}</Text>
-      </Pressable>
+      <Text variant="title">About</Text>
+      <TextArea numberOfLines={6} maxLength={MAX_ABOUT_LENGTH} value={about} onChangeText={setAbout}
+        placeholder="Tell musicians what makes this a good gig: the room, the crowd, what you're building…"
+        style={{ minHeight: 120 }} />
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save about"} />
     </View>
   );
 }
@@ -81,7 +72,7 @@ export function LocationForm({ profileId, subtype, initial }:
       return;
     }
     setBusy(true);
-    // Planners/hosts must NOT send an address — updateCuratorProfile rejects
+    // Planners/hosts must NOT send an address: updateCuratorProfile rejects
     // a non-empty one from a non-venue. This form never renders the address
     // field for them, but the payload is built explicitly (not "whatever's
     // in the address state") as a second line of defense.
@@ -91,28 +82,24 @@ export function LocationForm({ profileId, subtype, initial }:
   };
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Location</Text>
+      <Text variant="title">Location</Text>
       {isVenue ? (
         <>
-          <Text style={{ color: "#666" }}>Venues show a full street address publicly.</Text>
-          <TextInput placeholder="Street address" maxLength={MAX_ADDRESS_LENGTH} value={address} onChangeText={setAddress}
-            style={{ borderWidth: 1, borderRadius: 8, padding: 10 }} />
+          <Text muted>Venues show a full street address publicly.</Text>
+          <Input placeholder="Street address" maxLength={MAX_ADDRESS_LENGTH} value={address} onChangeText={setAddress} />
         </>
       ) : (
-        <Text style={{ color: "#666" }}>Only your city is shown publicly — never a precise address.</Text>
+        <Text muted>Only your city is shown publicly, never a precise address.</Text>
       )}
-      <TextInput placeholder="City" maxLength={MAX_CITY_LENGTH} value={city} onChangeText={setCity}
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10 }} />
+      <Input placeholder="City" maxLength={MAX_CITY_LENGTH} value={city} onChangeText={setCity} />
       {/* Reflects the SERVER's resolved value (post-geocode, which can
           normalize what was typed) rather than local state, so it stays live
           across saves without fighting this form's seed-once-on-mount
           convention. */}
-      <Text style={{ color: "#666", fontSize: 13 }}>
+      <Text variant="meta" muted>
         Currently saved: {initial?.city || "none yet"}{initial?.neighborhood ? ` (${initial.neighborhood})` : ""}
       </Text>
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save location"}</Text>
-      </Pressable>
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save location"} />
     </View>
   );
 }
@@ -126,7 +113,7 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
   const toggleActSize = (a: ActSize) => setActSizes((cur) => cur.includes(a) ? cur.filter((x) => x !== a) : [...cur, a]);
   const save = async () => {
     const input: LookingFor = { genres, actSizes, notes: notes.trim() || null };
-    // The one shared validator the task's brief calls out by name — same
+    // The one shared validator the task's brief calls out by name: same
     // rule the server enforces, run here first so a curator gets the exact
     // server-worded reason without a round-trip.
     const v = validateLookingFor(input);
@@ -137,26 +124,24 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
   };
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>What you&#39;re looking for</Text>
-      <Text style={{ color: "#666" }}>Genres</Text>
+      <Text variant="title">What you&#39;re looking for</Text>
+      <Text muted>Genres</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GENRES.map((g) => <Chip key={g} label={g} active={genres.includes(g)} onPress={() => toggleGenre(g)} />)}
       </View>
-      <Text style={{ color: "#666" }}>Act sizes</Text>
+      <Text muted>Act sizes</Text>
       <View style={{ flexDirection: "row", gap: 6 }}>
         {ACT_SIZES.map((a) => <Chip key={a} label={a} active={actSizes.includes(a)} onPress={() => toggleActSize(a)} />)}
       </View>
-      <TextInput multiline numberOfLines={3} maxLength={500} value={notes} onChangeText={setNotes}
+      <TextArea numberOfLines={3} maxLength={500} value={notes} onChangeText={setNotes}
         placeholder="Anything else musicians should know (optional)"
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 70, textAlignVertical: "top" }} />
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save preferences"}</Text>
-      </Pressable>
+        style={{ minHeight: 70 }} />
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save preferences"} />
     </View>
   );
 }
 
-// Mirrors functions/src/curator.ts's INDOOR_OUTDOOR_VALUES — an enum, not a
+// Mirrors functions/src/curator.ts's INDOOR_OUTDOOR_VALUES: an enum, not a
 // soft-cap constant, so it stays a local UX mirror; the server remains
 // authoritative. MAX_CAPACITY / MAX_AMENITY_NOTES_LENGTH come from shared
 // (see import above).
@@ -166,6 +151,7 @@ type Tri = boolean | null;
 
 export function AmenitiesForm({ profileId, initial, initialAdvertising }:
   { profileId: string; initial: CuratorDetails["amenities"] | undefined; initialAdvertising: boolean | undefined }) {
+  const t = useTokens();
   const [capacity, setCapacity] = useState(initial?.capacity != null ? String(initial.capacity) : "");
   const [hasPA, setHasPA] = useState<Tri>(initial?.hasPA ?? null);
   const [hasBackline, setHasBackline] = useState<Tri>(initial?.hasBackline ?? null);
@@ -190,7 +176,7 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
       return;
     }
     setBusy(true);
-    // Both fields land in one updateCuratorProfile call — the brief groups
+    // Both fields land in one updateCuratorProfile call: the brief groups
     // "amenities + advertising toggle" as a single section/save.
     await callOrAlert("updateCuratorProfile", {
       profileId,
@@ -212,11 +198,11 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
 
   return (
     <View style={{ gap: 10 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Amenities</Text>
+      <Text variant="title">Amenities</Text>
       <View style={{ gap: 4 }}>
         <Text>Capacity</Text>
-        <TextInput keyboardType="number-pad" placeholder="—" value={capacity} onChangeText={setCapacity}
-          style={{ borderWidth: 1, borderRadius: 8, padding: 8, width: 100 }} />
+        <Input keyboardType="number-pad" placeholder="-" value={capacity} onChangeText={setCapacity}
+          style={{ width: 100 }} />
       </View>
       {triRow("Has a PA system", hasPA, setHasPA)}
       {triRow("Has backline", hasBackline, setHasBackline)}
@@ -229,31 +215,30 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
           ))}
         </View>
       </View>
-      <TextInput multiline numberOfLines={3} maxLength={MAX_AMENITY_NOTES_LENGTH} value={notes} onChangeText={setNotes}
+      <TextArea numberOfLines={3} maxLength={MAX_AMENITY_NOTES_LENGTH} value={notes} onChangeText={setNotes}
         placeholder="Other amenities (optional)"
-        style={{ borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 70, textAlignVertical: "top" }} />
+        style={{ minHeight: 70 }} />
       <Pressable onPress={() => setAdvertisingInterest((v) => !v)}
         accessibilityRole="checkbox" accessibilityState={{ checked: advertisingInterest }}
         style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-        <View style={{ width: 20, height: 20, borderWidth: 1, borderColor: "#111", borderRadius: 4,
-          backgroundColor: advertisingInterest ? "#111" : "#fff", alignItems: "center", justifyContent: "center" }}>
-          {advertisingInterest && <Text style={{ color: "#fff", fontSize: 14 }}>✓</Text>}
+        <View style={{ width: 20, height: 20, borderWidth: 1, borderColor: advertisingInterest ? t.accent : t.border, borderRadius: 4,
+          backgroundColor: advertisingInterest ? t.accent : t.surface, alignItems: "center", justifyContent: "center" }}>
+          {advertisingInterest && <Text variant="meta" color={t.onAccent}>✓</Text>}
         </View>
         <Text style={{ flex: 1 }}>Interested in advertising opportunities on GateKeep</Text>
       </Pressable>
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save amenities"}</Text>
-      </Pressable>
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save amenities"} />
     </View>
   );
 }
 
 // One gallery tile: fetches its own display URL (public/photos/... objects
-// are publicly gettable per storage.rules — no auth needed) and owns its own
-// remove action independently of its siblings — removeCuratorPhoto only ever
+// are publicly gettable per storage.rules, no auth needed) and owns its own
+// remove action independently of its siblings: removeCuratorPhoto only ever
 // affects the ONE path it's called with, so per-tile busy state (not a
 // shared lock) is correct here, matching web's identical reasoning.
 function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) {
+  const t = useTokens();
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -267,7 +252,7 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
     setBusy(true);
     try {
       await httpsCallable(getFirebase().functions, "removeCuratorPhoto")({ profileId, path });
-      // No local state update needed on success — the parent screen's
+      // No local state update needed on success: the parent screen's
       // profile subscription delivers the shrunk photoPaths array, which
       // drops this path from the list and unmounts this tile (keyed by
       // path) on its own.
@@ -286,9 +271,9 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
     <View style={{ gap: 4, width: 110 }}>
       {url
         ? <Image source={{ uri: url }} style={{ width: 110, height: 110, borderRadius: 8 }} />
-        : <View style={{ width: 110, height: 110, borderRadius: 8, backgroundColor: "#eee" }} />}
+        : <Skeleton width={110} height={110} radius={8} />}
       <Pressable onPress={remove} disabled={busy}>
-        <Text style={{ color: "#dc2626" }}>{busy ? "Removing…" : "Remove"}</Text>
+        <Text color={t.destructive}>{busy ? "Removing…" : "Remove"}</Text>
       </Pressable>
     </View>
   );
@@ -296,24 +281,25 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
 
 // Curator equivalent of PhotoUploader's avatar/cover slots, but for the
 // append-only curator.photoPaths list (cap MAX_CURATOR_PHOTOS). Reuses
-// PhotoUploader as-is (kind="gallery") — see PortfolioForms.tsx's comment
+// PhotoUploader as-is (kind="gallery"), see PortfolioForms.tsx's comment
 // for how a list is threaded through the single-slot `currentPath` prop via
 // a length fingerprint instead of a real path.
 export function GalleryPhotosSection({ profileId, uid, photoPaths }:
   { profileId: string; uid: string; photoPaths: string[] }) {
+  const t = useTokens();
   const atCap = photoPaths.length >= MAX_CURATOR_PHOTOS;
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Photos ({photoPaths.length}/{MAX_CURATOR_PHOTOS})</Text>
+      <Text variant="title">Photos ({photoPaths.length}/{MAX_CURATOR_PHOTOS})</Text>
       {photoPaths.length > 0 && (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
           {photoPaths.map((path) => <GalleryPhoto key={path} path={path} profileId={profileId} />)}
         </View>
       )}
       {atCap
-        ? <Text style={{ color: "#92400e" }}>Gallery is full — remove a photo to add another.</Text>
+        ? <Text color={t.warning}>Gallery is full, remove a photo to add another.</Text>
         : <PhotoUploader profileId={profileId} uid={uid} kind="gallery" currentPath={String(photoPaths.length)} />}
-      <Text style={{ color: "#666" }}>New photos appear here a few seconds after upload.</Text>
+      <Text muted>New photos appear here a few seconds after upload.</Text>
     </View>
   );
 }

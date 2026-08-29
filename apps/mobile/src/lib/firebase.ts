@@ -26,7 +26,7 @@ const firebaseConfig = {
 };
 
 // Where do the Firebase emulators live, from this device's point of view?
-// A PHYSICAL phone must use the dev machine's LAN IP — which is exactly the
+// A PHYSICAL phone must use the dev machine's LAN IP, which is exactly the
 // host Metro served the bundle from (Constants.expoConfig.hostUri, e.g.
 // "192.168.4.27:8081") whenever the app runs under `expo start`. When that's
 // absent, fall back to the old per-platform loopbacks: the Android emulator

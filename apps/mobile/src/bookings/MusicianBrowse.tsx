@@ -1,39 +1,42 @@
 import { useEffect, useMemo, useState } from "react";
-import { View, Text, Pressable, ScrollView } from "react-native";
+import { View, ScrollView } from "react-native";
 import { useRouter } from "expo-router";
 import { collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type GigDoc } from "@gatekeep/shared";
-import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL, Chip } from "../gigs/GigForms";
-import { DEPOSIT_HONESTY_LINE, ErrorBox, OfferFields, buildOfferPayload, emptyOffer, errorCode, type OfferState } from "./BookingForms";
+import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
+import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
+import {
+  Text, Button, Card, Chip, PageBackground, PhotoScrim, PhotoPlaceholder,
+  Skeleton, SkeletonCard, ErrorBanner, IconUserCircle,
+} from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
+import { tokens } from "../theme/tokens";
 
-// RN port of ../../../web/src/bookings/MusicianBrowse.tsx (+ OfferComposer.tsx)
-// — SP4 Task 12. Mounted as the curator "Find musicians" tab
+// RN port of ../../../web/src/bookings/MusicianBrowse.tsx (+ OfferComposer.tsx),
+// SP4 Task 12. Mounted as the curator "Find musicians" tab
 // (apps/mobile/app/(curator)/musicians.tsx). Task 12's file list has no
-// standalone mobile OfferComposer.tsx (unlike web's split) — the offer flow
+// standalone mobile OfferComposer.tsx (unlike web's split), the offer flow
 // is embedded inline here, the same way GigBrowse's ApplyPanel is embedded
 // inline in its own detail modal.
 
 type MusicianRow = ProfileDoc & { id: string };
 
 // MusicianSubtype ("solo"|"band") is the only act-size-shaped field
-// present on a musician's own profile doc without an extra per-card read —
+// present on a musician's own profile doc without an extra per-card read,
 // same placeholder-grade tradeoff as web's filter.
 const ACT_SIZE_OPTIONS: MusicianSubtype[] = ["solo", "band"];
 const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
 const RATE_STRUCTURES: BudgetStructure[] = ["perHour", "perSong", "perSet"];
 
-const primaryBtn = { backgroundColor: "#111", paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8 };
-const secondaryBtn = { borderWidth: 1 as const, borderColor: "#bbb", borderRadius: 8, paddingVertical: 10, paddingHorizontal: 16 };
-
 function RatesSummary({ rates }: { rates: CuratorBookingDoc["rates"] }) {
   const parts = RATE_STRUCTURES
     .map((k) => (rates[k] ? `${formatCents(rates[k]!.amountCents)} ${BUDGET_STRUCTURE_LABEL[k]}` : null))
     .filter((p): p is string => p !== null);
-  if (parts.length === 0) return <Text style={{ color: "#666", fontSize: 13 }}>No public rates.</Text>;
-  return <Text style={{ fontSize: 13 }}>{parts.join(" · ")}</Text>;
+  if (parts.length === 0) return <Text variant="meta" muted>No public rates.</Text>;
+  return <Text variant="meta">{parts.join(" · ")}</Text>;
 }
 
 // Curator picks one of THEIR OWN open gigs and sends offerGig to a specific
@@ -43,20 +46,21 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
   curatorProfileId: string; musicianProfileId: string; musicianName: string; onClose: () => void;
 }) {
   const router = useRouter();
+  const t = useTokens();
   const [openGigs, setOpenGigs] = useState<(GigDoc & { id: string })[] | "loading">("loading");
   const [gigOverride, setGigOverride] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferState>(emptyOffer());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [alreadySent, setAlreadySent] = useState(false);
-  // SP4 (Task 13 item 9): the returned bookingId (not just a `sent` boolean)
-  // — web parity (src/bookings/OfferComposer.tsx's identical "View the
-  // booking thread ->" deep link) — so a curator who just sent an offer can
+  // SP4 (Task 13 item 9): the returned bookingId (not just a `sent` boolean),
+  // web parity (src/bookings/OfferComposer.tsx's identical "View the
+  // booking thread ->" deep link), so a curator who just sent an offer can
   // jump straight into the thread instead of having to find it again from
   // their bookings tab.
   const [bookingId, setBookingId] = useState<string | null>(null);
 
-  // Live (not one-shot) — the curator's open-gigs set can change while this
+  // Live (not one-shot), the curator's open-gigs set can change while this
   // panel is open. Needs gigs(curatorProfileId,status,startsAt), already
   // shipped (SP3/Task 2).
   useEffect(() => {
@@ -92,61 +96,64 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
   };
 
   return (
-    <View style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12, marginTop: 8, gap: 10 }}>
-      <Text style={{ fontWeight: "700" }}>Offer a gig to {musicianName}</Text>
+    <Card style={{ marginTop: 8, gap: 10 }}>
+      <Text variant="label">Offer a gig to {musicianName}</Text>
       {bookingId ? (
         <>
-          <Text style={{ color: "#16a34a" }}>Offer sent!</Text>
-          <Pressable onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } })}>
-            <Text style={{ textDecorationLine: "underline" }}>View the booking thread →</Text>
-          </Pressable>
-          <Pressable onPress={onClose} style={secondaryBtn}><Text>Close</Text></Pressable>
+          <Text color={t.success}>Offer sent!</Text>
+          <Button title="View the booking thread →" variant="secondary"
+            onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } })} />
+          <Button title="Close" variant="secondary" onPress={onClose} />
         </>
       ) : alreadySent ? (
         <>
-          <Text style={{ color: "#666" }}>There is already an open booking request between this act and that gig.</Text>
-          <Pressable onPress={onClose} style={secondaryBtn}><Text>Close</Text></Pressable>
+          <Text muted>There is already an open booking request between this act and that gig.</Text>
+          <Button title="Close" variant="secondary" onPress={onClose} />
         </>
       ) : openGigs === "loading" ? (
-        <Text>Loading your open gigs…</Text>
+        <Skeleton height={16} width="70%" />
       ) : openGigs.length === 0 ? (
         <>
-          <Text style={{ color: "#666" }}>You have no open gigs to offer right now. Post one from the Events tab first.</Text>
-          <Pressable onPress={onClose} style={secondaryBtn}><Text>Close</Text></Pressable>
+          <Text muted>You have no open gigs to offer right now. Post one from the Events tab first.</Text>
+          <Button title="Close" variant="secondary" onPress={onClose} />
         </>
       ) : (
         <>
-          <Text style={{ fontWeight: "600" }}>Gig</Text>
+          <Text variant="label">Gig</Text>
           <View style={{ gap: 6 }}>
             {openGigs.map((g) => (
-              <Chip key={g.id} label={`${g.title || "Untitled gig"} — ${formatGigDateTime(g.startsAt)}`}
+              <Chip key={g.id} label={`${g.title || "Untitled gig"}, ${formatGigDateTime(g.startsAt)}`}
                 active={selectedGigId === g.id} onPress={() => setGigOverride(g.id)} />
             ))}
           </View>
           {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
           {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={() => void submit()} />}
-          <Text style={{ color: "#666", fontSize: 12 }}>{DEPOSIT_HONESTY_LINE}</Text>
+          <Text variant="meta" muted>{DEPOSIT_HONESTY_LINE}</Text>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Pressable onPress={() => void submit()} disabled={busy} style={[primaryBtn, { opacity: busy ? 0.6 : 1 }]}>
-              <Text style={{ color: "#fff" }}>{busy ? "Sending…" : "Send offer"}</Text>
-            </Pressable>
-            <Pressable onPress={onClose} disabled={busy} style={secondaryBtn}><Text>Cancel</Text></Pressable>
+            <Button title={busy ? "Sending…" : "Send offer"} disabled={busy} onPress={() => void submit()} />
+            <Button title="Cancel" variant="secondary" disabled={busy} onPress={onClose} />
           </View>
         </>
       )}
-    </View>
+    </Card>
   );
 }
 
+// Photo-forward card (9A parity): a branded artist PhotoPlaceholder under the
+// standard scrim carries the act name in Syne; the body below holds genres,
+// public rates, the reliability line, and the portfolio / offer actions. No
+// real photo is wired through (portfolio.avatarPhotoPath would need a new
+// getDownloadURL Storage read, which web's grid does not do either).
 function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string; musician: MusicianRow }) {
   const router = useRouter();
+  const t = useTokens();
   const [booking, setBooking] = useState<CuratorBookingDoc | null | "loading">("loading");
   const [offering, setOffering] = useState(false);
 
-  // Per-card private/curatorBooking read — the caller has curatorAccess via
+  // Per-card private/curatorBooking read, the caller has curatorAccess via
   // their own approved curator profile membership (firestore.rules); n+1
-  // over the list accepted at v1 (spec §1 placeholder grade), same tradeoff
-  // as GigBrowse's series-badge decision.
+  // over the list accepted at v1 (spec section 1 placeholder grade), same
+  // tradeoff as GigBrowse's series-badge decision.
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
@@ -157,45 +164,50 @@ function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string
   }, [musician.id]);
 
   return (
-    <View style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12, gap: 6 }}>
-      <Text style={{ fontWeight: "700" }}>{musician.name}</Text>
-      {musician.portfolio?.genres && musician.portfolio.genres.length > 0 && (
-        <Text style={{ color: "#666", fontSize: 13 }}>{musician.portfolio.genres.join(" · ")}</Text>
-      )}
-      {booking === "loading" ? (
-        <Text style={{ color: "#999", fontSize: 13 }}>Loading rates…</Text>
-      ) : booking ? (
-        <>
-          <RatesSummary rates={booking.rates} />
-          {/* Counts BOOKINGS, not dates — an 8-date completed whole-run
-              booking is +1 here, not +8 (booking-scoped reliability
-              summary). */}
-          <Text style={{ fontSize: 13, color: "#666" }}>
-            {booking.reliability.noShowCount} no-shows / {booking.reliability.completedCount} bookings
-          </Text>
-        </>
-      ) : (
-        <Text style={{ color: "#666", fontSize: 13 }}>No booking info shared yet.</Text>
-      )}
-      <View style={{ flexDirection: "row", gap: 14 }}>
-        <Pressable onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: musician.handle } })}>
-          <Text style={{ textDecorationLine: "underline" }}>View portfolio</Text>
-        </Pressable>
-        <Pressable onPress={() => setOffering((v) => !v)}>
-          <Text style={{ textDecorationLine: "underline" }}>{offering ? "Cancel" : "Offer a gig"}</Text>
-        </Pressable>
+    <Card style={{ padding: 0, overflow: "hidden" }}>
+      <View style={{ height: 144 }}>
+        <PhotoPlaceholder icon={<IconUserCircle size={28} color={t.muted} />} />
+        <PhotoScrim />
+        <View style={{ position: "absolute", left: 12, right: 12, bottom: 10 }}>
+          <Text variant="title" color={tokens.dark.text} numberOfLines={1}>{musician.name}</Text>
+        </View>
       </View>
-      {offering && (
-        <OfferComposer key={`${curatorProfileId}-${musician.id}`} curatorProfileId={curatorProfileId}
-          musicianProfileId={musician.id} musicianName={musician.name} onClose={() => setOffering(false)} />
-      )}
-    </View>
+      <View style={{ padding: tokens.space.lg, gap: 6 }}>
+        {musician.portfolio?.genres && musician.portfolio.genres.length > 0 && (
+          <Text variant="meta" muted>{musician.portfolio.genres.join(" · ")}</Text>
+        )}
+        {booking === "loading" ? (
+          <Skeleton height={14} width="55%" />
+        ) : booking ? (
+          <>
+            <RatesSummary rates={booking.rates} />
+            {/* Counts BOOKINGS, not dates: an 8-date completed whole-run
+                booking is +1 here, not +8 (booking-scoped reliability
+                summary). */}
+            <Text variant="meta" muted>
+              {booking.reliability.noShowCount} no-shows / {booking.reliability.completedCount} bookings
+            </Text>
+          </>
+        ) : (
+          <Text variant="meta" muted>No booking info shared yet.</Text>
+        )}
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+          <Button title="View portfolio" variant="secondary"
+            onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: musician.handle } })} />
+          <Button title={offering ? "Cancel" : "Offer a gig"} variant="secondary" onPress={() => setOffering((v) => !v)} />
+        </View>
+        {offering && (
+          <OfferComposer key={`${curatorProfileId}-${musician.id}`} curatorProfileId={curatorProfileId}
+            musicianProfileId={musician.id} musicianName={musician.name} onClose={() => setOffering(false)} />
+        )}
+      </View>
+    </Card>
   );
 }
 
 // Find musicians (apps/mobile/app/(curator)/musicians.tsx): the curator-
 // context browse of approved musician acts. type=="musician" &&
-// status=="approved" is two pure-equality filters — provable under
+// status=="approved" is two pure-equality filters, provable under
 // firestore.rules' profiles read rule, no composite index needed.
 export function MusicianBrowse({ curatorProfileId }: { curatorProfileId: string }) {
   const [musicians, setMusicians] = useState<MusicianRow[] | "loading">("loading");
@@ -227,24 +239,38 @@ export function MusicianBrowse({ curatorProfileId }: { curatorProfileId: string 
   }, [musicians, genre, actSize]);
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 16 }} keyboardShouldPersistTaps="handled">
-      <Text style={{ fontSize: 22, fontWeight: "700" }}>Find musicians</Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-        <Chip label="All genres" active={genre === null} onPress={() => setGenre(null)} />
-        {GENRES.map((g) => <Chip key={g} label={g} active={genre === g} onPress={() => setGenre(genre === g ? null : g)} />)}
-      </View>
-      <View style={{ flexDirection: "row", gap: 6 }}>
-        <Chip label="Any act size" active={actSize === null} onPress={() => setActSize(null)} />
-        {ACT_SIZE_OPTIONS.map((a) => (
-          <Chip key={a} label={ACT_SIZE_LABEL[a]} active={actSize === a} onPress={() => setActSize(actSize === a ? null : a)} />
-        ))}
-      </View>
-      {error && <ErrorBox message={`Could not load musicians: ${error}`} />}
-      {musicians === "loading" && <Text>Loading…</Text>}
-      {musicians !== "loading" && filtered.length === 0 && !error && <Text style={{ color: "#666" }}>No approved musicians match these filters.</Text>}
-      <View style={{ gap: 10 }}>
-        {filtered.map((m) => <MusicianCard key={m.id} curatorProfileId={curatorProfileId} musician={m} />)}
-      </View>
-    </ScrollView>
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.lg }} keyboardShouldPersistTaps="handled">
+        <Text variant="heading">Find musicians</Text>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+          <Chip label="All genres" active={genre === null} onPress={() => setGenre(null)} />
+          {GENRES.map((g) => <Chip key={g} label={g} active={genre === g} onPress={() => setGenre(genre === g ? null : g)} />)}
+        </View>
+        <View style={{ flexDirection: "row", gap: 6 }}>
+          <Chip label="Any act size" active={actSize === null} onPress={() => setActSize(null)} />
+          {ACT_SIZE_OPTIONS.map((a) => (
+            <Chip key={a} label={ACT_SIZE_LABEL[a]} active={actSize === a} onPress={() => setActSize(actSize === a ? null : a)} />
+          ))}
+        </View>
+        {error && <ErrorBanner message={`Could not load musicians: ${error}`} />}
+        {musicians === "loading" && (
+          <View style={{ gap: 10 }}>
+            <SkeletonCard />
+            <SkeletonCard />
+            <SkeletonCard />
+          </View>
+        )}
+        {musicians !== "loading" && filtered.length === 0 && !error && (
+          <Card style={{ alignItems: "center", gap: 6 }}>
+            <Text variant="title">No matching musicians</Text>
+            <Text muted style={{ textAlign: "center" }}>No approved musicians match these filters.</Text>
+          </Card>
+        )}
+        <View style={{ gap: 10 }}>
+          {filtered.map((m) => <MusicianCard key={m.id} curatorProfileId={curatorProfileId} musician={m} />)}
+        </View>
+      </ScrollView>
+    </View>
   );
 }

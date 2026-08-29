@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { View, Text } from "react-native";
+import { View } from "react-native";
 import { doc, onSnapshot } from "firebase/firestore";
 import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { MusicianBrowse } from "../../src/bookings/MusicianBrowse";
 import type { ProfileDoc } from "@gatekeep/shared";
+import { Text, PageBackground, Skeleton, SkeletonCard } from "../../src/ui";
+import { tokens } from "../../src/theme/tokens";
 
-// Curator "Find musicians" tab (SP4 Task 12) — replaces the earlier
+// Curator "Find musicians" tab (SP4 Task 12), replaces the earlier
 // "Find Talent" placeholder (talent.tsx, deleted). Gated the same way
 // (curator)/events/index.tsx gates its own content: an approved curator
 // profile is required both to browse usefully (offerGig needs one) and to
@@ -38,14 +40,35 @@ export default function Musicians() {
   }, [profileId]);
 
   if (!user || !profileId || !profile) {
-    return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>{!user || !profileId ? "Switch to a curator profile to find musicians." : "Loading…"}</Text></View>;
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        {!user || !profileId ? (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+            <Text variant="title">No curator profile</Text>
+            <Text muted style={{ textAlign: "center" }}>Switch to a curator profile to find musicians.</Text>
+          </View>
+        ) : (
+          <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
+            <Skeleton height={24} width="55%" />
+            <SkeletonCard />
+            <SkeletonCard />
+            <SkeletonCard />
+          </View>
+        )}
+      </View>
+    );
   }
   if (profile.status !== "approved") {
-    return <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <Text style={{ textAlign: "center", color: "#666" }}>
-        Your curator profile must be approved before you can find musicians to book.
-      </Text></View>;
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Not approved yet</Text>
+          <Text muted style={{ textAlign: "center" }}>Your curator profile must be approved before you can find musicians to book.</Text>
+        </View>
+      </View>
+    );
   }
 
   return <MusicianBrowse key={profileId} curatorProfileId={profileId} />;

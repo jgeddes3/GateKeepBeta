@@ -1,20 +1,23 @@
 import { useEffect, useState } from "react";
-import { View, Text, Pressable, ScrollView } from "react-native";
+import { View, Pressable, ScrollView } from "react-native";
 import { useRouter } from "expo-router";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
-import { formatCents, formatGigDateTime, Badge } from "../gigs/GigForms";
+import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import {
   DEPOSIT_PERCENT,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc,
 } from "@gatekeep/shared";
+import { Text, StatusBadge } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
+import { tokens } from "../theme/tokens";
 
-// RN port of ../../../web/src/bookings/BookingInbox.tsx (SP4 Task 12) —
+// RN port of ../../../web/src/bookings/BookingInbox.tsx (SP4 Task 12),
 // per-profile booking inbox + the booking-status DISPLAY helpers it (and
 // BookingThread.tsx's thread screen) both need. Mounted as its own tab
 // screen on mobile (apps/mobile/app/(musician)/bookings.tsx and
 // (curator)/bookings.tsx), unlike web where it's a section on the profile
-// editor page — the plan's Task 12 file list names BookingInbox as its own
+// editor page, the plan's Task 12 file list names BookingInbox as its own
 // peer of BookingThread/OfferForm/CancelDialog, and mobile idiom favors a
 // dedicated tab over a long scrolling editor page (SP3 ruling 14
 // precedent).
@@ -24,7 +27,7 @@ export const BOOKING_TERMINAL_STATUSES: readonly BookingStatus[] = [
 ];
 
 // Task 8 review carry-forward (mirrored from web): an `expired` booking that
-// WAS a confirmed run (acceptedTerms/confirmedAt set — accepted, then later
+// WAS a confirmed run (acceptedTerms/confirmedAt set, accepted, then later
 // unwound by a moderation cascade or the sweep's zombie-run resolver) must
 // read as "this booking ended", not like an ordinary declined/expired
 // application that never got anywhere.
@@ -41,12 +44,12 @@ export function bookingHistoryLabel(b: Pick<BookingRequestDoc, "status" | "accep
   }
 }
 
-// The "$X known" deposit line — used once a real, already-computed deposit
+// The "$X known" deposit line, used once a real, already-computed deposit
 // amount exists (a confirmed booking's own deposit.amountCents). Distinct
 // from BookingForms.tsx's DEPOSIT_HONESTY_LINE, the pre-acceptance "implied,
 // not yet known" phrasing.
-// Final-review fix wave — mirrors web's SP5 Task 15 review round 1 fix
-// (medium #6): payments are LIVE — "will be collected when payments launch"
+// Final-review fix wave, mirrors web's SP5 Task 15 review round 1 fix
+// (medium #6): payments are LIVE, "will be collected when payments launch"
 // was accurate pre-SP5 and is now simply false (acceptBooking fires a real
 // Stripe charge the moment it commits). DEPOSIT_PERCENT templated in rather
 // than a hardcoded "35%" literal, so this can never drift from the actual
@@ -59,11 +62,11 @@ export function depositLine(amountCents: number): string {
 
 type BookingRow = BookingRequestDoc & { id: string };
 
-// Row-level, permission-tolerant gig title lookup — a permission-denied read
+// Row-level, permission-tolerant gig title lookup, a permission-denied read
 // here is an expected, common case for stale history/declined rows (the
 // initiating gig can leave every publicly-readable disjunct once its status
 // moves past open/filled/closed-booked while the viewer is on the musician
-// side), not a bug — falls back to a generic label. n+1 by design, same as
+// side), not a bug, falls back to a generic label. n+1 by design, same as
 // web (open threads bounded by MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE=25;
 // history capped at 20).
 function useRowGigTitle(gigId: string): string {
@@ -72,21 +75,21 @@ function useRowGigTitle(gigId: string): string {
     let cancelled = false;
     getDoc(doc(getFirebase().db, "gigs", gigId))
       .then((s) => { if (!cancelled && s.exists()) setTitle((s.data() as GigDoc).title || "Untitled gig"); })
-      .catch(() => { /* permission-denied or offline — keep the generic fallback */ });
+      .catch(() => { /* permission-denied or offline, keep the generic fallback */ });
     return () => { cancelled = true; };
   }, [gigId]);
   return title;
 }
 
-// Confirmed-booking "next date" — bookings carry no date of their own, so
+// Confirmed-booking "next date", bookings carry no date of their own, so
 // the next occurrence is its own per-booking fetch. Filters
-// status=="filled" IN ADDITION to bookingId — a bare bookingId-only list
+// status=="filled" IN ADDITION to bookingId, a bare bookingId-only list
 // query has no provable disjunct under firestore.rules' gigs read rule
 // (status is unconstrained); pinning status=="filled" makes it provable via
 // the unconditionally-public "filled" disjunct, reusing the
 // (bookingId,status,startsAt) index (Task 8) rather than a new one. Every
 // currently-linked-and-filled occurrence matches (past FILLED gigs stay
-// "filled" forever, per Task 8's review) — the same query shape
+// "filled" forever, per Task 8's review), the same query shape
 // BookingThread.tsx's own occurrence list reuses.
 function useNextOccurrence(bookingId: string): { startsAt: number } | null {
   const [next, setNext] = useState<{ startsAt: number } | null>(null);
@@ -103,18 +106,18 @@ function useNextOccurrence(bookingId: string): { startsAt: number } | null {
   return next;
 }
 
-const rowStyle = { borderWidth: 1 as const, borderColor: "#eee", borderRadius: 8, padding: 10, gap: 4 };
-
 function OpenThreadRow({ row, mySide, onPress }: { row: BookingRow; mySide: BookingSide; onPress: () => void }) {
+  const t = useTokens();
   const title = useRowGigTitle(row.gigId);
   const yourTurn = row.awaitingSide === mySide;
   return (
-    <Pressable onPress={onPress} style={rowStyle}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={{ fontWeight: "700", flex: 1 }}>{title}</Text>
-        {yourTurn && <Badge label="your turn" bg="#fef3c7" fg="#92400e" />}
+    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+      padding: tokens.space.md, gap: tokens.space.xs }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+        <Text variant="label" style={{ flex: 1 }}>{title}</Text>
+        {yourTurn && <StatusBadge status="warning" label="your turn" />}
       </View>
-      <Text style={{ color: "#666", fontSize: 13 }}>
+      <Text variant="meta" muted>
         {row.thread.length} offer{row.thread.length === 1 ? "" : "s"} so far
       </Text>
     </Pressable>
@@ -122,36 +125,40 @@ function OpenThreadRow({ row, mySide, onPress }: { row: BookingRow; mySide: Book
 }
 
 function ConfirmedRow({ row, onPress }: { row: BookingRow; onPress: () => void }) {
+  const t = useTokens();
   const title = useRowGigTitle(row.gigId);
   const next = useNextOccurrence(row.id);
   return (
-    <Pressable onPress={onPress} style={rowStyle}>
-      <Text style={{ fontWeight: "700" }}>{title}</Text>
-      {next && <Text style={{ color: "#666", fontSize: 13 }}>{formatGigDateTime(next.startsAt)}</Text>}
+    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+      padding: tokens.space.md, gap: tokens.space.xs }}>
+      <Text variant="label">{title}</Text>
+      {next && <Text variant="meta" muted>{formatGigDateTime(next.startsAt)}</Text>}
       {/* deposit is already frozen (computeDepositCents ran inside
-          acceptBooking's transaction) — no need to recompute, only display
+          acceptBooking's transaction), no need to recompute, only display
           the number it already produced. */}
-      {row.deposit && <Text style={{ fontSize: 13, color: "#666" }}>{depositLine(row.deposit.amountCents)}</Text>}
+      {row.deposit && <Text variant="meta" muted>{depositLine(row.deposit.amountCents)}</Text>}
     </Pressable>
   );
 }
 
 function HistoryRow({ row, onPress }: { row: BookingRow; onPress: () => void }) {
+  const t = useTokens();
   const title = useRowGigTitle(row.gigId);
   return (
-    <Pressable onPress={onPress} style={rowStyle}>
-      <Text style={{ fontWeight: "700" }}>{title}</Text>
-      <Text style={{ color: "#666", fontSize: 13 }}>{bookingHistoryLabel(row)}</Text>
+    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+      padding: tokens.space.md, gap: tokens.space.xs }}>
+      <Text variant="label">{title}</Text>
+      <Text variant="meta" muted>{bookingHistoryLabel(row)}</Text>
     </Pressable>
   );
 }
 
-// Per-profile booking inbox — mounted by both role tabs
+// Per-profile booking inbox, mounted by both role tabs
 // (apps/mobile/app/(musician)/bookings.tsx / (curator)/bookings.tsx),
 // `role` picking which IMMUTABLE side-field this profile is queried
 // against. Three lists, each its own onSnapshot on the SAME
 // (profileId,status,updatedAt) composite index (Task 2), just a different
-// status filter/cap — mirrors web exactly.
+// status filter/cap, mirrors web exactly.
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const router = useRouter();
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
@@ -190,24 +197,24 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
   const openThread = (bookingId: string) => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } });
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 20 }}>
-      <Text style={{ fontSize: 22, fontWeight: "700" }}>Bookings</Text>
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 18, fontWeight: "700" }}>Open threads{open.length > 0 ? ` (${open.length})` : ""}</Text>
+    <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.xl }}>
+      <Text variant="heading">Bookings</Text>
+      <View style={{ gap: tokens.space.sm }}>
+        <Text variant="title">Open threads{open.length > 0 ? ` (${open.length})` : ""}</Text>
         {open.length === 0
-          ? <Text style={{ color: "#666" }}>No open booking requests.</Text>
+          ? <Text muted>No open booking requests.</Text>
           : open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
       </View>
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 18, fontWeight: "700" }}>Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
+      <View style={{ gap: tokens.space.sm }}>
+        <Text variant="title">Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
         {confirmed.length === 0
-          ? <Text style={{ color: "#666" }}>Nothing confirmed yet.</Text>
+          ? <Text muted>Nothing confirmed yet.</Text>
           : confirmed.map((row) => <ConfirmedRow key={row.id} row={row} onPress={() => openThread(row.id)} />)}
       </View>
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 18, fontWeight: "700" }}>History</Text>
+      <View style={{ gap: tokens.space.sm }}>
+        <Text variant="title">History</Text>
         {history.length === 0
-          ? <Text style={{ color: "#666" }}>No past bookings yet.</Text>
+          ? <Text muted>No past bookings yet.</Text>
           : history.map((row) => <HistoryRow key={row.id} row={row} onPress={() => openThread(row.id)} />)}
       </View>
     </ScrollView>

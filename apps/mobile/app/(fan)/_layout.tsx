@@ -1,13 +1,18 @@
 import { Tabs } from "expo-router";
-import { ContextSwitcher } from "../../src/shell/ContextSwitcher";
+import { useShellScreenOptions } from "../../src/shell/useShellScreenOptions";
+import { IconHouse, IconTicket, IconMagnifyingGlass, IconUserCircle } from "../../src/ui/icons";
 
 export default function FanTabs() {
   return (
-    <Tabs screenOptions={{ headerRight: () => <ContextSwitcher /> }}>
-      <Tabs.Screen name="index" options={{ title: "Discover" }} />
-      <Tabs.Screen name="tickets" options={{ title: "Tickets" }} />
-      <Tabs.Screen name="search" options={{ title: "Search" }} />
-      <Tabs.Screen name="account" options={{ title: "Account" }} />
+    <Tabs screenOptions={useShellScreenOptions()}>
+      <Tabs.Screen name="index" options={{ title: "Discover",
+        tabBarIcon: ({ color }) => <IconHouse color={color} size={22} /> }} />
+      <Tabs.Screen name="tickets" options={{ title: "Tickets",
+        tabBarIcon: ({ color }) => <IconTicket color={color} size={22} /> }} />
+      <Tabs.Screen name="search" options={{ title: "Search",
+        tabBarIcon: ({ color }) => <IconMagnifyingGlass color={color} size={22} /> }} />
+      <Tabs.Screen name="account" options={{ title: "Account",
+        tabBarIcon: ({ color }) => <IconUserCircle color={color} size={22} /> }} />
     </Tabs>
   );
 }

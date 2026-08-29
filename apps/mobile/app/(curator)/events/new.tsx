@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ScrollView, View, Text, Pressable } from "react-native";
+import { ScrollView, View } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -7,7 +7,7 @@ import { getFirebase } from "../../../src/lib/firebase";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { useProfileContext } from "../../../src/shell/ProfileContext";
 import {
-  Chip, ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields, OneOffDateTimeFields,
+  ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields, OneOffDateTimeFields,
   emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, emptyOneOffDateTime, oneOffDateTimeToMs, endDateInputToUtcMs,
   MAX_ADDRESS_LENGTH,
   type LocationValue, type CreateGigPayload, type CreateSeriesPayload,
@@ -16,9 +16,11 @@ import {
   validateGigContent, validateBudget, validateRecurrence,
   type ProfileDoc, type CuratorSubtype, type GigContentInput, type GigBudget, type AddressVisibility,
 } from "@gatekeep/shared";
+import { Text, Button, Chip, PageBackground, Skeleton, SkeletonCard, ErrorBanner } from "../../../src/ui";
+import { tokens } from "../../../src/theme/tokens";
 
 // The composer's one-off/series fork mirrors web's gigs/new/page.tsx exactly
-// (and /join's musician/curator toggle before it) — a single screen, since
+// (and /join's musician/curator toggle before it), a single screen, since
 // the shared fields (content/budget/provisions/location) are identical and
 // only the "when" section differs.
 export default function NewGigOrSeries() {
@@ -42,12 +44,12 @@ export default function NewGigOrSeries() {
   // Same render-time-reset + late-callback guard as (curator)/dashboard.tsx
   // and events/index.tsx: this composer screen can stay mounted in the
   // background across a profile-context switch (the outer Tabs navigator
-  // keeps the "events" tab's nested Stack — wherever it's currently
-  // positioned — mounted when another tab is active), so without this the
+  // keeps the "events" tab's nested Stack, wherever it's currently
+  // positioned, mounted when another tab is active), so without this the
   // form's `profile` (isVenue/approval-status/venue-address label) could go
   // stale relative to `profileId` (read fresh from activeContext every
   // render, and what the submit payload actually uses) after switching back.
-  // Deliberately only resets `profile`, not the typed-in form fields — this
+  // Deliberately only resets `profile`, not the typed-in form fields, this
   // is external truth read from Firestore, not user-entered content.
   const activeIdRef = useRef(profileId);
   const [lastProfileId, setLastProfileId] = useState(profileId);
@@ -67,20 +69,43 @@ export default function NewGigOrSeries() {
       () => { if (activeIdRef.current !== forId) return; setProfile(null); });
   }, [profileId]);
 
-  if (!user || !profileId || !profile) {
-    return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>{!user || !profileId ? "Switch to a curator profile to post a gig." : "Loading…"}</Text></View>;
+  if (!user || !profileId) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">No curator profile</Text>
+          <Text muted style={{ textAlign: "center" }}>Switch to a curator profile to post a gig.</Text>
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
+          <Skeleton height={28} width="60%" />
+          <SkeletonCard />
+        </View>
+      </View>
+    );
   }
   if (profile.status !== "approved") {
-    return <View style={{ flex: 1, padding: 16 }}>
-      <Text style={{ color: "#666" }}>Your curator profile must be approved before you can post gigs.</Text>
-    </View>;
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, padding: tokens.space.lg }}>
+          <Text muted>Your curator profile must be approved before you can post gigs.</Text>
+        </View>
+      </View>
+    );
   }
 
   const subtype = profile.subtype as CuratorSubtype;
   const isVenue = subtype === "venue";
   // Same defaulting rule resolveGigLocation applies server-side
-  // (isVenue ? "public" : "neighborhood") — computed at render time from the
+  // (isVenue ? "public" : "neighborhood"), computed at render time from the
   // subtype rather than seeded into state on mount. `visibilityTouched`
   // tracks whether the curator has actually picked a value yet.
   const defaultVisibility: AddressVisibility = isVenue ? "public" : "neighborhood";
@@ -141,7 +166,7 @@ export default function NewGigOrSeries() {
       }
     } catch (e) {
       // Surfaces server errors verbatim, including the geocode failure
-      // message and (for series) the resource-exhausted active-series cap —
+      // message and (for series) the resource-exhausted active-series cap,
       // createGig itself has no cap check (that's publishGig's job, on the
       // gig editor screen), so a one-off's cap error can't appear here.
       setError(e instanceof Error ? e.message : "Could not create this.");
@@ -151,34 +176,28 @@ export default function NewGigOrSeries() {
   };
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 20 }} keyboardShouldPersistTaps="handled">
-      <View style={{ flexDirection: "row", gap: 8 }}>
-        {([false, true] as const).map((s) => (
-          <Chip key={String(s)} label={s ? "Recurring series" : "One-off gig"} active={isSeries === s} onPress={() => setIsSeries(s)} />
-        ))}
-      </View>
-      <ContentFields value={content} onChange={setContent} />
-      <BudgetFields value={budget} onChange={setBudget} />
-      <ProvisionsFields value={provisions} onChange={setProvisions} />
-      {isSeries ? (
-        <RecurrenceFields value={recurrence} onChange={setRecurrence} />
-      ) : (
-        <OneOffDateTimeFields value={oneOffDateTime} onChange={setOneOffDateTime} />
-      )}
-      <LocationFields isVenue={isVenue} addressRequired={!isVenue} currentLabel={currentLabel}
-        value={effectiveLocation}
-        onChange={(v) => { setVisibilityTouched(true); setLocation(v); }} />
-      {error && (
-        <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-          {error}
-        </Text>
-      )}
-      <Pressable onPress={() => void submit()} disabled={busy}
-        style={{ backgroundColor: "#111", padding: 14, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>
-          {busy ? "Creating…" : isSeries ? "Create series" : "Create gig (draft)"}
-        </Text>
-      </Pressable>
-    </ScrollView>
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.xl }} keyboardShouldPersistTaps="handled">
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          {([false, true] as const).map((s) => (
+            <Chip key={String(s)} label={s ? "Recurring series" : "One-off gig"} active={isSeries === s} onPress={() => setIsSeries(s)} />
+          ))}
+        </View>
+        <ContentFields value={content} onChange={setContent} />
+        <BudgetFields value={budget} onChange={setBudget} />
+        <ProvisionsFields value={provisions} onChange={setProvisions} />
+        {isSeries ? (
+          <RecurrenceFields value={recurrence} onChange={setRecurrence} />
+        ) : (
+          <OneOffDateTimeFields value={oneOffDateTime} onChange={setOneOffDateTime} />
+        )}
+        <LocationFields isVenue={isVenue} addressRequired={!isVenue} currentLabel={currentLabel}
+          value={effectiveLocation}
+          onChange={(v) => { setVisibilityTouched(true); setLocation(v); }} />
+        <ErrorBanner message={error} />
+        <Button title={busy ? "Creating…" : isSeries ? "Create series" : "Create gig (draft)"} disabled={busy} onPress={() => void submit()} />
+      </ScrollView>
+    </View>
   );
 }

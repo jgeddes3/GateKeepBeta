@@ -2,7 +2,7 @@
 // (i.e. shadowing) the "react-native" condition branch, so tsc always resolves imports from
 // "@firebase/auth" to the browser type surface (dist/auth-public.d.ts) and never sees
 // `getReactNativePersistence`, even with `customConditions: ["react-native"]` set (expo's
-// tsconfig.base already sets this). Metro's *runtime* resolution is unaffected — it correctly
+// tsconfig.base already sets this). Metro's *runtime* resolution is unaffected: it correctly
 // picks the "react-native" condition and the symbol exists there at bundle time. This augments
 // the module's types to match what's actually exported at runtime.
 // Verified against @firebase/auth/dist/rn/src/platform_react_native/persistence/react_native.d.ts

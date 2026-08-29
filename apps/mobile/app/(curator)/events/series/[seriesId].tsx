@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ScrollView, View, Text, Pressable, Alert } from "react-native";
+import { ScrollView, View, Pressable, Alert } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, collection, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -8,7 +8,7 @@ import { useAuth } from "../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
   contentFrom, provisionsFrom, budgetFrom, recurrenceFrom, endDateInputToUtcMs, MAX_ADDRESS_LENGTH,
-  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, WEEKDAY_LABELS, formatGigDateTime,
+  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, SERIES_STATUS_TONE, WEEKDAY_LABELS, formatGigDateTime,
   type ContentState, type ProvisionsState, type BudgetState, type RecurrenceState, type LocationValue,
   type UpdateSeriesPayload,
 } from "../../../../src/gigs/GigForms";
@@ -16,10 +16,13 @@ import {
   validateGigContent, validateBudget, validateRecurrence,
   type ProfileDoc, type CuratorSubtype, type GigDoc, type GigSeriesDoc, type GigContentInput, type GigBudget,
 } from "@gatekeep/shared";
+import { Text, Button, Card, StatusBadge, PageBackground, Skeleton, SkeletonCard, ErrorBanner } from "../../../../src/ui";
+import { useTokens } from "../../../../src/theme/ThemeProvider";
+import { tokens } from "../../../../src/theme/tokens";
 
 type OccurrenceRow = GigDoc & { id: string };
 
-// The template editor — keyed by seriesId by the parent, so it seeds its
+// The template editor, keyed by seriesId by the parent, so it seeds its
 // local state once from the first snapshot (same "seed once, never reseed"
 // contract as GigEditForm / CuratorForms.tsx's forms).
 function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; series: GigSeriesDoc; isVenue: boolean }) {
@@ -63,7 +66,7 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
 
     const trimmedAddress = location.address.trim();
     if (trimmedAddress.length > MAX_ADDRESS_LENGTH) { setError(`Address must be at most ${MAX_ADDRESS_LENGTH} characters.`); return; }
-    // Same omit-when-unchanged rule as the gig editor — updateSeries treats
+    // Same omit-when-unchanged rule as the gig editor, updateSeries treats
     // an omitted location as "leave the template's location untouched,"
     // which also skips the propagation loop's extra private/location
     // subdoc rewrite on every future occurrence.
@@ -85,8 +88,8 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
 
   return (
     <View style={{ gap: 12 }}>
-      <Text style={{ color: "#666" }}>
-        Saving applies to future, unedited dates only — occurrences you&#39;ve edited directly (in the gig editor)
+      <Text muted>
+        Saving applies to future, unedited dates only. Occurrences you&#39;ve edited directly (in the gig editor)
         have detached from this template and won&#39;t change.
       </Text>
       <ContentFields value={content} onChange={setContent} />
@@ -94,19 +97,13 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
       <RecurrenceFields value={recurrence} onChange={setRecurrence} />
       <ProvisionsFields value={provisions} onChange={setProvisions} />
       <LocationFields isVenue={isVenue} addressRequired={false} currentLabel={currentLabel} value={location} onChange={setLocation} />
-      {/* P10: mirrors web's identical copy — a visibility change here only
+      {/* P10: mirrors web's identical copy, a visibility change here only
           reaches future, still-attached occurrences. */}
-      <Text style={{ color: "#666", fontSize: 12 }}>
+      <Text variant="meta" muted>
         Occurrences you&#39;ve edited individually keep their current address visibility.
       </Text>
-      {error && (
-        <Text style={{ backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-          {error}
-        </Text>
-      )}
-      <Pressable onPress={() => void save()} disabled={busy} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8, opacity: busy ? 0.6 : 1 }}>
-        <Text style={{ color: "#fff", textAlign: "center" }}>{busy ? "Saving…" : "Save template"}</Text>
-      </Pressable>
+      <ErrorBanner message={error} />
+      <Button title={busy ? "Saving…" : "Save template"} disabled={busy} onPress={() => void save()} />
     </View>
   );
 }
@@ -116,6 +113,7 @@ export default function SeriesDetail() {
   const seriesId = rawSeriesId ?? "";
   const { user } = useAuth();
   const router = useRouter();
+  const t = useTokens();
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
   const [series, setSeries] = useState<GigSeriesDoc | null>(null);
   const [occurrences, setOccurrences] = useState<OccurrenceRow[]>([]);
@@ -137,12 +135,12 @@ export default function SeriesDetail() {
       (s) => setSeries(s.exists() ? (s.data() as GigSeriesDoc) : null),
       () => setSeries(null));
   }, [seriesId]);
-  // Keyed off the series' OWN curatorProfileId — not whichever profile
+  // Keyed off the series' OWN curatorProfileId, not whichever profile
   // happens to be "active" in the global ContextSwitcher, which is
   // independent and can change while this screen (reached by a Stack push)
   // stays mounted in the background on the "events" tab. Keying the PROFILE
   // lookup off activeContext instead would let this screen briefly show a
-  // DIFFERENT curator's subtype (wrong isVenue) after such a switch — a
+  // DIFFERENT curator's subtype (wrong isVenue) after such a switch, a
   // correctness issue, not just a staleness race. This query is also what
   // makes the occurrences list below rules-provable at all (gigs' read rule
   // has no seriesId-based disjunct, only status=='open' or
@@ -166,8 +164,16 @@ export default function SeriesDetail() {
   }, [curatorProfileId, seriesId]);
 
   if (!user || !series || !profile) {
-    return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>Loading…</Text></View>;
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
+          <Skeleton height={28} width="60%" />
+          <SkeletonCard />
+          <SkeletonCard />
+        </View>
+      </View>
+    );
   }
 
   const subtype = profile.subtype as CuratorSubtype;
@@ -187,7 +193,7 @@ export default function SeriesDetail() {
     }
   };
   const pause = () => {
-    Alert.alert("Pause this series?", "No new dates will be created going forward — already-open dates stay open. This can't be undone.",
+    Alert.alert("Pause this series?", "No new dates will be created going forward, already-open dates stay open. This can't be undone.",
       [{ text: "Keep active", style: "cancel" }, { text: "Pause", style: "destructive", onPress: () => void doPause() }]);
   };
   const doEnd = async () => {
@@ -206,41 +212,43 @@ export default function SeriesDetail() {
   };
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, gap: 20 }} keyboardShouldPersistTaps="handled">
-      <Text style={{ fontSize: 22, fontWeight: "700" }}>{series.template.title || "Untitled series"}</Text>
-      <Text>Status: <Text style={{ fontWeight: "700" }}>{SERIES_STATUS_LABEL[series.status]}</Text> · {cadenceSummary}</Text>
-      {series.status === "ended"
-        ? <Text style={{ color: "#666" }}>This series has ended and can no longer be edited.</Text>
-        : <SeriesTemplateForm key={seriesId} seriesId={seriesId} series={series} isVenue={isVenue} />}
-      <View style={{ flexDirection: "row", gap: 8, borderTopWidth: 1, borderTopColor: "#eee", paddingTop: 16 }}>
-        {series.status === "active" && (
-          <Pressable onPress={pause} disabled={pauseBusy}
-            style={{ borderWidth: 1, borderColor: "#fde68a", borderRadius: 6, padding: 10 }}>
-            <Text style={{ color: "#92400e" }}>{pauseBusy ? "Pausing…" : "Pause series"}</Text>
-          </Pressable>
-        )}
-        {series.status !== "ended" && (
-          <Pressable onPress={end} disabled={endBusy}
-            style={{ borderWidth: 1, borderColor: "#fca5a5", borderRadius: 6, padding: 10 }}>
-            <Text style={{ color: "#dc2626" }}>{endBusy ? "Ending…" : "End series"}</Text>
-          </Pressable>
-        )}
-      </View>
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 18, fontWeight: "700" }}>Occurrences</Text>
-        {occurrences.length === 0 && (
-          <Text style={{ color: "#666" }}>No dates yet — the daily sweep materializes upcoming occurrences from this template automatically.</Text>
-        )}
-        {occurrences.map((occ) => (
-          <Pressable key={occ.id} onPress={() => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId: occ.id } })}
-            style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 }}>
-            <Text style={{ fontWeight: "700" }}>{formatGigDateTime(occ.startsAt)}</Text>
-            <Text style={{ color: "#666", fontSize: 13 }}>
-              {GIG_STATUS_LABEL[occ.status]}{occ.detachedFromTemplate && " · detached"}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-    </ScrollView>
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.xl }} keyboardShouldPersistTaps="handled">
+        <Text variant="heading">{series.template.title || "Untitled series"}</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <Text variant="label" muted>Status</Text>
+          <StatusBadge label={SERIES_STATUS_LABEL[series.status]} status={SERIES_STATUS_TONE[series.status]} />
+        </View>
+        <Text muted>{cadenceSummary}</Text>
+        {series.status === "ended"
+          ? <Text muted>This series has ended and can no longer be edited.</Text>
+          : <SeriesTemplateForm key={seriesId} seriesId={seriesId} series={series} isVenue={isVenue} />}
+        <View style={{ flexDirection: "row", gap: 8, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
+          {series.status === "active" && (
+            <Button title={pauseBusy ? "Pausing…" : "Pause series"} variant="secondary" disabled={pauseBusy} onPress={pause} />
+          )}
+          {series.status !== "ended" && (
+            <Button title={endBusy ? "Ending…" : "End series"} variant="destructive" disabled={endBusy} onPress={end} />
+          )}
+        </View>
+        <View style={{ gap: 8 }}>
+          <Text variant="title">Occurrences</Text>
+          {occurrences.length === 0 && (
+            <Text muted>No dates yet. The daily sweep materializes upcoming occurrences from this template automatically.</Text>
+          )}
+          {occurrences.map((occ) => (
+            <Pressable key={occ.id} onPress={() => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId: occ.id } })}>
+              <Card style={{ padding: tokens.space.md, gap: 4 }}>
+                <Text variant="label">{formatGigDateTime(occ.startsAt)}</Text>
+                <Text variant="meta" muted>
+                  {GIG_STATUS_LABEL[occ.status]}{occ.detachedFromTemplate && " · detached"}
+                </Text>
+              </Card>
+            </Pressable>
+          ))}
+        </View>
+      </ScrollView>
+    </View>
   );
 }

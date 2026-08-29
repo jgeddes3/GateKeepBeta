@@ -1,12 +1,16 @@
-import { View, Text, Pressable, Alert } from "react-native";
+import { View, Alert } from "react-native";
 import { httpsCallable } from "firebase/functions";
 import { useAuth } from "../auth/AuthProvider";
 import { getFirebase } from "../lib/firebase";
 import { NotificationsList } from "./NotificationsList";
+import { Text, Button, Card, ThemeToggle, PageBackground } from "../ui";
+import { tokens } from "../theme/tokens";
 
-// Shared by all three role account screens (fan/musician/curator) — the
+// Shared by all three role account screens (fan/musician/curator), the
 // screen is identical across roles, so each `app/(role)/account.tsx` is a
-// thin wrapper around this component (SP2 deferred dedup item).
+// thin wrapper around this component (SP2 deferred dedup item). Restyling it
+// here retints all three at once and mounts the Appearance/ThemeToggle row in
+// each, exactly as the per-role account.tsx wrappers render it.
 export function AccountScreen() {
   const { user, signOutUser } = useAuth();
   const deleteAccount = () => {
@@ -23,11 +27,20 @@ export function AccountScreen() {
        } }]);
   };
   return (
-    <View style={{ flex: 1, padding: 24, gap: 16 }}>
-      <Text style={{ fontSize: 20 }}>{user?.email}</Text>
-      <Pressable onPress={signOutUser}><Text style={{ color: "#dc2626" }}>Sign out</Text></Pressable>
-      <Pressable onPress={deleteAccount}><Text style={{ color: "#dc2626" }}>Delete account</Text></Pressable>
-      <NotificationsList />
+    <View style={{ flex: 1 }}>
+      <PageBackground />
+      <View style={{ flex: 1, padding: tokens.space.xl, gap: tokens.space.lg }}>
+        <Text variant="title">{user?.email}</Text>
+        <Card style={{ gap: tokens.space.md }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.md }}>
+            <Text variant="label">Appearance</Text>
+            <ThemeToggle />
+          </View>
+        </Card>
+        <Button title="Sign out" variant="secondary" onPress={signOutUser} />
+        <Button title="Delete account" variant="destructive" onPress={deleteAccount} />
+        <NotificationsList />
+      </View>
     </View>
   );
 }
