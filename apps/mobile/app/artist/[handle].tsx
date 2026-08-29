@@ -103,7 +103,9 @@ function TrackRow({ t, playingId, onPlay }:
   const tk = useTokens();
   const active = playingId === t.id;
   return (
-    <Pressable onPress={() => onPlay(t)} accessibilityRole="button" accessibilityLabel={`Play ${t.title}`}
+    <Pressable onPress={() => onPlay(t)} accessibilityRole="button"
+      accessibilityLabel={active ? `Pause ${t.title}` : `Play ${t.title}`}
+      accessibilityState={{ selected: active }}
       style={{ flexDirection: "row", gap: 12, alignItems: "center", borderWidth: 1,
         borderColor: tk.border, borderRadius: tokens.radius.card, padding: 12, backgroundColor: tk.surface }}>
       <View style={{ width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center",
@@ -288,7 +290,7 @@ export default function Artist() {
           <View style={{ position: "absolute", left: 16, right: 16, bottom: 12,
             flexDirection: "row", alignItems: "flex-end", gap: 12 }}>
             {avatarUrl && <Image source={{ uri: avatarUrl }}
-              style={{ width: 64, height: 64, borderRadius: 32, borderWidth: 3, borderColor: t.bg0 }} />}
+              style={{ width: 64, height: 64, borderRadius: 32, borderWidth: 3, borderColor: tokens.dark.text }} />}
             <Text variant="heading" color={tokens.dark.text} numberOfLines={2} style={{ flex: 1 }}>{profile.name}</Text>
           </View>
         </View>
