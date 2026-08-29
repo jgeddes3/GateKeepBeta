@@ -21,7 +21,7 @@ function authMessage(code: string, mode: "in" | "up"): string {
     case "auth/wrong-password": return "That email and password don't match.";
     case "auth/user-not-found": return "No account with that email. Did you sign up with Google or Apple?";
     case "auth/too-many-requests": return "Too many tries. Wait a minute and try again.";
-    case "auth/email-already-in-use": return "That email already has an account — try signing in instead.";
+    case "auth/email-already-in-use": return "That email already has an account: try signing in instead.";
     case "auth/weak-password": return "Password must be at least 6 characters.";
     case "auth/account-exists-with-different-credential":
       return "This email is already registered with a different sign-in method.";
@@ -193,7 +193,7 @@ export default function SignInPage() {
                   onClick={async () => {
                     if (!email.trim()) { setError("Enter your email above, then press Forgot password."); return; }
                     const { sendPasswordResetEmail } = await import("firebase/auth");
-                    try { await sendPasswordResetEmail(auth, email.trim()); setError("Reset link sent — check your email."); }
+                    try { await sendPasswordResetEmail(auth, email.trim()); setError("Reset link sent: check your email."); }
                     catch { setError("Couldn't send the reset email."); }
                   }}
                 >
