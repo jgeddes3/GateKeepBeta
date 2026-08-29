@@ -122,7 +122,7 @@ export default function SignIn() {
         )}
         <Button title="Forgot password?" variant="ghost" onPress={async () => {
           setError(null);
-          if (!email.trim()) { Alert.alert("Reset password", "Enter your email above first."); return; }
+          if (!email.trim()) { setError("Enter your email above first."); return; }
           const { sendPasswordResetEmail } = await import("firebase/auth");
           try { await sendPasswordResetEmail(auth, email.trim());
                 Alert.alert("Reset password", "Reset link sent, check your email."); }
