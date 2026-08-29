@@ -9,8 +9,9 @@ import { tokens } from "../../src/theme/tokens";
 export default function SignUp() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  // Presentation-only: mirrors the message already computed for Alert.alert
-  // below so the same failure also renders as a branded inline banner.
+  // Presentation-only: the branded inline banner is the one error surface
+  // for the caught failure below (replaces the old Alert.alert popup for
+  // errors). The success alert is untouched.
   const [error, setError] = useState<string | null>(null);
   const t = useTokens();
   const create = async () => {
@@ -24,7 +25,6 @@ export default function SignUp() {
         : e?.code === "auth/weak-password" ? "Password must be at least 6 characters."
         : "Couldn't create the account. Try again.";
       setError(msg);
-      Alert.alert("Sign up", msg);
     }
   };
   return (

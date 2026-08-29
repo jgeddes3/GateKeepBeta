@@ -49,21 +49,17 @@ async function accountExistsMessage(auth: Auth, e: any): Promise<string> {
 export default function SignIn() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  // Presentation-only: mirrors the message an already-existing catch block
-  // hands to Alert.alert, so the same failure also renders as a branded
-  // inline banner. Does not change what triggers a catch, what message is
-  // computed, or that the alert still fires.
+  // Presentation-only: the branded inline banner is the one error surface
+  // for every caught auth failure (replaces the old Alert.alert popup for
+  // errors). Does not change what triggers a catch or what message is
+  // computed, only where the message renders. Success alerts are untouched.
   const [error, setError] = useState<string | null>(null);
   const { auth } = getFirebase();
   const t = useTokens();
 
   const emailSignIn = async () => {
     try { await signInWithEmailAndPassword(auth, email.trim(), password); }
-    catch (e: any) {
-      const msg = authMessage(e?.code ?? "");
-      setError(msg);
-      Alert.alert("Sign in", msg);
-    }
+    catch (e: any) { setError(authMessage(e?.code ?? "")); }
   };
   const googleSignIn = async () => {
     try {
@@ -75,10 +71,10 @@ export default function SignIn() {
     } catch (e: any) {
       console.warn("sign-in error", e?.code);
       if (e?.code === "auth/account-exists-with-different-credential") {
-        Alert.alert("Sign in", await accountExistsMessage(auth, e));
+        setError(await accountExistsMessage(auth, e));
         return;
       }
-      Alert.alert("Sign in", "Google sign-in didn't complete.");
+      setError("Google sign-in didn't complete.");
     }
   };
   const appleSignIn = async () => {
@@ -95,10 +91,10 @@ export default function SignIn() {
       if (e?.code === "ERR_REQUEST_CANCELED") return;
       console.warn("sign-in error", e?.code);
       if (e?.code === "auth/account-exists-with-different-credential") {
-        Alert.alert("Sign in", await accountExistsMessage(auth, e));
+        setError(await accountExistsMessage(auth, e));
         return;
       }
-      Alert.alert("Sign in", "Apple sign-in didn't complete.");
+      setError("Apple sign-in didn't complete.");
     }
   };
 
@@ -118,16 +114,19 @@ export default function SignIn() {
         <Input placeholder="Password" secureTextEntry
           value={password} onChangeText={setPassword} />
         <Button title="Sign in" onPress={() => { setError(null); void emailSignIn(); }} />
-        <Button title="Continue with Google" variant="secondary" onPress={googleSignIn} />
+        <Button title="Continue with Google" variant="secondary"
+          onPress={() => { setError(null); void googleSignIn(); }} />
         {Platform.OS === "ios" && (
-          <Button title="Continue with Apple" variant="secondary" onPress={appleSignIn} />
+          <Button title="Continue with Apple" variant="secondary"
+            onPress={() => { setError(null); void appleSignIn(); }} />
         )}
         <Button title="Forgot password?" variant="ghost" onPress={async () => {
+          setError(null);
           if (!email.trim()) { Alert.alert("Reset password", "Enter your email above first."); return; }
           const { sendPasswordResetEmail } = await import("firebase/auth");
           try { await sendPasswordResetEmail(auth, email.trim());
                 Alert.alert("Reset password", "Reset link sent, check your email."); }
-          catch { Alert.alert("Reset password", "Couldn't send the reset email."); }
+          catch { setError("Couldn't send the reset email."); }
         }} />
         <Link href="/(auth)/sign-up"><Text color={t.accent}>New here? Create an account</Text></Link>
       </View>

@@ -21,8 +21,10 @@ export default function Join() {
   const [name, setName] = useState("");
   const [handle, setHandle] = useState("");
   const [busy, setBusy] = useState(false);
-  // Presentation-only: mirrors the message already computed for Alert.alert
-  // below so a submit failure also renders as a branded inline banner.
+  // Presentation-only: the branded inline banner is the one error surface
+  // for validation failures and the caught submit failure below (replaces
+  // the old Alert.alert popups for errors). The two "Draft created" success
+  // alerts are untouched.
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
   const { switchTo } = useProfileContext();
@@ -33,7 +35,7 @@ export default function Join() {
     if (busy) return; // guards a double-tap from minting two drafts
     const input = { type, subtype, name, handle: handle.toLowerCase() };
     const v = validateProfileDraft(input);
-    if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
+    if (!v.ok) { setError(v.reason); return; }
     setBusy(true);
     try {
       const { functions } = getFirebase();
@@ -65,9 +67,7 @@ export default function Join() {
       Alert.alert("Draft created", "Add an about section, photos, a location, and what you're looking for next, then submit for review.");
       router.replace("/(curator)/dashboard");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Try again.";
-      setError(msg);
-      Alert.alert("Couldn't submit", msg);
+      setError(e instanceof Error ? e.message : "Try again.");
     } finally {
       setBusy(false);
     }
