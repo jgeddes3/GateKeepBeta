@@ -1,6 +1,5 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect } from "react";
-import { View } from "react-native";
 import type { ReactElement, ReactNode } from "react";
 import * as Sentry from "@sentry/react-native";
 import * as SplashScreen from "expo-splash-screen";
@@ -54,19 +53,22 @@ function Gate() {
       <StatusBar style={active === "light" ? "dark" : "light"} />
       <Stack screenOptions={{
         headerShown: false,
-        // Border separates, shadow does not (DESIGN.md). This Stack's
+        // Border separates, shadow does not (DESIGN.md), but this Stack's
         // header is expo-router's native (OS-chrome) header, not the
         // JS-rendered one Tabs uses: its headerStyle type only supports
-        // backgroundColor, and headerShadowVisible also controls the
-        // native bottom border on iOS (see expo-router's
-        // NativeStackNavigationOptions), so there is no headerStyle knob
-        // for a custom border here. headerBackground is the supported
-        // escape hatch for a themed background + hairline in its place.
+        // backgroundColor, no border. The would-be fix, a headerBackground
+        // render prop drawing a themed bottom hairline, was tried and
+        // reverted: expo-router's native-stack sets translucent:true
+        // whenever headerBackground is non-null, which floats the header
+        // over the screen content instead of pushing it down, and neither
+        // join.tsx nor artist/[handle].tsx pads for header height. A
+        // borderless themed header (surface-color change is still the
+        // separator) is far cheaper than an occluded screen on these two
+        // auxiliary routes. The JS-rendered TAB-group headers keep their
+        // border via useShellScreenOptions, a different render path, not
+        // affected by this native-stack constraint.
         headerShadowVisible: false,
         headerStyle: { backgroundColor: t.surface },
-        headerBackground: () => (
-          <View style={{ flex: 1, backgroundColor: t.surface, borderBottomWidth: 1, borderBottomColor: t.border }} />
-        ),
         headerTintColor: t.text,
         headerTitleStyle: { fontFamily: tokens.font.syne[700] },
       }}>
