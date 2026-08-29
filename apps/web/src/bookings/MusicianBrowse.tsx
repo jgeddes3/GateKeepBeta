@@ -2,41 +2,58 @@
 import { useEffect, useMemo, useState } from "react";
 import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
-import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure } from "@gatekeep/shared";
-import { formatCents, BUDGET_STRUCTURE_LABEL, chip } from "../gigs/GigForms";
+import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc } from "@gatekeep/shared";
+import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
+import { MusicianCard, type MusicianCardProfile } from "../components/MusicianCard";
 import { OfferComposer } from "./OfferComposer";
+import { Button } from "../ui/button";
+import { Skeleton } from "../ui/skeleton";
+import { IconUser, IconWarning } from "../ui/icons";
 
 type MusicianRow = ProfileDoc & { id: string };
 
 // MusicianSubtype ("solo"|"band") is the only act-size-shaped field actually
-// present on a musician's own profile doc without an extra per-card read —
+// present on a musician's own profile doc without an extra per-card read:
 // BookingPreferences.actSize (the richer solo/duo/band value) only exists
 // inside the per-card curatorBooking projection fetched below, and gating
 // the FILTER on that would force every card's private read before the list
 // could even render. Placeholder-grade per spec §1, same as GigBrowse's
-// filters — sub-8 replaces the internals.
+// filters; sub-8 replaces the internals.
 const ACT_SIZE_OPTIONS: MusicianSubtype[] = ["solo", "band"];
 const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
-const RATE_STRUCTURES: BudgetStructure[] = ["perHour", "perSong", "perSet"];
 
-function RatesSummary({ rates }: { rates: CuratorBookingDoc["rates"] }) {
-  const parts = RATE_STRUCTURES
-    .map((k) => (rates[k] ? `${formatCents(rates[k]!.amountCents)} ${BUDGET_STRUCTURE_LABEL[k]}` : null))
-    .filter((p): p is string => p !== null);
-  if (parts.length === 0) return <p style={{ margin: 0, color: "#666", fontSize: 14 }}>No public rates.</p>;
-  return <p style={{ margin: 0, fontSize: 14 }}>{parts.join(" · ")}</p>;
+function MusicianCardSkeleton() {
+  return (
+    <div className="overflow-hidden rounded-gk border border-gk-border bg-gk-surface">
+      <Skeleton className="h-36 w-full rounded-none sm:h-40" />
+      <div className="grid gap-2 p-3.5">
+        <Skeleton className="h-4 w-2/3" />
+        <div className="flex gap-1.5">
+          <Skeleton className="h-4 w-14 rounded-gk-sm" />
+          <Skeleton className="h-4 w-16 rounded-gk-sm" />
+        </div>
+        <Skeleton className="h-3 w-1/2" />
+      </div>
+    </div>
+  );
 }
 
-function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string; musician: MusicianRow }) {
+// One grid item: the card itself (whole-card-clickable, opens the public
+// portfolio in a new tab so a curator comparing several acts doesn't lose
+// their place in this grid) plus the "Offer a gig" action, which stays a
+// sibling control rather than moving inside the card's own <a> (nesting an
+// interactive control inside an anchor is invalid HTML, and GigCard/
+// MusicianCard's locked spec is "whole card clickable" as ONE link).
+function MusicianGridItem({ curatorProfileId, musician }: { curatorProfileId: string; musician: MusicianRow }) {
   const [booking, setBooking] = useState<CuratorBookingDoc | null | "loading">("loading");
   const [offering, setOffering] = useState(false);
 
-  // Per-card private/curatorBooking read — the caller has curatorAccess via
+  // Per-card private/curatorBooking read: the caller has curatorAccess via
   // their own approved curator profile membership (firestore.rules'
   // curatorBooking read rule), regardless of curatorProfileId; n+1 over the
   // list is accepted at v1 (spec §1 placeholder grade), same tradeoff as
   // GigBrowse's series-badge decision. No synchronous setBooking("loading")
-  // reset here (set-state-in-effect) — musician.id never changes for an
+  // reset here (set-state-in-effect): musician.id never changes for an
   // already-mounted card (each card is keyed by musician.id one level up in
   // MusicianBrowse, so a different musician is always a fresh mount), and
   // the initial useState("loading") above already covers first render.
@@ -49,33 +66,40 @@ function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string
     return () => { cancelled = true; };
   }, [musician.id]);
 
+  // Availability + reliability: rendered only from data this card already
+  // fetched above (the same curatorBooking doc the old card used for its
+  // rates summary), never a price. Rates are private by SP4 rule and the
+  // locked card spec is explicit: NEVER a price on this card.
+  const availabilityLabel = booking && booking !== "loading" && booking.preferences.availabilityPattern
+    ? formatChipLabel(booking.preferences.availabilityPattern)
+    : null;
+  const reliabilityLine = booking && booking !== "loading"
+    // Counts BOOKINGS, not dates: an 8-date completed whole-run booking is
+    // +1 here, not +8 (ReliabilitySummary.completedCount is booking-scoped,
+    // see functions/src/bookingLifecycle.ts's recomputeReliability).
+    ? `${booking.reliability.completedCount} show${booking.reliability.completedCount === 1 ? "" : "s"} played` +
+      ` · ${booking.reliability.noShowCount} no-show${booking.reliability.noShowCount === 1 ? "" : "s"}`
+    : null;
+
+  // ProfileDoc.subtype is the MusicianSubtype|CuratorSubtype union; this
+  // list is already filtered to type=="musician" by the query below, the
+  // same narrowing cast the curator gig/series composer pages use for their
+  // own `subtype as CuratorSubtype`.
+  const cardProfile: MusicianCardProfile = { ...musician, subtype: musician.subtype as MusicianSubtype };
+
   return (
-    <li style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, display: "grid", gap: 6 }}>
-      <strong>{musician.name}</strong>
-      {musician.portfolio?.genres && musician.portfolio.genres.length > 0 && (
-        <p style={{ margin: 0, color: "#666", fontSize: 14 }}>{musician.portfolio.genres.join(" · ")}</p>
-      )}
-      {booking === "loading" ? (
-        <p style={{ margin: 0, color: "#999", fontSize: 14 }}>Loading rates…</p>
-      ) : booking ? (
-        <>
-          <RatesSummary rates={booking.rates} />
-          {/* Counts BOOKINGS, not dates — an 8-date completed whole-run
-              booking is +1 here, not +8 (ReliabilitySummary.completedCount
-              is booking-scoped — see functions/src/bookingLifecycle.ts's
-              recomputeReliability). */}
-          <p style={{ margin: 0, fontSize: 13, color: "#666" }}>
-            {booking.reliability.noShowCount} no-shows / {booking.reliability.completedCount} bookings
-          </p>
-        </>
-      ) : (
-        <p style={{ margin: 0, color: "#666", fontSize: 14 }}>No booking info shared yet.</p>
-      )}
-      <p style={{ margin: 0 }}>
-        <a href={`/@${musician.handle}`} target="_blank" rel="noopener noreferrer">View portfolio</a>
-        {" · "}
-        <button type="button" onClick={() => setOffering((v) => !v)}>{offering ? "Cancel" : "Offer a gig"}</button>
-      </p>
+    <li className="grid gap-2">
+      <MusicianCard
+        musician={cardProfile}
+        href={`/@${musician.handle}`}
+        newTab
+        availabilityLabel={availabilityLabel}
+        reliabilityLine={reliabilityLine}
+      />
+      <Button type="button" variant="secondary" size="sm" className="justify-self-start"
+        onClick={() => setOffering((v) => !v)}>
+        {offering ? "Cancel" : "Offer a gig"}
+      </Button>
       {offering && (
         <OfferComposer key={`${curatorProfileId}-${musician.id}`} curatorProfileId={curatorProfileId}
           musicianProfileId={musician.id} musicianName={musician.name} onClose={() => setOffering(false)} />
@@ -86,7 +110,7 @@ function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string
 
 // Find musicians (apps/web/app/dashboard/curator/[profileId]/musicians/page.tsx):
 // the curator-context browse of approved musician acts. type=="musician" &&
-// status=="approved" is two pure-equality filters with no orderBy — provable
+// status=="approved" is two pure-equality filters with no orderBy: provable
 // under firestore.rules' profiles read rule (which only ever inspects
 // `status`) via Firestore's automatic per-field indexing, no composite index
 // needed (mirrors the SSR public pages' single-equality approved-profile
@@ -121,31 +145,65 @@ export function MusicianBrowse({ curatorProfileId }: { curatorProfileId: string 
   }, [musicians, genre, actSize]);
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <button type="button" onClick={() => setGenre(null)} style={chip(genre === null)}>All genres</button>
-        {GENRES.map((g) => (
-          <button key={g} type="button" onClick={() => setGenre(genre === g ? null : g)} style={chip(genre === g)}>{g}</button>
-        ))}
+    <div className="grid gap-6">
+      <div className="grid gap-4">
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Genre</span>
+          <div className="flex flex-wrap gap-2">
+            <Chip active={genre === null} onClick={() => setGenre(null)}>All genres</Chip>
+            {GENRES.map((g) => (
+              <Chip key={g} active={genre === g} onClick={() => setGenre(genre === g ? null : g)}>
+                {formatChipLabel(g)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Act size</span>
+          <div className="flex flex-wrap gap-2">
+            <Chip active={actSize === null} onClick={() => setActSize(null)}>Any act size</Chip>
+            {ACT_SIZE_OPTIONS.map((a) => (
+              <Chip key={a} active={actSize === a} onClick={() => setActSize(actSize === a ? null : a)}>
+                {ACT_SIZE_LABEL[a]}
+              </Chip>
+            ))}
+          </div>
+        </div>
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
-        <button type="button" onClick={() => setActSize(null)} style={chip(actSize === null)}>Any act size</button>
-        {ACT_SIZE_OPTIONS.map((a) => (
-          <button key={a} type="button" onClick={() => setActSize(actSize === a ? null : a)} style={chip(actSize === a)}>
-            {ACT_SIZE_LABEL[a]}
-          </button>
-        ))}
-      </div>
+
       {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+        <p
+          role="alert"
+          className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+        >
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
           Could not load musicians: {error}
         </p>
       )}
-      {musicians === "loading" && <p>Loading…</p>}
-      {musicians !== "loading" && filtered.length === 0 && !error && <p style={{ color: "#666" }}>No approved musicians match these filters.</p>}
-      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 10 }}>
-        {filtered.map((m) => <MusicianCard key={m.id} curatorProfileId={curatorProfileId} musician={m} />)}
-      </ul>
+
+      {musicians === "loading" && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" role="status" aria-label="Loading approved musicians">
+          {[0, 1, 2, 3, 4, 5].map((i) => <MusicianCardSkeleton key={i} />)}
+        </div>
+      )}
+
+      {musicians !== "loading" && filtered.length === 0 && !error && (
+        <div className="rounded-gk border border-gk-border bg-gk-surface px-6 py-10 text-center">
+          <span className="mx-auto flex size-10 items-center justify-center rounded-full bg-gk-border/50 text-gk-muted">
+            <IconUser size={20} aria-hidden="true" />
+          </span>
+          <p className="mt-3 font-syne text-base font-semibold text-gk-text">No musicians match these filters</p>
+          <p className="mx-auto mt-1 max-w-sm font-sora text-sm text-gk-muted">
+            Try a different genre or act size, or clear a filter to see every approved act.
+          </p>
+        </div>
+      )}
+
+      {musicians !== "loading" && filtered.length > 0 && (
+        <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {filtered.map((m) => <MusicianGridItem key={m.id} curatorProfileId={curatorProfileId} musician={m} />)}
+        </ul>
+      )}
     </div>
   );
 }

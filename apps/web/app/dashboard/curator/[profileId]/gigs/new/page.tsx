@@ -1,5 +1,6 @@
 "use client";
 import { use, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -14,9 +15,15 @@ import {
   validateGigContent, validateBudget, validateRecurrence,
   type ProfileDoc, type CuratorSubtype, type GigContentInput, type GigBudget, type AddressVisibility,
 } from "@gatekeep/shared";
+import { Chip } from "../../../../../../src/portfolio/PortfolioForms";
+import { Button } from "../../../../../../src/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/ui/card";
+import { Input } from "../../../../../../src/ui/input";
+import { Skeleton } from "../../../../../../src/ui/skeleton";
+import { IconWarning } from "../../../../../../src/ui/icons";
 
 // The composer's one-off/series fork mirrors /join's musician/curator toggle
-// exactly (same "click a chip, the form below reshapes" pattern) — a single
+// exactly (same "click a chip, the form below reshapes" pattern): a single
 // page rather than two, since the shared fields (content/budget/provisions/
 // location) are identical and only the "when" section differs (a single
 // startsAt datetime vs. a weekday/hour/cadence recurrence + fillMode).
@@ -45,19 +52,40 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
       () => setProfile(null));
   }, [user, profileId]);
 
-  if (loading || !user || profile === "loading") return <main><p>Loading…</p></main>;
-  if (!profile || profile.type !== "curator") return <main><p>No curator profile here.</p></main>;
+  if (loading || !user || profile === "loading") {
+    return (
+      <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14" role="status" aria-label="Loading">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="mt-4 h-9 w-48" />
+        <div className="mt-8 grid gap-6">
+          {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32 w-full" />)}
+        </div>
+      </main>
+    );
+  }
+  if (!profile || profile.type !== "curator") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 text-center sm:px-6">
+        <p className="font-syne text-lg font-semibold text-gk-text">No curator profile here</p>
+        <Button asChild className="mt-4"><Link href="/dashboard">Back to dashboard</Link></Button>
+      </main>
+    );
+  }
   if (profile.status !== "approved") {
-    return <main style={{ maxWidth: 640, margin: "40px auto" }}>
-      <p>Your curator profile must be approved before you can post gigs.</p>
-      <a href={`/dashboard/curator/${profileId}`}>← Back to profile</a>
-    </main>;
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 text-center sm:px-6">
+        <p className="font-sora text-sm text-gk-muted">Your curator profile must be approved before you can post gigs.</p>
+        <Button asChild variant="link" className="mt-2 h-auto p-0">
+          <Link href={`/dashboard/curator/${profileId}`}>&larr; Back to profile</Link>
+        </Button>
+      </main>
+    );
   }
 
   const subtype = profile.subtype as CuratorSubtype;
   const isVenue = subtype === "venue";
   // Same defaulting rule resolveGigLocation applies server-side
-  // (isVenue ? "public" : "neighborhood") — computed at render time from the
+  // (isVenue ? "public" : "neighborhood"), computed at render time from the
   // subtype rather than seeded into state on mount, so it stays correct
   // even though `profile` arrives asynchronously; `visibilityTouched` tracks
   // whether the curator has actually picked a value yet.
@@ -120,7 +148,7 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
       }
     } catch (e) {
       // Surfaces server errors verbatim, including the geocode failure
-      // message and (for series) the resource-exhausted active-series cap —
+      // message and (for series) the resource-exhausted active-series cap:
       // createGig itself has no cap check (that's publishGig's job, on the
       // gig editor page), so a one-off's cap error can't appear here.
       setError(e instanceof Error ? e.message : "Could not create this.");
@@ -130,37 +158,73 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
   };
 
   return (
-    <main style={{ maxWidth: 640, margin: "40px auto", display: "grid", gap: 24 }}>
-      <a href={`/dashboard/curator/${profileId}/gigs`} style={{ color: "#666", fontSize: 14 }}>← Gigs & series</a>
-      <h1>Post a gig</h1>
-      <div style={{ display: "flex", gap: 8 }}>
-        {([false, true] as const).map((s) => (
-          <button key={String(s)} type="button" onClick={() => setIsSeries(s)}
-            style={{ padding: 10, borderRadius: 8, border: "1px solid #bbb",
-              background: isSeries === s ? "#111" : "#fff", color: isSeries === s ? "#fff" : "#111" }}>
-            {s ? "Recurring series" : "One-off gig"}
-          </button>
-        ))}
+    <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+      <Link href={`/dashboard/curator/${profileId}/gigs`} className="font-sora text-sm text-gk-muted hover:text-gk-text">
+        &larr; Gigs &amp; series
+      </Link>
+      <h1 className="mt-4 font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Post a gig</h1>
+
+      <div className="mt-6 grid gap-6">
+        <div className="flex flex-wrap gap-2">
+          {([false, true] as const).map((s) => (
+            <Chip key={String(s)} active={isSeries === s} onClick={() => setIsSeries(s)}>
+              {s ? "Recurring series" : "One-off gig"}
+            </Chip>
+          ))}
+        </div>
+
+        <Card>
+          <CardHeader><CardTitle>Details</CardTitle></CardHeader>
+          <CardContent><ContentFields value={content} onChange={setContent} /></CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>Budget</CardTitle></CardHeader>
+          <CardContent><BudgetFields value={budget} onChange={setBudget} /></CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>{isSeries ? "Schedule" : "When"}</CardTitle></CardHeader>
+          <CardContent>
+            {isSeries ? (
+              <RecurrenceFields value={recurrence} onChange={setRecurrence} />
+            ) : (
+              <div className="grid max-w-64 gap-1.5">
+                <label htmlFor="gig-when" className="font-sora text-sm font-medium text-gk-text">Date and time</label>
+                <Input id="gig-when" type="datetime-local" value={oneOffDate} onChange={(e) => setOneOffDate(e.target.value)} />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>Provisions</CardTitle></CardHeader>
+          <CardContent><ProvisionsFields value={provisions} onChange={setProvisions} /></CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>Location</CardTitle></CardHeader>
+          <CardContent>
+            <LocationFields isVenue={isVenue} addressRequired={!isVenue} currentLabel={currentLabel}
+              value={effectiveLocation}
+              onChange={(v) => { setVisibilityTouched(true); setLocation(v); }} />
+          </CardContent>
+        </Card>
+
+        {error && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          >
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <p>{error}</p>
+          </div>
+        )}
+
+        <Button type="button" onClick={submit} disabled={busy} className="justify-self-start">
+          {busy ? "Creating…" : isSeries ? "Create series" : "Create gig (draft)"}
+        </Button>
       </div>
-      <ContentFields value={content} onChange={setContent} />
-      <BudgetFields value={budget} onChange={setBudget} />
-      <ProvisionsFields value={provisions} onChange={setProvisions} />
-      {isSeries ? (
-        <RecurrenceFields value={recurrence} onChange={setRecurrence} />
-      ) : (
-        <label>When: <input type="datetime-local" value={oneOffDate} onChange={(e) => setOneOffDate(e.target.value)} /></label>
-      )}
-      <LocationFields isVenue={isVenue} addressRequired={!isVenue} currentLabel={currentLabel}
-        value={effectiveLocation}
-        onChange={(v) => { setVisibilityTouched(true); setLocation(v); }} />
-      {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-          {error}
-        </p>
-      )}
-      <button onClick={submit} disabled={busy} style={{ padding: 12, fontSize: 16 }}>
-        {busy ? "Creating…" : isSeries ? "Create series" : "Create gig (draft)"}
-      </button>
     </main>
   );
 }

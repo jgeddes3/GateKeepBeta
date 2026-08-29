@@ -1,5 +1,6 @@
 "use client";
 import { use, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot, getDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -14,6 +15,12 @@ import {
   validateGigContent, validateBudget,
   type ProfileDoc, type CuratorSubtype, type GigDoc, type GigPrivateLocation, type GigContentInput, type GigBudget,
 } from "@gatekeep/shared";
+import { Button } from "../../../../../../src/ui/button";
+import { Badge } from "../../../../../../src/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/ui/card";
+import { Input } from "../../../../../../src/ui/input";
+import { Skeleton } from "../../../../../../src/ui/skeleton";
+import { IconWarning } from "../../../../../../src/ui/icons";
 
 const toLocalInput = (ms: number) => {
   const d = new Date(ms);
@@ -21,7 +28,12 @@ const toLocalInput = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
-// The actual content editor — keyed by gigId (not gig.updatedAt) by the
+type GigStatusBadgeVariant = "secondary" | "outline" | "success" | "warning" | "destructive";
+const GIG_STATUS_BADGE: Record<GigDoc["status"], GigStatusBadgeVariant> = {
+  draft: "secondary", open: "success", filled: "outline", closed: "secondary", cancelled: "destructive", taken_down: "warning",
+};
+
+// The actual content editor: keyed by gigId (not gig.updatedAt) by the
 // parent below, so it seeds its local state ONCE from the first snapshot and
 // never again: neither a live update from elsewhere (e.g. runDailySweep
 // closing this gig) nor this form's own save (which echoes right back
@@ -65,10 +77,10 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
     if (trimmedAddress.length > MAX_ADDRESS_LENGTH) { setError(`Address must be at most ${MAX_ADDRESS_LENGTH} characters.`); return; }
     // Omit `location` entirely (rather than resending an unchanged one) when
     // the curator neither typed a new address nor picked a different
-    // visibility — updateGig treats an omitted location as "leave it
+    // visibility: updateGig treats an omitted location as "leave it
     // untouched," skipping a redundant re-geocode + private-doc rewrite.
     // Anything actually typed in the address field always counts as an
-    // override and re-geocodes, even if it happens to match what's on file —
+    // override and re-geocodes, even if it happens to match what's on file:
     // a rare, harmless extra lookup, not a correctness bug.
     const locationChanged = trimmedAddress.length > 0 || location.visibility !== gig.location.addressVisibility;
 
@@ -87,24 +99,52 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
   };
 
   return (
-    <section style={{ display: "grid", gap: 12 }}>
-      <ContentFields value={content} onChange={setContent} />
-      <BudgetFields value={budget} onChange={setBudget} />
-      <label>When: <input type="datetime-local" value={startsAtInput} onChange={(e) => setStartsAtInput(e.target.value)} /></label>
-      <ProvisionsFields value={provisions} onChange={setProvisions} />
-      <LocationFields isVenue={isVenue} addressRequired={false} currentLabel={currentLabel} value={location} onChange={setLocation} />
+    <div className="grid gap-6">
+      <Card>
+        <CardHeader><CardTitle>Details</CardTitle></CardHeader>
+        <CardContent><ContentFields value={content} onChange={setContent} /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Budget</CardTitle></CardHeader>
+        <CardContent><BudgetFields value={budget} onChange={setBudget} /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>When</CardTitle></CardHeader>
+        <CardContent>
+          <div className="grid max-w-64 gap-1.5">
+            <label htmlFor="gig-edit-when" className="font-sora text-sm font-medium text-gk-text">Date and time</label>
+            <Input id="gig-edit-when" type="datetime-local" value={startsAtInput} onChange={(e) => setStartsAtInput(e.target.value)} />
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Provisions</CardTitle></CardHeader>
+        <CardContent><ProvisionsFields value={provisions} onChange={setProvisions} /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Location</CardTitle></CardHeader>
+        <CardContent>
+          <LocationFields isVenue={isVenue} addressRequired={false} currentLabel={currentLabel} value={location} onChange={setLocation} />
+        </CardContent>
+      </Card>
       {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-          {error}
-        </p>
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+        >
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          <p>{error}</p>
+        </div>
       )}
-      <button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save changes"}</button>
-    </section>
+      <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
+        {busy ? "Saving…" : "Save changes"}
+      </Button>
+    </div>
   );
 }
 
 // Both a standalone one-off gig's editor AND the destination "occurrence
-// edit routes to the gig editor" sends a series occurrence to — updateGig
+// edit routes to the gig editor" sends a series occurrence to: updateGig
 // treats both identically (same callable, same detachment side effect for
 // anything with a seriesId), so one page correctly serves both.
 export default function GigEditor(props: { params: Promise<{ profileId: string; gigId: string }> }) {
@@ -115,7 +155,7 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
   const [gig, setGig] = useState<GigDoc | null | "loading">("loading");
   const [privateLoc, setPrivateLoc] = useState<GigPrivateLocation | null | "loading">("loading");
   // Render-time reset (React's documented "adjust state when a prop
-  // changes" pattern — see PortfolioEditor's identical `bookingProfileId`
+  // changes" pattern, see PortfolioEditor's identical `bookingProfileId`
   // trick) for the private/location one-shot getDoc below: navigating from
   // one gig's editor to another's (same route/component, different gigId)
   // does NOT remount this page, so without this, the second gig's page would
@@ -154,15 +194,32 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
     return () => { cancelled = true; };
   }, [user, gigId]);
 
-  if (loading || !user || profile === "loading" || gig === "loading" || privateLoc === "loading") return <main><p>Loading…</p></main>;
-  if (!profile || !gig) return <main><p>Gig not found.</p></main>;
+  if (loading || !user || profile === "loading" || gig === "loading" || privateLoc === "loading") {
+    return (
+      <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14" role="status" aria-label="Loading">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="mt-4 h-9 w-56" />
+        <div className="mt-8 grid gap-6">
+          {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32 w-full" />)}
+        </div>
+      </main>
+    );
+  }
+  if (!profile || !gig) {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 text-center sm:px-6">
+        <p className="font-syne text-lg font-semibold text-gk-text">Gig not found</p>
+        <Button asChild className="mt-4"><Link href={`/dashboard/curator/${profileId}/gigs`}>Back to gigs</Link></Button>
+      </main>
+    );
+  }
 
   const subtype = profile.subtype as CuratorSubtype;
   const isVenue = subtype === "venue";
   const currentLabel = privateLoc
     ? `Currently on file: ${privateLoc.address} (${gig.location.addressVisibility === "public" ? "shown publicly" : "neighborhood only, publicly"})`
     : "No exact address on file.";
-  // Mirrors updateGig's own gate exactly — cancelled/taken_down gigs reject
+  // Mirrors updateGig's own gate exactly: cancelled/taken_down gigs reject
   // the callable outright, so the edit form is hidden rather than left live
   // and doomed to a failed-precondition on save. "closed" (auto-closed past
   // gigs) is deliberately still editable, matching the server, which places
@@ -175,7 +232,7 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
       await httpsCallable(getFirebase().functions, "publishGig")({ gigId });
     } catch (e) {
       // The MAX_OPEN_GIGS_PER_PROFILE cap error (resource-exhausted) lands
-      // here verbatim — this is the one place that error can ever surface.
+      // here verbatim: this is the one place that error can ever surface.
       setPublishError(e instanceof Error ? e.message : "Could not publish.");
     } finally {
       setPublishBusy(false);
@@ -194,37 +251,67 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
   };
 
   return (
-    <main style={{ maxWidth: 640, margin: "40px auto", display: "grid", gap: 20 }}>
-      <a href={`/dashboard/curator/${profileId}/gigs`} style={{ color: "#666", fontSize: 14 }}>← Gigs & series</a>
-      <h1>{gig.title || "Untitled gig"}</h1>
-      <p style={{ margin: 0 }}>Status: <strong>{GIG_STATUS_LABEL[gig.status]}</strong></p>
+    <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+      <Link href={`/dashboard/curator/${profileId}/gigs`} className="font-sora text-sm text-gk-muted hover:text-gk-text">
+        &larr; Gigs &amp; series
+      </Link>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <h1 className="font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">{gig.title || "Untitled gig"}</h1>
+        <Badge variant={GIG_STATUS_BADGE[gig.status]}>{GIG_STATUS_LABEL[gig.status]}</Badge>
+      </div>
+
       {gig.seriesId && (
-        <div style={{ background: gig.detachedFromTemplate ? "#f3f4f6" : "#fef3c7", border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
-          {gig.detachedFromTemplate
-            ? "This date was edited directly and no longer follows its series' template."
-            : "Part of a recurring series — saving any change here will detach this date from the series; future template edits won't apply to it anymore."}
-          {" "}<a href={`/dashboard/curator/${profileId}/series/${gig.seriesId}`}>View series →</a>
+        <div
+          className={
+            gig.detachedFromTemplate
+              ? "mt-4 flex items-start gap-2 rounded-gk border border-gk-border bg-gk-border/20 px-3.5 py-2.5 font-sora text-sm text-gk-muted"
+              : "mt-4 flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          }
+        >
+          <p>
+            {gig.detachedFromTemplate
+              ? "This date was edited directly and no longer follows its series' template."
+              : "Part of a recurring series: saving any change here will detach this date from the series. Future template edits won't apply to it anymore."}
+            {" "}
+            <Link href={`/dashboard/curator/${profileId}/series/${gig.seriesId}`} className="underline underline-offset-4">
+              View series
+            </Link>
+          </p>
         </div>
       )}
-      {!editable && <p style={{ color: "#666" }}>This gig is {GIG_STATUS_LABEL[gig.status].toLowerCase()} and can no longer be edited.</p>}
-      {editable && <GigEditForm key={gigId} gigId={gigId} gig={gig} isVenue={isVenue} currentLabel={currentLabel} />}
+
+      {!editable && (
+        <p className="mt-6 font-sora text-sm text-gk-muted">
+          This gig is {GIG_STATUS_LABEL[gig.status].toLowerCase()} and can no longer be edited.
+        </p>
+      )}
+      {editable && (
+        <div className="mt-6">
+          <GigEditForm key={gigId} gigId={gigId} gig={gig} isVenue={isVenue} currentLabel={currentLabel} />
+        </div>
+      )}
+
       {gig.status === "draft" && (
-        <section style={{ display: "grid", gap: 8, borderTop: "1px solid #eee", paddingTop: 16 }}>
-          <button onClick={publish} disabled={publishBusy} style={{ padding: 12, fontSize: 16 }}>
+        <section className="mt-8 grid gap-3 border-t border-gk-border pt-8">
+          <Button type="button" onClick={publish} disabled={publishBusy} className="justify-self-start">
             {publishBusy ? "Publishing…" : "Publish"}
-          </button>
+          </Button>
           {publishError && (
-            <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-              {publishError}
-            </p>
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+            >
+              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              <p>{publishError}</p>
+            </div>
           )}
         </section>
       )}
       {(gig.status === "draft" || gig.status === "open") && (
-        <button onClick={cancel} disabled={cancelBusy}
-          style={{ color: "#dc2626", justifySelf: "start", background: "none", border: "1px solid #fca5a5", borderRadius: 6, padding: "6px 12px" }}>
+        <Button type="button" variant="link" onClick={cancel} disabled={cancelBusy}
+          className="mt-4 h-auto justify-self-start p-0 text-gk-destructive">
           {cancelBusy ? "Cancelling…" : "Cancel this gig"}
-        </button>
+        </Button>
       )}
     </main>
   );
