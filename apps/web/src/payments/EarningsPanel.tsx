@@ -10,6 +10,11 @@ import {
   instantFeePreviewCents,
   type PaymentDoc, type StripeStatusResult,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { Input } from "../ui/input";
+import { Skeleton } from "../ui/skeleton";
+import { IconEarnings, IconWarning } from "../ui/icons";
 
 // SP5 Task 14 — the musician's payouts surface. House idiom throughout (see
 // src/bookings/CancelDialog.tsx): "use client", httpsCallable + inline
@@ -92,16 +97,26 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
   const pending = rows
     .filter((r) => r.settlement.status === "pending" || r.settlement.status === "past_due")
     .sort((a, b) => a.occurrenceStartsAt - b.occurrenceStartsAt);
-  if (pending.length === 0) return <p style={{ color: "#666" }}>Nothing pending.</p>;
+  if (pending.length === 0) {
+    return <p className="font-sora text-sm text-gk-muted">Nothing pending. Every settlement is caught up.</p>;
+  }
   return (
-    <ul>
+    <ul className="grid gap-2">
       {pending.map((r) => (
-        <li key={`${r.bookingId}:${r.id}`}>
-          {formatGigDateTime(r.occurrenceStartsAt)}
-          {" — "}
-          {r.settlement.status === "past_due"
-            ? "curator payment delayed"
-            : `pays out ~${r.settlement.settleAfter != null ? formatGigDateTime(r.settlement.settleAfter) : "after the gig"}`}
+        <li
+          key={`${r.bookingId}:${r.id}`}
+          className="flex flex-wrap items-center justify-between gap-2 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5"
+        >
+          <span className="font-sora text-sm text-gk-text">{formatGigDateTime(r.occurrenceStartsAt)}</span>
+          {/* Status chip (spec 4): past_due is the one genuinely urgent
+              state here (money that should be settling is stalled on the
+              CURATOR's side); an ordinary pending settlement is expected,
+              not cautionary, so it stays neutral. */}
+          <Badge variant={r.settlement.status === "past_due" ? "destructive" : "secondary"}>
+            {r.settlement.status === "past_due"
+              ? "curator payment delayed"
+              : `pays out ~${r.settlement.settleAfter != null ? formatGigDateTime(r.settlement.settleAfter) : "after the gig"}`}
+          </Badge>
         </li>
       ))}
     </ul>
@@ -118,17 +133,28 @@ function HistoryList({ rows }: { rows: PaymentRow[] }) {
     .filter((r) => r.transfer.status === "transferred" || r.deposit.status === "forfeited")
     .sort((a, b) => (b.transfer.transferredAt ?? b.updatedAt) - (a.transfer.transferredAt ?? a.updatedAt))
     .slice(0, HISTORY_LIMIT);
-  if (history.length === 0) return <p style={{ color: "#666" }}>No payout history yet.</p>;
+  if (history.length === 0) {
+    return (
+      <p className="flex items-start gap-2 font-sora text-sm text-gk-muted">
+        <IconEarnings size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+        No payout history yet. Play a gig and your first payout lands here.
+      </p>
+    );
+  }
   return (
-    <ul>
+    <ul className="grid gap-2">
       {history.map((r) => (
-        <li key={`${r.bookingId}:${r.id}`}>
-          {formatGigDateTime(r.occurrenceStartsAt)}
-          {" — "}
-          {r.deposit.status === "forfeited" && `Forfeited deposit — received 100% (${formatCents(r.deposit.sliceCents)})`}
-          {r.deposit.status === "forfeited" && r.transfer.status === "transferred" && "; "}
-          {r.transfer.status === "transferred" && r.transfer.amountCents != null
-            && `Paid ${formatCents(r.transfer.amountCents)}`}
+        <li
+          key={`${r.bookingId}:${r.id}`}
+          className="flex flex-wrap items-center justify-between gap-2 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5"
+        >
+          <span className="font-sora text-sm text-gk-text">{formatGigDateTime(r.occurrenceStartsAt)}</span>
+          <Badge variant="success">
+            {r.deposit.status === "forfeited" && `Forfeited deposit — received 100% (${formatCents(r.deposit.sliceCents)})`}
+            {r.deposit.status === "forfeited" && r.transfer.status === "transferred" && "; "}
+            {r.transfer.status === "transferred" && r.transfer.amountCents != null
+              && `Paid ${formatCents(r.transfer.amountCents)}`}
+          </Badge>
         </li>
       ))}
     </ul>
@@ -238,92 +264,103 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
   };
 
   return (
-    <section style={{ borderTop: "1px solid #eee", paddingTop: 24, display: "grid", gap: 12 }}>
-      <h2>{name}</h2>
-      {status === "loading" && <p>Loading…</p>}
+    <section className="grid gap-4 border-t border-gk-border pt-6">
+      <h2 className="font-syne text-lg font-semibold text-gk-text">{name}</h2>
+      {status === "loading" && (
+        <div className="grid gap-2" role="status" aria-label={`Loading ${name}'s earnings`}>
+          <Skeleton className="h-4 w-32" />
+          <Skeleton className="h-9 w-40" />
+        </div>
+      )}
       {status === "error" && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e" }}>
-          Couldn&apos;t load payout status.{" "}
-          <button onClick={() => setReloadKey((k) => k + 1)}>Retry</button>
+        <p className="flex flex-wrap items-center gap-2 font-sora text-sm text-gk-warning">
+          <IconWarning size={16} className="shrink-0" aria-hidden="true" />
+          Couldn&apos;t load payout status.
+          <Button onClick={() => setReloadKey((k) => k + 1)} variant="link" className="h-auto p-0">Retry</Button>
         </p>
       )}
       {typeof status === "object" && (
         <>
           {status.delinquent && (
-            <p style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, padding: 12, color: "#991b1b", margin: 0 }}>
+            <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-2.5 font-sora text-sm text-gk-destructive">
+              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
               A booking you&apos;re part of has an overdue curator payment.
             </p>
           )}
           {!(status.hasAccount && status.payoutsEnabled) ? (
-            <div style={{ display: "grid", gap: 8 }}>
-              <p style={{ margin: 0 }}>Set up payouts to get paid for your bookings.</p>
-              <div>
-                <button onClick={setupPayouts} disabled={onboardBusy}>
-                  {onboardBusy ? "Redirecting…" : "Set up payouts"}
-                </button>
-              </div>
+            <div className="grid gap-2.5">
+              <p className="font-sora text-sm text-gk-text">Set up payouts to get paid for your bookings.</p>
+              <Button onClick={setupPayouts} disabled={onboardBusy} className="w-fit">
+                {onboardBusy ? "Redirecting…" : "Set up payouts"}
+              </Button>
               {onboardError && (
-                <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+                <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                  <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
                   {onboardError}
                 </p>
               )}
-              <p style={{ margin: 0, fontSize: 13, color: "#666" }}>
+              <p className="font-sora text-xs text-gk-muted">
                 Your first payout may be held for about 7 days while Stripe verifies your account.
               </p>
             </div>
           ) : (
-            <div style={{ display: "grid", gap: 10 }}>
+            <div className="grid gap-3">
               <div>
-                <p style={{ margin: 0, fontSize: 13, color: "#666" }}>Available balance</p>
-                <p style={{ margin: "2px 0 0", fontSize: 28, fontWeight: 700 }}>
+                <p className="font-sora text-sm text-gk-muted">Available balance</p>
+                {/* availableBalanceCents null renders "unavailable", never
+                    $0.00 (binding: see this file's own MAX_PREVIEW_CENTS/
+                    parseDollarsToCents comments for why a real 0 balance and
+                    "we don't know yet" must never look the same). */}
+                <p className="mt-0.5 font-syne text-2xl font-bold text-gk-text sm:text-3xl">
                   {status.availableBalanceCents == null ? "Balance unavailable — try again shortly" : formatCents(status.availableBalanceCents)}
                 </p>
                 {status.availableBalanceCents != null && status.instantAvailableBalanceCents != null
                   && status.instantAvailableBalanceCents !== status.availableBalanceCents && (
-                  <p style={{ margin: "2px 0 0", fontSize: 13, color: "#666" }}>
+                  <p className="mt-0.5 font-sora text-sm text-gk-muted">
                     Instant available: {formatCents(status.instantAvailableBalanceCents)}
                   </p>
                 )}
               </div>
-              <div>
-                <label>
-                  Amount to cash out{" "}
-                  <input type="number" min="1" step="0.01" value={amount}
-                    onChange={(e) => { setAmount(e.target.value); setPayoutError(null); }}
-                    disabled={payoutBusy || status.availableBalanceCents == null}
-                    style={{ width: 100 }} aria-label="Amount to cash out (dollars)" />
+              <div className="grid max-w-40 gap-1.5">
+                <label htmlFor="earnings-cashout-amount" className="font-sora text-sm font-medium text-gk-text">
+                  Amount to cash out
                 </label>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-sora text-sm text-gk-muted">$</span>
+                  <Input id="earnings-cashout-amount" type="number" min="1" step="0.01" value={amount}
+                    onChange={(e) => { setAmount(e.target.value); setPayoutError(null); }}
+                    disabled={payoutBusy || status.availableBalanceCents == null} />
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button onClick={() => submitPayout("standard")} disabled={payoutBusy}>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => submitPayout("standard")} disabled={payoutBusy} variant="secondary">
                   Standard (free, 1–3 business days)
-                </button>
-                <button onClick={() => submitPayout("instant")}
+                </Button>
+                <Button onClick={() => submitPayout("instant")}
                   disabled={payoutBusy || !status.instantEligible || belowInstantMin
                     || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}
                   title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE
                     : belowInstantMin ? PAYOUT_INSTANT_MIN_MESSAGE : undefined}>
                   {`Instant${previewCents != null && previewFeeCents != null ? ` — fee ${formatCents(previewFeeCents)}` : ""}`}
-                </button>
+                </Button>
               </div>
               {payoutError && (
-                <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+                <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                  <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
                   {payoutError}
                 </p>
               )}
               {payoutMessage && (
-                <p style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 12, color: "#166534", margin: 0 }}>
-                  {payoutMessage}
-                </p>
+                <p className="font-sora text-sm text-gk-success">{payoutMessage}</p>
               )}
             </div>
           )}
-          <div>
-            <h3>Pending settlements</h3>
+          <div className="grid gap-2">
+            <h3 className="font-syne text-sm font-semibold text-gk-text">Pending settlements</h3>
             <PendingSettlementsList rows={rows} />
           </div>
-          <div>
-            <h3>History</h3>
+          <div className="grid gap-2">
+            <h3 className="font-syne text-sm font-semibold text-gk-text">History</h3>
             <HistoryList rows={rows} />
           </div>
         </>

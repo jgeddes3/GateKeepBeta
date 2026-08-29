@@ -1,12 +1,16 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
-import { formatCents, formatGigDateTime, badge } from "../gigs/GigForms";
+import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import {
   DEPOSIT_PERCENT,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc,
 } from "@gatekeep/shared";
+import { Badge } from "../ui/badge";
+import { DateBlockRow } from "../components/DateBlockRow";
+import { IconBookings } from "../ui/icons";
+import { cn } from "../lib/utils";
 
 // SP4 Task 10: per-profile booking inbox + the booking-status DISPLAY
 // helpers it (and BookingThread.tsx's thread screen) both need. Split out
@@ -116,42 +120,96 @@ function useNextOccurrence(bookingId: string): { startsAt: number } | null {
   return next;
 }
 
+// Theme pass (sub-project 9A task 11): spec 6.7, DateBlockRow where a
+// dated shape genuinely fits (ConfirmedRow has a real occurrence date once
+// `next` resolves), a solid row otherwise. Every row is the same
+// rounded-gk/border-gk-border/hover:border-gk-accent-50 shell GigCard
+// already established for a clickable card, just a flat row instead of a
+// photo card.
+function SolidRow({ href, children, className }: { href: string; children: ReactNode; className?: string }) {
+  return (
+    <li>
+      <a
+        href={href}
+        className={cn(
+          "flex min-w-0 items-center justify-between gap-3 rounded-gk border border-gk-border bg-gk-surface px-4 py-3 outline-none transition-colors",
+          "hover:border-gk-accent/50 focus-visible:ring-2 focus-visible:ring-gk-focus",
+          className,
+        )}
+      >
+        {children}
+      </a>
+    </li>
+  );
+}
+
 function OpenThreadRow({ row, mySide }: { row: BookingRow; mySide: BookingSide }) {
   const title = useRowGigTitle(row.gigId);
   const yourTurn = row.awaitingSide === mySide;
   return (
-    <li>
-      <a href={`/dashboard/bookings/${row.id}`}>{title}</a>
-      {yourTurn && <span style={{ ...badge("#fef3c7", "#92400e"), marginLeft: 8 }}>your turn</span>}
-      <span style={{ color: "#666", fontSize: 13, marginLeft: 8 }}>
+    <SolidRow href={`/dashboard/bookings/${row.id}`}>
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
+        {/* "your turn" is the one thing on this row that genuinely needs the
+            accent: DESIGN.md's "one deliberate accent" rule (accent belongs
+            to the single most important thing on screen), and this badge is
+            exactly that: the row telling you it's waiting on you. */}
+        {yourTurn && <Badge variant="default" className="shrink-0">your turn</Badge>}
+      </div>
+      <span className="shrink-0 font-sora text-xs text-gk-muted">
         {row.thread.length} offer{row.thread.length === 1 ? "" : "s"} so far
       </span>
-    </li>
+    </SolidRow>
   );
 }
 
 function ConfirmedRow({ row }: { row: BookingRow }) {
   const title = useRowGigTitle(row.gigId);
   const next = useNextOccurrence(row.id);
+  // deposit is already frozen (computeDepositCents ran inside acceptBooking's
+  // transaction) — no need to recompute it here, only to display the number
+  // it already produced.
+  const depositDetail = row.deposit ? depositLine(row.deposit.amountCents) : undefined;
+  if (next) {
+    return (
+      <DateBlockRow
+        href={`/dashboard/bookings/${row.id}`}
+        dateMs={next.startsAt}
+        title={title}
+        subtitle={depositDetail ?? formatGigDateTime(next.startsAt)}
+        className="border border-gk-border bg-gk-surface px-3 hover:border-gk-accent/50 hover:bg-gk-surface"
+      />
+    );
+  }
   return (
-    <li>
-      <a href={`/dashboard/bookings/${row.id}`}>{title}</a>
-      {next && <span style={{ color: "#666", fontSize: 13, marginLeft: 8 }}>{formatGigDateTime(next.startsAt)}</span>}
-      {/* deposit is already frozen (computeDepositCents ran inside
-          acceptBooking's transaction) — no need to recompute it here, only
-          to display the number it already produced. */}
-      {row.deposit && <p style={{ margin: "2px 0 0", fontSize: 13, color: "#666" }}>{depositLine(row.deposit.amountCents)}</p>}
-    </li>
+    <SolidRow href={`/dashboard/bookings/${row.id}`}>
+      <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
+      {depositDetail && <span className="shrink-0 font-sora text-xs text-gk-muted">{depositDetail}</span>}
+    </SolidRow>
   );
 }
 
 function HistoryRow({ row }: { row: BookingRow }) {
   const title = useRowGigTitle(row.gigId);
   return (
-    <li>
-      <a href={`/dashboard/bookings/${row.id}`}>{title}</a>
-      <span style={{ color: "#666", fontSize: 13, marginLeft: 8 }}>{bookingHistoryLabel(row)}</span>
-    </li>
+    <SolidRow href={`/dashboard/bookings/${row.id}`}>
+      <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
+      <span className="shrink-0 font-sora text-xs text-gk-muted">{bookingHistoryLabel(row)}</span>
+    </SolidRow>
+  );
+}
+
+// Empty-state copy (task 11 addition, spec section 4's "named cause + one
+// action, night-life voice": antislop-copywriting governs, no emoji, no em
+// dashes). This component is mounted for both sides (musician portfolio AND
+// curator profile), so the copy stays role-neutral rather than naming an
+// action only one side could take.
+function InboxEmpty({ children }: { children: ReactNode }) {
+  return (
+    <p className="flex items-start gap-2 font-sora text-sm text-gk-muted">
+      <IconBookings size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+      {children}
+    </p>
   );
 }
 
@@ -203,23 +261,33 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
   }, [field, profileId]);
 
   return (
-    <div style={{ display: "grid", gap: 20 }}>
-      <section>
-        <h3>Open threads{open.length > 0 ? ` (${open.length})` : ""}</h3>
-        {open.length === 0 ? <p style={{ color: "#666" }}>No open booking requests.</p> : (
-          <ul>{open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} />)}</ul>
+    <div className="grid gap-6">
+      <section className="grid gap-2.5">
+        <h3 className="font-syne text-sm font-semibold text-gk-text">
+          Open threads{open.length > 0 ? ` (${open.length})` : ""}
+        </h3>
+        {open.length === 0 ? (
+          <InboxEmpty>No open threads yet. Offers and counters will show up here.</InboxEmpty>
+        ) : (
+          <ul className="grid gap-2">{open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
       </section>
-      <section>
-        <h3>Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}</h3>
-        {confirmed.length === 0 ? <p style={{ color: "#666" }}>Nothing confirmed yet.</p> : (
-          <ul>{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} />)}</ul>
+      <section className="grid gap-2.5">
+        <h3 className="font-syne text-sm font-semibold text-gk-text">
+          Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}
+        </h3>
+        {confirmed.length === 0 ? (
+          <InboxEmpty>Nothing confirmed yet. Accepted offers turn into dates here.</InboxEmpty>
+        ) : (
+          <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} />)}</ul>
         )}
       </section>
-      <section>
-        <h3>History</h3>
-        {history.length === 0 ? <p style={{ color: "#666" }}>No past bookings yet.</p> : (
-          <ul>{history.map((row) => <HistoryRow key={row.id} row={row} />)}</ul>
+      <section className="grid gap-2.5">
+        <h3 className="font-syne text-sm font-semibold text-gk-text">History</h3>
+        {history.length === 0 ? (
+          <InboxEmpty>No history yet. Completed and closed bookings will land here.</InboxEmpty>
+        ) : (
+          <ul className="grid gap-2">{history.map((row) => <HistoryRow key={row.id} row={row} />)}</ul>
         )}
       </section>
     </div>

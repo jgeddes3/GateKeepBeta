@@ -15,6 +15,10 @@ import {
   CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_CANCEL_REASON_LENGTH, CANCEL_GRACE_MS,
   type BookingSide,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
+import { Textarea } from "../ui/textarea";
+import { IconWarning } from "../ui/icons";
 
 // Shared cancel UI for both cancelBooking (mode "booking" — the whole
 // booking/run) and cancelOccurrence (mode "occurrence" — one date of a
@@ -100,26 +104,36 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
   };
 
   return (
-    <div style={{ border: "1px solid #fca5a5", borderRadius: 8, padding: 12, display: "grid", gap: 10, background: "#fef2f2" }}>
-      <p style={{ margin: 0, fontWeight: 600 }}>{mode === "booking" ? "Cancel this booking" : "Cancel this date"}</p>
-      <p style={{ margin: 0, color: "#92400e" }}>{warning}</p>
-      <div>
-        <textarea rows={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reason} disabled={busy}
-          onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)" aria-label="Cancellation reason"
-          style={{ width: "100%" }} />
-        <p style={{ margin: "2px 0 0", fontSize: 12, color: "#666" }}>{reason.length}/{MAX_CANCEL_REASON_LENGTH}</p>
-      </div>
-      {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-          {error}
+    <Card className="border-gk-destructive/40 bg-gk-destructive/14 p-4">
+      <CardContent className="grid gap-3 p-0">
+        <p className="font-syne text-base font-semibold text-gk-text">
+          {mode === "booking" ? "Cancel this booking" : "Cancel this date"}
         </p>
-      )}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={submit} disabled={busy} style={{ color: "#dc2626" }}>
-          {busy ? "Cancelling…" : "Confirm cancellation"}
-        </button>
-        <button type="button" onClick={onClose} disabled={busy}>Back</button>
-      </div>
-    </div>
+        <p className="flex items-start gap-2 font-sora text-sm text-gk-destructive">
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          {warning}
+        </p>
+        <div className="grid gap-1">
+          <Textarea rows={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reason} disabled={busy}
+            onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)" aria-label="Cancellation reason" />
+          <p className="font-sora text-xs text-gk-muted">{reason.length}/{MAX_CANCEL_REASON_LENGTH}</p>
+        </div>
+        {error && (
+          <p
+            role="alert"
+            className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          >
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {error}
+          </p>
+        )}
+        <div className="flex gap-2">
+          <Button onClick={submit} disabled={busy} variant="destructive">
+            {busy ? "Cancelling…" : "Confirm cancellation"}
+          </Button>
+          <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Back</Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

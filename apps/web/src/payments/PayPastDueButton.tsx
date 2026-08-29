@@ -4,6 +4,9 @@ import { httpsCallable } from "firebase/functions";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import { getFirebase } from "../lib/firebase";
 import { getStripeJs } from "./stripeLoader";
+import { gkStripeAppearance } from "./stripeAppearance";
+import { Button } from "../ui/button";
+import { IconWarning } from "../ui/icons";
 
 // SP5 Task 15 — pays down an overdue settlement OR an exhausted birth
 // deposit for one occurrence. `payPastDue` DISPATCHES server-side on which
@@ -27,7 +30,11 @@ interface PayPastDueResult {
 
 function ErrorBox({ message }: { message: string }) {
   return (
-    <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+    <p
+      role="alert"
+      className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+    >
+      <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
       {message}
     </p>
   );
@@ -60,12 +67,12 @@ function ConfirmForm({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
   };
 
   return (
-    <div style={{ display: "grid", gap: 10 }}>
+    <div className="grid gap-3">
       <PaymentElement />
       {error && <ErrorBox message={error} />}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={confirm} disabled={busy || !stripe || !elements}>{busy ? "Paying…" : "Pay now"}</button>
-        <button type="button" onClick={onCancel} disabled={busy}>Cancel</button>
+      <div className="flex gap-2">
+        <Button onClick={confirm} disabled={busy || !stripe || !elements}>{busy ? "Paying…" : "Pay now"}</Button>
+        <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
       </div>
     </div>
   );
@@ -116,22 +123,22 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
   // getStripeStatus read that can still race the finalize write by a beat.
   // The copy says so rather than implying the delinquency banner/card row is
   // guaranteed to already reflect it.
-  if (done) return <p style={{ margin: 0, color: "#166534" }}>Payment sent — clearing any overdue status may take a moment.</p>;
+  if (done) return <p className="font-sora text-sm text-gk-success">Payment sent — clearing any overdue status may take a moment.</p>;
 
   if (clientSecret) {
     return (
-      <Elements stripe={getStripeJs()} options={{ clientSecret }}>
+      <Elements stripe={getStripeJs()} options={{ clientSecret, appearance: gkStripeAppearance() }}>
         <ConfirmForm onDone={() => { setDone(true); onDone?.(); }} onCancel={() => setClientSecret(null)} />
       </Elements>
     );
   }
 
   return (
-    <div style={{ display: "grid", gap: 6 }}>
+    <div className="grid gap-2">
       {error && <ErrorBox message={error} />}
-      <button onClick={start} disabled={busy} style={{ width: "fit-content", color: "#dc2626" }}>
+      <Button onClick={start} disabled={busy} variant="secondary" size="sm" className="w-fit text-gk-destructive">
         {busy ? "Starting…" : "Pay now"}
-      </button>
+      </Button>
     </div>
   );
 }

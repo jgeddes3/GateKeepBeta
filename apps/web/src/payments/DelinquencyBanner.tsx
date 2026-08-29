@@ -5,6 +5,7 @@ import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
 import type { StripeStatusResult } from "@gatekeep/shared";
+import { IconWarning } from "../ui/icons";
 
 // SP5 Task 15 — mounted on the curator profile editor (the closest thing
 // this app has to a "curator dashboard shell": it's where a curator's own
@@ -37,18 +38,19 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
   if (status?.delinquent !== true) return null;
 
   return (
-    <div style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, padding: 12, display: "grid", gap: 6 }}>
-      <p style={{ margin: 0, fontWeight: 600, color: "#991b1b" }}>
+    <div role="alert" className="grid gap-1.5 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-3">
+      <p className="flex items-start gap-2 font-sora text-sm font-semibold text-gk-destructive">
+        <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
         This profile has an overdue payment — you can&apos;t book new musicians until it&apos;s settled.
       </p>
       {affected === "loading" ? (
-        <p style={{ margin: 0, color: "#991b1b" }}>Checking which booking is affected…</p>
+        <p className="font-sora text-sm text-gk-destructive">Checking which booking is affected…</p>
       ) : affected.length > 0 ? (
-        <p style={{ margin: 0, color: "#991b1b" }}>
+        <p className="font-sora text-sm text-gk-destructive">
           Settle it from{" "}
           {affected.map((id, i) => (
             <span key={id}>
-              <Link href={`/dashboard/bookings/${id}`} style={{ color: "#991b1b", textDecoration: "underline" }}>
+              <Link href={`/dashboard/bookings/${id}`} className="underline underline-offset-4">
                 this booking{affected.length > 1 ? ` (${i + 1})` : ""}
               </Link>
               {i < affected.length - 1 ? ", " : ""}
@@ -57,7 +59,7 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
           .
         </p>
       ) : (
-        <p style={{ margin: 0, color: "#991b1b" }}>See your bookings below to find and settle the overdue date.</p>
+        <p className="font-sora text-sm text-gk-destructive">See your bookings below to find and settle the overdue date.</p>
       )}
     </div>
   );

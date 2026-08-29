@@ -7,6 +7,9 @@ import { formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
 import type { GigDoc } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
 type GigRow = GigDoc & { id: string };
 
@@ -66,54 +69,68 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
   };
 
   return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginTop: 8, display: "grid", gap: 10 }}>
-      <p style={{ margin: 0, fontWeight: 600 }}>Offer a gig to {musicianName}</p>
-      {bookingId ? (
-        <>
-          <p style={{ color: "#16a34a", margin: 0 }}>Offer sent!</p>
-          <p style={{ margin: 0 }}><a href={`/dashboard/bookings/${bookingId}`}>View the booking thread →</a></p>
-          <button type="button" onClick={onClose}>Close</button>
-        </>
-      ) : alreadySent ? (
-        <>
-          <p style={{ color: "#666", margin: 0 }}>There is already an open booking request between this act and that gig.</p>
-          <button type="button" onClick={onClose}>Close</button>
-        </>
-      ) : openGigs === "loading" ? (
-        <p style={{ margin: 0 }}>Loading your open gigs…</p>
-      ) : openGigs.length === 0 ? (
-        <>
-          <p style={{ margin: 0, color: "#666" }}>
-            You have no open gigs to offer right now. <a href={`/dashboard/curator/${curatorProfileId}/gigs/new`}>Post a gig</a>.
-          </p>
-          <button type="button" onClick={onClose}>Close</button>
-        </>
-      ) : (
-        <>
-          <label>Gig:{" "}
-            <select value={selectedGigId} onChange={(e) => setGigOverride(e.target.value)}>
-              {openGigs.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {(g.title || "Untitled gig")} — {formatGigDateTime(g.startsAt)} ({BUDGET_STRUCTURE_LABEL[g.budget.structure]})
-                </option>
-              ))}
-            </select>
-          </label>
-          {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
-          {/* SP5 Task 15: offerGig's own gates (requireCuratorChargeable)
-              throw CURATOR_CARD_REQUIRED_MESSAGE/CURATOR_DELINQUENT_MESSAGE
-              verbatim — GatePrompt opens SaveCardModal inline (retrying this
-              same submit once saved) or links to the overdue booking; any
-              other error falls through to the same plain warning line this
-              used to render directly. */}
-          {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={submit} />}
-          <p style={{ color: "#666", fontSize: 13, margin: 0 }}>{DEPOSIT_HONESTY_LINE}</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={submit} disabled={busy}>{busy ? "Sending…" : "Send offer"}</button>
-            <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
-          </div>
-        </>
-      )}
-    </div>
+    <Card className="mt-2 p-4">
+      <CardContent className="grid gap-3 p-0">
+        <p className="font-syne text-base font-semibold text-gk-text">Offer a gig to {musicianName}</p>
+        {bookingId ? (
+          <>
+            <p className="font-sora text-sm text-gk-success">Offer sent!</p>
+            <Button asChild variant="link" className="h-auto justify-self-start p-0">
+              <a href={`/dashboard/bookings/${bookingId}`}>View the booking thread →</a>
+            </Button>
+            <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
+          </>
+        ) : alreadySent ? (
+          <>
+            <p className="font-sora text-sm text-gk-muted">There is already an open booking request between this act and that gig.</p>
+            <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
+          </>
+        ) : openGigs === "loading" ? (
+          <p className="font-sora text-sm text-gk-muted">Loading your open gigs…</p>
+        ) : openGigs.length === 0 ? (
+          <>
+            <p className="font-sora text-sm text-gk-muted">
+              You have no open gigs to offer right now.{" "}
+              <a
+                href={`/dashboard/curator/${curatorProfileId}/gigs/new`}
+                className="text-gk-text underline underline-offset-4 hover:text-gk-accent"
+              >
+                Post a gig
+              </a>.
+            </p>
+            <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
+          </>
+        ) : (
+          <>
+            <div className="grid max-w-sm gap-1.5">
+              <label htmlFor="offer-composer-gig" className="font-sora text-sm font-medium text-gk-text">Gig</label>
+              <Select value={selectedGigId} onValueChange={setGigOverride}>
+                <SelectTrigger id="offer-composer-gig" className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {openGigs.map((g) => (
+                    <SelectItem key={g.id} value={g.id}>
+                      {(g.title || "Untitled gig")} — {formatGigDateTime(g.startsAt)} ({BUDGET_STRUCTURE_LABEL[g.budget.structure]})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
+            {/* SP5 Task 15: offerGig's own gates (requireCuratorChargeable)
+                throw CURATOR_CARD_REQUIRED_MESSAGE/CURATOR_DELINQUENT_MESSAGE
+                verbatim — GatePrompt opens SaveCardModal inline (retrying this
+                same submit once saved) or links to the overdue booking; any
+                other error falls through to the same plain warning line this
+                used to render directly. */}
+            {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={submit} />}
+            <p className="font-sora text-xs text-gk-muted">{DEPOSIT_HONESTY_LINE}</p>
+            <div className="flex gap-2">
+              <Button onClick={submit} disabled={busy}>{busy ? "Sending…" : "Send offer"}</Button>
+              <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }

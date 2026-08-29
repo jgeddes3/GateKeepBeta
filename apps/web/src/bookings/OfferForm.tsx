@@ -2,6 +2,9 @@
 import { useState } from "react";
 import { OfferFields, buildOfferPayload, emptyOffer, type OfferState, type OfferPayload } from "./BookingForms";
 import type { BudgetStructure } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
+import { IconWarning } from "../ui/icons";
 
 // Task 10's counter-offer form on the booking thread screen — same fields
 // as Task 9's apply/offer composers (OfferFields, buildOfferPayload —
@@ -30,17 +33,23 @@ export function OfferForm({ structure, busy, error, onSubmit, onCancel, submitLa
   };
 
   return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, display: "grid", gap: 10 }}>
-      <OfferFields structure={structure} value={offer} onChange={setOffer} disabled={busy} />
-      {(localError ?? error) && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-          {localError ?? error}
-        </p>
-      )}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={submit} disabled={busy}>{busy ? "Sending…" : submitLabel}</button>
-        <button type="button" onClick={onCancel} disabled={busy}>Cancel</button>
-      </div>
-    </div>
+    <Card className="p-4">
+      <CardContent className="grid gap-4 p-0">
+        <OfferFields structure={structure} value={offer} onChange={setOffer} disabled={busy} />
+        {(localError ?? error) && (
+          <p
+            role="alert"
+            className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          >
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {localError ?? error}
+          </p>
+        )}
+        <div className="flex gap-2">
+          <Button onClick={submit} disabled={busy}>{busy ? "Sending…" : submitLabel}</Button>
+          <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

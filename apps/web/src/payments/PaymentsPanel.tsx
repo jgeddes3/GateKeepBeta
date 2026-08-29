@@ -12,6 +12,11 @@ import {
   PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
   type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Badge, type badgeVariants } from "../ui/badge";
+import { Skeleton } from "../ui/skeleton";
+import { IconWarning } from "../ui/icons";
+import type { VariantProps } from "class-variance-authority";
 
 // SP5 Task 15 — the booking detail page's money surface: subscribes to
 // bookings/{id}/payments (rules permit either side's members + admins — see
@@ -91,6 +96,29 @@ function rowLabel(kind: PaymentRowKind, row: Row, isCuratorSide: boolean): strin
       const exhaustive: never = kind;
       return exhaustive;
     }
+  }
+}
+
+// Status chip variant per row kind (task 11, spec 4: "Status/money chips use
+// the established Badge treatments"). Pure display mapping, layered on top
+// of the existing rowLabel/paymentRowKind ladder: no new state, and no
+// change to which kind a row resolves to. Only the two PAST DUE kinds are
+// genuinely urgent (destructive); paid/forfeited are a settled success;
+// everything else (refunded/waived/pending/held/unpaid) is an ordinary,
+// expected in-progress or closed state, not a warning. DESIGN.md's status
+// tints name exactly three colors, and "pending"/"held in escrow" is normal,
+// not cautionary, so those get the neutral "secondary" treatment rather than
+// reaching for warning just to use a third color.
+function rowBadgeVariant(kind: PaymentRowKind): VariantProps<typeof badgeVariants>["variant"] {
+  switch (kind) {
+    case "paid":
+    case "forfeited":
+      return "success";
+    case "settlementPastDue":
+    case "depositPastDue":
+      return "destructive";
+    default:
+      return "secondary";
   }
 }
 
@@ -174,43 +202,48 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
   }
 
   return (
-    <section style={{ borderTop: "1px solid #eee", paddingTop: 24, display: "grid", gap: 16 }}>
-      <h2>Payments</h2>
+    <section className="grid gap-4 border-t border-gk-border pt-6">
+      <h2 className="font-syne text-lg font-semibold text-gk-text">Payments</h2>
 
       {isCuratorSide && curatorProfileId && (
-        <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+        <div className="rounded-gk border border-gk-border bg-gk-surface p-3.5">
           {showSaveCard ? (
             <SaveCardModal profileId={curatorProfileId}
               onSaved={() => { setShowSaveCard(false); setStripeReloadKey((k) => k + 1); }}
               onClose={() => setShowSaveCard(false)} />
           ) : stripeStatus === "loading" ? (
-            <p style={{ margin: 0, color: "#666" }}>Loading card status…</p>
+            <Skeleton className="h-5 w-40" />
           ) : stripeStatus === "error" ? (
-            <p style={{ margin: 0, color: "#92400e" }}>
-              Couldn&apos;t load your card status.{" "}
-              <button onClick={() => setStripeReloadKey((k) => k + 1)}>Retry</button>
+            <p className="flex flex-wrap items-center gap-2 font-sora text-sm text-gk-warning">
+              <IconWarning size={16} className="shrink-0" aria-hidden="true" />
+              Couldn&apos;t load your card status.
+              <Button onClick={() => setStripeReloadKey((k) => k + 1)} variant="link" className="h-auto p-0">Retry</Button>
             </p>
           ) : (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-              <span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-sora text-sm text-gk-text">
                 {stripeStatus.hasCard
                   ? `Card on file: ${stripeStatus.cardBrand ?? "card"} •••• ${stripeStatus.cardLast4 ?? "----"}`
                   : "No card on file"}
               </span>
-              <button onClick={() => setShowSaveCard(true)}>{stripeStatus.hasCard ? "Update card" : "Add a card"}</button>
+              <Button onClick={() => setShowSaveCard(true)} variant="secondary" size="sm">
+                {stripeStatus.hasCard ? "Update card" : "Add a card"}
+              </Button>
             </div>
           )}
         </div>
       )}
 
-      <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 10 }}>
+      <ul className="grid gap-2.5">
         {rows.map((row) => {
           const kind = paymentRowKind(row);
           return (
-            <li key={row.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, display: "grid", gap: 6 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span>{formatGigDateTime(row.occurrenceStartsAt)}</span>
-                <span>{rowLabel(kind, row, isCuratorSide)}</span>
+            <li key={row.id} className="grid gap-2.5 rounded-gk border border-gk-border bg-gk-surface p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-sora text-sm text-gk-text">{formatGigDateTime(row.occurrenceStartsAt)}</span>
+                {/* Status/money chip (spec 4): the established Badge status
+                    treatments, not a bespoke color per row. */}
+                <Badge variant={rowBadgeVariant(kind)}>{rowLabel(kind, row, isCuratorSide)}</Badge>
               </div>
               {isCuratorSide && (kind === "settlementPastDue" || kind === "depositPastDue") && (
                 <PayPastDueButton bookingId={bookingId} gigId={row.id} onDone={() => setStripeReloadKey((k) => k + 1)} />
@@ -225,9 +258,9 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
                     onDone={() => setOpenTrueUpFor(null)} onCancel={() => setOpenTrueUpFor(null)}
                   />
                 ) : (
-                  <button onClick={() => setOpenTrueUpFor(row.id)} style={{ width: "fit-content", fontSize: 13 }}>
+                  <Button onClick={() => setOpenTrueUpFor(row.id)} variant="secondary" size="sm" className="w-fit">
                     Report actuals
-                  </button>
+                  </Button>
                 )
               )}
             </li>
@@ -235,9 +268,11 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
         })}
       </ul>
 
-      <div style={{ borderTop: "1px solid #eee", paddingTop: 10 }}>
-        <p style={{ margin: 0 }}>Held in escrow: {formatCents(heldCents)}</p>
-        <p style={{ margin: 0 }}>Total paid so far: {formatCents(paidCents)} (includes {formatCents(feesCents)} in service fees)</p>
+      <div className="grid gap-0.5 border-t border-gk-border pt-3">
+        <p className="font-sora text-sm text-gk-text">Held in escrow: {formatCents(heldCents)}</p>
+        <p className="font-sora text-sm text-gk-text">
+          Total paid so far: {formatCents(paidCents)} (includes {formatCents(feesCents)} in service fees)
+        </p>
       </div>
     </section>
   );

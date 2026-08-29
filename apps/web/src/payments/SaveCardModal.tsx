@@ -4,6 +4,10 @@ import { httpsCallable } from "firebase/functions";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import { getFirebase } from "../lib/firebase";
 import { getStripeJs, stripeEnabled } from "./stripeLoader";
+import { gkStripeAppearance } from "./stripeAppearance";
+import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
+import { IconWarning } from "../ui/icons";
 
 // House idiom (see src/bookings/CancelDialog.tsx): "use client",
 // httpsCallable(getFirebase().functions, ...), inline styles, verbatim
@@ -63,31 +67,39 @@ export function SaveCardModal({ profileId, onSaved, onClose }: {
   };
 
   return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, display: "grid", gap: 10 }}>
-      <p style={{ margin: 0, fontWeight: 600 }}>Save a payment card</p>
-      {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-          {error}
-        </p>
-      )}
-      {fakeSaved ? (
-        <>
-          <p style={{ margin: 0, color: "#166534" }}>Test card saved (visa •••• 4242) — no real Stripe Elements form runs in the emulator.</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={onSaved}>Done</button>
+    <Card className="p-4">
+      <CardContent className="grid gap-3 p-0">
+        <p className="font-syne text-base font-semibold text-gk-text">Save a payment card</p>
+        {error && (
+          <p
+            role="alert"
+            className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          >
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {error}
+          </p>
+        )}
+        {fakeSaved ? (
+          <>
+            <p className="font-sora text-sm text-gk-success">
+              Test card saved (visa •••• 4242) — no real Stripe Elements form runs in the emulator.
+            </p>
+            <div className="flex gap-2">
+              <Button onClick={onSaved}>Done</Button>
+            </div>
+          </>
+        ) : clientSecret ? (
+          <Elements stripe={getStripeJs()} options={{ clientSecret, appearance: gkStripeAppearance() }}>
+            <CardConfirmForm profileId={profileId} onSaved={onSaved} onCancel={onClose} />
+          </Elements>
+        ) : (
+          <div className="flex gap-2">
+            <Button onClick={start} disabled={busy}>{busy ? "Starting…" : "Add a card"}</Button>
+            <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
           </div>
-        </>
-      ) : clientSecret ? (
-        <Elements stripe={getStripeJs()} options={{ clientSecret }}>
-          <CardConfirmForm profileId={profileId} onSaved={onSaved} onCancel={onClose} />
-        </Elements>
-      ) : (
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={start} disabled={busy}>{busy ? "Starting…" : "Add a card"}</button>
-          <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
-        </div>
-      )}
-    </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -133,16 +145,20 @@ function CardConfirmForm({ profileId, onSaved, onCancel }: {
   };
 
   return (
-    <div style={{ display: "grid", gap: 10 }}>
+    <div className="grid gap-3">
       <PaymentElement />
       {error && (
-        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+        <p
+          role="alert"
+          className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+        >
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
           {error}
         </p>
       )}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={confirm} disabled={busy || !stripe || !elements}>{busy ? "Saving…" : "Save card"}</button>
-        <button type="button" onClick={onCancel} disabled={busy}>Cancel</button>
+      <div className="flex gap-2">
+        <Button onClick={confirm} disabled={busy || !stripe || !elements}>{busy ? "Saving…" : "Save card"}</Button>
+        <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
       </div>
     </div>
   );

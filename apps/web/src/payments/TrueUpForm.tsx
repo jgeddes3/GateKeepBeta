@@ -8,10 +8,18 @@ import {
   TRUE_UP_INCREASE_ONLY_MESSAGE, trueUpDeltaPreviewCents,
   type BudgetStructure, type FeePolicy,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { Card, CardContent } from "../ui/card";
+import { Input } from "../ui/input";
+import { IconWarning } from "../ui/icons";
 
 function ErrorBox({ message }: { message: string }) {
   return (
-    <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+    <p
+      role="alert"
+      className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+    >
+      <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
       {message}
     </p>
   );
@@ -96,28 +104,31 @@ export function TrueUpForm({
   };
 
   return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10, display: "grid", gap: 8 }}>
-      <p style={{ margin: 0, fontWeight: 600 }}>Report actuals</p>
-      <label>
-        {isPerHour ? "Extra minutes played" : "Extra songs played"}:{" "}
-        <input type="number" min={0} max={cap} step={1} disabled={busy} style={{ width: 90 }}
-          value={rawInput} onChange={(e) => setRawInput(e.target.value)}
-          placeholder="0" aria-label={isPerHour ? "Extra minutes played" : "Extra songs played"} />
-      </label>
-      <p style={{ margin: 0, fontSize: 12, color: "#666" }}>
-        Actuals can only increase — this replaces any previous report for this date.
-      </p>
-      {preview && preview.deltaBaseCents > 0 && (
-        <p style={{ margin: 0, fontSize: 13, color: "#166534" }}>
-          The musician will receive an extra {formatCents(preview.musicianDeltaCents)}
-          {" "}— you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
+    <Card className="p-3.5">
+      <CardContent className="grid gap-2.5 p-0">
+        <p className="font-syne text-sm font-semibold text-gk-text">Report actuals</p>
+        <div className="grid max-w-40 gap-1.5">
+          <label htmlFor="true-up-extra" className="font-sora text-sm font-medium text-gk-text">
+            {isPerHour ? "Extra minutes played" : "Extra songs played"}
+          </label>
+          <Input id="true-up-extra" type="number" min={0} max={cap} step={1} disabled={busy}
+            value={rawInput} onChange={(e) => setRawInput(e.target.value)} placeholder="0" />
+        </div>
+        <p className="font-sora text-xs text-gk-muted">
+          Actuals can only increase — this replaces any previous report for this date.
         </p>
-      )}
-      {error && <ErrorBox message={error} />}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save actuals"}</button>
-        <button type="button" onClick={onCancel} disabled={busy}>Cancel</button>
-      </div>
-    </div>
+        {preview && preview.deltaBaseCents > 0 && (
+          <p className="font-sora text-sm text-gk-success">
+            The musician will receive an extra {formatCents(preview.musicianDeltaCents)}
+            {" "}— you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
+          </p>
+        )}
+        {error && <ErrorBox message={error} />}
+        <div className="flex gap-2">
+          <Button onClick={submit} disabled={busy} size="sm">{busy ? "Saving…" : "Save actuals"}</Button>
+          <Button type="button" variant="secondary" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

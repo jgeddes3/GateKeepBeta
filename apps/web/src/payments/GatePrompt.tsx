@@ -7,6 +7,8 @@ import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   DEPOSIT_PROCESSING_MESSAGE,
 } from "@gatekeep/shared";
+import { Button } from "../ui/button";
+import { IconInfo, IconWarning } from "../ui/icons";
 
 // SP5 Task 15 — renders the RIGHT inline recovery UI for one of the SP5
 // gate/outcome messages the apply/offer/accept callables can throw VERBATIM
@@ -25,9 +27,18 @@ import {
 
 function WarnBox({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+    <div className="grid gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-3">
       {children}
     </div>
+  );
+}
+
+function WarnLine({ children }: { children: React.ReactNode }) {
+  return (
+    <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+      <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+      <span>{children}</span>
+    </p>
   );
 }
 
@@ -47,8 +58,11 @@ function CuratorCardGate({ message, curatorProfileId, onRetry }: {
   }
   return (
     <WarnBox>
-      <p style={{ margin: 0, color: "#92400e" }}>{message}</p>
-      <button onClick={() => setShowSaveCard(true)} style={{ width: "fit-content" }}>Save a card</button>
+      <p className="flex items-start gap-2 font-sora text-sm text-gk-warning">
+        <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+        {message}
+      </p>
+      <Button onClick={() => setShowSaveCard(true)} size="sm" className="w-fit">Save a card</Button>
     </WarnBox>
   );
 }
@@ -73,12 +87,15 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
   }, [curatorProfileId]);
   return (
     <WarnBox>
-      <p style={{ margin: 0, color: "#92400e" }}>{message}</p>
+      <p className="flex items-start gap-2 font-sora text-sm text-gk-warning">
+        <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+        {message}
+      </p>
       {affected === "loading" ? null : affected.length > 0 ? (
-        <p style={{ margin: 0 }}>
+        <p className="font-sora text-sm text-gk-text">
           {affected.map((id, i) => (
             <span key={id}>
-              <Link href={`/dashboard/bookings/${id}`}>
+              <Link href={`/dashboard/bookings/${id}`} className="text-gk-text underline underline-offset-4 hover:text-gk-accent">
                 Go to the overdue booking{affected.length > 1 ? ` (${i + 1})` : ""}
               </Link>
               {i < affected.length - 1 ? ", " : ""}
@@ -86,7 +103,9 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
           ))}
         </p>
       ) : (
-        <p style={{ margin: 0 }}><Link href="/dashboard">Go to your bookings</Link></p>
+        <p className="font-sora text-sm text-gk-text">
+          <Link href="/dashboard" className="text-gk-text underline underline-offset-4 hover:text-gk-accent">Go to your bookings</Link>
+        </p>
       )}
     </WarnBox>
   );
@@ -138,31 +157,39 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
     // curator's recovery UI — mirrors the non-musician branch of
     // MUSICIAN_PAYOUTS_REQUIRED_MESSAGE below.
     return (
-      <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+      <WarnLine>
         {message === CURATOR_DELINQUENT_MESSAGE
           ? "The curator has an overdue payment to resolve before this booking can be confirmed — they've been notified."
           : "The curator needs to finish payment setup before this booking can be confirmed — they've been notified."}
-      </p>
+      </WarnLine>
     );
   }
   if (message === MUSICIAN_PAYOUTS_REQUIRED_MESSAGE) {
     return viewerIsMusician ? (
       <WarnBox>
-        <p style={{ margin: 0, color: "#92400e" }}>{message}</p>
-        <p style={{ margin: 0 }}><Link href="/dashboard/earnings">Finish payout setup →</Link></p>
+        <p className="flex items-start gap-2 font-sora text-sm text-gk-warning">
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          {message}
+        </p>
+        <Button asChild variant="link" className="h-auto w-fit p-0">
+          <Link href="/dashboard/earnings">Finish payout setup →</Link>
+        </Button>
       </WarnBox>
     ) : (
-      <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-        The musician hasn&apos;t finished payout setup yet — they&apos;ve been notified.
-      </p>
+      <WarnLine>The musician hasn&apos;t finished payout setup yet — they&apos;ve been notified.</WarnLine>
     );
   }
   // DEPOSIT_PROCESSING_MESSAGE is NOT a failure (the booking confirms
-  // automatically once the charge clears) — info-styled (blue), not the
-  // warning amber every other branch uses.
+  // automatically once the charge clears): info-styled, not the warning
+  // treatment every other branch uses. No gk token names an "info" status
+  // (DESIGN.md's "Status tints" names exactly three: success/warning/
+  // destructive), so this reuses gk-muted/gk-border/gk-surface, the
+  // system's own neutral-informational combination, rather than inventing a
+  // fourth status color DESIGN.md doesn't define.
   if (message === DEPOSIT_PROCESSING_MESSAGE) {
     return (
-      <p style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 12, color: "#1e40af", margin: 0 }}>
+      <p className="flex items-start gap-2 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5 font-sora text-sm text-gk-text">
+        <IconInfo size={16} className="mt-0.5 shrink-0 text-gk-muted" aria-hidden="true" />
         {message}
       </p>
     );
@@ -172,9 +199,5 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
   // and any unrelated server error — is already actionable/informative
   // server copy on its own; same visual treatment this app's ErrorBox
   // convention has always used.
-  return (
-    <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-      {message}
-    </p>
-  );
+  return <WarnLine>{message}</WarnLine>;
 }

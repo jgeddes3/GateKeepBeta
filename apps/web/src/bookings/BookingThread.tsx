@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { collection, doc, getDoc, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL, badge } from "../gigs/GigForms";
+import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { formatDuration, type OfferPayload } from "./BookingForms";
 import { bookingHistoryLabel, depositLine } from "./BookingInbox";
 import { OfferForm } from "./OfferForm";
@@ -15,15 +15,50 @@ import {
   DEPOSIT_PERCENT, CANCEL_GRACE_MS, depositChargePreviewCents,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
+import { cn } from "../lib/utils";
+import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { Card, CardContent } from "../ui/card";
+import { Textarea } from "../ui/textarea";
+import { Skeleton } from "../ui/skeleton";
+import { IconWarning } from "../ui/icons";
 
 export type Role = "musician" | "curator" | "both" | "none" | "loading";
 export type Occurrence = { id: string; startsAt: number; durationMinutes: number };
 
 function ErrorBox({ message }: { message: string }) {
   return (
-    <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
+    <p
+      role="alert"
+      className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+    >
+      <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
       {message}
     </p>
+  );
+}
+
+// Loading skeleton (task 11 addition): this screen's own initial "loading"
+// state used to render a bare "Loading…" paragraph; every other async
+// surface in the app gets a content-shaped skeleton instead (spec section
+// 4). Shape mirrors the chat thread this becomes below it: a header line
+// plus a couple of alternating bubbles, without claiming any real data.
+function ThreadSkeleton() {
+  return (
+    <div className="grid gap-6" role="status" aria-label="Loading booking">
+      <div className="grid gap-2">
+        <Skeleton className="h-8 w-2/3" />
+        <Skeleton className="h-4 w-1/3" />
+      </div>
+      <div className="grid gap-3">
+        <div className="flex justify-start">
+          <Skeleton className="h-20 w-2/3 max-w-sm" />
+        </div>
+        <div className="flex justify-end">
+          <Skeleton className="h-20 w-2/3 max-w-sm" />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -143,31 +178,74 @@ export function useOccurrences(bookingId: string): Occurrence[] {
   return rows;
 }
 
-function ThreadHistory({ thread, structure }: { thread: BookingRequestDoc["thread"]; structure: BookingRequestDoc["structure"] }) {
+// Chat-style thread (sub-project 9A task 11, owner-locked per spec 6.7):
+// every offer/counter in the thread renders as a message bubble, own side
+// right and ember-tinted, other side left and solid, exactly the same
+// entries and data the plain-list version rendered before this restyle:
+// only the shape changed.
+function ThreadHistory({ thread, structure, mySide, lastEntryTotalCents }: {
+  thread: BookingRequestDoc["thread"];
+  structure: BookingRequestDoc["structure"];
+  // null in the "none"-role (observer) branch below: there's no "my side"
+  // to distinguish for a viewer who's a member of neither profile, so every
+  // bubble renders on the left as a neutral, solid surface there.
+  mySide: BookingSide | null;
+  // The CURRENT (last) entry's real expected total, when one is known: see
+  // this file's own derivation next to `preview` below (booking.acceptedTerms
+  // once the booking has been accepted, a real, already-frozen number, or
+  // else the same live accept-preview math this screen already computes for
+  // the accept-confirm block). Every earlier, superseded entry's bubble
+  // shows structure + amount only, exactly like the plain-list version did.
+  lastEntryTotalCents: number | null;
+}) {
   return (
-    <section>
-      <h2>
-        Offer history{" "}
-        <span style={{ color: "#666", fontSize: 14, fontWeight: 400 }}>thread {thread.length}/{MAX_BOOKING_THREAD_ENTRIES}</span>
+    <section className="grid gap-3">
+      <h2 className="flex flex-wrap items-baseline gap-x-2 gap-y-1 font-syne text-lg font-semibold text-gk-text">
+        Offer history
+        <span className="font-sora text-xs font-normal text-gk-muted">
+          thread {thread.length}/{MAX_BOOKING_THREAD_ENTRIES}
+        </span>
       </h2>
-      <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 8 }}>
+      <div className="grid gap-3">
         {thread.map((entry, i) => {
           const isCurrent = i === thread.length - 1;
+          const isMine = mySide != null && entry.by === mySide;
           return (
-            <li key={`${i}-${entry.at}`} style={{
-              border: `1px solid ${isCurrent ? "#111" : "#eee"}`, borderRadius: 8, padding: 10, background: isCurrent ? "#f9fafb" : "#fff",
-            }}>
-              <p style={{ margin: 0, fontWeight: isCurrent ? 600 : 400 }}>
-                {entry.by === "musician" ? "Musician" : "Curator"} offered {formatCents(entry.amountCents)} {BUDGET_STRUCTURE_LABEL[structure]}
-                {structure === "perSong" && entry.expectedQuantity != null ? ` × ${entry.expectedQuantity} songs` : ""}
-                {isCurrent && <span style={{ ...badge("#e0e7ff"), marginLeft: 8 }}>current offer</span>}
-              </p>
-              {entry.note && <p style={{ margin: "4px 0 0", color: "#666" }}>{entry.note}</p>}
-              <p style={{ margin: "4px 0 0", color: "#999", fontSize: 12 }}>{formatGigDateTime(entry.at)}</p>
-            </li>
+            <div key={`${i}-${entry.at}`} className={cn("flex", isMine ? "justify-end" : "justify-start")}>
+              <div
+                className={cn(
+                  "grid max-w-[85%] gap-2 rounded-gk border p-3.5 sm:max-w-[70%]",
+                  isMine ? "border-gk-accent/30 bg-gk-accent/14" : "border-gk-border bg-gk-surface",
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-sora text-xs font-medium text-gk-muted">
+                    {entry.by === "musician" ? "Musician" : "Curator"}
+                  </span>
+                  {isCurrent && <Badge variant="default">current offer</Badge>}
+                </div>
+                {/* Structured money-term card (spec 6.7): structure + amount
+                    (+ song count for perSong), and, only on the current
+                    entry, the expected total: see lastEntryTotalCents'
+                    own comment above for exactly where that number comes
+                    from. */}
+                <div className="grid gap-0.5 rounded-gk-sm border border-gk-border/60 bg-gk-page/60 px-3 py-2">
+                  <p className="font-syne text-base font-bold text-gk-text">
+                    {formatCents(entry.amountCents)}{" "}
+                    <span className="font-sora text-sm font-normal text-gk-muted">{BUDGET_STRUCTURE_LABEL[structure]}</span>
+                    {structure === "perSong" && entry.expectedQuantity != null ? ` × ${entry.expectedQuantity} songs` : ""}
+                  </p>
+                  {isCurrent && lastEntryTotalCents != null && (
+                    <p className="font-sora text-xs text-gk-muted">Expected total: {formatCents(lastEntryTotalCents)}</p>
+                  )}
+                </div>
+                {entry.note && <p className="font-sora text-sm text-gk-text">{entry.note}</p>}
+                <p className="font-sora text-xs text-gk-muted">{formatGigDateTime(entry.at)}</p>
+              </div>
+            </div>
           );
         })}
-      </ul>
+      </div>
     </section>
   );
 }
@@ -204,18 +282,28 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   // Render-safe "now" — see useNow's comment above.
   const now = useNow();
 
-  if (booking === "loading" || role === "loading") return <p>Loading…</p>;
+  if (booking === "loading" || role === "loading") return <ThreadSkeleton />;
   if (booking === "unavailable" || !booking) {
-    return <p>You don&apos;t have access to this booking, or it doesn&apos;t exist.</p>;
+    return (
+      <p className="flex items-start gap-2 font-sora text-sm text-gk-muted">
+        <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+        You don&apos;t have access to this booking, or it doesn&apos;t exist.
+      </p>
+    );
   }
   if (role === "none") {
     // Reachable only for an admin (bookings/{id}'s own read rule also
     // allows isAdmin()) — a stranger to both profiles can't read the
     // booking doc at all, so `booking` would already be "unavailable".
     return (
-      <div style={{ display: "grid", gap: 16 }}>
-        <p style={{ color: "#666" }}>Viewing as an observer — you&apos;re not a member of either side, so actions here are unavailable.</p>
-        <ThreadHistory thread={booking.thread} structure={booking.structure} />
+      <div className="grid gap-4">
+        <p className="font-sora text-sm text-gk-muted">
+          Viewing as an observer — you&apos;re not a member of either side, so actions here are unavailable.
+        </p>
+        <ThreadHistory
+          thread={booking.thread} structure={booking.structure} mySide={null}
+          lastEntryTotalCents={booking.acceptedTerms?.expectedTotalCents ?? null}
+        />
       </div>
     );
   }
@@ -260,6 +348,12 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
       chargePreview: depositChargePreviewCents(expectedTotalCents),
     };
   })();
+  // Chat-bubble money card (task 11, spec 6.7): the CURRENT (last) thread
+  // entry's real expected total, when one is known: booking.acceptedTerms
+  // once accepted (an already-frozen number), otherwise the same live
+  // accept-preview total computed above. Neither value is new math: this
+  // only hands an already-derived number down to ThreadHistory for display.
+  const lastEntryTotalCents = booking.acceptedTerms?.expectedTotalCents ?? preview?.expectedTotalCents ?? null;
   // SP5 Task 15 review round 1: "1-hour" derived from the actual shared
   // constant rather than a hardcoded literal that could drift from it if
   // CANCEL_GRACE_MS ever changes. CANCEL_GRACE_MS is exactly 3_600_000 today,
@@ -377,144 +471,154 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   // both-sides member (not hidden) — matches the ambiguity banner's own
   // promise ("cancellation and no-show reporting are disabled here").
   const reportNoShowBlock = (
-    <div style={{ borderTop: "1px solid #eee", paddingTop: 12, display: "grid", gap: 8 }}>
+    <div className="grid gap-2.5 border-t border-gk-border pt-4">
       {showReportForm ? (
-        <div style={{ display: "grid", gap: 8 }}>
-          <textarea rows={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reportReason}
+        <div className="grid gap-2.5">
+          <Textarea rows={3} maxLength={MAX_CANCEL_REASON_LENGTH} value={reportReason}
             onChange={(e) => setReportReason(e.target.value)} placeholder="What happened?" disabled={actionBusy !== null}
-            aria-label="No-show report reason" style={{ width: "100%" }} />
-          <p style={{ margin: 0, fontSize: 12, color: "#666" }}>{reportReason.length}/{MAX_CANCEL_REASON_LENGTH}</p>
+            aria-label="No-show report reason" />
+          <p className="font-sora text-xs text-gk-muted">{reportReason.length}/{MAX_CANCEL_REASON_LENGTH}</p>
           {actionError && <ErrorBox message={actionError} />}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={reportNoShow} disabled={actionBusy !== null} style={{ color: "#dc2626" }}>
+          <div className="flex gap-2">
+            <Button onClick={reportNoShow} disabled={actionBusy !== null} variant="destructive">
               {actionBusy === "reportNoShow" ? "Reporting…" : "Submit report"}
-            </button>
-            <button type="button" onClick={() => { setShowReportForm(false); setActionError(null); }} disabled={actionBusy !== null}>
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => { setShowReportForm(false); setActionError(null); }} disabled={actionBusy !== null}>
               Cancel
-            </button>
+            </Button>
           </div>
         </div>
       ) : (
-        <button onClick={() => setShowReportForm(true)} disabled={bothSides}
+        <Button onClick={() => setShowReportForm(true)} disabled={bothSides}
           title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
-          style={{ width: "fit-content", color: "#dc2626" }}>
+          variant="secondary" className="w-fit text-gk-destructive">
           Report a no-show
-        </button>
+        </Button>
       )}
     </div>
   );
 
   return (
-    <div style={{ display: "grid", gap: 20 }}>
+    <div className="grid gap-6">
       <div>
-        <h1 style={{ margin: 0 }}>{gigTitle}</h1>
-        <p style={{ margin: "4px 0 0", color: "#666" }}>
+        <h1 className="font-syne text-2xl font-extrabold text-gk-text sm:text-3xl">{gigTitle}</h1>
+        <p className="mt-1 font-sora text-sm text-gk-muted">
           {BUDGET_STRUCTURE_LABEL[booking.structure]} · Status: {booking.status.replace(/_/g, " ")}
         </p>
       </div>
 
       {bothSides && (
-        <p style={{ background: "#e0e7ff", border: "1px solid #c7d2fe", borderRadius: 8, padding: 12, margin: 0 }}>
+        <p className="rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5 font-sora text-sm text-gk-text">
           You&apos;re on both sides of this booking. Negotiation actions (accept/counter/decline/withdraw) still work — the
           server treats you as the musician side — but cancellation and no-show reporting are disabled here to avoid an
           ambiguous, self-favoring choice.
         </p>
       )}
 
-      <ThreadHistory thread={booking.thread} structure={booking.structure} />
+      <ThreadHistory
+        thread={booking.thread} structure={booking.structure} mySide={mySide}
+        lastEntryTotalCents={lastEntryTotalCents}
+      />
 
       {booking.status === "open" && (
-        <section style={{ display: "grid", gap: 10 }}>
-          <h2>Respond</h2>
+        <section className="grid gap-3 border-t border-gk-border pt-5">
+          <h2 className="font-syne text-lg font-semibold text-gk-text">Respond</h2>
           {showCounterForm ? (
             <OfferForm structure={booking.structure} busy={actionBusy === "counter"} error={actionError}
               onSubmit={counter} onCancel={() => { setShowCounterForm(false); setActionError(null); }} />
           ) : booking.awaitingSide !== mySide ? (
-            <div style={{ display: "grid", gap: 8 }}>
-              <p style={{ margin: 0, color: "#666" }}>Waiting on the other side to respond.</p>
-              <button onClick={withdraw} disabled={actionBusy !== null} style={{ width: "fit-content" }}>
+            <div className="grid gap-2.5">
+              <p className="font-sora text-sm text-gk-muted">Waiting on the other side to respond.</p>
+              <Button onClick={withdraw} disabled={actionBusy !== null} variant="secondary" className="w-fit">
                 {actionBusy === "withdraw" ? "Withdrawing…" : "Withdraw"}
-              </button>
+              </Button>
               {actionError && <ErrorBox message={actionError} />}
             </div>
           ) : (
-            <div style={{ display: "grid", gap: 10 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button onClick={() => setShowAcceptConfirm(true)} disabled={actionBusy !== null}>
+            <div className="grid gap-3">
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => setShowAcceptConfirm(true)} disabled={actionBusy !== null}>
                   Accept {formatCents(lastEntry.amountCents)}
-                </button>
-                <button onClick={() => setShowCounterForm(true)} disabled={actionBusy !== null}>Counter…</button>
-                <button onClick={decline} disabled={actionBusy !== null}>
+                </Button>
+                <Button onClick={() => setShowCounterForm(true)} disabled={actionBusy !== null} variant="secondary">Counter…</Button>
+                <Button onClick={decline} disabled={actionBusy !== null} variant="ghost">
                   {actionBusy === "decline" ? "Declining…" : "Decline"}
-                </button>
+                </Button>
               </div>
               {actionError && (
                 <GatePrompt message={actionError} curatorProfileId={booking.curatorProfileId}
                   viewerIsMusician={mySide === "musician"} onRetry={accept} />
               )}
               {showAcceptConfirm && (
-                <div style={{ border: "1px solid #111", borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
-                  <p style={{ margin: 0, fontWeight: 600 }}>Confirm accept</p>
-                  {preview ? (
-                    <>
-                      <p style={{ margin: 0 }}>Total: {formatCents(preview.expectedTotalCents)}</p>
-                      {/* SP5 Task 15 review round 1 (medium #4): the "Due now"
-                          breakdown is CURATOR money — only the curator side
-                          sees the actual figures; a musician-side accepter
-                          gets a neutral line instead (the charge lands on the
-                          CURATOR's card regardless of who clicks accept). */}
-                      {mySide === "curator" ? (
-                        <>
-                          <p style={{ margin: 0, color: "#666" }}>
-                            Due now: {formatCents(preview.chargePreview.totalCents)}{" "}
-                            ({formatCents(preview.chargePreview.sliceCents)} deposit{" + "}
-                            {formatCents(preview.chargePreview.feeCents)} service fee)
-                            {/* SP5 Task 15 review round 1 (medium #5): a whole-
-                                run booking's deposit is charged PER DATE, not
-                                once — the figure above is one date's worth.
-                                occurrences[] only ever holds "filled" gigs, so
-                                it's empty at this pre-accept point in
-                                practice; the count branch below is a
-                                cheap-if-available upgrade, not something this
-                                screen can currently reach, but it stays
-                                correct if that ever changes. */}
-                            {booking.seriesId != null && occurrences.length === 0
-                              ? " × each of the run's upcoming dates" : ""}
-                          </p>
-                          {booking.seriesId != null && occurrences.length > 0 && (
-                            <p style={{ margin: 0, color: "#666" }}>
-                              ≈ {occurrences.length} dates, {formatCents(preview.chargePreview.totalCents * occurrences.length)} total due now.
+                // Accept-confirm block restyled as a solid card (spec 6.7):
+                // gk-surface + gk-border, the same flat elevation every other
+                // card in the system uses, not a colored/ember callout.
+                <Card className="p-4">
+                  <CardContent className="grid gap-2.5 p-0">
+                    <p className="font-syne text-base font-semibold text-gk-text">Confirm accept</p>
+                    {preview ? (
+                      <>
+                        <p className="font-sora text-sm text-gk-text">Total: {formatCents(preview.expectedTotalCents)}</p>
+                        {/* SP5 Task 15 review round 1 (medium #4): the "Due now"
+                            breakdown is CURATOR money — only the curator side
+                            sees the actual figures; a musician-side accepter
+                            gets a neutral line instead (the charge lands on the
+                            CURATOR's card regardless of who clicks accept). */}
+                        {mySide === "curator" ? (
+                          <>
+                            <p className="font-sora text-sm text-gk-muted">
+                              Due now: {formatCents(preview.chargePreview.totalCents)}{" "}
+                              ({formatCents(preview.chargePreview.sliceCents)} deposit{" + "}
+                              {formatCents(preview.chargePreview.feeCents)} service fee)
+                              {/* SP5 Task 15 review round 1 (medium #5): a whole-
+                                  run booking's deposit is charged PER DATE, not
+                                  once — the figure above is one date's worth.
+                                  occurrences[] only ever holds "filled" gigs, so
+                                  it's empty at this pre-accept point in
+                                  practice; the count branch below is a
+                                  cheap-if-available upgrade, not something this
+                                  screen can currently reach, but it stays
+                                  correct if that ever changes. */}
+                              {booking.seriesId != null && occurrences.length === 0
+                                ? " × each of the run's upcoming dates" : ""}
                             </p>
-                          )}
-                          <p style={{ margin: 0, color: "#666" }}>
-                            Remaining {100 - DEPOSIT_PERCENT}% + fee auto-charges after each date.
+                            {booking.seriesId != null && occurrences.length > 0 && (
+                              <p className="font-sora text-sm text-gk-muted">
+                                ≈ {occurrences.length} dates, {formatCents(preview.chargePreview.totalCents * occurrences.length)} total due now.
+                              </p>
+                            )}
+                            <p className="font-sora text-sm text-gk-muted">
+                              Remaining {100 - DEPOSIT_PERCENT}% + fee auto-charges after each date.
+                            </p>
+                          </>
+                        ) : (
+                          <p className="font-sora text-sm text-gk-muted">
+                            The curator&apos;s card is charged the deposit when you accept.
                           </p>
-                        </>
-                      ) : (
-                        <p style={{ margin: 0, color: "#666" }}>
-                          The curator&apos;s card is charged the deposit when you accept.
-                        </p>
-                      )}
-                      {startsSoonFlash && (
-                        <p style={{ background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, padding: 12, color: "#92400e", margin: 0 }}>
-                          {mySide === "curator"
-                            ? `This booking starts soon — once accepted it's final after a ${graceHours}-hour grace period (cancelling later forfeits your deposit).`
-                            : `This booking starts soon — once accepted it's final after a ${graceHours}-hour grace period (cancelling less than ${MUSICIAN_MARK_WINDOW_HOURS}h out adds a reliability mark).`}
-                        </p>
-                      )}
-                    </>
-                  ) : (
-                    <p style={{ margin: 0, color: "#92400e" }}>
-                      Couldn&apos;t load this gig&apos;s details to preview the total right now — try again shortly.
-                    </p>
-                  )}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={accept} disabled={actionBusy !== null || !preview}>
-                      {actionBusy === "accept" ? "Accepting…" : "Confirm accept"}
-                    </button>
-                    <button type="button" onClick={() => setShowAcceptConfirm(false)} disabled={actionBusy !== null}>Back</button>
-                  </div>
-                </div>
+                        )}
+                        {startsSoonFlash && (
+                          <p className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                            {mySide === "curator"
+                              ? `This booking starts soon — once accepted it's final after a ${graceHours}-hour grace period (cancelling later forfeits your deposit).`
+                              : `This booking starts soon — once accepted it's final after a ${graceHours}-hour grace period (cancelling less than ${MUSICIAN_MARK_WINDOW_HOURS}h out adds a reliability mark).`}
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="flex items-start gap-2 font-sora text-sm text-gk-warning">
+                        <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                        Couldn&apos;t load this gig&apos;s details to preview the total right now — try again shortly.
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button onClick={accept} disabled={actionBusy !== null || !preview}>
+                        {actionBusy === "accept" ? "Accepting…" : "Confirm accept"}
+                      </Button>
+                      <Button type="button" variant="secondary" onClick={() => setShowAcceptConfirm(false)} disabled={actionBusy !== null}>Back</Button>
+                    </div>
+                  </CardContent>
+                </Card>
               )}
             </div>
           )}
@@ -522,41 +626,48 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
       )}
 
       {booking.status === "confirmed" && (
-        <section style={{ display: "grid", gap: 12 }}>
-          <h2>Confirmed</h2>
+        <section className="grid gap-3 border-t border-gk-border pt-5">
+          <h2 className="font-syne text-lg font-semibold text-gk-text">Confirmed</h2>
           {booking.acceptedTerms && (
-            <p style={{ margin: 0 }}>
+            <p className="font-sora text-sm text-gk-text">
               Terms: {formatCents(booking.acceptedTerms.amountCents)} {BUDGET_STRUCTURE_LABEL[booking.structure]}
               {" "}— total {formatCents(booking.acceptedTerms.expectedTotalCents)}
             </p>
           )}
-          {booking.deposit && <p style={{ margin: 0, color: "#666" }}>{depositLine(booking.deposit.amountCents)}</p>}
+          {booking.deposit && <p className="font-sora text-sm text-gk-muted">{depositLine(booking.deposit.amountCents)}</p>}
           {booking.seriesId == null && displayOccurrence && (
-            <p style={{ margin: 0 }}>{formatGigDateTime(displayOccurrence.startsAt)} ({formatDuration(displayOccurrence.durationMinutes)})</p>
+            <p className="font-sora text-sm text-gk-text">
+              {formatGigDateTime(displayOccurrence.startsAt)} ({formatDuration(displayOccurrence.durationMinutes)})
+            </p>
           )}
 
           {booking.seriesId != null && (
-            <div>
-              <h3>Dates</h3>
+            <div className="grid gap-2">
+              <h3 className="font-syne text-sm font-semibold text-gk-text">Dates</h3>
               {occurrences.length === 0 ? (
-                <p style={{ color: "#666" }}>No dates of this run remain booked.</p>
+                <p className="font-sora text-sm text-gk-muted">No dates of this run remain booked.</p>
               ) : (
-                <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 6 }}>
+                <ul className="grid gap-2">
                   {occurrences.map((o) => {
                     const isFuture = now != null && o.startsAt > now;
                     return (
-                      <li key={o.id} style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #eee", borderRadius: 6, padding: 8 }}>
-                        <span>{formatGigDateTime(o.startsAt)} ({formatDuration(o.durationMinutes)})</span>
+                      <li
+                        key={o.id}
+                        className="flex items-center gap-2 rounded-gk-sm border border-gk-border bg-gk-surface px-3 py-2"
+                      >
+                        <span className="font-sora text-sm text-gk-text">
+                          {formatGigDateTime(o.startsAt)} ({formatDuration(o.durationMinutes)})
+                        </span>
                         {isFuture && (
                           // Visible but disabled for a both-sides member (not hidden) — the
                           // ambiguity notice above already explains why; per-action disabling
                           // is the binding shape for cancel/report, unlike negotiation actions.
-                          <button
+                          <Button
                             onClick={() => setShowCancelFor({ mode: "occurrence", gigId: o.id, startsAt: o.startsAt })}
                             disabled={bothSides || actionBusy !== null} title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
-                            style={{ marginLeft: "auto", fontSize: 13 }}>
+                            variant="link" size="sm" className="ml-auto h-auto p-0 text-gk-destructive">
                             Cancel this date
-                          </button>
+                          </Button>
                         )}
                       </li>
                     );
@@ -572,11 +683,11 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
               onClose={() => setShowCancelFor(null)} onDone={() => setShowCancelFor(null)} />
           ) : (
             cancelTarget && (
-              <button onClick={() => setShowCancelFor({ mode: "booking", startsAt: cancelTarget.startsAt })}
+              <Button onClick={() => setShowCancelFor({ mode: "booking", startsAt: cancelTarget.startsAt })}
                 disabled={bothSides || actionBusy !== null} title={bothSides ? "Disabled — you're on both sides of this booking" : undefined}
-                style={{ width: "fit-content", color: "#dc2626" }}>
+                variant="secondary" className="w-fit text-gk-destructive">
                 Cancel this booking
-              </button>
+              </Button>
             )
           )}
 
@@ -585,32 +696,34 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
       )}
 
       {booking.status !== "open" && booking.status !== "confirmed" && (
-        <section style={{ display: "grid", gap: 10 }}>
-          <h2>{bookingHistoryLabel(booking)}</h2>
+        <section className="grid gap-3 border-t border-gk-border pt-5">
+          <h2 className="font-syne text-lg font-semibold text-gk-text">{bookingHistoryLabel(booking)}</h2>
           {(booking.status === "cancelled_by_curator" || booking.status === "cancelled_by_musician") && booking.cancellation && (
-            <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 4 }}>
-              <p style={{ margin: 0 }}>
-                Cancelled by the {booking.cancellation.by} side on {formatGigDateTime(booking.cancellation.at)}.
-              </p>
-              <p style={{ margin: 0, color: "#666" }}>Reason: {booking.cancellation.reason}</p>
-              <p style={{ margin: 0, color: "#666" }}>
-                {booking.cancellation.outcome === "deposit_forfeited" ? "Deposit forfeited to the musician." : "Deposit refunded."}
-                {booking.cancellation.markApplied ? (
-                  // reportNoShow always produces hoursBeforeStart <= 0 (the
-                  // occurrence had already started when reported); a
-                  // genuine LATE-but-before-start cancellation (cancelBooking
-                  // /cancelOccurrence's musician-side <24h path) always has
-                  // hoursBeforeStart > 0 — the sign reliably tells the two
-                  // apart without a dedicated field, since only one of these
-                  // two callables can ever produce a negative value.
-                  <> {booking.cancellation.hoursBeforeStart <= 0 ? "A reliability mark was recorded." : "A late-cancellation mark was recorded."}</>
-                ) : ""}
-              </p>
-            </div>
+            <Card className="p-4">
+              <CardContent className="grid gap-1.5 p-0">
+                <p className="font-sora text-sm text-gk-text">
+                  Cancelled by the {booking.cancellation.by} side on {formatGigDateTime(booking.cancellation.at)}.
+                </p>
+                <p className="font-sora text-sm text-gk-muted">Reason: {booking.cancellation.reason}</p>
+                <p className="font-sora text-sm text-gk-muted">
+                  {booking.cancellation.outcome === "deposit_forfeited" ? "Deposit forfeited to the musician." : "Deposit refunded."}
+                  {booking.cancellation.markApplied ? (
+                    // reportNoShow always produces hoursBeforeStart <= 0 (the
+                    // occurrence had already started when reported); a
+                    // genuine LATE-but-before-start cancellation (cancelBooking
+                    // /cancelOccurrence's musician-side <24h path) always has
+                    // hoursBeforeStart > 0 — the sign reliably tells the two
+                    // apart without a dedicated field, since only one of these
+                    // two callables can ever produce a negative value.
+                    <> {booking.cancellation.hoursBeforeStart <= 0 ? "A reliability mark was recorded." : "A late-cancellation mark was recorded."}</>
+                  ) : ""}
+                </p>
+              </CardContent>
+            </Card>
           )}
           {booking.status === "completed" && (
             <>
-              <p style={{ color: "#666" }}>This booking is complete.</p>
+              <p className="font-sora text-sm text-gk-muted">This booking is complete.</p>
               {isCuratorSide && canReportInCompleted && reportNoShowBlock}
             </>
           )}

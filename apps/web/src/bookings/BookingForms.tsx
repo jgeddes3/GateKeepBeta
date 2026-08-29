@@ -3,6 +3,8 @@ import {
   validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type BudgetStructure,
 } from "@gatekeep/shared";
+import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 // SP4 (Task 13 item 9): re-exported, not redefined — see GigForms.tsx's
 // identical formatGigDateTime re-export comment for the full rationale;
 // gigDisplay.ts is now the ONE canonical gigLocationLabel too (this file
@@ -79,26 +81,41 @@ export function buildOfferPayload(
 // accept, gated on the SAME structure-driven branch validateOfferInput uses
 // server-side (perHour is server-derived from the gig's duration; perSet
 // never takes a quantity).
+//
+// Theme pass (sub-project 9A task 11): src/ui Input/Textarea, same
+// label-above-field grid as GigForms.tsx's ContentFields/BudgetFields (the
+// one other money-amount field group in the app, "Min $"/"Max $"). The
+// dollar sign stays visible text next to the input (not hidden from
+// assistive tech) rather than folded into a placeholder, so a screen reader
+// still announces it exactly as the old inline "$" did.
 export function OfferFields({ structure, value, onChange, disabled }: {
   structure: BudgetStructure; value: OfferState; onChange: (v: OfferState) => void; disabled?: boolean;
 }) {
   const unitLabel = structure === "perHour" ? "per hour" : structure === "perSong" ? "per song" : "flat, per set";
   return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <label>Your offer ({unitLabel}): $
-        <input type="number" min={0} step="0.01" style={{ width: 100, marginLeft: 4 }} disabled={disabled}
-          value={value.amount} onChange={(e) => onChange({ ...value, amount: e.target.value })} />
-      </label>
-      {structure === "perSong" && (
-        <label>Song count:{" "}
-          <input type="number" min={1} max={MAX_OFFER_SONG_COUNT} step={1} style={{ width: 90 }} disabled={disabled}
-            value={value.quantity} onChange={(e) => onChange({ ...value, quantity: e.target.value })} />
+    <div className="grid gap-4">
+      <div className="grid max-w-44 gap-1.5">
+        <label htmlFor="offer-amount" className="font-sora text-sm font-medium text-gk-text">
+          Your offer ({unitLabel})
         </label>
+        <div className="flex items-center gap-1.5">
+          <span className="font-sora text-sm text-gk-muted">$</span>
+          <Input id="offer-amount" type="number" min={0} step="0.01" disabled={disabled}
+            value={value.amount} onChange={(e) => onChange({ ...value, amount: e.target.value })} />
+        </div>
+      </div>
+      {structure === "perSong" && (
+        <div className="grid max-w-32 gap-1.5">
+          <label htmlFor="offer-song-count" className="font-sora text-sm font-medium text-gk-text">Song count</label>
+          <Input id="offer-song-count" type="number" min={1} max={MAX_OFFER_SONG_COUNT} step={1} disabled={disabled}
+            value={value.quantity} onChange={(e) => onChange({ ...value, quantity: e.target.value })} />
+        </div>
       )}
-      <div>
-        <textarea rows={3} maxLength={MAX_OFFER_NOTE_LENGTH} placeholder="Note (optional)" aria-label="Note (optional)" disabled={disabled}
-          style={{ width: "100%" }} value={value.note} onChange={(e) => onChange({ ...value, note: e.target.value })} />
-        <p style={{ margin: "2px 0 0", fontSize: 12, color: "#666" }}>{value.note.length}/{MAX_OFFER_NOTE_LENGTH}</p>
+      <div className="grid gap-1.5">
+        <label htmlFor="offer-note" className="font-sora text-sm font-medium text-gk-text">Note (optional)</label>
+        <Textarea id="offer-note" rows={3} maxLength={MAX_OFFER_NOTE_LENGTH} placeholder="Note (optional)" disabled={disabled}
+          value={value.note} onChange={(e) => onChange({ ...value, note: e.target.value })} />
+        <p className="font-sora text-xs text-gk-muted">{value.note.length}/{MAX_OFFER_NOTE_LENGTH}</p>
       </div>
     </div>
   );
