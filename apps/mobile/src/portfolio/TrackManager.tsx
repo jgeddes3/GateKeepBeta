@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { View, Text, TextInput, Pressable, Alert } from "react-native";
+import { View, Pressable, Alert } from "react-native";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
+import { Text, Input, Card, StatusBadge } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
 
 type Row = TrackDoc & { id: string };
 
@@ -12,12 +14,16 @@ const STATUS_LABEL: Record<TrackDoc["status"], string> = {
   processing: "Processing…", pending_review: "In review", approved: "Live",
   rejected: "Rejected", failed: "Failed",
 };
-const STATUS_BG: Record<TrackDoc["status"], string> = {
-  approved: "#dcfce7", rejected: "#fee2e2", failed: "#fee2e2",
-  processing: "#fef9c3", pending_review: "#fef9c3",
+// Presentation-only: maps each track status to its StatusBadge tone (was a
+// raw hex-background map before the src/ui migration). Does not touch any
+// status-driven behavior; it only picks the badge color family.
+const STATUS_TONE: Record<TrackDoc["status"], "success" | "warning" | "destructive"> = {
+  approved: "success", rejected: "destructive", failed: "destructive",
+  processing: "warning", pending_review: "warning",
 };
 
 export function TrackManager({ profileId }: { profileId: string }) {
+  const tok = useTokens();
   const [tracks, setTracks] = useState<Row[]>([]);
   // Single flag, not per-row: reorderTracks affects TWO rows at once (the
   // swapped pair), so a per-row lock wouldn't stop a second tap from racing
@@ -42,14 +48,14 @@ export function TrackManager({ profileId }: { profileId: string }) {
   const call = async (name: string, data: object): Promise<boolean> => {
     setBusy(true);
     try { await httpsCallable(getFirebase().functions, name)(data); return true; }
-    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work — try again."); return false; }
+    catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work, try again."); return false; }
     finally { setBusy(false); }
   };
 
   const move = (i: number, dir: -1 | 1) => {
     if (busy || !tracks[i] || !tracks[i + dir]) return;
     // A single reorderTracks call with the whole reordered id list, not two
-    // sequential updateTrack calls — reorderTracks owns ordering atomically;
+    // sequential updateTrack calls: reorderTracks owns ordering atomically;
     // two separate calls would be non-atomic (a reload between them leaves
     // two tracks sharing an order) and a no-op on ties.
     const ids = tracks.map((t) => t.id);
@@ -59,7 +65,7 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
   const startRename = (t: Row) => { setRenamingId(t.id); setRenameText(t.title); };
   // Exits rename mode immediately (mirroring a native prompt dismissing
-  // itself synchronously) rather than waiting on the async call — the Alert
+  // itself synchronously) rather than waiting on the async call: the Alert
   // inside call() explains a failure, and re-opening below (pre-filled with
   // exactly what was typed, stashed BEFORE closing) means the musician
   // doesn't have to retype it after a transient network/server error.
@@ -75,30 +81,28 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
   return (
     <View style={{ gap: 8 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>
+      <Text variant="title">
         Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
       </Text>
       {tracks.map((t, i) => (
-        <View key={t.id} style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10, gap: 6 }}>
+        <Card key={t.id} style={{ gap: 6 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Text style={{ fontWeight: "600", flex: 1 }}>{t.title}</Text>
-            <View style={{ paddingVertical: 2, paddingHorizontal: 8, borderRadius: 10, backgroundColor: STATUS_BG[t.status] }}>
-              <Text style={{ fontSize: 12 }}>{STATUS_LABEL[t.status]}</Text>
-            </View>
+            <Text variant="label" style={{ flex: 1 }}>{t.title}</Text>
+            <StatusBadge label={STATUS_LABEL[t.status]} status={STATUS_TONE[t.status]} />
           </View>
           {(t.rejectionReason || t.failureReason) && (
-            <Text style={{ color: "#991b1b" }}>{t.rejectionReason ?? t.failureReason}</Text>
+            <Text color={tok.destructive}>{t.rejectionReason ?? t.failureReason}</Text>
           )}
           {renamingId === t.id ? (
             <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
-              <TextInput value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
+              <Input value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
                 returnKeyType="done" onSubmitEditing={() => saveRename(t.id)}
-                style={{ borderWidth: 1, borderRadius: 8, padding: 8, flex: 1 }} />
+                style={{ flex: 1 }} />
               <Pressable disabled={busy} onPress={() => saveRename(t.id)}>
-                <Text style={{ fontWeight: "600" }}>Save</Text>
+                <Text variant="label">Save</Text>
               </Pressable>
               <Pressable onPress={() => setRenamingId(null)}>
-                <Text style={{ color: "#666" }}>Cancel</Text>
+                <Text muted>Cancel</Text>
               </Pressable>
             </View>
           ) : (
@@ -117,11 +121,11 @@ export function TrackManager({ profileId }: { profileId: string }) {
                   { text: "Delete", style: "destructive",
                     onPress: () => void call("deleteTrack", { profileId, trackId: t.id }) },
                 ])}>
-                <Text style={{ color: "#dc2626", opacity: busy ? 0.4 : 1 }}>Delete</Text>
+                <Text color={tok.destructive} style={{ opacity: busy ? 0.4 : 1 }}>Delete</Text>
               </Pressable>
             </View>
           )}
-        </View>
+        </Card>
       ))}
       <TrimUploader profileId={profileId} onDone={() => { /* onSnapshot refreshes */ }} />
     </View>
