@@ -149,6 +149,38 @@ the key and the `data-theme` attribute, handing control back to the media query.
 script in `apps/web/app/layout.tsx` reads the same key before hydration, so there is no flash of
 the wrong theme on load.
 
+### Marketing-route dark default (sub-project 9A task 4 addition, post-review fix)
+
+The "Design language" section above states the rule: dark is the brand default for **signed-out
+marketing pages** (`/`, `/terms`, `/privacy`), not the visitor's OS preference the way every other
+route works. A light-OS visitor with no stored `gk-theme` choice must still see the dark hero,
+below-fold sections, and legal pages, the same as a dark-OS visitor. An explicit stored choice
+(light or dark) still overrides this everywhere, marketing routes included: this is a route-scoped
+*default*, not a route-scoped theme lock.
+
+Two pieces implement it, both reachable from `apps/web/app/layout.tsx`:
+
+1. **`layout.tsx`'s pre-hydration inline script** (the same one described in "System preference"
+   above) now also checks `window.location.pathname` when there's no stored choice: `/`, `/terms`,
+   and `/privacy` stamp `data-theme="dark"` on `<html>` itself, before first paint. Stamping the
+   *root*, not a subtree, matters here: `body`'s `--gk-page` background and every below-fold
+   section on these routes need to resolve dark too, not just the hero (the hero already forces its
+   own `data-theme="dark"` independently, see `HeroCarousel.tsx`'s own comment: that one exists for
+   a different reason, the photo scrim being always-dark regardless of theme, and stays even when a
+   visitor has explicitly chosen light).
+2. **`apps/web/src/shell/MarketingThemeDefault.tsx`** (new), mounted once and unconditionally in
+   `layout.tsx`, outside `AppShell`'s shell/non-shell branch. The inline script only runs once, on
+   a fresh document load; it can't react to a client-side `<Link>` navigation between a marketing
+   route and a non-marketing one (Next doesn't reload the document for those). This component
+   re-applies the identical route/stored-choice logic on every `usePathname()` change via
+   `useLayoutEffect`, so navigating from a dark-stamped marketing page to, say, `/sign-in` (a
+   non-marketing route with no `ThemeToggle` mounted to otherwise correct it) correctly clears the
+   forced attribute and falls back to system preference, and navigating the other way stamps dark
+   again. Like the inline script, it no-ops whenever an explicit choice is stored.
+
+Signed-in shell routes are unaffected: neither piece changes behavior there, so they keep following
+system preference (or an explicit stored choice) exactly as before this addition.
+
 ### Accessibility note on the accent
 
 `--gk-accent` (ember) measures roughly **6.4-6.9:1** against dark surfaces, comfortably AA, but only

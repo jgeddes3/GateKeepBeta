@@ -11,8 +11,10 @@ const TRANSITION_S = 1.2;
 // Full-viewport hero carousel (spec section 5.1). Images come from
 // heroImages.ts (any count from 1 to N: a single image renders statically
 // with no progress dots). Auto-advances LEFT every 15s with a slow slide
-// plus a soft cross-dim, pauses on hover, and collapses to the static first
-// image under prefers-reduced-motion (no interval, no dots, no transition).
+// plus a soft cross-dim, pauses on hover OR keyboard focus (WCAG 2.2.2:
+// hover alone isn't a pause control a keyboard-only visitor can reach; see
+// hovered/focused below), and collapses to the static first image under
+// prefers-reduced-motion (no interval, no dots, no transition).
 //
 // data-theme="dark" is forced on this section deliberately, not a stray
 // override: DESIGN.md documents --gk-scrim as the one token that never
@@ -27,7 +29,16 @@ export function HeroCarousel({ children }: { children?: ReactNode }) {
   const images = HERO_IMAGES;
   const hasMultiple = images.length > 1;
   const [index, setIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
+  // Two separate booleans, not one shared "paused" flag: a mouse-and-
+  // keyboard visitor can hover away from the hero while focus is still
+  // inside it (or vice versa), and either one alone must keep it paused.
+  // React's onFocus/onBlur are synthetic events that bubble (unlike native
+  // DOM focus/blur), so a single pair of handlers on the section catches
+  // focus moving to or away from any descendant, including the nav link,
+  // both CTAs, and every dot below.
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const paused = hovered || focused;
   const reducedMotion = useReducedMotion();
 
   useEffect(() => {
@@ -45,8 +56,10 @@ export function HeroCarousel({ children }: { children?: ReactNode }) {
     <section
       data-theme="dark"
       className="relative h-dvh min-h-[560px] w-full overflow-hidden"
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
     >
       <div className="absolute inset-0">
         {animated ? (
@@ -79,8 +92,18 @@ export function HeroCarousel({ children }: { children?: ReactNode }) {
       <div className="absolute inset-0" style={{ background: "var(--gk-scrim)" }} aria-hidden="true" />
       {children}
       {hasMultiple && !reducedMotion && (
+        // Plain buttons in a labeled role="group", not the ARIA tablist/tab
+        // pattern: that pattern requires roving tabindex, arrow-key
+        // navigation, and aria-controls pointing at a real per-tab panel,
+        // none of which fit a set of photo-picker dots (there's one shared
+        // image layer, not N separate panels). A partial tablist (the
+        // previous version here) is worse than no tablist: it tells
+        // assistive tech to expect behavior that isn't there. Plain
+        // Tab-reachable buttons, aria-current marking the visible photo,
+        // and a descriptive aria-label per button is the simplest pattern
+        // that's fully and honestly supported.
         <div
-          role="tablist"
+          role="group"
           aria-label="Hero photos"
           className="absolute inset-x-0 bottom-6 z-10 flex justify-center gap-1.5"
         >
@@ -88,8 +111,7 @@ export function HeroCarousel({ children }: { children?: ReactNode }) {
             <button
               key={img.src}
               type="button"
-              role="tab"
-              aria-selected={i === index}
+              aria-current={i === index}
               aria-label={`Show photo ${i + 1} of ${images.length}`}
               onClick={() => setIndex(i)}
               className={cn(
