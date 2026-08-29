@@ -15,10 +15,12 @@ import {
   Circle,
   DotsThreeVertical,
   FunnelSimple,
+  Globe,
   GoogleLogo,
   House,
   Image,
   Info,
+  InstagramLogo,
   LinkSimple,
   List,
   MagnifyingGlass,
@@ -30,6 +32,7 @@ import {
   PencilSimple,
   Play,
   Plus,
+  SpotifyLogo,
   Sun,
   Trash,
   UploadSimple,
@@ -37,6 +40,7 @@ import {
   Wallet,
   Warning,
   X,
+  YoutubeLogo,
 } from "@phosphor-icons/react/ssr";
 import type { ComponentProps, ComponentType } from "react";
 
@@ -127,6 +131,17 @@ export const IconPlus = pin(Plus);
 export const IconArrowUp = pin(ArrowUp);
 export const IconArrowDown = pin(ArrowDown);
 export const IconLink = pin(LinkSimple);
+
+// Sub-project 9A task 9: the artist page's External links section names
+// which platform each link points to (spotify/youtube/instagram/website,
+// ExternalLinkKind's full union), so each gets a real, brand-relevant mark
+// rather than IconLink's generic chain glyph for every row (antislop R-04).
+// "website" has no single platform logo; Globe is the closest genuinely
+// relevant glyph for "leaves the product to an external site" of that kind.
+export const IconSpotify = pin(SpotifyLogo);
+export const IconYoutube = pin(YoutubeLogo);
+export const IconInstagram = pin(InstagramLogo);
+export const IconWebsite = pin(Globe);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At

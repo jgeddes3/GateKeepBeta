@@ -34,19 +34,28 @@ export type PublicGig = GigDoc & { id: string };
 // `location` is always populated (every GigDoc has one) even though only
 // MusicianProfile.tsx's ShowCard renders it — the curator already knows
 // their own gig's location.
+// durationMinutes (Task 9 addition): public per the gigs read rule (a
+// filled, or closed-and-booked, gig is readable by anyone regardless of
+// query shape: see firestore.rules' comment on this exact disjunct), and
+// already present on every GigDoc these queries already fetch in full. The
+// past-shows page's member-only depth (spec 6.5) renders it alongside the
+// private earned/true-up figures it DOES need a gated read for, so it rides
+// along here at zero extra read cost rather than needing its own fetch.
 export type ShowEntry = {
-  gigId: string; title: string; startsAtMs: number; location: GigPublicLocation;
+  gigId: string; title: string; startsAtMs: number; location: GigPublicLocation; durationMinutes: number;
   otherProfileName: string; otherProfileHandle: string | null;
 };
 
 export type MusicianLoaded = {
   kind: "musician";
+  profileId: string;
   profile: ProfileDoc; tracks: LoadedTrack[];
   avatarUrl: string | null; coverUrl: string | null;
   upcomingShows: ShowEntry[]; pastShows: ShowEntry[];
 };
 export type CuratorLoaded = {
   kind: "curator";
+  profileId: string;
   profile: ProfileDoc;
   photoUrls: string[];
   openGigs: PublicGig[];
@@ -112,24 +121,33 @@ async function resolveProfileLabels(ids: string[]): Promise<Map<string, { name: 
 // OLDEST rows instead of the ones nearest "now", so the 20/20 caps are
 // applied in JS below, after the full (bounded-in-practice) result is in
 // hand.
+// Split out of loadMusicianShows (Task 9) so the new past-shows page (spec
+// 6.5) can reuse the EXACT SAME query (no new where/orderBy clause, no new
+// index) without loadMusicianShows' own 20-cap slice, which exists only for
+// the artist page's fixed-height Shows-box PREVIEW: see
+// loadAllPastMusicianShows below.
+async function fetchMusicianShowEntries(profileId: string): Promise<ShowEntry[]> {
+  const { db } = getServerFirebase();
+  const snap = await getDocs(query(
+    collection(db, "gigs"),
+    where("bookedMusicianProfileId", "==", profileId),
+    where("status", "in", ["filled", "closed"]),
+    orderBy("startsAt")));
+  const gigs = snap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
+  const labels = await resolveProfileLabels(gigs.map((g) => g.curatorProfileId));
+  return gigs.map((g) => {
+    const label = labels.get(g.curatorProfileId) ?? { name: "Unknown", handle: null };
+    return {
+      gigId: g.id, title: g.title, startsAtMs: g.startsAt, location: g.location, durationMinutes: g.durationMinutes,
+      otherProfileName: label.name, otherProfileHandle: label.handle,
+    };
+  });
+}
+
 async function loadMusicianShows(profileId: string): Promise<{ upcoming: ShowEntry[]; past: ShowEntry[] }> {
   try {
-    const { db } = getServerFirebase();
-    const snap = await getDocs(query(
-      collection(db, "gigs"),
-      where("bookedMusicianProfileId", "==", profileId),
-      where("status", "in", ["filled", "closed"]),
-      orderBy("startsAt")));
-    const gigs = snap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
-    const labels = await resolveProfileLabels(gigs.map((g) => g.curatorProfileId));
+    const entries = await fetchMusicianShowEntries(profileId);
     const now = Date.now();
-    const entries: ShowEntry[] = gigs.map((g) => {
-      const label = labels.get(g.curatorProfileId) ?? { name: "Unknown", handle: null };
-      return {
-        gigId: g.id, title: g.title, startsAtMs: g.startsAt, location: g.location,
-        otherProfileName: label.name, otherProfileHandle: label.handle,
-      };
-    });
     return {
       upcoming: entries.filter((e) => e.startsAtMs > now).slice(0, 20), // already ascending -> soonest first
       past: entries.filter((e) => e.startsAtMs <= now).slice(-20).reverse(), // newest first
@@ -141,6 +159,22 @@ async function loadMusicianShows(profileId: string): Promise<{ upcoming: ShowEnt
     // contract) beats a 500 for every visitor to this profile.
     console.error("loadMusicianShows failed", profileId, e);
     return { upcoming: [], past: [] };
+  }
+}
+
+// Task 9: app/u/[handle]/shows/page.tsx's own base-depth loader. Same query,
+// same failure handling as loadMusicianShows above, just unsliced (this
+// page's entire purpose is the FULL past-shows history, not a preview) and
+// past-only (the new page links from the artist page's Shows box, which
+// already covers upcoming shows itself).
+export async function loadAllPastMusicianShows(profileId: string): Promise<ShowEntry[]> {
+  try {
+    const entries = await fetchMusicianShowEntries(profileId);
+    const now = Date.now();
+    return entries.filter((e) => e.startsAtMs <= now).reverse(); // newest first, matching loadMusicianShows' own past ordering
+  } catch (e) {
+    console.error("loadAllPastMusicianShows failed", profileId, e);
+    return [];
   }
 }
 
@@ -174,7 +208,7 @@ async function loadCuratorShows(profileId: string): Promise<{ upcoming: ShowEntr
     const entries: ShowEntry[] = gigs.map((g) => {
       const label = g.bookedMusicianProfileId ? labels.get(g.bookedMusicianProfileId) : undefined;
       return {
-        gigId: g.id, title: g.title, startsAtMs: g.startsAt, location: g.location,
+        gigId: g.id, title: g.title, startsAtMs: g.startsAt, location: g.location, durationMinutes: g.durationMinutes,
         otherProfileName: label?.name ?? "Unknown", otherProfileHandle: label?.handle ?? null,
       };
     });
@@ -203,7 +237,10 @@ async function loadMusician(profileId: string, profile: ProfileDoc): Promise<Mus
     storageUrl(profile.portfolio?.coverPhotoPath),
     loadMusicianShows(profileId),
   ]);
-  return { kind: "musician", profile, tracks, avatarUrl, coverUrl, upcomingShows: shows.upcoming, pastShows: shows.past };
+  return {
+    kind: "musician", profileId, profile, tracks, avatarUrl, coverUrl,
+    upcomingShows: shows.upcoming, pastShows: shows.past,
+  };
 }
 
 async function loadCurator(profileId: string, profile: ProfileDoc): Promise<CuratorLoaded> {
@@ -228,13 +265,19 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
     loadCuratorShows(profileId),
   ]);
   const openGigs = gigsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
-  return { kind: "curator", profile, photoUrls, openGigs, upcomingShows: shows.upcoming, pastShows: shows.past };
+  return {
+    kind: "curator", profileId, profile, photoUrls, openGigs,
+    upcomingShows: shows.upcoming, pastShows: shows.past,
+  };
 }
 
 // cache() dedupes this per-request across generateMetadata and the page body —
 // both call loadProfile(handle) with the same argument, so React's per-request
-// cache means the Firestore/Storage reads only actually happen once.
-const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
+// cache means the Firestore/Storage reads only actually happen once. Exported
+// (Task 9) so the new past-shows page (app/u/[handle]/shows/page.tsx) can
+// reuse this EXACT loader (same handle resolution, same approval gate, same
+// permission-denied-as-404 handling) rather than a second, driftable copy.
+export const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
   const handle = rawHandle.toLowerCase(); // handles are stored lowercase
   // Finding 5: an unvalidated handle segment (e.g. "/@a/b", "/@..") used to
   // reach doc(db, "handles", handle) directly — Firestore's doc() throws on
@@ -300,13 +343,13 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
     const pf = profile.portfolio;
     description = pf?.bio?.slice(0, 160)
       || [`${profile.name} on GateKeep`, pf?.genres?.length ? pf.genres.join(", ") : null]
-        .filter(Boolean).join(" — ");
+        .filter(Boolean).join(": ");
     imageUrl = data.coverUrl;
   } else {
     const c = profile.curator;
     description = c?.about?.slice(0, 160)
       || [`${profile.name} on GateKeep`, c?.lookingFor?.genres?.length ? c.lookingFor.genres.join(", ") : null]
-        .filter(Boolean).join(" — ");
+        .filter(Boolean).join(": ");
     imageUrl = data.photoUrls[0] ?? null;
   }
   return {

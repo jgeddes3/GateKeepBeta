@@ -29,6 +29,18 @@ export function formatGigDateTime(startsAtMs: number): string {
   return tzName ? `${formatted} ${tzName}` : formatted;
 }
 
+// Sub-project 9A task 9: DateBlockRow's own locked anatomy (spec section 4)
+// puts the DAY in a dedicated date chip, so a Shows-box row's muted
+// venue/time line only needs the TIME, not a second copy of the date
+// formatGigDateTime already renders redundantly in the chip beside it.
+export function formatGigTime(startsAtMs: number): string {
+  const date = new Date(startsAtMs);
+  const formatted = date.toLocaleString("en-US", { timeStyle: "short", timeZone: LAUNCH_TIMEZONE });
+  const tzName = new Intl.DateTimeFormat("en-US", { timeZone: LAUNCH_TIMEZONE, timeZoneName: "short" })
+    .formatToParts(date).find((p) => p.type === "timeZoneName")?.value;
+  return tzName ? `${formatted} ${tzName}` : formatted;
+}
+
 // Public precision per gig, matching GigPublicLocation's own shape: `address`
 // is present on the doc ONLY when addressVisibility=='public' (the write
 // path in functions/src/gigs.ts nulls it out otherwise), so this never needs

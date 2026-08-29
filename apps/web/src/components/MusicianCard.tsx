@@ -15,7 +15,9 @@ import { PhotoPlaceholder } from "./GigCard";
 // gives GigCard's photo a badge; it says nothing of the sort for this
 // card), so the photo area is photo/placeholder + scrim only.
 
-const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
+// Exported (Task 9): the artist page hero's own act-size chip needs the
+// exact same label, so it reuses this instead of a second, driftable copy.
+export const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
 
 export type MusicianCardProfile = {
   id: string;
