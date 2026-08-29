@@ -8,15 +8,20 @@
 // file uses the non-deprecated `*Icon` exports so new code does not start
 // life against an already-deprecated API. The curated set and the wrapped
 // `IconX` export names below are unchanged from the plan.
+import type { ColorValue } from "react-native";
 import * as Ph from "phosphor-react-native";
 import { useTokens } from "../theme/ThemeProvider";
 
-type Props = { size?: number; color?: string };
+// color accepts RN's ColorValue (not just string) so a caller can pass a
+// tabBarIcon/headerRight-supplied color straight through without an
+// as-string cast at every call site; the underlying Phosphor component only
+// takes a string, so the cast happens once here instead of N times.
+type Props = { size?: number; color?: ColorValue };
 
 function wrap(Comp: Ph.Icon) {
   return function Icon({ size = 20, color }: Props) {
     const t = useTokens();
-    return <Comp size={size} color={color ?? t.text} weight="duotone" />;
+    return <Comp size={size} color={(color ?? t.text) as string} weight="duotone" />;
   };
 }
 
@@ -45,4 +50,5 @@ export const IconMapPin = wrap(Ph.MapPinIcon);
 export const IconFunnel = wrap(Ph.FunnelIcon);
 export const IconBell = wrap(Ph.BellIcon);
 export const IconStar = wrap(Ph.StarIcon);
+export const IconHandshake = wrap(Ph.HandshakeIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.

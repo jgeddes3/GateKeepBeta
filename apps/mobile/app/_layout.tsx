@@ -1,5 +1,6 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect } from "react";
+import { View } from "react-native";
 import type { ReactElement, ReactNode } from "react";
 import * as Sentry from "@sentry/react-native";
 import * as SplashScreen from "expo-splash-screen";
@@ -53,7 +54,19 @@ function Gate() {
       <StatusBar style={active === "light" ? "dark" : "light"} />
       <Stack screenOptions={{
         headerShown: false,
+        // Border separates, shadow does not (DESIGN.md). This Stack's
+        // header is expo-router's native (OS-chrome) header, not the
+        // JS-rendered one Tabs uses: its headerStyle type only supports
+        // backgroundColor, and headerShadowVisible also controls the
+        // native bottom border on iOS (see expo-router's
+        // NativeStackNavigationOptions), so there is no headerStyle knob
+        // for a custom border here. headerBackground is the supported
+        // escape hatch for a themed background + hairline in its place.
+        headerShadowVisible: false,
         headerStyle: { backgroundColor: t.surface },
+        headerBackground: () => (
+          <View style={{ flex: 1, backgroundColor: t.surface, borderBottomWidth: 1, borderBottomColor: t.border }} />
+        ),
         headerTintColor: t.text,
         headerTitleStyle: { fontFamily: tokens.font.syne[700] },
       }}>
