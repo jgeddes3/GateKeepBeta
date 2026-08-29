@@ -745,6 +745,37 @@ before a real launch:
    `apps/web/src/shell/Footer.tsx`) is a placeholder, `hello@gatekeep.app`. The operator must own
    that mailbox or change it to a real one before launch.
 
+### Sub-project 9B smoke checklist (mobile UI/UX)
+
+Sub-project 9B was a presentation-only redesign of the mobile app (the app shell, three-state
+theming, branded skeleton/empty/error states, photo-forward browse cards, the artist page, and
+every SP4/SP5 booking and money surface), with zero behavior change. It is the one thing this
+machine cannot verify, since it can't run the dev client, so the owner runs this visual pass on
+the next EAS dev-client build. Walk every item at phone width, once in dark theme and again in
+light:
+
+- **Shell**: tab bars, headers, the context switcher (fan / musician / curator), and the
+  three-state theme toggle (system / light / dark) all render and switch cleanly.
+- **Auth + join**: sign-in, sign-up, and the join wizard, including the inline error banners and
+  the forgot-password flow.
+- **Dashboards + account**: the curator and musician dashboards and the account screens.
+- **Editors**: the profile editors (musician portfolio, curator wizard/editor) and the gig
+  composer, including photo upload and its processing state.
+- **Browse + events**: the gig and musician browse cards (photo-forward, with the placeholder art
+  when a photo is missing) and curator events management (list → composer → gig → series).
+- **Artist page**: the cover-photo hero, the Shows section, and the inline solid audio player
+  (play/pause, one track at a time).
+- **Booking thread**: offer, counter, accept, and cancel, with each state's chips and buttons.
+- **Money surfaces**: the native PaymentSheet appearance, save-card, and the earnings, payout,
+  delinquency, and gate-prompt surfaces. (Sheets appear only when
+  `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` is set for the build; a keyless build skips them.)
+- **Loading / empty / error**: skeleton loaders, branded empty states, and branded error states
+  across the screens above.
+- **Coming-soon states**: the fan tabs (discover, search, tickets) and the curator/musician
+  messages tabs.
+- **Both themes**: repeat the entire pass above in the other theme, so every surface is confirmed
+  in both dark and light.
+
 ### Manual smoke walkthrough (real Stripe test mode)
 
 The emulator suite covers the sagas against `FakeStripe`; this walkthrough is the one thing it
