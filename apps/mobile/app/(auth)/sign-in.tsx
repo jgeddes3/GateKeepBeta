@@ -9,7 +9,7 @@ import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
 import { getFirebase } from "../../src/lib/firebase";
 import { GOOGLE_WEB_CLIENT_ID } from "../../src/auth/config";
-import { Text, Button, Input, PageBackground } from "../../src/ui";
+import { Text, Button, Input, PageBackground, ErrorBanner } from "../../src/ui";
 import { useTokens } from "../../src/theme/ThemeProvider";
 import { tokens } from "../../src/theme/tokens";
 
@@ -103,12 +103,7 @@ export default function SignIn() {
       <PageBackground />
       <View style={{ flex: 1, justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
         <Text variant="display">GateKeep</Text>
-        {error ? (
-          <View style={{ borderWidth: 1, borderColor: t.destructive, borderRadius: tokens.radius.card,
-            padding: tokens.space.md, backgroundColor: t.surface }}>
-            <Text color={t.destructive}>{error}</Text>
-          </View>
-        ) : null}
+        <ErrorBanner message={error} />
         <Input placeholder="Email" autoCapitalize="none" keyboardType="email-address"
           value={email} onChangeText={setEmail} />
         <Input placeholder="Password" secureTextEntry

@@ -2,8 +2,7 @@ import { useState } from "react";
 import { View, Alert } from "react-native";
 import { createUserWithEmailAndPassword, sendEmailVerification } from "firebase/auth";
 import { getFirebase } from "../../src/lib/firebase";
-import { Text, Button, Input, PageBackground } from "../../src/ui";
-import { useTokens } from "../../src/theme/ThemeProvider";
+import { Text, Button, Input, PageBackground, ErrorBanner } from "../../src/ui";
 import { tokens } from "../../src/theme/tokens";
 
 export default function SignUp() {
@@ -13,7 +12,6 @@ export default function SignUp() {
   // for the caught failure below (replaces the old Alert.alert popup for
   // errors). The success alert is untouched.
   const [error, setError] = useState<string | null>(null);
-  const t = useTokens();
   const create = async () => {
     try {
       const cred = await createUserWithEmailAndPassword(getFirebase().auth, email.trim(), password);
@@ -32,12 +30,7 @@ export default function SignUp() {
       <PageBackground />
       <View style={{ flex: 1, justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
         <Text variant="heading">Create your account</Text>
-        {error ? (
-          <View style={{ borderWidth: 1, borderColor: t.destructive, borderRadius: tokens.radius.card,
-            padding: tokens.space.md, backgroundColor: t.surface }}>
-            <Text color={t.destructive}>{error}</Text>
-          </View>
-        ) : null}
+        <ErrorBanner message={error} />
         <Input placeholder="Email" autoCapitalize="none" keyboardType="email-address"
           value={email} onChangeText={setEmail} />
         <Input placeholder="Password" secureTextEntry

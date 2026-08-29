@@ -5,8 +5,7 @@ import { useRouter } from "expo-router";
 import { getFirebase } from "../src/lib/firebase";
 import { useProfileContext } from "../src/shell/ProfileContext";
 import { validateProfileDraft, type ProfileType } from "@gatekeep/shared";
-import { Text, Button, Input, Chip, PageBackground } from "../src/ui";
-import { useTokens } from "../src/theme/ThemeProvider";
+import { Text, Button, Input, Chip, PageBackground, ErrorBanner } from "../src/ui";
 import { tokens } from "../src/theme/tokens";
 
 const SUBTYPES: Record<ProfileType, { value: string; label: string }[]> = {
@@ -28,7 +27,6 @@ export default function Join() {
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
   const { switchTo } = useProfileContext();
-  const t = useTokens();
 
   const submit = async () => {
     setError(null);
@@ -79,12 +77,7 @@ export default function Join() {
       <ScrollView contentContainerStyle={{ padding: tokens.space.xl, gap: tokens.space.md }}
         keyboardShouldPersistTaps="handled">
         <Text variant="heading">Join GateKeep</Text>
-        {error ? (
-          <View style={{ borderWidth: 1, borderColor: t.destructive, borderRadius: tokens.radius.card,
-            padding: tokens.space.md, backgroundColor: t.surface }}>
-            <Text color={t.destructive}>{error}</Text>
-          </View>
-        ) : null}
+        <ErrorBanner message={error} />
         <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
           {(["musician", "curator"] as const).map((pt) => (
             <Chip key={pt} label={pt} active={type === pt}
