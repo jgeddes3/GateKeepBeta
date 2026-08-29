@@ -10,6 +10,13 @@ type Status = "success" | "warning" | "destructive" | "neutral";
 // 6-digit hex token; every status token (success/warning/destructive) is
 // 6-digit, so this always produces a valid 8-digit hex.
 function tint(hex: string) {
+  if (__DEV__ && !/^#[0-9a-f]{6}$/i.test(hex)) {
+    // Pins the invariant this function relies on: appending a 2-digit alpha
+    // byte only produces a valid color on a 6-digit hex. A caller passing a
+    // 3-digit hex, an rgba() string, or a named color would silently render
+    // a broken background in production; catch it in dev instead.
+    console.warn(`StatusBadge.tint: expected a 6-digit hex color, got "${hex}"`);
+  }
   return hex + "24";
 }
 

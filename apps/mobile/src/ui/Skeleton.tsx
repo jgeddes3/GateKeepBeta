@@ -8,6 +8,12 @@ import { useTokens } from "../theme/ThemeProvider";
 // hook, so this falls back to AccessibilityInfo's imperative API: read once
 // on mount, then stay live via its change event, per the task's fallback
 // clause.
+//
+// Follow-up (not done here): every Skeleton mounts its own
+// isReduceMotionEnabled() call and change-event subscription. Fine at
+// today's scale; if a screen ever renders many Skeletons at once (a long
+// list), consider hoisting this to a single shared subscription (context or
+// module-level store) instead of N independent ones.
 function useReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
   useEffect(() => {

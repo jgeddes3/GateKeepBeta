@@ -40,4 +40,9 @@ export const IconInfo = wrap(Ph.InfoIcon);
 export const IconGear = wrap(Ph.GearIcon);
 export const IconSun = wrap(Ph.SunIcon);
 export const IconMoon = wrap(Ph.MoonIcon);
+export const IconPlus = wrap(Ph.PlusIcon);
+export const IconMapPin = wrap(Ph.MapPinIcon);
+export const IconFunnel = wrap(Ph.FunnelIcon);
+export const IconBell = wrap(Ph.BellIcon);
+export const IconStar = wrap(Ph.StarIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.

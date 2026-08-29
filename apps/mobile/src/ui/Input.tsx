@@ -3,7 +3,7 @@ import { useState } from "react";
 import { tokens } from "../theme/tokens";
 import { useTokens } from "../theme/ThemeProvider";
 
-export function Input({ style, ...rest }: TextInputProps) {
+export function Input({ style, error, ...rest }: TextInputProps & { error?: boolean }) {
   const t = useTokens();
   const [focused, setFocused] = useState(false);
   return (
@@ -23,7 +23,9 @@ export function Input({ style, ...rest }: TextInputProps) {
           backgroundColor: t.surface,
           color: t.text,
           borderWidth: 1,
-          borderColor: focused ? t.focus : t.border,
+          // `error` overrides the focus/border logic: validation styling
+          // lives in one place.
+          borderColor: error ? t.destructive : focused ? t.focus : t.border,
           borderRadius: tokens.radius.card,
           paddingHorizontal: 12,
           paddingVertical: 10,
