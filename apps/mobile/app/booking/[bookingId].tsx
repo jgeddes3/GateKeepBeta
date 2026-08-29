@@ -3,6 +3,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { BookingThread } from "../../src/bookings/BookingThread";
 import { PaymentStatus } from "../../src/bookings/PaymentStatus";
+import { useTokens } from "../../src/theme/ThemeProvider";
 
 // Shared booking thread route (SP4 Task 12) — deep-linked from both role
 // tabs' inbox rows (BookingInbox.tsx) and from notification rows
@@ -20,6 +21,7 @@ export default function BookingThreadPage() {
   const bookingId = rawBookingId ?? "";
   const { user, loading } = useAuth();
   const router = useRouter();
+  const t = useTokens();
 
   if (loading || !user) {
     return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}><Text>Loading…</Text></View>;
@@ -28,7 +30,7 @@ export default function BookingThreadPage() {
   return (
     <ScrollView contentContainerStyle={{ padding: 16, gap: 16 }}>
       <Pressable onPress={() => (router.canGoBack() ? router.back() : router.replace("/"))}>
-        <Text style={{ color: "#666" }}>← Back</Text>
+        <Text style={{ color: t.muted }}>← Back</Text>
       </Pressable>
       {/* Keyed by bookingId+uid: forces a fresh BookingThread instance (all
           its per-action busy/error/dialog state resets to defaults) on

@@ -3,11 +3,13 @@ import { useEffect } from "react";
 import type { ReactElement, ReactNode } from "react";
 import * as Sentry from "@sentry/react-native";
 import * as SplashScreen from "expo-splash-screen";
+import { StatusBar } from "expo-status-bar";
 import { setAudioModeAsync } from "expo-audio";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
 import { ProfileProvider } from "../src/shell/ProfileContext";
 import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
-import { ThemeProvider } from "../src/theme/ThemeProvider";
+import { ThemeProvider, useTokens, useThemeChoice } from "../src/theme/ThemeProvider";
+import { tokens } from "../src/theme/tokens";
 import { useAppFonts } from "../src/theme/fonts";
 
 // Crash reporting: no-op in dev, and a no-op in production too until
@@ -38,6 +40,8 @@ function Gate() {
   const { user, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  const t = useTokens();
+  const { active } = useThemeChoice();
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === "(auth)";
@@ -45,15 +49,23 @@ function Gate() {
     if (user && inAuthGroup) router.replace("/");
   }, [user, loading, segments, router]);
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      {/* Detail screens pushed over the tab groups get a native header whose
-          automatic back arrow is the back affordance. booking/[bookingId]
-          keeps its own custom back control instead — it also handles the
-          no-history deep-link case (canGoBack ? back : replace("/")), which
-          a native header's auto-hidden back arrow would not. */}
-      <Stack.Screen name="join" options={{ headerShown: true, title: "Create a profile" }} />
-      <Stack.Screen name="artist/[handle]" options={{ headerShown: true, title: "Artist" }} />
-    </Stack>
+    <>
+      <StatusBar style={active === "light" ? "dark" : "light"} />
+      <Stack screenOptions={{
+        headerShown: false,
+        headerStyle: { backgroundColor: t.surface },
+        headerTintColor: t.text,
+        headerTitleStyle: { fontFamily: tokens.font.syne[700] },
+      }}>
+        {/* Detail screens pushed over the tab groups get a native header whose
+            automatic back arrow is the back affordance. booking/[bookingId]
+            keeps its own custom back control instead: it also handles the
+            no-history deep-link case (canGoBack ? back : replace("/")), which
+            a native header's auto-hidden back arrow would not. */}
+        <Stack.Screen name="join" options={{ headerShown: true, title: "Create a profile" }} />
+        <Stack.Screen name="artist/[handle]" options={{ headerShown: true, title: "Artist" }} />
+      </Stack>
+    </>
   );
 }
 
