@@ -8,7 +8,7 @@ import {
   TRUE_UP_INCREASE_ONLY_MESSAGE, trueUpDeltaPreviewCents,
   type BudgetStructure, type FeePolicy,
 } from "@gatekeep/shared";
-import { Text, Button, Card, Input } from "../ui";
+import { Text, Button, Card, Input, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -110,10 +110,7 @@ export function TrueUpForm({
           {", "}you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
         </Text>
       )}
-      {error && (
-        <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-          borderRadius: tokens.radius.card, padding: tokens.space.md }}>{error}</Text>
-      )}
+      {error && <Callout tone="warning"><Text color={t.warning}>{error}</Text></Callout>}
       <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
         <Button title={busy ? "Saving…" : "Save actuals"} onPress={() => void submit()} disabled={busy} />
         <Button title="Cancel" variant="secondary" onPress={onCancel} disabled={busy} />

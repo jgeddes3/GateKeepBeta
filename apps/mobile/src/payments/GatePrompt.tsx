@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { View } from "react-native";
 import { useRouter } from "expo-router";
 import { SaveCardSheet } from "./SaveCardSheet";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
@@ -7,7 +6,7 @@ import {
   CURATOR_CARD_REQUIRED_MESSAGE, CURATOR_DELINQUENT_MESSAGE, MUSICIAN_PAYOUTS_REQUIRED_MESSAGE,
   DEPOSIT_PROCESSING_MESSAGE,
 } from "@gatekeep/shared";
-import { Text, Button } from "../ui";
+import { Text, Button, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -33,13 +32,7 @@ import { tokens } from "../theme/tokens";
 // differences from web.
 
 function WarnBox({ children }: { children: React.ReactNode }) {
-  const t = useTokens();
-  return (
-    <View style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-      borderRadius: tokens.radius.card, padding: tokens.space.md, gap: tokens.space.sm }}>
-      {children}
-    </View>
-  );
+  return <Callout tone="warning" style={{ gap: tokens.space.sm }}>{children}</Callout>;
 }
 
 // CURATOR_CARD_REQUIRED_MESSAGE: opens SaveCardSheet INLINE (no navigation,
@@ -86,6 +79,10 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
       .catch(() => { if (!cancelled) setAffected([]); });
     return () => { cancelled = true; };
   }, [curatorProfileId]);
+  // Intentional web-parity tone split: this in-flow gate reads amber
+  // (warning), while the standalone DelinquencyBanner / EarningsPanel notices
+  // read red (destructive). Web draws the same distinction (its WarnBox here
+  // is gk-warning; its banner is gk-destructive), so mobile keeps it.
   return (
     <WarnBox>
       <Text color={t.warning}>{message}</Text>
@@ -158,12 +155,13 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
     // curator's recovery UI, mirrors the non-musician branch of
     // MUSICIAN_PAYOUTS_REQUIRED_MESSAGE below.
     return (
-      <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-        borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-        {message === CURATOR_DELINQUENT_MESSAGE
-          ? "The curator has an overdue payment to resolve before this booking can be confirmed, they've been notified."
-          : "The curator needs to finish payment setup before this booking can be confirmed, they've been notified."}
-      </Text>
+      <Callout tone="warning">
+        <Text color={t.warning}>
+          {message === CURATOR_DELINQUENT_MESSAGE
+            ? "The curator has an overdue payment to resolve before this booking can be confirmed, they've been notified."
+            : "The curator needs to finish payment setup before this booking can be confirmed, they've been notified."}
+        </Text>
+      </Callout>
     );
   }
   if (message === MUSICIAN_PAYOUTS_REQUIRED_MESSAGE) {
@@ -175,10 +173,9 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
         </Text>
       </WarnBox>
     ) : (
-      <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-        borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-        The musician hasn&apos;t finished payout setup yet, they&apos;ve been notified.
-      </Text>
+      <Callout tone="warning">
+        <Text color={t.warning}>The musician hasn&apos;t finished payout setup yet, they&apos;ve been notified.</Text>
+      </Callout>
     );
   }
   // DEPOSIT_PROCESSING_MESSAGE is NOT a failure (the booking confirms
@@ -186,10 +183,9 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
   // not the warning amber every other branch uses.
   if (message === DEPOSIT_PROCESSING_MESSAGE) {
     return (
-      <Text style={{ backgroundColor: t.surface, borderWidth: 1, borderColor: t.border,
-        borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-        {message}
-      </Text>
+      <Callout tone="neutral">
+        <Text>{message}</Text>
+      </Callout>
     );
   }
   // Everything else: BOOKING_NOT_CONFIRMABLE_MESSAGE (the musician-side
@@ -198,9 +194,8 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
   // server copy on its own; same visual treatment this app's ErrorBox
   // convention has always used.
   return (
-    <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-      borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-      {message}
-    </Text>
+    <Callout tone="warning">
+      <Text color={t.warning}>{message}</Text>
+    </Callout>
   );
 }

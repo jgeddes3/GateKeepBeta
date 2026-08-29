@@ -3,9 +3,8 @@ import {
   validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type BudgetStructure, type GigPublicLocation,
 } from "@gatekeep/shared";
-import { Text, Input, TextArea } from "../ui";
+import { Text, Input, TextArea, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
-import { tokens } from "../theme/tokens";
 
 // RN port of ../../../web/src/bookings/BookingForms.tsx (SP4 Task 12):
 // booking-domain field-groups + pure formatters shared by GigBrowse's Apply
@@ -195,10 +194,9 @@ export function gigLocationLabel(location: GigPublicLocation): string {
 export function ErrorBox({ message }: { message: string }) {
   const t = useTokens();
   return (
-    <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-      borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-      {message}
-    </Text>
+    <Callout tone="warning">
+      <Text color={t.warning}>{message}</Text>
+    </Callout>
   );
 }
 

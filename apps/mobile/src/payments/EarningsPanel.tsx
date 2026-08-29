@@ -10,7 +10,7 @@ import {
   instantFeePreviewCents,
   type PaymentDoc, type StripeStatusResult,
 } from "@gatekeep/shared";
-import { Text, Button, Input } from "../ui";
+import { Text, Button, Input, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -311,10 +311,7 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
       {status === "loading" && <Text muted>Loading…</Text>}
       {status === "error" && (
         <View style={{ gap: tokens.space.sm }}>
-          <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-            borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-            Couldn&apos;t load payout status.
-          </Text>
+          <Callout tone="warning"><Text color={t.warning}>Couldn&apos;t load payout status.</Text></Callout>
           <Pressable onPress={() => setReloadKey((k) => k + 1)} style={{ alignSelf: "flex-start" }}>
             <Text color={t.warning} style={{ textDecorationLine: "underline" }}>Retry</Text>
           </Pressable>
@@ -323,10 +320,9 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
       {typeof status === "object" && (
         <>
           {status.delinquent && (
-            <Text color={t.destructive} style={{ backgroundColor: t.destructive + "24", borderWidth: 1,
-              borderColor: t.destructive, borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-              A booking you&apos;re part of has an overdue curator payment.
-            </Text>
+            <Callout tone="destructive">
+              <Text color={t.destructive}>A booking you&apos;re part of has an overdue curator payment.</Text>
+            </Callout>
           )}
           {!(status.hasAccount && status.payoutsEnabled) ? (
             <View style={{ gap: tokens.space.sm }}>
@@ -334,10 +330,7 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
               <Button title={onboardBusy ? "Opening Stripe…" : "Set up payouts"}
                 onPress={() => void setupPayouts()} disabled={onboardBusy} style={{ alignSelf: "flex-start" }} />
               {onboardError && (
-                <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-                  borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-                  {onboardError}
-                </Text>
+                <Callout tone="warning"><Text color={t.warning}>{onboardError}</Text></Callout>
               )}
               <Text variant="meta" muted>
                 Your first payout may be held for about 7 days while Stripe verifies your account.
@@ -369,23 +362,17 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
                 />
               </View>
               <View style={{ flexDirection: "row", gap: tokens.space.sm, flexWrap: "wrap" }}>
-                <Button title="Standard (free, 1–3 business days)" variant="secondary"
+                <Button title="Standard (free, 1-3 business days)" variant="secondary"
                   onPress={() => void submitPayout("standard")} disabled={payoutBusy} />
                 <Button title={`Instant${previewCents != null && previewFeeCents != null ? `: fee ${formatCents(previewFeeCents)}` : ""}`}
                   variant="secondary" onPress={() => void submitPayout("instant")} disabled={instantDisabled} />
               </View>
               {instantHint && <Text variant="meta" muted>{instantHint}</Text>}
               {payoutError && (
-                <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-                  borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-                  {payoutError}
-                </Text>
+                <Callout tone="warning"><Text color={t.warning}>{payoutError}</Text></Callout>
               )}
               {payoutMessage && (
-                <Text color={t.success} style={{ backgroundColor: t.success + "24", borderWidth: 1, borderColor: t.success,
-                  borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-                  {payoutMessage}
-                </Text>
+                <Callout tone="success"><Text color={t.success}>{payoutMessage}</Text></Callout>
               )}
             </View>
           )}

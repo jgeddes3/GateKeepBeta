@@ -2,8 +2,8 @@ import { useState } from "react";
 import { View } from "react-native";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import { stripeEnabled, runSetupSheet, setupIntentIdFromClientSecret } from "./stripe";
-import { Text, Button, Card } from "../ui";
+import { stripeEnabled, runSetupSheet, setupIntentIdFromClientSecret, sheetAppearanceFromTokens } from "./stripe";
+import { Text, Button, Card, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -29,20 +29,6 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
   const [error, setError] = useState<string | null>(null);
   const [fakeSaved, setFakeSaved] = useState(false);
 
-  // Token-based PaymentSheet theming (Part C): colors only, the native sheet
-  // cannot be handed the Sora font family (see stripe.ts). secondaryText takes
-  // a hex-valued token (t.text), never the rgba-valued t.muted, which the
-  // native appearance.colors API can reject.
-  const sheetAppearance = {
-    colors: {
-      primary: t.accent,
-      background: t.surface,
-      componentBackground: t.surface,
-      primaryText: t.text,
-      secondaryText: t.text,
-    },
-  };
-
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -53,7 +39,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
         setFakeSaved(true);
         return;
       }
-      const outcome = await runSetupSheet(res.data.clientSecret, sheetAppearance);
+      const outcome = await runSetupSheet(res.data.clientSecret, sheetAppearanceFromTokens(t));
       if (!outcome.ok) {
         if (!outcome.cancelled) setError(outcome.message ?? "Could not save the card.");
         return;
@@ -79,10 +65,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
   return (
     <Card style={{ gap: tokens.space.md }}>
       <Text variant="label">Save a payment card</Text>
-      {error && (
-        <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-          borderRadius: tokens.radius.card, padding: tokens.space.md }}>{error}</Text>
-      )}
+      {error && <Callout tone="warning"><Text color={t.warning}>{error}</Text></Callout>}
       {fakeSaved ? (
         <>
           <Text color={t.success}>

@@ -14,7 +14,7 @@ import {
   NO_SHOW_REPORT_WINDOW_DAYS, DEPOSIT_PERCENT, depositChargePreviewCents,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
-import { Text, Button, Card, TextArea, StatusBadge } from "../ui";
+import { Text, Button, Card, TextArea, StatusBadge, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -193,7 +193,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const occurrences = useOccurrences(bookingId);
   const now = useNow();
 
-  if (booking === "loading" || role === "loading") return <Text>Loading…</Text>;
+  if (booking === "loading" || role === "loading") return <Text muted>Loading…</Text>;
   if (booking === "unavailable" || !booking) {
     return <Text>You don&apos;t have access to this booking, or it doesn&apos;t exist.</Text>;
   }
@@ -371,12 +371,15 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
       </View>
 
       {bothSides && (
-        <Text style={{ backgroundColor: t.surface, borderWidth: 1, borderColor: t.border,
-          borderRadius: tokens.radius.card, padding: tokens.space.md }}>
-          You&apos;re on both sides of this booking. Negotiation actions (accept/counter/decline/withdraw) still work, the
-          server treats you as the musician side, but cancellation and no-show reporting are disabled here to avoid an
-          ambiguous, self-favoring choice.
-        </Text>
+        // Left accent rule (ember) distinguishes this neutral info banner
+        // from the Cards below; ember is in-palette (no 4th color added).
+        <Callout tone="neutral" style={{ borderLeftWidth: 3, borderLeftColor: t.accent }}>
+          <Text>
+            You&apos;re on both sides of this booking. Negotiation actions (accept/counter/decline/withdraw) still work, the
+            server treats you as the musician side, but cancellation and no-show reporting are disabled here to avoid an
+            ambiguous, self-favoring choice.
+          </Text>
+        </Callout>
       )}
 
       <ThreadHistory thread={booking.thread} structure={booking.structure} />

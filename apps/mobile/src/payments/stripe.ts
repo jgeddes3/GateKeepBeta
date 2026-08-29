@@ -1,3 +1,5 @@
+import type { GkTokens } from "../theme/tokens";
+
 // SP5b: the ONLY file in this app that touches @stripe/stripe-react-native.
 // Two reasons it exists:
 //  1. Keyless mode is one branch: no EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY
@@ -28,6 +30,22 @@ function native(): StripeNative {
 // fonts are not guaranteed to load across the native sheet, so callers pass
 // token-based colors and leave typography at the sheet's own default.
 type SheetAppearance = import("@stripe/stripe-react-native").PaymentSheet.AppearanceParams;
+
+// Builds the colors-only appearance from the active theme tokens, one place
+// both money sheets (SaveCardSheet, PayPastDueButton) share. secondaryText
+// takes a hex-valued token (t.text), never the rgba-valued t.muted, which the
+// native appearance.colors API can reject.
+export function sheetAppearanceFromTokens(t: GkTokens): SheetAppearance {
+  return {
+    colors: {
+      primary: t.accent,
+      background: t.surface,
+      componentBackground: t.surface,
+      primaryText: t.text,
+      secondaryText: t.text,
+    },
+  };
+}
 
 // testEnv keys Google Pay off the KEY, not __DEV__: a preview/internal build
 // running a pk_test_ key is still a test environment.

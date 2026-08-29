@@ -5,6 +5,7 @@ export * from "./Button";
 export * from "./Card";
 export * from "./Chip";
 export * from "./ErrorBanner";
+export * from "./Callout";
 export * from "./Badge";
 export * from "./StatusBadge";
 export * from "./Input";

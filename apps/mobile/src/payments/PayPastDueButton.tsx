@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { View, Pressable } from "react-native";
+import { View } from "react-native";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import { stripeEnabled, runPaymentSheet } from "./stripe";
-import { Text } from "../ui";
+import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "./stripe";
+import { Text, Button, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -39,19 +39,6 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
-  // Token-based PaymentSheet theming (Part C): colors only, the native sheet
-  // cannot take the Sora font family (see stripe.ts). secondaryText uses a
-  // hex-valued token, never the rgba-valued t.muted.
-  const sheetAppearance = {
-    colors: {
-      primary: t.accent,
-      background: t.surface,
-      componentBackground: t.surface,
-      primaryText: t.text,
-      secondaryText: t.text,
-    },
-  };
-
   const start = async () => {
     setBusy(true);
     setError(null);
@@ -73,7 +60,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
         setError("This payment needs the payment sheet, which isn't configured in this build.");
         return;
       }
-      const outcome = await runPaymentSheet(res.data.clientSecret, sheetAppearance);
+      const outcome = await runPaymentSheet(res.data.clientSecret, sheetAppearanceFromTokens(t));
       if (outcome.ok) {
         // payment_intent.succeeded finalizes the doc out-of-band; the row's
         // onSnapshot picks the terminal write up on its own (web's comment).
@@ -102,15 +89,13 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
   }
   return (
     <View style={{ gap: tokens.space.sm }}>
-      {error && (
-        <Text color={t.warning} style={{ backgroundColor: t.warning + "24", borderWidth: 1, borderColor: t.warning,
-          borderRadius: tokens.radius.card, padding: tokens.space.md }}>{error}</Text>
-      )}
-      <Pressable onPress={() => void start()} disabled={busy} style={{ alignSelf: "flex-start" }}>
-        <Text color={t.destructive} style={{ textDecorationLine: "underline" }}>
-          {busy ? "Starting…" : "Pay now"}
-        </Text>
-      </Pressable>
+      {error && <Callout tone="warning"><Text color={t.warning}>{error}</Text></Callout>}
+      {/* Web parity: a secondary Button carrying destructive text (web's
+          PayPastDueButton uses variant="secondary" + text-gk-destructive),
+          not a bare text link. */}
+      <Button variant="secondary" onPress={() => void start()} disabled={busy} style={{ alignSelf: "flex-start" }}>
+        <Text variant="label" color={t.destructive}>{busy ? "Starting…" : "Pay now"}</Text>
+      </Button>
     </View>
   );
 }
