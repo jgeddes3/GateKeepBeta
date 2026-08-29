@@ -1,16 +1,26 @@
 // Page + scrim gradients via react-native-svg (no expo-linear-gradient, per
 // the plan: this and icons.tsx are the two native-svg/phosphor consumers).
 //
-// pointerEvents on the two <Svg> fills below is set INSIDE `style`, not as a
-// top-level prop: react-native-svg's SvgProps type Omit<...,'pointerEvents'>
-// from its own props (it still honors the style key), so `<Svg
-// pointerEvents="none">` fails to typecheck while `style={{ pointerEvents:
-// "none" }}` works. The plain <View> (light branch) accepts either form; the
-// top-level prop is used there to match the common RN idiom.
+// pointerEvents on the two <Svg> fills below MUST be the discrete top-level
+// prop, not `style.pointerEvents`: react-native-svg's own extractResponder()
+// reads `props.pointerEvents` to decide native touch handling; it never
+// looks at `style.pointerEvents`, so a style-only value is silently
+// ignored and the fill still eats touches (the exact hazard this prop is
+// meant to prevent for PhotoScrim over a tappable card). SvgProps'
+// TS type Omit<..., 'pointerEvents'>s the field from its declared props
+// (it forwards it fine at runtime), so the discrete prop is passed via a
+// small cast past that Omit. The `style` key is also set, belt-and-
+// suspenders, in case a future react-native-svg version reverses course.
+// The plain <View> (light branch) has no such split: RN's own View honors
+// both forms, so the top-level prop there needs no cast.
 import { View } from "react-native";
-import Svg, { Defs, LinearGradient, Stop, Rect } from "react-native-svg";
+import Svg, { Defs, LinearGradient, Stop, Rect, type SvgProps } from "react-native-svg";
 import { useThemeChoice } from "../theme/ThemeProvider";
 import { PAGE_DARK_STOPS, SCRIM_STOPS, tokens } from "../theme/tokens";
+
+// Cast-past-the-Omit helper: SvgProps strips `pointerEvents` from its type
+// even though the runtime still reads it (see comment above).
+const svgNoTouch = { pointerEvents: "none" } as Partial<SvgProps>;
 
 // Full-bleed page background: dark = 165deg night gradient, light = flat paper.
 export function PageBackground() {
@@ -24,7 +34,12 @@ export function PageBackground() {
     );
   }
   return (
-    <Svg style={{ position: "absolute", inset: 0, pointerEvents: "none" }} width="100%" height="100%">
+    <Svg
+      {...svgNoTouch}
+      style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+      width="100%"
+      height="100%"
+    >
       <Defs>
         <LinearGradient id="page" x1="0" y1="0" x2="0.42" y2="1">
           {PAGE_DARK_STOPS.map((s) => (
@@ -41,7 +56,12 @@ export function PageBackground() {
 // absolutely over the image; text/CTAs on top of it stay legible.
 export function PhotoScrim() {
   return (
-    <Svg style={{ position: "absolute", inset: 0, pointerEvents: "none" }} width="100%" height="100%">
+    <Svg
+      {...svgNoTouch}
+      style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+      width="100%"
+      height="100%"
+    >
       <Defs>
         <LinearGradient id="scrim" x1="0" y1="1" x2="0" y2="0">
           {SCRIM_STOPS.map((s) => (
