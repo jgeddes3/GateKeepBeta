@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { CURATOR_FEE_PCT, MUSICIAN_FEE_PCT, DEPOSIT_PERCENT } from "@gatekeep/shared";
 import { Button } from "@/src/ui/button";
-import { IconMonitor } from "@/src/ui/icons";
 import { cn } from "@/src/lib/utils";
 
 // Below-fold landing sections, spec section 5 items 2-6. Each section has
@@ -12,29 +12,25 @@ import { cn } from "@/src/lib/utils";
 // calls for page anatomies that vary deliberately, and the landing page is
 // its own named example ("the landing page alternates section alignment").
 
-// Placeholder for the audience-story screenshots (spec 5.2): a real
-// screenshot of the redesigned app doesn't exist yet (Task 12 replaces
-// this). Framed and labeled honestly rather than disguised as a real
-// product shot or a fake skeleton mimicking one.
-function ScreenshotFrame({ subject }: { subject: string }) {
-  return (
-    <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-3 rounded-gk border border-gk-border bg-gk-surface p-8 text-center sm:aspect-video">
-      <IconMonitor size={28} className="text-gk-muted" aria-hidden="true" />
-      <p className="max-w-xs font-sora text-sm text-gk-muted">
-        A preview of the {subject.toLowerCase()} arrives with the redesign rollout.
-      </p>
-    </div>
-  );
-}
-
+// Task 12: real captures of the redesigned app, replacing Task 4's honest
+// placeholder frame. Both public/marketing/*.jpg files are dark-theme
+// screenshots of the actual running app (public/, unauthenticated surfaces
+// only: signing in was not available to capture the signed-in dashboards
+// the spec originally named), taken at the seeded test account's real
+// state, not staged or fabricated content. Dimensions are read from the
+// files themselves (next/image requires width/height for a non-fill
+// image), not hardcoded to a round number.
 function AudienceSection({
-  heading, paragraphs, ctaLabel, frameSubject, reverse,
+  heading, paragraphs, ctaLabel, reverse, imageSrc, imageAlt, imageWidth, imageHeight,
 }: {
   heading: string;
   paragraphs: string[];
   ctaLabel: string;
-  frameSubject: string;
   reverse?: boolean;
+  imageSrc: string;
+  imageAlt: string;
+  imageWidth: number;
+  imageHeight: number;
 }) {
   return (
     <section className="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 sm:py-24 lg:grid-cols-2 lg:items-center lg:gap-16">
@@ -49,8 +45,15 @@ function AudienceSection({
           <Link href="/sign-in">{ctaLabel}</Link>
         </Button>
       </div>
-      <div className={cn(reverse && "lg:order-1")}>
-        <ScreenshotFrame subject={frameSubject} />
+      <div className={cn("overflow-hidden rounded-gk border border-gk-border bg-gk-surface", reverse && "lg:order-1")}>
+        <Image
+          src={imageSrc}
+          alt={imageAlt}
+          width={imageWidth}
+          height={imageHeight}
+          className="aspect-[4/3] w-full object-cover object-top sm:aspect-video"
+          sizes="(min-width: 1024px) 50vw, 100vw"
+        />
       </div>
     </section>
   );
@@ -65,7 +68,10 @@ export function MusicianStorySection() {
         "When an offer comes in, you negotiate the details right in the thread until the terms are right. Then it's booked.",
       ]}
       ctaLabel="Start your musician profile"
-      frameSubject="Musician portfolio"
+      imageSrc="/marketing/artist-page.jpg"
+      imageAlt="A musician's public artist page on GateKeep, showing the Syne name, genre and act-size chips, and the about section on the dark night-scrim background."
+      imageWidth={1568}
+      imageHeight={556}
     />
   );
 }
@@ -79,7 +85,10 @@ export function CuratorStorySection() {
         "A deposit locks in the moment you both agree on terms, so the night doesn't fall apart on a handshake.",
       ]}
       ctaLabel="Start booking talent"
-      frameSubject="Curator dashboard"
+      imageSrc="/marketing/find-gigs-browse.jpg"
+      imageAlt="The Find gigs browse page on GateKeep, showing city and genre filters above the open-gigs list."
+      imageWidth={1568}
+      imageHeight={557}
       reverse
     />
   );

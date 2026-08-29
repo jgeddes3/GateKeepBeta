@@ -1,5 +1,4 @@
 "use client";
-import type { CSSProperties } from "react";
 import {
   GENRES, ACT_SIZES, SERIES_CADENCES,
   type GigContentInput, type GigBudget, type GigDoc, type GigStatus, type SeriesStatus,
@@ -9,9 +8,7 @@ import {
 // src/ui + the Chip/formatChipLabel precedent CuratorForms.tsx and
 // PortfolioForms.tsx already established for genre/type pickers: every
 // composer/editor page that imports these (gig posting, gig editor, series
-// template editor) gets the restyle for free. `chip`/`badge` (below) stay
-// exported byte-identical: BookingInbox.tsx, BookingThread.tsx, and
-// app/admin/page.tsx (out of scope for this task) still call them directly.
+// template editor) gets the restyle for free.
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -53,14 +50,6 @@ export const FILL_MODE_LABEL: Record<FillMode, string> = {
   per_occurrence: "Each date booked separately", whole_run: "One act takes the whole run",
 };
 export const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
-export const chip = (active: boolean): CSSProperties => ({
-  padding: "4px 10px", borderRadius: 12, border: "1px solid #bbb",
-  background: active ? "#111" : "#fff", color: active ? "#fff" : "#111",
-});
-export const badge = (bg: string, fg = "#111"): CSSProperties => ({
-  fontSize: 13, padding: "2px 8px", borderRadius: 10, background: bg, color: fg,
-});
 
 // cents -> a dollar string, showing cents only when they're non-zero: a
 // bare `.toFixed(0)` silently rounds e.g. $12.50 up to "$13", which is wrong
