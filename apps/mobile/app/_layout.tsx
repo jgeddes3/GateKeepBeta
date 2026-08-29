@@ -79,10 +79,12 @@ export default function RootLayout() {
     })();
   }, []);
 
+  // Render gate only, not the splash trigger: hiding the splash here as soon
+  // as fonts load could still show a blank frame if ThemeProvider (mounted
+  // below) has not finished reading the stored theme choice yet. ThemeProvider
+  // itself calls SplashScreen.hideAsync() once its own readiness resolves, so
+  // the splash covers both fonts AND theme resolution, not just fonts.
   const fontsLoaded = useAppFonts();
-  useEffect(() => {
-    if (fontsLoaded) SplashScreen.hideAsync().catch(() => {});
-  }, [fontsLoaded]);
   if (!fontsLoaded) return null;
 
   return (
