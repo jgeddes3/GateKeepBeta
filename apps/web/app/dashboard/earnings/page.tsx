@@ -13,7 +13,7 @@ type MusicianProfileSummary = { profileId: string; name: string };
 
 // Same "my profiles" subscription idiom as app/dashboard/page.tsx's
 // ProfilesList (collectionGroup('members').where('uid','==',uid), then a
-// per-doc profile get()), filtered to type === "musician" — payouts are the
+// per-doc profile get()), filtered to type === "musician": payouts are the
 // musician half of a profile (Stripe Connect Express), so a curator-only
 // profile has nothing to show on this page. Mounted with key={user.uid} by
 // the page below for the same remount-on-identity-change reason ProfilesList

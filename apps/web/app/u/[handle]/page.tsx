@@ -9,10 +9,10 @@ import { MusicianProfile } from "./MusicianProfile";
 import { CuratorProfile } from "./CuratorProfile";
 
 // Takedowns/approvals need to propagate within about a minute, and this page
-// can't be gated behind App Check (it's plain SSR, no client attestation) —
+// can't be gated behind App Check (it's plain SSR, no client attestation),
 // so ISR bounds repeat Firestore/Storage reads to once per handle per
 // revalidate window instead of `force-dynamic`'s unbounded per-request reads.
-// (A flood of distinct/random handles still costs one cold render each —
+// (A flood of distinct/random handles still costs one cold render each:
 // this caps *repeat* hits on the same handle, not a broad crawl.)
 export const revalidate = 60;
 // Required for `revalidate` to take effect on a dynamic-params route: without
@@ -30,9 +30,9 @@ export type PublicGig = GigDoc & { id: string };
 
 // Task 11 Shows entry: one filled/closed-booked gig, plus the OTHER party's
 // resolved display name/handle (curator, on the musician page; booked
-// musician, on the curator page — see resolveProfileLabels below).
+// musician, on the curator page, see resolveProfileLabels below).
 // `location` is always populated (every GigDoc has one) even though only
-// MusicianProfile.tsx's ShowCard renders it — the curator already knows
+// MusicianProfile.tsx's ShowCard renders it: the curator already knows
 // their own gig's location.
 // durationMinutes (Task 9 addition): public per the gigs read rule (a
 // filled, or closed-and-booked, gig is readable by anyone regardless of
@@ -69,19 +69,19 @@ async function storageUrl(path: string | null | undefined): Promise<string | nul
   catch (e) {
     // Swallowed to null on purpose (a missing/racing object shouldn't 500 the
     // whole page), but a Storage-wide outage would otherwise silently empty
-    // every avatar/cover/track/gallery URL with no signal anywhere — log it.
+    // every avatar/cover/track/gallery URL with no signal anywhere: log it.
     console.warn("storageUrl failed", path, e);
     return null;
   }
 }
 
 // Batched cross-reference profile-name lookup for the Shows section below
-// (curator names on the musician page, musician names on the curator page) —
+// (curator names on the musician page, musician names on the curator page):
 // one Promise.all over the *unique* ids in a Shows result set, not one
 // sequential getDoc per row (n+1-avoidance, same shape the admin page's own
 // TracksQueue/GigsAdmin batched name resolution uses). A single id's lookup
-// failing — permission-denied (that profile has since gone
-// unapproved/deleted) or any other read error — doesn't fail the whole Shows
+// failing, permission-denied (that profile has since gone
+// unapproved/deleted) or any other read error, doesn't fail the whole Shows
 // section: same "auxiliary content shouldn't 500 the whole page" tradeoff as
 // storageUrl above, just falling back to an unlinked placeholder name for
 // that one row instead of a null URL.
@@ -95,7 +95,7 @@ async function resolveProfileLabels(ids: string[]): Promise<Map<string, { name: 
       const p = snap.data() as ProfileDoc;
       return [id, { name: p.name, handle: p.handle }];
     } catch (e) {
-      // Duck-typed per loadProfile's own comment below — a stranger's
+      // Duck-typed per loadProfile's own comment below: a stranger's
       // profile that went unapproved/private reads as permission-denied,
       // which is a legitimate (if unusual) state for a Shows row's OTHER
       // party, not a bug worth logging loudly.
@@ -111,12 +111,12 @@ async function resolveProfileLabels(ids: string[]): Promise<Map<string, { name: 
 
 // Musician-page Shows query (Task 11): a single `status in [...]` query is
 // list-provable here because bookedMusicianProfileId is pinned by EQUALITY
-// to one specific non-null profileId — see firestore.rules' own comment on
+// to one specific non-null profileId, see firestore.rules' own comment on
 // the gigs read rule for why that alone proves the status=='closed'
 // disjunct's `bookedMusicianProfileId != null` requirement (the curator page
-// below can't take this shortcut — see loadCuratorShows). No `.limit()`: the
+// below can't take this shortcut, see loadCuratorShows). No `.limit()`: the
 // Shows section's own design assumption (this task's plan) is that this
-// returns at most a few dozen docs per profile at V1 scale — capping the
+// returns at most a few dozen docs per profile at V1 scale: capping the
 // ascending-ordered result at the Firestore level would bias toward the
 // OLDEST rows instead of the ones nearest "now", so the 20/20 caps are
 // applied in JS below, after the full (bounded-in-practice) result is in
@@ -154,7 +154,7 @@ async function loadMusicianShows(profileId: string): Promise<{ upcoming: ShowEnt
     };
   } catch (e) {
     // Same "auxiliary content shouldn't 500 the whole page" tradeoff as
-    // storageUrl above — an empty Shows section (indistinguishable from the
+    // storageUrl above: an empty Shows section (indistinguishable from the
     // legitimate no-shows-yet case, per the section's own hidden-while-empty
     // contract) beats a 500 for every visitor to this profile.
     console.error("loadMusicianShows failed", profileId, e);
@@ -179,13 +179,13 @@ export async function loadAllPastMusicianShows(profileId: string): Promise<ShowE
 }
 
 // Curator-page Shows query (Task 11): MUST split into two queries per the
-// rules-provability constraint (Task 2 audit) — a combined `status in`
+// rules-provability constraint (Task 2 audit): a combined `status in`
 // query filtered only by curatorProfileId can't prove the closed leg's
 // `bookedMusicianProfileId != null` requirement (unlike the musician page's
 // single query above, curatorProfileId doesn't pin bookedMusicianProfileId
 // to anything). The closed leg's inequality filter (`> ""`) forces an
 // implicit order by bookedMusicianProfileId when no explicit orderBy is
-// given — not startsAt — so chronological ordering happens here, in JS,
+// given (not startsAt), so chronological ordering happens here, in JS,
 // over the merged result, rather than at the query level for either leg.
 async function loadCuratorShows(profileId: string): Promise<{ upcoming: ShowEntry[]; past: ShowEntry[] }> {
   try {
@@ -247,13 +247,13 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
   const { db } = getServerFirebase();
   const photoPaths = profile.curator?.photoPaths ?? [];
   // Anonymous, rules-governed read (same client SDK as everything else on
-  // this page) — firestore.rules' gigs read rule proves this exact shape
+  // this page): firestore.rules' gigs read rule proves this exact shape
   // (status=='open' AND curatorProfileId=='X') for a stranger without a
   // membership/admin disjunct: see tests-rules/rules.test.ts's "public
   // open-gigs list may add a curatorProfileId equality filter (a curator's
   // public page's 'open gigs' section)" test. orderBy(startsAt) adds no
   // further rules exposure (rules only ever see per-document field values,
-  // never result ordering) — it only changes which composite index the
+  // never result ordering): it only changes which composite index the
   // query needs at the datastore layer (see firestore.indexes.json).
   const [gigsSnap, photoUrls, shows] = await Promise.all([
     getDocs(query(
@@ -271,7 +271,7 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
   };
 }
 
-// cache() dedupes this per-request across generateMetadata and the page body —
+// cache() dedupes this per-request across generateMetadata and the page body:
 // both call loadProfile(handle) with the same argument, so React's per-request
 // cache means the Firestore/Storage reads only actually happen once. Exported
 // (Task 9) so the new past-shows page (app/u/[handle]/shows/page.tsx) can
@@ -280,9 +280,9 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
 export const loadProfile = cache(async (rawHandle: string): Promise<Loaded | null> => {
   const handle = rawHandle.toLowerCase(); // handles are stored lowercase
   // Finding 5: an unvalidated handle segment (e.g. "/@a/b", "/@..") used to
-  // reach doc(db, "handles", handle) directly — Firestore's doc() throws on
+  // reach doc(db, "handles", handle) directly: Firestore's doc() throws on
   // a value containing "/", which propagated as an uncaught 500 instead of
-  // a normal 404, and — since throws bypass the `return null` path below —
+  // a normal 404, and (since throws bypass the `return null` path below)
   // never got cached by ISR either, so every hit on a malformed handle paid
   // a fresh Firestore round-trip AND rendered as a 500. validateHandle is
   // already the source of truth for what a well-formed handle looks like
@@ -297,7 +297,7 @@ export const loadProfile = cache(async (rawHandle: string): Promise<Loaded | nul
     const p = await getDoc(doc(db, "profiles", profileId)); // rules deny unless approved
     if (!p.exists()) return null;
     const profile = p.data() as ProfileDoc;
-    // Sub-3 widens this route to curators, branching on profile.type — both
+    // Sub-3 widens this route to curators, branching on profile.type: both
     // types share the exact same handle-lookup/approval-gate machinery
     // above (profiles/{id}'s read rule is status=='approved' regardless of
     // type), only the content loaded below differs.
@@ -309,16 +309,16 @@ export const loadProfile = cache(async (rawHandle: string): Promise<Loaded | nul
     // constructor runs `Object.setPrototypeOf(this, FirebaseError.prototype)`
     // (an ES5-target workaround in @firebase/util, still present in the
     // built SDK) which clobbers the prototype chain of every subclass
-    // instance — so a real FirestoreError never passes `instanceof
+    // instance, so a real FirestoreError never passes `instanceof
     // FirestoreError`, only `instanceof FirebaseError`. Trusting that check
     // would send every FirestoreError down the "rethrow as 500" path below,
-    // including permission-denied ones — turning "not approved" into a
+    // including permission-denied ones: turning "not approved" into a
     // 404-vs-500 enumeration oracle for handle existence.
     //
     // permission-denied = the profile/track isn't approved (rules deny the
-    // read) — that's a legitimate "not found" from the public's point of
+    // read): that's a legitimate "not found" from the public's point of
     // view. not-found only fires if a doc vanishes between reads. Anything
-    // else (offline, a missing index, a backend outage) is a real failure —
+    // else (offline, a missing index, a backend outage) is a real failure:
     // surface it as a truthful 500, not a silent "Not found" 200.
     const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;
     if (code === "permission-denied" || code === "not-found") return null;
@@ -332,7 +332,7 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
   const data = await loadProfile(handle);
   // The page component calls notFound() for the same null case, which
   // renders not-found.tsx's own `metadata` (its title) instead of whatever
-  // this function returns — so only robots survives here in practice; keep
+  // this function returns, so only robots survives here in practice; keep
   // it anyway as a fallback for any caller that resolves metadata without
   // rendering the page (e.g. a metadata-only route consumer).
   if (!data) return { robots: { index: false } };

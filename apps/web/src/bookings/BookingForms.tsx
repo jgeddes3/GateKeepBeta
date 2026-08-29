@@ -6,7 +6,7 @@ import {
 } from "@gatekeep/shared";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
-// SP4 (Task 13 item 9): re-exported, not redefined — see GigForms.tsx's
+// SP4 (Task 13 item 9): re-exported, not redefined: see GigForms.tsx's
 // identical formatGigDateTime re-export comment for the full rationale;
 // gigDisplay.ts is now the ONE canonical gigLocationLabel too (this file
 // used to carry its own, byte-identical, copy).
@@ -16,23 +16,23 @@ export { gigLocationLabel } from "../../app/u/[handle]/gigDisplay";
 // "apply / offer" building blocks reused by the gig detail page's Apply
 // panel and OfferComposer.tsx (Find musicians -> offerGig). Kept as its own
 // module (not added to GigForms.tsx, which is SP3-owned and out of scope for
-// this task) even though it mirrors that file's conventions closely —
+// this task) even though it mirrors that file's conventions closely:
 // dollars in the UI, integer cents on the wire, the exact shared validator
 // the callables run, LAUNCH_TIMEZONE-pinned dates via the existing
 // formatGigDateTime import wherever a gig time is shown.
 //
-// Field-groups + pure formatters ONLY (Task 10 review) — booking-status
+// Field-groups + pure formatters ONLY (Task 10 review): booking-status
 // DISPLAY helpers (bookingHistoryLabel/depositLine) and the inbox lists live
 // in BookingInbox.tsx, and the render-safe "now" hook lives in
-// BookingThread.tsx (its primary consumer) — neither is a field-group.
+// BookingThread.tsx (its primary consumer); neither is a field-group.
 
 // Exact copy required by Task 9's spec for the pre-acceptance surfaces (gig
-// detail Apply panel, OfferComposer) — no computed dollar amount exists yet
+// detail Apply panel, OfferComposer): no computed dollar amount exists yet
 // at this point (that only exists once a deposit is actually calculated,
 // after acceptBooking runs), so this is the "implied, not yet known" phrasing
 // rather than Task 10's "$X" variant.
 // SP5 Task 15 review round 1 (medium #6): payments are LIVE as of this
-// sub-project — the old "...will be collected... when payments launch"
+// sub-project: the old "...will be collected... when payments launch"
 // wording was accurate pre-SP5 and is now simply false (acceptBooking fires
 // a real Stripe charge the moment it commits). DEPOSIT_PERCENT templated in
 // rather than a hardcoded "35%" literal, so this can never drift from the
@@ -47,7 +47,7 @@ export interface OfferPayload { amountCents: number; expectedQuantity: number | 
 
 // Converts the dollar-string UI state into the integer-cents callable
 // payload and runs the SAME validator applyToGig/offerGig/counterBooking run
-// server-side (validateOfferInput) — a malformed offer is caught here, with
+// server-side (validateOfferInput): a malformed offer is caught here, with
 // the identical error copy the server would otherwise return, before it
 // ever reaches the network.
 export function buildOfferPayload(
@@ -64,7 +64,7 @@ export function buildOfferPayload(
     if (state.quantity.trim() === "" || !Number.isFinite(q)) {
       return { payload: null, error: "Enter a song count." };
     }
-    // Raw, not Math.trunc'd — a fractional entry (e.g. "3.5") is passed
+    // Raw, not Math.trunc'd: a fractional entry (e.g. "3.5") is passed
     // through as-is so validateOfferInput's own `!Number.isInteger(...)`
     // check catches it and returns its real "must be a whole number" copy,
     // rather than silently rounding it down to a value the musician never
@@ -77,7 +77,7 @@ export function buildOfferPayload(
   return { payload: { amountCents, expectedQuantity, note }, error: null };
 }
 
-// Amount + (perSong only) song count + note-with-counter — the exact input
+// Amount + (perSong only) song count + note-with-counter: the exact input
 // set functions/src/bookings.ts's finalizeBookingRequest/counterBooking
 // accept, gated on the SAME structure-driven branch validateOfferInput uses
 // server-side (perHour is server-derived from the gig's duration; perSet
@@ -146,7 +146,7 @@ export function formatDuration(minutes: number): string {
 
 // Offset (in ms) between UTC and `timeZone`'s wall clock AT a given UTC
 // instant, i.e. `wallClockAsUtcNumbers - utcMs`. Derived per-instant (not a
-// constant) so it's correct on both sides of a DST transition — the whole
+// constant) so it's correct on both sides of a DST transition: the whole
 // reason this needs Intl instead of a fixed "-5h"/"-4h" literal.
 function tzOffsetMs(timeZone: string, utcMs: number): number {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -161,7 +161,7 @@ function tzOffsetMs(timeZone: string, utcMs: number): number {
 // GigBrowse's date-filter boundary computation: every gig time on this app
 // is displayed in LAUNCH_TIMEZONE (formatGigDateTime), so a "From"/"To" day
 // picked in the filter UI must be bucketed by LAUNCH_TIMEZONE midnight, not
-// UTC midnight — an evening gig near the boundary would otherwise mis-bucket
+// UTC midnight: an evening gig near the boundary would otherwise mis-bucket
 // by the zone's offset (4-5h for LAUNCH_TIMEZONE = America/New_York).
 // Standard two-step technique: treat the input Y-M-D as a UTC guess, read
 // LAUNCH_TIMEZONE's offset AT that guess (so DST is derived per-date, never
@@ -189,12 +189,12 @@ export function launchTzDayStartMs(dateInput: string): number | null {
 }
 
 // The exclusive upper bound for a "To" date filter: the LAUNCH_TIMEZONE
-// midnight that STARTS the day after `dateInput` — computed by advancing
+// midnight that STARTS the day after `dateInput`: computed by advancing
 // the calendar date itself (plain UTC-numbers arithmetic on Y-M-D, timezone-
 // agnostic) and re-running launchTzDayStartMs on that date, rather than
 // adding a fixed 24h to this date's start. A fixed +24h would be wrong by an
 // hour on LAUNCH_TIMEZONE's own spring-forward/fall-back days (23h/25h
-// calendar days) — deriving the boundary from the actual next calendar date
+// calendar days): deriving the boundary from the actual next calendar date
 // keeps this correct across DST the same way launchTzDayStartMs itself is.
 export function launchTzNextDayStartMs(dateInput: string): number | null {
   if (!dateInput) return null;

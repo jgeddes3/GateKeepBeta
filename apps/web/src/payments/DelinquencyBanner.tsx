@@ -7,13 +7,13 @@ import { fetchDelinquentBookingIds } from "./delinquentBookings";
 import type { StripeStatusResult } from "@gatekeep/shared";
 import { IconWarning } from "../ui/icons";
 
-// SP5 Task 15 — mounted on the curator profile editor (the closest thing
+// SP5 Task 15: mounted on the curator profile editor (the closest thing
 // this app has to a "curator dashboard shell": it's where a curator's own
 // bookings already render below, via BookingInbox). One-shot getStripeStatus
-// on mount (no need for a live subscription here — a curator opening this
+// on mount (no need for a live subscription here: a curator opening this
 // page is exactly when a fresh read is worth it) plus, only when delinquent,
 // the shared delinquentBookings.ts query (also used by GatePrompt's
-// CuratorDelinquentGate — one copy of the query, review round 1 low #14).
+// CuratorDelinquentGate, one copy of the query, review round 1 low #14).
 export function DelinquencyBanner({ profileId }: { profileId: string }) {
   const [status, setStatus] = useState<StripeStatusResult | null>(null);
   const [affected, setAffected] = useState<string[] | "loading">("loading");
@@ -41,7 +41,7 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
     <div role="alert" className="grid gap-1.5 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-3">
       <p className="flex items-start gap-2 font-sora text-sm font-semibold text-gk-destructive">
         <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-        This profile has an overdue payment — you can&apos;t book new musicians until it&apos;s settled.
+        This profile has an overdue payment. You can&apos;t book new musicians until it&apos;s settled.
       </p>
       {affected === "loading" ? (
         <p className="font-sora text-sm text-gk-destructive">Checking which booking is affected…</p>

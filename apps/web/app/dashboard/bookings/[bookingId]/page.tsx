@@ -7,10 +7,10 @@ import { BookingThread } from "../../../../src/bookings/BookingThread";
 import { PaymentsPanel } from "../../../../src/payments/PaymentsPanel";
 import { Skeleton } from "../../../../src/ui/skeleton";
 
-// The booking thread screen — deep-linked from both dashboards' inbox
+// The booking thread screen: deep-linked from both dashboards' inbox
 // sections (src/bookings/BookingInbox.tsx's BookingInbox) and from
 // notification rows (kind:"booking" rows in app/dashboard/page.tsx's
-// NotificationsList, via NotificationDoc.refId — Task 10a's plumbing).
+// NotificationsList, via NotificationDoc.refId, Task 10a's plumbing).
 
 function AuthSkeleton() {
   return (
@@ -36,7 +36,7 @@ export default function BookingThreadPage(props: { params: Promise<{ bookingId: 
       {/* Keyed by bookingId+uid: forces a fresh BookingThread instance (all
           its per-action busy/error/dialog state resets to defaults) on
           either a route change to a different booking or a signed-in
-          identity switch — mirrors the gig detail page's ApplyPanel
+          identity switch: mirrors the gig detail page's ApplyPanel
           key={user.uid} rationale, extended to also cover navigating
           between two DIFFERENT booking threads without an intervening
           unmount (Next.js reuses this same page component instance across
@@ -44,7 +44,7 @@ export default function BookingThreadPage(props: { params: Promise<{ bookingId: 
       <div className="mt-6">
         <BookingThread key={`${bookingId}-${user.uid}`} bookingId={bookingId} uid={user.uid} />
       </div>
-      {/* Self-contained SP5 money surface — subscribes to its own
+      {/* Self-contained SP5 money surface: subscribes to its own
           bookings/{id} + payments data and renders nothing until the accept
           saga has staged the payments subcollection; both sides mount it,
           it renders side-appropriately. Keyed the same as BookingThread

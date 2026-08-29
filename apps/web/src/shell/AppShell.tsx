@@ -240,7 +240,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
-      <div className="flex-1">{children}</div>
+      <div>{children}</div>
       <Footer />
     </>
   );

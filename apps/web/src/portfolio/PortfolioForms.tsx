@@ -45,6 +45,7 @@ export function Chip({ active, onClick, disabled, children }:
       disabled={disabled}
       className="rounded-full"
       onClick={onClick}
+      aria-pressed={active}
     >
       {children}
     </Button>

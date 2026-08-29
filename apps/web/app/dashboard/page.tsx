@@ -85,8 +85,8 @@ function ProfilesList({ uid }: { uid: string }) {
         </span>
         <p className="mt-3 font-syne text-base font-semibold text-gk-text">No profiles yet</p>
         <p className="mx-auto mt-1 max-w-sm font-sora text-sm text-gk-muted">
-          Create a musician or curator profile to start booking or hosting gigs. You can also start one
-          from the mobile app.
+          Set up a musician or curator profile and this becomes home base: gigs, bookings, all of it.
+          You can also start one from the mobile app.
         </p>
         <Button asChild className="mt-4">
           <Link href="/join">Create a profile</Link>
@@ -171,10 +171,10 @@ function NotificationsList({ uid }: { uid: string }) {
         <span className="mx-auto flex size-10 items-center justify-center rounded-full bg-gk-border/50 text-gk-muted">
           <IconBell size={20} aria-hidden="true" />
         </span>
-        <p className="mt-3 font-syne text-base font-semibold text-gk-text">No notifications yet</p>
+        <p className="mt-3 font-syne text-base font-semibold text-gk-text">All caught up</p>
         <p className="mx-auto mt-1 max-w-sm font-sora text-sm text-gk-muted">
-          Nothing needs your attention right now. Review updates and booking activity will show up here
-          as they happen.
+          Review updates and booking activity will land here the moment they happen. In the meantime,
+          go see what&apos;s playing.
         </p>
         <Button asChild variant="link" className="mt-2 h-auto p-0">
           <Link href="/gigs">Browse gigs</Link>
@@ -265,7 +265,7 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <main className="flex flex-1 items-center justify-center px-4 py-16">
+      <main className="flex items-center justify-center px-4 py-16">
         <p className="font-sora text-sm text-gk-muted">Loading…</p>
       </main>
     );
@@ -290,7 +290,7 @@ export default function Dashboard() {
   };
 
   return (
-    <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+    <main className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
       <h1 className="font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Dashboard</h1>
       <p className="mt-2 font-sora text-sm text-gk-muted">Your profiles, and anything that needs a look.</p>
 

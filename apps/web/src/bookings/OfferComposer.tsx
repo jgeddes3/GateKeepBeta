@@ -32,10 +32,10 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
   const [alreadySent, setAlreadySent] = useState(false);
   const [bookingId, setBookingId] = useState<string | null>(null);
 
-  // Live (not one-shot) — the curator's open-gigs set can change while this
+  // Live (not one-shot): the curator's open-gigs set can change while this
   // panel is open (another tab publishing/cancelling a gig); needs its own
   // 3-field composite index, already present (gigs(curatorProfileId,status,
-  // startsAt) — see firestore.indexes.json, shipped with SP3/Task 2).
+  // startsAt), see firestore.indexes.json, shipped with SP3/Task 2).
   useEffect(() => {
     const { db } = getFirebase();
     const unsub = onSnapshot(
@@ -46,7 +46,7 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
     return unsub;
   }, [curatorProfileId]);
 
-  // Derived default selection (no setState-in-effect — see the gig detail
+  // Derived default selection (no setState-in-effect, see the gig detail
   // page's ApplyPanel comment for the same rationale).
   const selectedGigId = gigOverride && openGigs !== "loading" && openGigs.some((g) => g.id === gigOverride)
     ? gigOverride
@@ -113,7 +113,7 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
                 <SelectContent>
                   {openGigs.map((g) => (
                     <SelectItem key={g.id} value={g.id}>
-                      {(g.title || "Untitled gig")} — {formatGigDateTime(g.startsAt)} ({BUDGET_STRUCTURE_LABEL[g.budget.structure]})
+                      {(g.title || "Untitled gig")} · {formatGigDateTime(g.startsAt)} ({BUDGET_STRUCTURE_LABEL[g.budget.structure]})
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -122,7 +122,7 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
             {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
             {/* SP5 Task 15: offerGig's own gates (requireCuratorChargeable)
                 throw CURATOR_CARD_REQUIRED_MESSAGE/CURATOR_DELINQUENT_MESSAGE
-                verbatim — GatePrompt opens SaveCardModal inline (retrying this
+                verbatim: GatePrompt opens SaveCardModal inline (retrying this
                 same submit once saved) or links to the overdue booking; any
                 other error falls through to the same plain warning line this
                 used to render directly. */}

@@ -8,18 +8,18 @@ import { gkStripeAppearance } from "./stripeAppearance";
 import { Button } from "../ui/button";
 import { IconWarning } from "../ui/icons";
 
-// SP5 Task 15 — pays down an overdue settlement OR an exhausted birth
+// SP5 Task 15: pays down an overdue settlement OR an exhausted birth
 // deposit for one occurrence. `payPastDue` DISPATCHES server-side on which
 // debt {bookingId, gigId} actually owes (see functions/src/payments.ts's
-// header on the dispatcher) — this button just triggers it and doesn't need
+// header on the dispatcher); this button just triggers it and doesn't need
 // to know which kind of debt it is.
 //
-// Two response shapes (PayPastDueResult, mirrored here — not imported, since
+// Two response shapes (PayPastDueResult, mirrored here, not imported, since
 // apps/web never depends on functions/src types, same boundary every other
 // payments component in this app respects):
-//  - FAKE STRIPE (emulator): `done: true` — the callable already finalized
+//  - FAKE STRIPE (emulator): `done: true`. The callable already finalized
 //    the charge by the time it returns; nothing left for the browser to do.
-//  - REAL: `done: false, clientSecret` — the SAME on-session confirm flow as
+//  - REAL: `done: false, clientSecret`. The SAME on-session confirm flow as
 //    SaveCardModal's CardConfirmForm (an Elements PaymentElement against the
 //    returned clientSecret, confirmed with stripe.confirmPayment({redirect:
 //    "if_required"})), except this confirms a PaymentIntent, not a
@@ -41,7 +41,7 @@ function ErrorBox({ message }: { message: string }) {
 }
 
 // Split out so useStripe()/useElements() only run inside the live <Elements>
-// context PayPastDueButton renders this into — mirrors SaveCardModal's
+// context PayPastDueButton renders this into: mirrors SaveCardModal's
 // CardConfirmForm split for the identical reason.
 function ConfirmForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
   const stripe = useStripe();
@@ -60,7 +60,7 @@ function ConfirmForm({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
       return;
     }
     // The payment_intent.succeeded webhook finalizes the doc out-of-band
-    // (transfer, terminal write, ledger, delinquency lift) — the live
+    // (transfer, terminal write, ledger, delinquency lift): the live
     // onSnapshot in PaymentsPanel picks up the resulting write on its own;
     // this just tells the caller the confirm step itself is done.
     onDone();
@@ -81,7 +81,7 @@ function ConfirmForm({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
 export function PayPastDueButton({ bookingId, gigId, onDone }: {
   bookingId: string; gigId: string;
   // Optional: fired once the payment is confirmed (fake path) or the
-  // on-session confirm succeeds (real path) — PaymentsPanel uses this to
+  // on-session confirm succeeds (real path): PaymentsPanel uses this to
   // refresh the curator's Stripe status (a cleared delinquency), not to
   // refresh the row itself (the live onSnapshot already covers that).
   onDone?: () => void;
@@ -107,10 +107,10 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
       } else if (res.data.clientSecret) {
         setClientSecret(res.data.clientSecret);
       } else {
-        // Real mode's own non-success exit with no clientSecret at all — see
+        // Real mode's own non-success exit with no clientSecret at all, see
         // PayPastDueResult's header. Not expected in practice; a friendly
         // fallback rather than a silent no-op button.
-        setError("Could not start this payment — try again.");
+        setError("Could not start this payment, try again.");
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not pay this now.");
@@ -121,13 +121,13 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
 
   // Review round 1 (low #13): the delinquency LIFT (clearDelinquencyIfSettled)
   // is NOT guaranteed to have landed by the time either success path gets
-  // here — the real-Stripe path finalizes off the payment_intent.succeeded
+  // here: the real-Stripe path finalizes off the payment_intent.succeeded
   // webhook (fully async, arrives after this confirm call already returned),
   // and even the fake-mode `done:true` path's onDone() just triggers a fresh
   // getStripeStatus read that can still race the finalize write by a beat.
   // The copy says so rather than implying the delinquency banner/card row is
   // guaranteed to already reflect it.
-  if (done) return <p className="font-sora text-sm text-gk-success">Payment sent — clearing any overdue status may take a moment.</p>;
+  if (done) return <p className="font-sora text-sm text-gk-success">Payment sent. Clearing any overdue status may take a moment.</p>;
 
   if (clientSecret) {
     return (

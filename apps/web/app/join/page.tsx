@@ -36,6 +36,7 @@ function Chip({
       size="sm"
       className="rounded-full"
       onClick={onClick}
+      aria-pressed={active}
     >
       {children}
     </Button>

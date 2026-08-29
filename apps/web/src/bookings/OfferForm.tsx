@@ -6,12 +6,12 @@ import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import { IconWarning } from "../ui/icons";
 
-// Task 10's counter-offer form on the booking thread screen — same fields
-// as Task 9's apply/offer composers (OfferFields, buildOfferPayload —
+// Task 10's counter-offer form on the booking thread screen: same fields
+// as Task 9's apply/offer composers (OfferFields, buildOfferPayload,
 // exactly the client-side mirror of validateOfferInput counterBooking runs
 // server-side), wrapped as a dumb value/submit component so BookingThread
 // owns the actual counterBooking call, its busy lock, and its verbatim-
-// server-error surface (this component only owns CLIENT-side validation —
+// server-error surface (this component only owns CLIENT-side validation:
 // the `error` prop is for the server's own error message, shown alongside
 // any local validation failure).
 export function OfferForm({ structure, busy, error, onSubmit, onCancel, submitLabel = "Send counter" }: {

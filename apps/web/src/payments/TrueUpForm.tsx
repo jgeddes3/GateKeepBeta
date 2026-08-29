@@ -25,11 +25,11 @@ function ErrorBox({ message }: { message: string }) {
   );
 }
 
-// SP5 Task 15 — the curator's increase-only true-up of one occurrence's
+// SP5 Task 15: the curator's increase-only true-up of one occurrence's
 // actuals, reported during its settlement window (PaymentsPanel only ever
-// mounts this while settlement.status === "pending" — see its rowKind).
+// mounts this while settlement.status === "pending", see its rowKind).
 // Structure-aware: perHour bookings report extra MINUTES, perSong bookings
-// report extra SONGS, and perSet is flat — the caller never mounts this for
+// report extra SONGS, and perSet is flat: the caller never mounts this for
 // a perSet booking at all, and the guard below is a defensive second line,
 // mirroring confirmOccurrenceActuals's own server-side refusal for the same
 // case.
@@ -42,7 +42,7 @@ export function TrueUpForm({
   onDone: () => void; onCancel: () => void;
 }) {
   const isPerHour = structure === "perHour";
-  // Review round 1 (low #7): empty by default, never "0" — a booking with no
+  // Review round 1 (low #7): empty by default, never "0". A booking with no
   // prior report has current == null, and confirmOccurrenceActuals' own
   // SHAPE check refuses extraMinutes===0 && extraSongs===0 outright. A "0"
   // pre-fill would let a curator submit the empty state UNCHANGED straight
@@ -55,7 +55,7 @@ export function TrueUpForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (structure === "perSet") return null; // flat — nothing to report
+  if (structure === "perSet") return null; // flat: nothing to report
 
   const trimmed = rawInput.trim();
   const parsedValue = Math.round(Number(trimmed));
@@ -67,7 +67,7 @@ export function TrueUpForm({
   const nextExtraMinutes = isPerHour ? (inputShapeOk ? parsedValue : (currentAxisValue ?? 0)) : (current?.extraMinutes ?? 0);
   const nextExtraSongs = isPerHour ? (current?.extraSongs ?? 0) : (inputShapeOk ? parsedValue : (currentAxisValue ?? 0));
   // Review round 1 (low #7): mirrors confirmOccurrenceActuals' own SHAPE
-  // check exactly — server-side this is folded into ONE
+  // check exactly: server-side this is folded into ONE
   // `(extraMinutes===0 && extraSongs===0)` clause alongside the integer/
   // non-negative checks, not a separate rule. A booking that's never had
   // actuals reported has BOTH extras at 0 by default, and 0/0 is refused
@@ -84,8 +84,8 @@ export function TrueUpForm({
   const submit = async () => {
     setError(null);
     // Client-side mirror of confirmOccurrenceActuals' own SHAPE -> CAP ->
-    // increase-only ordering (different complaints, different fixes — see
-    // messages.ts's header) — the server independently re-validates all
+    // increase-only ordering (different complaints, different fixes, see
+    // messages.ts's header): the server independently re-validates all
     // three regardless.
     if (!shapeOk) { setError(TRUE_UP_SHAPE_MESSAGE); return; }
     if (overCap) { setError(trueUpOverCapMessage(isPerHour ? "minutes" : "songs", cap)); return; }
@@ -115,12 +115,12 @@ export function TrueUpForm({
             value={rawInput} onChange={(e) => setRawInput(e.target.value)} placeholder="0" />
         </div>
         <p className="font-sora text-xs text-gk-muted">
-          Actuals can only increase — this replaces any previous report for this date.
+          Actuals can only increase: this replaces any previous report for this date.
         </p>
         {preview && preview.deltaBaseCents > 0 && (
           <p className="font-sora text-sm text-gk-success">
-            The musician will receive an extra {formatCents(preview.musicianDeltaCents)}
-            {" "}— you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
+            The musician will receive an extra {formatCents(preview.musicianDeltaCents)}, and
+            {" "}you&apos;ll be charged an extra {formatCents(preview.deltaBaseCents + preview.curatorFeeDeltaCents)} at settlement.
           </p>
         )}
         {error && <ErrorBox message={error} />}
