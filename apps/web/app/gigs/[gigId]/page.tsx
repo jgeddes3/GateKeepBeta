@@ -257,9 +257,14 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
           <p className="font-sora text-sm text-gk-text">
             {formatGigDateTime(gig.startsAt)} · {formatDuration(gig.durationMinutes)}
           </p>
-          <p className="font-syne text-lg font-semibold text-gk-accent">
+          {/* Filled pill, not bare ember text: same DESIGN.md accessibility
+              note as GigCard's price (bare text-gk-accent on this page's
+              gk-page/gk-surface fails AA in light theme; the prescribed
+              fix is a filled chip/pill, ember fill + on-accent text,
+              which Badge's "default" variant already is). */}
+          <Badge variant="default" className="w-fit font-syne text-base font-semibold">
             {formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
-          </p>
+          </Badge>
           <p className="font-sora text-sm text-gk-muted">{gigLocationLabel(gig.location)}</p>
         </div>
 

@@ -74,12 +74,19 @@ export function GigCard({ gig, badgeLabel, photoUrl, href, className }: {
     <Link
       href={href ?? `/gigs/${gig.id}`}
       className={cn(
-        "group block overflow-hidden rounded-gk border border-gk-border bg-gk-surface transition-colors",
+        "group block overflow-hidden rounded-gk border border-gk-border bg-gk-surface outline-none transition-colors",
         // Hover: border warms + scrim lightens ONLY (locked spec, section 4).
         // No lift, no zoom, no shadow: DESIGN.md's elevation rule keeps
         // cards flat; this hover state deliberately does not touch
         // transform or box-shadow.
         "hover:border-gk-accent/50",
+        // The whole-card focus ring every other interactive src/ui
+        // component gets (Button/Input/Select's own focus-visible:ring-2
+        // focus-visible:ring-gk-focus). No extra ring-offset/rounding
+        // needed beyond that: a CSS box-shadow ring already follows the
+        // element's own border-radius, so it hugs this card's rounded-gk
+        // shape automatically.
+        "focus-visible:ring-2 focus-visible:ring-gk-focus",
         className,
       )}
     >
@@ -110,7 +117,18 @@ export function GigCard({ gig, badgeLabel, photoUrl, href, className }: {
         )}
         <div className="mt-3 flex items-center justify-between gap-2">
           <span className="min-w-0 truncate font-sora text-sm text-gk-muted">{formatGigDateTime(gig.startsAt)}</span>
-          <span className="shrink-0 font-syne text-sm font-semibold text-gk-accent">{formatGigCardPrice(gig.budget)}</span>
+          {/* Filled pill, not bare ember text: DESIGN.md's accessibility
+              note measures text-gk-accent at ~2.6-2.8:1 on a light-theme
+              gk-surface (this card's own background), under AA, and names
+              exactly this "price on a light surface" case with its
+              prescribed fix, a filled chip/pill (ember fill + on-accent
+              text) instead of bare accent-colored text. Badge's "default"
+              variant already is that pairing; only the type scale is
+              bumped up here so the price still reads as the card's one
+              money moment, not a routine status label. */}
+          <Badge variant="default" className="shrink-0 font-syne text-sm font-semibold">
+            {formatGigCardPrice(gig.budget)}
+          </Badge>
         </div>
       </div>
     </Link>

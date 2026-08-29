@@ -43,17 +43,23 @@ export function MusicianCard({
   newTab?: boolean;
   className?: string;
 }) {
-  const genres = musician.portfolio?.genres ?? [];
+  // Capped at 2, same as GigCard's genre chips: consistency across the two
+  // locked card skeletons, and an uncapped list (portfolio.genres allows up
+  // to 3) wrapped untidily next to the act-size chip on narrower cards.
+  const genres = (musician.portfolio?.genres ?? []).slice(0, 2);
   return (
     <Link
       href={href ?? `/@${musician.handle}`}
       target={newTab ? "_blank" : undefined}
       rel={newTab ? "noopener noreferrer" : undefined}
       className={cn(
-        "group block overflow-hidden rounded-gk border border-gk-border bg-gk-surface transition-colors",
+        "group block overflow-hidden rounded-gk border border-gk-border bg-gk-surface outline-none transition-colors",
         // Same hover contract as GigCard: border warms + scrim lightens
         // only, no lift, no zoom, no shadow.
         "hover:border-gk-accent/50",
+        // Same whole-card focus ring as GigCard; see its comment for why no
+        // extra ring-offset/rounding is needed.
+        "focus-visible:ring-2 focus-visible:ring-gk-focus",
         className,
       )}
     >
