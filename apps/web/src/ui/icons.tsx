@@ -19,6 +19,7 @@ import {
   GoogleLogo,
   House,
   Image,
+  Images,
   Info,
   InstagramLogo,
   LinkSimple,
@@ -131,6 +132,14 @@ export const IconPlus = pin(Plus);
 export const IconArrowUp = pin(ArrowUp);
 export const IconArrowDown = pin(ArrowDown);
 export const IconLink = pin(LinkSimple);
+
+// Sub-project 9A task 10: the venue page's collage-header "Open gallery"
+// bubble (spec section 6.6, docs/superpowers/mocks/sp9a/venue-page.html
+// option A). Images (a stacked-photos glyph), not the singular Image above
+// (already spoken for as the photo-upload placeholder icon): this button
+// opens a multi-photo lightbox, so the plural glyph is the one that is
+// actually relevant to what it represents (antislop R-04).
+export const IconImages = pin(Images);
 
 // Sub-project 9A task 9: the artist page's External links section names
 // which platform each link points to (spotify/youtube/instagram/website,
