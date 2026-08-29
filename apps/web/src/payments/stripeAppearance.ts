@@ -36,7 +36,20 @@ export function gkStripeAppearance(): Appearance {
       colorTextSecondary: resolveToken("--gk-muted", "rgba(245,241,248,.62)"),
       colorTextPlaceholder: resolveToken("--gk-muted", "rgba(245,241,248,.62)"),
       colorDanger: resolveToken("--gk-destructive", "#E5484D"),
-      fontFamily: "var(--font-sora), sans-serif",
+      // Review round 1: no `fontFamily` here. Stripe's PaymentElement
+      // inputs render inside a cross-origin iframe Stripe.js itself
+      // controls, which CSS custom properties (var(--font-sora)) cannot
+      // cross, so that value would never resolve there; a bare "sans-serif"
+      // fallback with no real family named would just be dead weight. Sora
+      // is loaded via next/font/google (self-hosted at build, no runtime
+      // request to Google, per DESIGN.md), so it has no stable public URL
+      // this config could hand to Stripe's own `options.fonts` (a `cssSrc`
+      // pointing at fonts.googleapis.com would work, but reintroduces
+      // exactly the runtime Google Fonts request DESIGN.md deliberately
+      // avoids, for one component). Net effect: the money-entry fields
+      // inside the iframe render in Stripe's own default UI font, not Sora;
+      // every label/button/surface AROUND the iframe (`.Label` below, the
+      // page's own Save card/Pay now buttons) still is.
       // DESIGN.md's card/input radius tier (rounded-gk), the same one
       // src/ui/input.tsx and src/ui/select.tsx use.
       borderRadius: "10px",

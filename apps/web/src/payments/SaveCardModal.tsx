@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import { getFirebase } from "../lib/firebase";
@@ -45,6 +45,11 @@ export function SaveCardModal({ profileId, onSaved, onClose }: {
   const [fakeSaved, setFakeSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Reads computed CSS custom properties off the document (real DOM work),
+  // same render-body-work-avoidance idiom GigBrowse.tsx/MusicianBrowse.tsx's
+  // own useMemo'd `filtered` lists already use in this app, computed once
+  // per mount rather than on every render.
+  const appearance = useMemo(() => gkStripeAppearance(), []);
 
   const start = async () => {
     setBusy(true);
@@ -89,7 +94,7 @@ export function SaveCardModal({ profileId, onSaved, onClose }: {
             </div>
           </>
         ) : clientSecret ? (
-          <Elements stripe={getStripeJs()} options={{ clientSecret, appearance: gkStripeAppearance() }}>
+          <Elements stripe={getStripeJs()} options={{ clientSecret, appearance }}>
             <CardConfirmForm profileId={profileId} onSaved={onSaved} onCancel={onClose} />
           </Elements>
         ) : (

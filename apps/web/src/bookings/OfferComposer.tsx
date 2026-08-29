@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
@@ -20,6 +20,10 @@ type GigRow = GigDoc & { id: string };
 export function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onClose }: {
   curatorProfileId: string; musicianProfileId: string; musicianName: string; onClose: () => void;
 }) {
+  // MusicianBrowse can open several OfferComposer instances on the same
+  // page (one per musician card), so a literal "offer-composer-gig" id would
+  // collide across them; useId() gives each mounted instance its own.
+  const gigSelectId = useId();
   const [openGigs, setOpenGigs] = useState<GigRow[] | "loading">("loading");
   const [gigOverride, setGigOverride] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferState>(emptyOffer());
@@ -103,9 +107,9 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
         ) : (
           <>
             <div className="grid max-w-sm gap-1.5">
-              <label htmlFor="offer-composer-gig" className="font-sora text-sm font-medium text-gk-text">Gig</label>
+              <label htmlFor={gigSelectId} className="font-sora text-sm font-medium text-gk-text">Gig</label>
               <Select value={selectedGigId} onValueChange={setGigOverride}>
-                <SelectTrigger id="offer-composer-gig" className="w-full"><SelectValue /></SelectTrigger>
+                <SelectTrigger id={gigSelectId} className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {openGigs.map((g) => (
                     <SelectItem key={g.id} value={g.id}>

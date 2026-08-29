@@ -242,8 +242,18 @@ export function PaymentsPanel({ bookingId, uid }: { bookingId: string; uid: stri
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-sora text-sm text-gk-text">{formatGigDateTime(row.occurrenceStartsAt)}</span>
                 {/* Status/money chip (spec 4): the established Badge status
-                    treatments, not a bespoke color per row. */}
-                <Badge variant={rowBadgeVariant(kind)}>{rowLabel(kind, row, isCuratorSide)}</Badge>
+                    treatments, not a bespoke color per row.
+                    Review round 1: Badge's own base class is
+                    whitespace-nowrap (right, for a short status word), but
+                    several rowLabel() outputs are full money sentences with
+                    a formatted dollar amount folded in (e.g. a "Forfeited"
+                    clause naming who got paid what), which can outrun a
+                    narrow (360px) viewport as one unbroken line. whitespace-normal
+                    overrides that for just this usage so a long label wraps
+                    inside the chip instead of forcing horizontal overflow. */}
+                <Badge variant={rowBadgeVariant(kind)} className="whitespace-normal text-right">
+                  {rowLabel(kind, row, isCuratorSide)}
+                </Badge>
               </div>
               {isCuratorSide && (kind === "settlementPastDue" || kind === "depositPastDue") && (
                 <PayPastDueButton bookingId={bookingId} gigId={row.id} onDone={() => setStripeReloadKey((k) => k + 1)} />

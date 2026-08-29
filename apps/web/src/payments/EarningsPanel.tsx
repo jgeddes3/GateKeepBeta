@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
@@ -98,7 +98,11 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
     .filter((r) => r.settlement.status === "pending" || r.settlement.status === "past_due")
     .sort((a, b) => a.occurrenceStartsAt - b.occurrenceStartsAt);
   if (pending.length === 0) {
-    return <p className="font-sora text-sm text-gk-muted">Nothing pending. Every settlement is caught up.</p>;
+    return (
+      <p className="font-sora text-sm text-gk-muted">
+        Nothing pending right now. A confirmed date shows up here once it&apos;s played and waiting to settle.
+      </p>
+    );
   }
   return (
     <ul className="grid gap-2">
@@ -111,8 +115,14 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
           {/* Status chip (spec 4): past_due is the one genuinely urgent
               state here (money that should be settling is stalled on the
               CURATOR's side); an ordinary pending settlement is expected,
-              not cautionary, so it stays neutral. */}
-          <Badge variant={r.settlement.status === "past_due" ? "destructive" : "secondary"}>
+              not cautionary, so it stays neutral.
+              Review round 1: whitespace-normal (Badge's own base class is
+              nowrap). "pays out ~{date}" can run long enough to overflow a
+              360px viewport as one unbroken line; this lets it wrap. */}
+          <Badge
+            variant={r.settlement.status === "past_due" ? "destructive" : "secondary"}
+            className="whitespace-normal text-right"
+          >
             {r.settlement.status === "past_due"
               ? "curator payment delayed"
               : `pays out ~${r.settlement.settleAfter != null ? formatGigDateTime(r.settlement.settleAfter) : "after the gig"}`}
@@ -149,7 +159,14 @@ function HistoryList({ rows }: { rows: PaymentRow[] }) {
           className="flex flex-wrap items-center justify-between gap-2 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5"
         >
           <span className="font-sora text-sm text-gk-text">{formatGigDateTime(r.occurrenceStartsAt)}</span>
-          <Badge variant="success">
+          {/* Review round 1: whitespace-normal (Badge's own base class is
+              nowrap). The worst case here is a forfeited deposit AND a
+              transfer both landing on the same row, which joins two full
+              money sentences (a "Forfeited deposit..." clause plus a
+              "Paid $Y" clause) into one string that can easily outrun a
+              360px viewport as one unbroken line, so this lets it wrap
+              instead of forcing horizontal overflow. */}
+          <Badge variant="success" className="whitespace-normal text-right">
             {r.deposit.status === "forfeited" && `Forfeited deposit — received 100% (${formatCents(r.deposit.sliceCents)})`}
             {r.deposit.status === "forfeited" && r.transfer.status === "transferred" && "; "}
             {r.transfer.status === "transferred" && r.transfer.amountCents != null
@@ -162,6 +179,11 @@ function HistoryList({ rows }: { rows: PaymentRow[] }) {
 }
 
 export function EarningsPanel({ profileId, name }: { profileId: string; name: string }) {
+  // The earnings page mounts one EarningsPanel per musician profile the
+  // signed-in account has (MusicianProfilesList), so a literal
+  // "earnings-cashout-amount" id would collide across two-plus panels on
+  // the same page; useId() gives each mounted instance its own.
+  const amountFieldId = useId();
   const [status, setStatus] = useState<StripeStatusResult | "loading" | "error">("loading");
   const [reloadKey, setReloadKey] = useState(0);
   const [onboardBusy, setOnboardBusy] = useState(false);
@@ -322,14 +344,15 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
                 )}
               </div>
               <div className="grid max-w-40 gap-1.5">
-                <label htmlFor="earnings-cashout-amount" className="font-sora text-sm font-medium text-gk-text">
+                <label htmlFor={amountFieldId} className="font-sora text-sm font-medium text-gk-text">
                   Amount to cash out
                 </label>
                 <div className="flex items-center gap-1.5">
-                  <span className="font-sora text-sm text-gk-muted">$</span>
-                  <Input id="earnings-cashout-amount" type="number" min="1" step="0.01" value={amount}
+                  <span aria-hidden="true" className="font-sora text-sm text-gk-muted">$</span>
+                  <Input id={amountFieldId} type="number" min="1" step="0.01" value={amount}
                     onChange={(e) => { setAmount(e.target.value); setPayoutError(null); }}
-                    disabled={payoutBusy || status.availableBalanceCents == null} />
+                    disabled={payoutBusy || status.availableBalanceCents == null}
+                    aria-label="Amount to cash out (dollars)" />
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">

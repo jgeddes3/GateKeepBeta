@@ -175,7 +175,11 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
         <span className="font-sora text-sm font-semibold text-gk-text">Add a track (30-second snippet)</span>
       </div>
       <label
-        className="inline-flex w-fit cursor-pointer items-center gap-2 rounded-gk-sm border border-gk-border bg-gk-page px-3 py-2 font-sora text-sm font-medium text-gk-text transition-colors hover:border-gk-focus"
+        // bg-gk-page is a gradient token, excluded from Tailwind's color
+        // mapping (DESIGN.md), so `bg-gk-page` alone compiled to no
+        // background at all. bg-gk-surface is the solid control-face fill
+        // every other bordered control (Input, Select, Card) already uses.
+        className="inline-flex w-fit cursor-pointer items-center gap-2 rounded-gk-sm border border-gk-border bg-gk-surface px-3 py-2 font-sora text-sm font-medium text-gk-text transition-colors hover:border-gk-focus"
       >
         {file ? "Choose a different file" : "Choose an audio file"}
         <input

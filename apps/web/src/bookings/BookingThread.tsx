@@ -215,21 +215,42 @@ function ThreadHistory({ thread, structure, mySide, lastEntryTotalCents }: {
               <div
                 className={cn(
                   "grid max-w-[85%] gap-2 rounded-gk border p-3.5 sm:max-w-[70%]",
-                  isMine ? "border-gk-accent/30 bg-gk-accent/14" : "border-gk-border bg-gk-surface",
+                  // Review round 1: /50 border opacity, not a new /30 value.
+                  // This is the SAME accent-border opacity GigCard's hover,
+                  // BookingInbox's SolidRow hover, and DateBlockRow's
+                  // ConfirmedRow override already established product-wide,
+                  // rather than a fourth, unexplained opacity figure.
+                  isMine ? "border-gk-accent/50 bg-gk-accent/14" : "border-gk-border bg-gk-surface",
                 )}
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-sora text-xs font-medium text-gk-muted">
                     {entry.by === "musician" ? "Musician" : "Curator"}
                   </span>
-                  {isCurrent && <Badge variant="default">current offer</Badge>}
+                  {/* Review round 1 (accent dosage): variant="secondary", not
+                      "default" (ember). DESIGN.md's "one deliberate accent"
+                      rule reserves the fill for the single most important
+                      thing on screen, and on this screen that's the Accept
+                      button below, not a marker on a bubble that can appear
+                      on EITHER side (including "mine", which is already
+                      ember-tinted): a second, unrelated ember use here
+                      would dose the accent past its budget. */}
+                  {isCurrent && <Badge variant="secondary">current offer</Badge>}
                 </div>
                 {/* Structured money-term card (spec 6.7): structure + amount
                     (+ song count for perSong), and, only on the current
                     entry, the expected total: see lastEntryTotalCents'
                     own comment above for exactly where that number comes
                     from. */}
-                <div className="grid gap-0.5 rounded-gk-sm border border-gk-border/60 bg-gk-page/60 px-3 py-2">
+                {/* bg-gk-page is a gradient token (flat only in light theme)
+                    and is excluded from Tailwind's color mapping per
+                    DESIGN.md, so `bg-gk-page/*` compiles to no background at
+                    all. bg-gk-border/25 is the same neutral wash this file's
+                    own DateBlockRow hover override and AppShell's row hovers
+                    already use, and it reads as a recessed nested surface
+                    against BOTH bubble backgrounds (the ember tint and the
+                    plain gk-surface). */}
+                <div className="grid gap-0.5 rounded-gk-sm border border-gk-border/60 bg-gk-border/25 px-3 py-2">
                   <p className="font-syne text-base font-bold text-gk-text">
                     {formatCents(entry.amountCents)}{" "}
                     <span className="font-sora text-sm font-normal text-gk-muted">{BUDGET_STRUCTURE_LABEL[structure]}</span>
@@ -353,7 +374,20 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   // once accepted (an already-frozen number), otherwise the same live
   // accept-preview total computed above. Neither value is new math: this
   // only hands an already-derived number down to ThreadHistory for display.
-  const lastEntryTotalCents = booking.acceptedTerms?.expectedTotalCents ?? preview?.expectedTotalCents ?? null;
+  //
+  // Controller ruling (review round 1): gated to `booking.status === "open"`
+  // (still negotiating, so `preview` above is a legitimate CURRENT figure)
+  // OR a real `acceptedTerms` (a frozen, authoritative number). A declined/
+  // withdrawn/superseded/expired booking has neither: negotiation is dead,
+  // and `preview` would still recompute a number off the CURRENT gig's
+  // durationMinutes, which can have drifted since that dead negotiation
+  // ended, so showing it there would be a stale figure presented as live.
+  // Display-only gate: does not touch `preview`'s own derivation, any
+  // handler, callable, or query, only which of its outputs this screen is
+  // willing to show on the bubble.
+  const lastEntryTotalCents = (booking.status === "open" || booking.acceptedTerms != null)
+    ? (booking.acceptedTerms?.expectedTotalCents ?? preview?.expectedTotalCents ?? null)
+    : null;
   // SP5 Task 15 review round 1: "1-hour" derived from the actual shared
   // constant rather than a hardcoded literal that could drift from it if
   // CANCEL_GRACE_MS ever changes. CANCEL_GRACE_MS is exactly 3_600_000 today,

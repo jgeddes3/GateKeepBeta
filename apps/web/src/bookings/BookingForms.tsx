@@ -1,4 +1,5 @@
 "use client";
+import { useId } from "react";
 import {
   validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   type BudgetStructure,
@@ -85,35 +86,50 @@ export function buildOfferPayload(
 // Theme pass (sub-project 9A task 11): src/ui Input/Textarea, same
 // label-above-field grid as GigForms.tsx's ContentFields/BudgetFields (the
 // one other money-amount field group in the app, "Min $"/"Max $"). The
-// dollar sign stays visible text next to the input (not hidden from
-// assistive tech) rather than folded into a placeholder, so a screen reader
-// still announces it exactly as the old inline "$" did.
+// dollar sign stays visible text next to the input; an aria-label on the
+// input itself restores the "dollars" qualifier for assistive tech (the old
+// inline "Your offer (per hour): $" wording announced it as part of the
+// label text, which splitting the "$" into its own sibling span no longer
+// does on its own).
+//
+// Review round 1: this component mounts more than once on the same page in
+// at least two places (MusicianBrowse can open several OfferComposer
+// instances; the gig detail page can render this from ApplyPanel alongside
+// other booking surfaces), so a literal id string would collide across
+// instances (two elements with the same id, and a label pointing at
+// whichever one the browser resolves first). useId() mints a stable,
+// per-mount-instance-unique id, the same fix applied to every other
+// duplicate-id spot flagged in this review (OfferComposer, EarningsPanel).
 export function OfferFields({ structure, value, onChange, disabled }: {
   structure: BudgetStructure; value: OfferState; onChange: (v: OfferState) => void; disabled?: boolean;
 }) {
   const unitLabel = structure === "perHour" ? "per hour" : structure === "perSong" ? "per song" : "flat, per set";
+  const amountId = useId();
+  const songCountId = useId();
+  const noteId = useId();
   return (
     <div className="grid gap-4">
       <div className="grid max-w-44 gap-1.5">
-        <label htmlFor="offer-amount" className="font-sora text-sm font-medium text-gk-text">
+        <label htmlFor={amountId} className="font-sora text-sm font-medium text-gk-text">
           Your offer ({unitLabel})
         </label>
         <div className="flex items-center gap-1.5">
-          <span className="font-sora text-sm text-gk-muted">$</span>
-          <Input id="offer-amount" type="number" min={0} step="0.01" disabled={disabled}
+          <span aria-hidden="true" className="font-sora text-sm text-gk-muted">$</span>
+          <Input id={amountId} type="number" min={0} step="0.01" disabled={disabled}
+            aria-label={`Your offer (${unitLabel}), dollars`}
             value={value.amount} onChange={(e) => onChange({ ...value, amount: e.target.value })} />
         </div>
       </div>
       {structure === "perSong" && (
         <div className="grid max-w-32 gap-1.5">
-          <label htmlFor="offer-song-count" className="font-sora text-sm font-medium text-gk-text">Song count</label>
-          <Input id="offer-song-count" type="number" min={1} max={MAX_OFFER_SONG_COUNT} step={1} disabled={disabled}
+          <label htmlFor={songCountId} className="font-sora text-sm font-medium text-gk-text">Song count</label>
+          <Input id={songCountId} type="number" min={1} max={MAX_OFFER_SONG_COUNT} step={1} disabled={disabled}
             value={value.quantity} onChange={(e) => onChange({ ...value, quantity: e.target.value })} />
         </div>
       )}
       <div className="grid gap-1.5">
-        <label htmlFor="offer-note" className="font-sora text-sm font-medium text-gk-text">Note (optional)</label>
-        <Textarea id="offer-note" rows={3} maxLength={MAX_OFFER_NOTE_LENGTH} placeholder="Note (optional)" disabled={disabled}
+        <label htmlFor={noteId} className="font-sora text-sm font-medium text-gk-text">Note (optional)</label>
+        <Textarea id={noteId} rows={3} maxLength={MAX_OFFER_NOTE_LENGTH} placeholder="Note (optional)" disabled={disabled}
           value={value.note} onChange={(e) => onChange({ ...value, note: e.target.value })} />
         <p className="font-sora text-xs text-gk-muted">{value.note.length}/{MAX_OFFER_NOTE_LENGTH}</p>
       </div>

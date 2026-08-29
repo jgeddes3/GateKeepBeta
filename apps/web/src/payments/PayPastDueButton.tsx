@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import { getFirebase } from "../lib/firebase";
@@ -90,6 +90,10 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
   const [error, setError] = useState<string | null>(null);
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  // Same render-body-work-avoidance idiom as SaveCardModal.tsx's identical
+  // memoization (see its comment): computed once per mount rather than on
+  // every render.
+  const appearance = useMemo(() => gkStripeAppearance(), []);
 
   const start = async () => {
     setBusy(true);
@@ -127,7 +131,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
 
   if (clientSecret) {
     return (
-      <Elements stripe={getStripeJs()} options={{ clientSecret, appearance: gkStripeAppearance() }}>
+      <Elements stripe={getStripeJs()} options={{ clientSecret, appearance }}>
         <ConfirmForm onDone={() => { setDone(true); onDone?.(); }} onCancel={() => setClientSecret(null)} />
       </Elements>
     );

@@ -123,7 +123,7 @@ function useNextOccurrence(bookingId: string): { startsAt: number } | null {
 // Theme pass (sub-project 9A task 11): spec 6.7, DateBlockRow where a
 // dated shape genuinely fits (ConfirmedRow has a real occurrence date once
 // `next` resolves), a solid row otherwise. Every row is the same
-// rounded-gk/border-gk-border/hover:border-gk-accent-50 shell GigCard
+// rounded-gk/border-gk-border/hover:border-gk-accent/50 shell GigCard
 // already established for a clickable card, just a flat row instead of a
 // photo card.
 function SolidRow({ href, children, className }: { href: string; children: ReactNode; className?: string }) {
@@ -172,19 +172,35 @@ function ConfirmedRow({ row }: { row: BookingRow }) {
   const depositDetail = row.deposit ? depositLine(row.deposit.amountCents) : undefined;
   if (next) {
     return (
-      <DateBlockRow
-        href={`/dashboard/bookings/${row.id}`}
-        dateMs={next.startsAt}
-        title={title}
-        subtitle={depositDetail ?? formatGigDateTime(next.startsAt)}
-        className="border border-gk-border bg-gk-surface px-3 hover:border-gk-accent/50 hover:bg-gk-surface"
-      />
+      // Review round 1: DateBlockRow renders a Link/div, not an <li> itself
+      // (every other schedule context mounts it inside its OWN <li>, e.g.
+      // the artist page's Shows box). This was previously dropped straight
+      // into the surrounding <ul>, an invalid list. Wrapping it here matches
+      // SolidRow's own <li> and keeps the list valid.
+      //
+      // Review round 1: subtitle is the gig's start time (what DateBlockRow's
+      // other mounts always show there), not the deposit line. The deposit
+      // line almost always exists once a booking is confirmed, so folding it
+      // into subtitle meant the time itself never actually showed. The
+      // deposit line moves to `detail` (right-aligned), bounded to a couple
+      // of lines so a long deposit sentence wraps instead of overflowing the
+      // row on a narrow viewport.
+      <li>
+        <DateBlockRow
+          href={`/dashboard/bookings/${row.id}`}
+          dateMs={next.startsAt}
+          title={title}
+          subtitle={formatGigDateTime(next.startsAt)}
+          detail={depositDetail && <span className="block max-w-28 whitespace-normal">{depositDetail}</span>}
+          className="border border-gk-border bg-gk-surface px-3 hover:border-gk-accent/50 hover:bg-gk-surface"
+        />
+      </li>
     );
   }
   return (
     <SolidRow href={`/dashboard/bookings/${row.id}`}>
       <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
-      {depositDetail && <span className="shrink-0 font-sora text-xs text-gk-muted">{depositDetail}</span>}
+      {depositDetail && <span className="max-w-40 shrink-0 whitespace-normal text-right font-sora text-xs text-gk-muted">{depositDetail}</span>}
     </SolidRow>
   );
 }
@@ -277,7 +293,7 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
           Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}
         </h3>
         {confirmed.length === 0 ? (
-          <InboxEmpty>Nothing confirmed yet. Accepted offers turn into dates here.</InboxEmpty>
+          <InboxEmpty>Nothing confirmed yet. Accept an offer in Open threads above and it lands here as a date.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} />)}</ul>
         )}
