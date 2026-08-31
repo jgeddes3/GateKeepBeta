@@ -124,7 +124,9 @@ function CancelledTicketCard({ ticket }: { ticket: TicketRow }) {
         <Badge variant="destructive">Cancelled</Badge>
       </div>
       {ticket.status === "refunded" && (
-        <p className="mt-2 font-sora text-sm text-gk-muted">You were refunded in full.</p>
+        <p className="mt-2 font-sora text-sm text-gk-muted">
+          This event was cancelled. Any payment was refunded to the original purchaser.
+        </p>
       )}
     </TicketCardShell>
   );
