@@ -816,7 +816,17 @@ export type AdminAlertKind =
   // named in `detail`. Distinct from ticket_settlement_blocked, which never
   // reaches Stripe at all: this kind means the call was made and refused, not
   // that it was withheld.
-  | "ticket_settlement_failed";
+  | "ticket_settlement_failed"
+  // SP6 Task 8 fix round 1 (security review, Important, silent money drift):
+  // refundTicket's Stripe refund succeeded, but the ticket it was refunding
+  // had (raced) become "transferred" out from under it, AND the CURRENT
+  // live descendant ticket could not be automatically torn down to match
+  // (it was already refunded, already checked in, missing, or ambiguous).
+  // bookingId/gigId are always null (ticket-scoped, like the two kinds
+  // above); the ticket id, order id, and amount are named in `detail`.
+  // Never a silent no-op: refundTicket THROWS after raising this, so the
+  // caller (and the curator) sees the refund did not cleanly resolve.
+  | "ticket_refund_convergence_failed";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -960,7 +970,16 @@ export interface AttendeeDoc {             // events/{eventId}/attendees/{ticket
   ownerUid: string; ownerName: string; tierId: string; tierName: string;
   status: TicketStatus; checkedInAt?: number;
 }
-export type TicketTransferStatus = "offered" | "accepted" | "declined" | "expired";
+// Task 8 fix round 1 (security review, money drift): "voided" is a distinct
+// terminal status from "declined": the recipient never chose anything here.
+// A curator's grace refund on the underlying ticket, run BEFORE the Stripe
+// call, transactionally flips any still-"offered" transfer for that ticket
+// to "voided" so no accept can complete against a ticket about to be
+// refunded out from under it. Both "declined" and "voided" are equally
+// terminal to respondToTransfer/offerTransfer (either simply fails the
+// `status === "offered"` check), so nothing downstream needs to distinguish
+// the two beyond the audit trail this value preserves.
+export type TicketTransferStatus = "offered" | "accepted" | "declined" | "expired" | "voided";
 export interface TicketTransferDoc {
   ticketId: string; eventId: string; fromUid: string; toUid: string;
   status: TicketTransferStatus; createdAt: number; expiresAt: number; resolvedAt?: number;

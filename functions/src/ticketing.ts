@@ -333,6 +333,16 @@ function ticketCancelAlertId(orderId: string): string {
   return `ticket-cancel:${orderId}`;
 }
 
+// Task 8 fix round 1 (security review): the adminAlerts id for "a grace
+// refund's Stripe money moved but the live descendant of a raced-transferred
+// ticket could not be automatically torn down to match it" (see
+// AdminAlertKind's ticket_refund_convergence_failed). One id per ORIGINAL
+// ticket id (the one the caller actually asked to refund), scoped to this
+// file the same way ticketCancelAlertId above is.
+function ticketRefundConvergenceAlertId(ticketId: string): string {
+  return `ticket-refund-converge:${ticketId}`;
+}
+
 // The buyer-facing cancellation notification body, shared by every order
 // this batch touches (a paid order, and a $0 one alike). `reason`, when the
 // curator gave one on cancelEvent's own input, is folded in here: this is
@@ -646,6 +656,28 @@ export interface RefundTicketInput { curatorProfileId: string; eventId: string; 
 // is refused by Stripe forever. Freezing refunds a full T+1 window (24h)
 // before any transfer can even become due removes the drift at its source
 // instead of trying to re-scope the key around it.
+//
+// Fix round 1 (security review, Important, silent money drift): a transfer
+// accept can race BETWEEN this callable's Stripe refund call and its books-
+// resolution transaction (both used to run back to back with nothing in
+// between). Closed in two layers, belt and braces, matching this codebase's
+// money-converges discipline (see paymentsSweep.ts's own "money always wins"
+// rule):
+//  1. PREVENTION, right here, right before the Stripe call: a transaction
+//     re-verifies the ticket is still valid/checked_in and VOIDS any open
+//     transfer offer for it, so no PRE-EXISTING offer can be accepted once
+//     this refund is committed to happening.
+//  2. CONVERGENCE, in `applyTicketRefund` below: if a BRAND-NEW offer+accept
+//     still slips into the (much narrower) window spanning the Stripe call
+//     itself, the books-resolution transaction finds the ticket "transferred"
+//     instead of "valid"/"checked_in" and follows it to the CURRENT live
+//     descendant to tear down instead, never a silent { ok: true } with
+//     Stripe money moved and nothing in the books to show for it.
+const TICKET_OFFER_WITHDRAWN_MESSAGE_BODY = (tierName: string) =>
+  `The "${tierName}" ticket you were offered was refunded by the organizer and is no longer available.`;
+const TICKET_REFUND_CONVERGENCE_FAILED_MESSAGE =
+  "This refund could not be completed automatically and has been flagged for review.";
+
 export const refundTicket = onCall<RefundTicketInput>(
   { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
     const uid = requireAuthUid(req);
@@ -701,6 +733,36 @@ export const refundTicket = onCall<RefundTicketInput>(
     const feeCents = ticketServiceFeeCents(unitPriceCents, order.feePolicy);
     const amountCents = unitPriceCents + feeCents;
 
+    // Layer 1, PREVENTION (see this callable's own header comment): fresh
+    // transactional re-verification, immediately before the Stripe call, and
+    // an atomic void of any open offer in the SAME transaction. A voided
+    // offer notifies its would-be recipient only AFTER this commits (never
+    // inside the transaction itself).
+    const voidedOffers = await db.runTransaction(async (tx) => {
+      const openOffersQuery = db.collection("transfers")
+        .where("ticketId", "==", input.ticketId).where("status", "==", "offered");
+      const [tSnap, offersSnap] = await Promise.all([tx.get(ticketRef), tx.get(openOffersQuery)]);
+      const t = tSnap.data() as TicketDoc | undefined;
+      if (!t || (t.status !== "valid" && t.status !== "checked_in")) {
+        throw new HttpsError("failed-precondition", TICKET_NOT_REFUNDABLE_MESSAGE);
+      }
+      const now = Date.now();
+      const voided: Array<{ transferId: string; toUid: string }> = [];
+      for (const doc of offersSnap.docs) {
+        const transfer = doc.data() as TicketTransferDoc;
+        tx.update(doc.ref, { status: "voided", resolvedAt: now });
+        voided.push({ transferId: doc.id, toUid: transfer.toUid });
+      }
+      return voided;
+    });
+
+    for (const v of voidedOffers) {
+      await notifyUser(v.toUid, {
+        kind: "ticket", refId: input.eventId, title: "Ticket offer withdrawn",
+        body: TICKET_OFFER_WITHDRAWN_MESSAGE_BODY(item.tierName),
+      }).catch((e) => console.error(`refundTicket: voided-offer notification failed for transfer ${v.transferId}`, e));
+    }
+
     if (amountCents > 0) {
       await getStripe().refund({
         intentId: order.paymentIntentId!, amountCents,
@@ -709,48 +771,163 @@ export const refundTicket = onCall<RefundTicketInput>(
       });
     }
 
-    const tierRef = eventRef.collection("tiers").doc(ticket.tierId);
-    const idxRef = db.doc(`users/${ownerUid}/ticketIndex/${input.eventId}`);
-
-    const applied = await db.runTransaction(async (tx) => {
-      const [tSnap, tierSnap, idxSnap] = await Promise.all([tx.get(ticketRef), tx.get(tierRef), tx.get(idxRef)]);
-      const t = tSnap.data() as TicketDoc | undefined;
-      // Idempotent no-op: a racer (a duplicate call, or a crash-recovery retry
-      // after the Stripe call above already succeeded once) already resolved
-      // this exact ticket.
-      if (!t || (t.status !== "valid" && t.status !== "checked_in")) return false;
-
-      tx.update(ticketRef, { status: "refunded" });
-      tx.update(attendeeRef, { status: "refunded" });
-      if (tierSnap.exists) tx.update(tierRef, { soldCount: FieldValue.increment(-1) });
-
-      const idxCount = (idxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
-      if (idxCount <= 1) tx.delete(idxRef); else tx.update(idxRef, { count: idxCount - 1 });
-
-      tx.update(orderRef, {
-        refundedTicketIds: FieldValue.arrayUnion(input.ticketId),
-        refundedCents: FieldValue.increment(amountCents),
-        refundedFaceCents: FieldValue.increment(unitPriceCents),
-      });
-      return true;
+    // Layer 2, CONVERGENCE: see applyTicketRefund's own header comment.
+    // Throws (never a silent { ok: true }) if Stripe money moved and the
+    // books could not be made to match it.
+    await applyTicketRefund({
+      eventId: input.eventId, ticketId: input.ticketId, ownerUid, tierId: ticket.tierId, tierName: item.tierName,
+      curatorProfileId: input.curatorProfileId, orderId: ticket.orderId, buyerUid: order.buyerUid,
+      amountCents, unitPriceCents,
     });
-
-    if (!applied) return { ok: true };
-
-    await writeLedger({
-      kind: "ticket_grace_refund", amountCents, bookingId: null, gigId: null,
-      profileId: input.curatorProfileId, stripeId: input.ticketId,
-      detail: `curator grace refund for one ticket ("${item.tierName}")`,
-      eventId: input.eventId, buyerUid: order.buyerUid,
-    }).catch((e) => console.error(`refundTicket: ledger write failed for ticket ${input.ticketId}`, e));
-
-    await notifyUser(ownerUid, {
-      kind: "ticket", refId: input.eventId, title: "Ticket refunded",
-      body: `The organizer refunded your "${item.tierName}" ticket.`,
-    }).catch((e) => console.error(`refundTicket: notification failed for ticket ${input.ticketId}`, e));
 
     return { ok: true };
   });
+
+export interface ApplyTicketRefundParams {
+  eventId: string; ticketId: string; ownerUid: string; tierId: string; tierName: string;
+  curatorProfileId: string; orderId: string; buyerUid: string;
+  amountCents: number; unitPriceCents: number;
+}
+
+type ApplyTicketRefundOutcome =
+  | { kind: "applied" }
+  | { kind: "converged"; ownerUid: string; ticketId: string }
+  | { kind: "noop" }
+  | { kind: "convergeFailed"; reason: string };
+
+// The post-Stripe books resolution refundTicket calls once its Stripe
+// refund has succeeded. Split out into its own exported function, same
+// discipline as completeOrderTx/cancelEventCore/refundOrdersForCancelledEvent
+// above in this file, so fix round 1's residual race window (a BRAND-NEW
+// transfer offer+accept slipping in between refundTicket's own pre-phase
+// transaction and this one, completing while the Stripe call itself is in
+// flight) can be exercised directly by tests without fighting real network
+// timing (the emulator's Functions process is a separate sandbox a test
+// cannot reach into to pause mid-call).
+//
+// `ticketRef` (`users/{ownerUid}/tickets/{ticketId}`) is fixed on the
+// ORIGINAL ticket doc the caller named; that doc is NEVER deleted by a
+// transfer (only its sibling attendee doc is), so a fresh read of it always
+// reflects the truth regardless of how the race played out. Three shapes:
+//  - "valid"/"checked_in": the ordinary path, unchanged from before this fix
+//    round: flips straight to "refunded".
+//  - "transferred": the raced case. `t.transferredTo` names the CURRENT
+//    owner; their live ("valid") descendant ticket sharing this order id is
+//    found and torn down INSTEAD of the original doc, which is left exactly
+//    as it is (still "transferred"). Deliberately narrower than
+//    refundTicket's own "valid or checked_in" refundability rule: a
+//    descendant already "checked_in" is NOT auto-torn-down here, since the
+//    attendee already walked in on it, and an automatic yank of an in-use
+//    seat is a judgment call for a human, not this function (see the
+//    "convergeFailed" branch).
+//  - anything else: an idempotent no-op for an already-"refunded" doc
+//    (a racer/retry already resolved this exact ticket, unchanged from
+//    before this fix round) or an ESCALATED, THROWN failure when the
+//    "transferred" branch's descendant is missing, already refunded,
+//    already checked in, or ambiguous. Stripe money already moved and
+//    nothing in the books moved to match it, which must never be swallowed
+//    into a silent { ok: true }.
+export async function applyTicketRefund(params: ApplyTicketRefundParams): Promise<void> {
+  const db = getFirestore();
+  const eventRef = db.doc(`events/${params.eventId}`);
+  const ticketRef = db.doc(`users/${params.ownerUid}/tickets/${params.ticketId}`);
+  const orderRef = db.doc(`orders/${params.orderId}`);
+  const tierRef = eventRef.collection("tiers").doc(params.tierId);
+
+  const outcome = await db.runTransaction<ApplyTicketRefundOutcome>(async (tx) => {
+    const tSnap = await tx.get(ticketRef);
+    const t = tSnap.data() as TicketDoc | undefined;
+    if (!t) return { kind: "noop" };
+
+    if (t.status === "valid" || t.status === "checked_in") {
+      const idxRef = db.doc(`users/${params.ownerUid}/ticketIndex/${params.eventId}`);
+      const attendeeRef = eventRef.collection("attendees").doc(params.ticketId);
+      const [tierSnap, idxSnap] = await Promise.all([tx.get(tierRef), tx.get(idxRef)]);
+      tx.update(ticketRef, { status: "refunded" });
+      tx.update(attendeeRef, { status: "refunded" });
+      if (tierSnap.exists) tx.update(tierRef, { soldCount: FieldValue.increment(-1) });
+      const idxCount = (idxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+      if (idxCount <= 1) tx.delete(idxRef); else tx.update(idxRef, { count: idxCount - 1 });
+      tx.update(orderRef, {
+        refundedTicketIds: FieldValue.arrayUnion(params.ticketId),
+        refundedCents: FieldValue.increment(params.amountCents),
+        refundedFaceCents: FieldValue.increment(params.unitPriceCents),
+      });
+      return { kind: "applied" };
+    }
+
+    if (t.status === "transferred") {
+      const currentOwnerUid = t.transferredTo;
+      if (!currentOwnerUid) {
+        return { kind: "convergeFailed", reason: "transferred with no transferredTo recorded" };
+      }
+      const liveSnap = await tx.get(
+        db.collection(`users/${currentOwnerUid}/tickets`).where("orderId", "==", params.orderId));
+      const descendants = liveSnap.docs.map((d) => ({ doc: d, status: (d.data() as TicketDoc).status }));
+      // A "refunded" descendant means this exact convergence already ran
+      // (an earlier pass, or a crash-recovery retry) and already tore it
+      // down: idempotent no-op, mirroring the direct path's own "already
+      // refunded" branch below, checked BEFORE the ambiguity guard so a
+      // retry after a successful converge never mistakes "nothing left
+      // valid" for a failure.
+      if (descendants.some((d) => d.status === "refunded")) return { kind: "noop" };
+      const liveDocs = descendants.filter((d) => d.status === "valid").map((d) => d.doc);
+      if (liveDocs.length !== 1) {
+        return {
+          kind: "convergeFailed",
+          reason: `${liveDocs.length} live ("valid") descendant ticket(s) found under ${currentOwnerUid} for order ${params.orderId} (of ${descendants.length} total)`,
+        };
+      }
+      const liveDoc = liveDocs[0];
+      const liveTicketId = liveDoc.id;
+      const liveIdxRef = db.doc(`users/${currentOwnerUid}/ticketIndex/${params.eventId}`);
+      const liveAttendeeRef = eventRef.collection("attendees").doc(liveTicketId);
+      const [tierSnap, liveIdxSnap] = await Promise.all([tx.get(tierRef), tx.get(liveIdxRef)]);
+
+      tx.update(liveDoc.ref, { status: "refunded" });
+      tx.update(liveAttendeeRef, { status: "refunded" });
+      if (tierSnap.exists) tx.update(tierRef, { soldCount: FieldValue.increment(-1) });
+      const idxCount = (liveIdxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+      if (idxCount <= 1) tx.delete(liveIdxRef); else tx.update(liveIdxRef, { count: idxCount - 1 });
+      tx.update(orderRef, {
+        refundedTicketIds: FieldValue.arrayUnion(liveTicketId),
+        refundedCents: FieldValue.increment(params.amountCents),
+        refundedFaceCents: FieldValue.increment(params.unitPriceCents),
+      });
+      return { kind: "converged", ownerUid: currentOwnerUid, ticketId: liveTicketId };
+    }
+
+    // Any other terminal state ("refunded"): idempotent no-op, unchanged
+    // from before this fix round.
+    return { kind: "noop" };
+  });
+
+  if (outcome.kind === "noop") return;
+
+  if (outcome.kind === "convergeFailed") {
+    const alertId = ticketRefundConvergenceAlertId(params.ticketId);
+    await recordAdminAlert({
+      alertId, kind: "ticket_refund_convergence_failed",
+      detail: `refundTicket ${params.ticketId} (order ${params.orderId}): Stripe refunded ${params.amountCents}c but the ticket had been transferred and its current live descendant could not be torn down to match (${outcome.reason}); needs manual reconciliation`,
+      bookingId: null, gigId: null, now: Date.now(),
+    });
+    throw new HttpsError("internal", TICKET_REFUND_CONVERGENCE_FAILED_MESSAGE);
+  }
+
+  const notifyOwnerUid = outcome.kind === "converged" ? outcome.ownerUid : params.ownerUid;
+
+  await writeLedger({
+    kind: "ticket_grace_refund", amountCents: params.amountCents, bookingId: null, gigId: null,
+    profileId: params.curatorProfileId, stripeId: params.ticketId,
+    detail: `curator grace refund for one ticket ("${params.tierName}")`,
+    eventId: params.eventId, buyerUid: params.buyerUid,
+  }).catch((e) => console.error(`applyTicketRefund: ledger write failed for ticket ${params.ticketId}`, e));
+
+  await notifyUser(notifyOwnerUid, {
+    kind: "ticket", refId: params.eventId, title: "Ticket refunded",
+    body: `The organizer refunded your "${params.tierName}" ticket.`,
+  }).catch((e) => console.error(`applyTicketRefund: notification failed for ticket ${params.ticketId}`, e));
+}
 
 /**
  * SP6 Task 8: the door (QR check-in) and capped in-app ticket transfers.
@@ -837,7 +1014,12 @@ export const checkInTicket = onCall<CheckInTicketInput>(
       if (!ticket || ticket.eventId !== input.eventId || ticket.curatorProfileId !== input.curatorProfileId) {
         throw new HttpsError("not-found", "Ticket not found.");
       }
-      if (!input.override && ticket.qrSecret !== input.qrSecret) {
+      // Strict `!== true` (fix round 1, security review): a truthy-but-not-
+      // literal-`true` override (a string, a number, any non-boolean JSON
+      // value an untrusted onCall payload can carry) must never skip the
+      // secret check, even if it slipped past the validation gate above by
+      // also supplying a (possibly wrong) qrSecret.
+      if (input.override !== true && ticket.qrSecret !== input.qrSecret) {
         throw new HttpsError("failed-precondition", TICKET_NOT_VALID_MESSAGE);
       }
       if (ticket.status === "checked_in") {

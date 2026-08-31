@@ -1560,6 +1560,7 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   ticket_cancel_refund_failed: "Ticket order not refunded for cancelled event",
   ticket_settlement_blocked: "Ticket settlement blocked, no payout account",
   ticket_settlement_failed: "Ticket settlement transfer failed",
+  ticket_refund_convergence_failed: "Ticket refund could not converge with a transfer",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on

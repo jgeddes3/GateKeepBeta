@@ -4,9 +4,11 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
   type TicketOrderDoc, type TicketDoc, type AttendeeDoc, type TicketIndexDoc, type TicketTransferDoc,
+  type AdminAlertDoc, ticketServiceFeeCents,
   TICKET_ALREADY_CHECKED_IN_MESSAGE, TICKET_NOT_VALID_MESSAGE, TRANSFER_OFFER_SENT_MESSAGE, EVENT_BUYER_CAP_MESSAGE,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
+import { applyTicketRefund } from "../src/ticketing.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -517,5 +519,193 @@ describe("cancelEvent widened resolution for a transferred ticket (Task 8 regres
     // The old, dead ("transferred") ticket doc is left exactly as it was.
     const oldTicket = (await adb.doc(`users/${buyer.uid}/tickets/${oldTicketId}`).get()).data() as TicketDoc;
     expect(oldTicket.status).toBe("transferred");
+  });
+});
+
+// Security review, fix round 1: refundTicket's Stripe refund used to run
+// with nothing between it and its books-resolution transaction, so a
+// transfer accept racing into that window would leave Stripe money moved and
+// the books untouched, silently ({ ok: true }). Fixed in two layers:
+// refundTicket's own pre-phase transaction (exercised end-to-end below, test
+// "voids an open offer"), and applyTicketRefund's convergence branch
+// (exercised directly below, since the emulator's Functions process is a
+// separate sandbox no test can pause mid-call to inject a genuine network
+// race, so "simulate the raced state, then run the post-Stripe resolution"
+// is the practical equivalent.
+function refundAmountsFor(order: TicketOrderDoc, tierId: string): { amountCents: number; unitPriceCents: number } {
+  const item = order.items.find((it) => it.tierId === tierId);
+  if (!item) throw new Error(`refundAmountsFor: no order item for tier ${tierId}`);
+  const unitPriceCents = item.unitPriceCents;
+  return { amountCents: unitPriceCents + ticketServiceFeeCents(unitPriceCents, order.feePolicy), unitPriceCents };
+}
+
+describe("refundTicket vs transfer race (security review fix round 1)", () => {
+  it("voids an open transfer offer, notifies the would-be recipient, and a subsequent accept fails", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rtx1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rtx1buyer");
+    const recipient = await makeBuyer("rtx1recipient");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const ticketId = tickets[0].id;
+
+    await callFn("offerTransfer", { ticketId, target: recipient.user.email }, buyer.user);
+    const transferId = await openOfferIdFor(ticketId);
+
+    const result = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "refundTicket", { curatorProfileId: profileId, eventId, ticketId }, owner.user);
+    expect(result.ok).toBe(true);
+
+    const transferAfter = (await adb.doc(`transfers/${transferId}`).get()).data() as TicketTransferDoc;
+    expect(transferAfter.status).toBe("voided");
+    expect(transferAfter.resolvedAt).toBeTypeOf("number");
+
+    const recipientNotifs = await adb.collection(`users/${recipient.uid}/notifications`).get();
+    expect(recipientNotifs.docs.some((d) => d.data().kind === "ticket" && d.data().title === "Ticket offer withdrawn"))
+      .toBe(true);
+
+    await expect(callFn("respondToTransfer", { transferId, accept: true }, recipient.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("refunded");
+  });
+
+  it("apply-tx convergence: a raced-transferred ticket's CURRENT live descendant is torn down instead, and order counters update exactly once", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rtx2");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1500, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rtx2buyer");
+    const recipient = await makeBuyer("rtx2recipient");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    const { amountCents, unitPriceCents } = refundAmountsFor(order, tierId);
+
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const oldTicketId = tickets[0].id;
+
+    // Constructs, via the REAL transfer flow, the exact end state a transfer
+    // accept completing DURING refundTicket's Stripe call would leave
+    // behind: the old ticket "transferred", a fresh live ticket minted
+    // under the recipient sharing the same orderId.
+    await callFn("offerTransfer", { ticketId: oldTicketId, target: recipient.user.email }, buyer.user);
+    const transferId = await openOfferIdFor(oldTicketId);
+    const acceptResult = await callFn<Record<string, unknown>, { ok: boolean; newTicketId: string | null }>(
+      "respondToTransfer", { transferId, accept: true }, recipient.user);
+    const liveTicketId = acceptResult.newTicketId!;
+
+    // Simulates "the Stripe call already succeeded against the OLD ticket's
+    // identity; now resolve the books" by calling the post-Stripe step
+    // refundTicket itself calls, directly.
+    await applyTicketRefund({
+      eventId, ticketId: oldTicketId, ownerUid: buyer.uid, tierId, tierName: "General",
+      curatorProfileId: profileId, orderId, buyerUid: buyer.uid, amountCents, unitPriceCents,
+    });
+
+    const liveTicket = (await adb.doc(`users/${recipient.uid}/tickets/${liveTicketId}`).get()).data() as TicketDoc;
+    expect(liveTicket.status).toBe("refunded");
+    const liveAttendee = (await adb.doc(`events/${eventId}/attendees/${liveTicketId}`).get()).data() as AttendeeDoc;
+    expect(liveAttendee.status).toBe("refunded");
+    const recipientIdx = await adb.doc(`users/${recipient.uid}/ticketIndex/${eventId}`).get();
+    expect(recipientIdx.exists).toBe(false); // count was 1 -> deleted
+
+    // The old (still "transferred") ticket doc is left exactly as it was.
+    const oldTicket = (await adb.doc(`users/${buyer.uid}/tickets/${oldTicketId}`).get()).data() as TicketDoc;
+    expect(oldTicket.status).toBe("transferred");
+
+    const orderAfter = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(orderAfter.refundedCents).toBe(amountCents);
+    expect(orderAfter.refundedFaceCents).toBe(unitPriceCents);
+    expect(orderAfter.refundedTicketIds).toEqual([liveTicketId]); // the LIVE doc, not the dead old one
+
+    const ledgerSnap = await adb.collection("ledger").where("stripeId", "==", oldTicketId).get();
+    const row = ledgerSnap.docs.find((d) => d.data().kind === "ticket_grace_refund");
+    expect(row?.data().amountCents).toBe(amountCents);
+
+    const recipientNotifs = await adb.collection(`users/${recipient.uid}/notifications`).get();
+    expect(recipientNotifs.docs.some((d) => d.data().kind === "ticket" && d.data().title === "Ticket refunded")).toBe(true);
+
+    // A retry (crash recovery, a duplicate call) converges to the same
+    // idempotent no-op: no double count, no second ledger row.
+    await applyTicketRefund({
+      eventId, ticketId: oldTicketId, ownerUid: buyer.uid, tierId, tierName: "General",
+      curatorProfileId: profileId, orderId, buyerUid: buyer.uid, amountCents, unitPriceCents,
+    });
+    const orderAfterRetry = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(orderAfterRetry.refundedCents).toBe(amountCents);
+    const ledgerSnapAfterRetry = await adb.collection("ledger").where("stripeId", "==", oldTicketId).get();
+    expect(ledgerSnapAfterRetry.docs.filter((d) => d.data().kind === "ticket_grace_refund")).toHaveLength(1);
+  });
+
+  it("alerts and throws instead of silently no-op'ing when the live descendant is already checked in", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rtx3");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1200, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rtx3buyer");
+    const recipient = await makeBuyer("rtx3recipient");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    const { amountCents, unitPriceCents } = refundAmountsFor(order, tierId);
+
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const oldTicketId = tickets[0].id;
+
+    await callFn("offerTransfer", { ticketId: oldTicketId, target: recipient.user.email }, buyer.user);
+    const transferId = await openOfferIdFor(oldTicketId);
+    const acceptResult = await callFn<Record<string, unknown>, { ok: boolean; newTicketId: string | null }>(
+      "respondToTransfer", { transferId, accept: true }, recipient.user);
+    const liveTicketId = acceptResult.newTicketId!;
+
+    // The recipient's live descendant is already checked in by the time the
+    // (simulated) raced refund tries to resolve.
+    const liveTicketBefore = (await adb.doc(`users/${recipient.uid}/tickets/${liveTicketId}`).get()).data() as TicketDoc;
+    await callFn("checkInTicket",
+      { curatorProfileId: profileId, eventId, ticketId: liveTicketId, qrSecret: liveTicketBefore.qrSecret }, owner.user);
+
+    await expect(applyTicketRefund({
+      eventId, ticketId: oldTicketId, ownerUid: buyer.uid, tierId, tierName: "General",
+      curatorProfileId: profileId, orderId, buyerUid: buyer.uid, amountCents, unitPriceCents,
+    })).rejects.toMatchObject({ code: "internal" });
+
+    // Nothing moves in the books: the order's refund fields stay at zero,
+    // and the live ticket's checked-in state is untouched, exactly the
+    // "never a silent no-op" contract (this test never calls Stripe itself,
+    // since it exercises the post-Stripe resolution step directly).
+    const orderAfter = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(orderAfter.refundedCents).toBe(0);
+    expect(orderAfter.refundedTicketIds).toEqual([]);
+    const liveTicketAfter = (await adb.doc(`users/${recipient.uid}/tickets/${liveTicketId}`).get()).data() as TicketDoc;
+    expect(liveTicketAfter.status).toBe("checked_in");
+
+    const alert = (await adb.doc(`adminAlerts/ticket-refund-converge:${oldTicketId}`).get()).data() as AdminAlertDoc | undefined;
+    expect(alert).toBeTruthy();
+    expect(alert?.kind).toBe("ticket_refund_convergence_failed");
+    expect(alert?.resolvedAt).toBeNull();
+    expect(alert?.bookingId).toBeNull();
+    expect(alert?.gigId).toBeNull();
+  });
+
+  it("checkInTicket's override gate is strict: a truthy non-boolean value never skips the secret check", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rtx4");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rtx4buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const ticketId = tickets[0].id;
+
+    await expect(callFn(
+      "checkInTicket",
+      { curatorProfileId: profileId, eventId, ticketId, qrSecret: "definitely-wrong", override: "not-literally-true" },
+      owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: TICKET_NOT_VALID_MESSAGE });
+
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("valid");
   });
 });
