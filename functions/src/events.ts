@@ -1,0 +1,405 @@
+/**
+ * SP6 events/ticketing Task 4: the event and ticket-tier LIFECYCLE callables
+ * (create/update an event, upsert its tiers, publish it). Every callable here
+ * is Cloud-Functions-only per firestore.rules (`events/{eventId}` and its
+ * `tiers` subcollection both read "allow write: if false"): this file is
+ * the only writer.
+ *
+ * Guard chain on every callable, per the sub-project's binding rules:
+ * requireAuthUid -> requireVerifiedEmail -> [pure content validation] ->
+ * requireProfileMember(curatorProfileId, uid) -> requireApprovedCuratorProfile.
+ * Deliberately NOT gated on requireCuratorChargeable anywhere in this file:
+ * ticket money collects on the platform account, not a connected account, so
+ * nothing here depends on the curator's Stripe Connect onboarding state.
+ *
+ * cancelEventCore at the bottom is a plain (non-onCall) helper only: Task 6
+ * wraps it with the real `cancelEvent` callable (guards + the refund loop).
+ */
+
+import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { getFirestore } from "firebase-admin/firestore";
+import {
+  isValidDocId,
+  type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
+  type TicketTierDoc, type CuratorSubtype, type CuratorDetails,
+} from "@gatekeep/shared";
+import {
+  requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
+} from "./guards.js";
+import { validateEventInput, validateTierInput, DEFAULT_MAX_TICKETS_PER_BUYER } from "./eventsCore.js";
+import { resolveGigLocation, validateLocationInput, type GigLocationInput } from "./gigs.js";
+import { geocoderApiKey } from "./geocode.js";
+
+const MAX_TIERS_PER_EVENT = 20;
+
+// events/{eventId}/private/address: the door address behind an event's
+// public-precision location. Mirrors gigs/{id}/private/location's shape
+// exactly (same fields, same optionality); see gigs.ts's GigPrivateLocation
+// and the firestore.rules comment on this path's read gate.
+export interface EventPrivateAddress {
+  address: string; geo: { lat: number; lng: number } | null; geocodedFrom?: string;
+}
+
+export type EventSourceInput =
+  // Reuses GigLocationInput verbatim (same shape createGig accepts):
+  // location is optional here for the identical reason it's optional on
+  // CreateGigInput: a venue profile falls back to its own profile address
+  // when omitted (resolveGigLocation's job, shared with createGig).
+  | { kind: "standalone"; location?: GigLocationInput }
+  // Promoting a filled gig to an event: the gig's own public-precision
+  // location + private address are copied verbatim, never re-geocoded.
+  | { kind: "gig"; gigId: string };
+
+export interface CreateEventInput {
+  curatorProfileId: string; source: EventSourceInput;
+  title: string; description: string; startsAt: number; endsAt: number;
+  maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
+}
+
+export interface UpdateEventInput {
+  curatorProfileId: string; eventId: string;
+  title: string; description: string; startsAt: number; endsAt: number;
+  maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
+}
+
+export interface SetEventTiersInput {
+  curatorProfileId: string; eventId: string;
+  tiers: Array<{
+    tierId?: string; name: string; priceCents: number; capacity: number;
+    saleStartsAt: number | null; saleEndsAt: number | null;
+  }>;
+}
+
+export interface PublishEventInput { curatorProfileId: string; eventId: string; }
+
+// Defensive-runtime shape check for the discriminated source union, same
+// convention as eventsCore.ts's validators: the declared param type only
+// binds a trusted caller, the actual onCall payload can be any JSON value.
+function validateSourceInput(source: unknown): void {
+  if (typeof source !== "object" || source === null) {
+    throw new HttpsError("invalid-argument", "A source is required.");
+  }
+  const kind = (source as { kind?: unknown }).kind;
+  if (kind === "standalone") {
+    const v = validateLocationInput((source as { location?: unknown }).location);
+    if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
+    return;
+  }
+  if (kind === "gig") {
+    if (!isValidDocId((source as { gigId?: unknown }).gigId)) {
+      throw new HttpsError("invalid-argument", "A gig id is required.");
+    }
+    return;
+  }
+  throw new HttpsError("invalid-argument", 'Source kind must be "standalone" or "gig".');
+}
+
+// validateEventInput checks each act's kind/name only (it has no Firestore
+// access to check further); this fills in the one extra thing worth
+// checking without a DB read: a "booking" act's linkage ids are shaped like
+// real doc ids, so a forged/garbage id doesn't silently ride along into
+// lineupMusicianProfileIds (which Task 9's musician-page query trusts).
+function validateLineupIdentity(lineup: EventAct[]): void {
+  for (const act of lineup) {
+    if (act.kind === "booking" && (!isValidDocId(act.bookingId) || !isValidDocId(act.musicianProfileId))) {
+      throw new HttpsError("invalid-argument", "Invalid booking act.");
+    }
+  }
+}
+
+// EventDoc.lineupMusicianProfileIds: server-maintained projection of the
+// lineup's "booking" acts' musicianProfileId, deduplicated. Recomputed
+// wherever lineup is written (create and update both replace lineup
+// wholesale, matching updateGig's full-content-replace convention), so this
+// never needs an incremental diff against the prior value.
+function deriveLineupMusicianProfileIds(lineup: EventAct[]): string[] {
+  const ids = new Set<string>();
+  for (const act of lineup) {
+    if (act.kind === "booking") ids.add(act.musicianProfileId);
+  }
+  return [...ids];
+}
+
+// posterPath, when set, must be a processed photo path belonging to THIS
+// curator profile (a string-prefix check against publicPhotoPath's own
+// shape, see storagePaths.ts): otherwise a curator could point an event at
+// another profile's poster (or an unprocessed/nonexistent path). Omitted or
+// null both mean "no poster" (createEvent's default; updateEvent's way to
+// clear one, matching this callable family's full-replace convention).
+function resolvePosterPath(posterPath: string | null | undefined, curatorProfileId: string): string | null {
+  if (posterPath === undefined || posterPath === null) return null;
+  if (typeof posterPath !== "string" || !posterPath.startsWith(`public/photos/${curatorProfileId}/poster-`)) {
+    throw new HttpsError("invalid-argument", "Invalid poster path.");
+  }
+  return posterPath;
+}
+
+export const createEvent = onCall<CreateEventInput>(
+  { region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.curatorProfileId)) {
+      throw new HttpsError("invalid-argument", "A curator profile id is required.");
+    }
+    validateEventInput(input);
+    validateLineupIdentity(input.lineup);
+    validateSourceInput(input.source);
+    const posterPath = resolvePosterPath(input.posterPath, input.curatorProfileId);
+
+    // sequential is deliberate, mirroring createGig's identical rationale:
+    // parallelizing makes rejection order nondeterministic and would leak
+    // profile existence/type/approval status to non-members.
+    await requireProfileMember(input.curatorProfileId, uid);
+    const profileSnap = await requireApprovedCuratorProfile(input.curatorProfileId);
+    const profile = profileSnap.data()!;
+
+    const db = getFirestore();
+    let location: GigPublicLocation;
+    let privateAddress: EventPrivateAddress;
+    let gigId: string | null = null;
+
+    if (input.source.kind === "gig") {
+      gigId = input.source.gigId;
+      const gigSnap = await db.doc(`gigs/${gigId}`).get();
+      if (!gigSnap.exists) throw new HttpsError("not-found", "Gig not found.");
+      const gig = gigSnap.data() as GigDoc;
+      if (gig.curatorProfileId !== input.curatorProfileId) {
+        throw new HttpsError("permission-denied", "That gig does not belong to this curator profile.");
+      }
+      if (gig.status !== "filled") {
+        throw new HttpsError("failed-precondition", "Only a filled gig can be promoted to an event.");
+      }
+      location = gig.location;
+      const privLocSnap = await db.doc(`gigs/${gigId}/private/location`).get();
+      const privLoc = privLocSnap.data() as GigPrivateLocation | undefined;
+      if (!privLoc) throw new HttpsError("internal", "This gig's location is missing.");
+      privateAddress = { address: privLoc.address, geo: privLoc.geo, geocodedFrom: privLoc.geocodedFrom };
+    } else {
+      const subtype = profile.subtype as CuratorSubtype;
+      const isVenue = subtype === "venue";
+      const curatorLocation = profile.curator?.location as CuratorDetails["location"] | undefined;
+      const { location: loc, privateLocation } = await resolveGigLocation(
+        uid, isVenue, profile.name as string, curatorLocation, input.source.location);
+      location = loc;
+      privateAddress = {
+        address: privateLocation.address, geo: privateLocation.geo, geocodedFrom: privateLocation.geocodedFrom,
+      };
+    }
+
+    const now = Date.now();
+    const eventRef = db.collection("events").doc();
+    const event: EventDoc = {
+      curatorProfileId: input.curatorProfileId,
+      title: input.title.trim(), description: input.description.trim(),
+      location, startsAt: input.startsAt, endsAt: input.endsAt,
+      posterPath, status: "draft",
+      maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
+      lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
+      gigId, createdAt: now, updatedAt: now,
+    };
+
+    const batch = db.batch();
+    batch.set(eventRef, event);
+    batch.set(db.doc(`events/${eventRef.id}/private/address`), privateAddress);
+    await batch.commit();
+
+    return { eventId: eventRef.id };
+  });
+
+export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, async (req) => {
+  const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
+  const input = req.data;
+  if (!isValidDocId(input?.curatorProfileId)) {
+    throw new HttpsError("invalid-argument", "A curator profile id is required.");
+  }
+  if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+  // Re-validates the same content shape createEvent does. Notably this
+  // includes validateEventInput's blanket "startsAt must be in the future"
+  // check, which, applied here with no publish-status special-casing, IS
+  // the enforcement of "a published event's startsAt can't move earlier than
+  // now": there is no separate rule to write, this check already covers it
+  // for a draft edit too (moving a draft's date into the past makes no more
+  // sense than doing so for a published one).
+  validateEventInput(input);
+  validateLineupIdentity(input.lineup);
+  const posterPath = resolvePosterPath(input.posterPath, input.curatorProfileId);
+
+  await requireProfileMember(input.curatorProfileId, uid);
+  await requireApprovedCuratorProfile(input.curatorProfileId);
+
+  const db = getFirestore();
+  const eventRef = db.doc(`events/${input.eventId}`);
+  const eventSnap = await eventRef.get();
+  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+  const event = eventSnap.data() as EventDoc;
+  // curatorProfileId/gigId are never accepted as update fields at all (see
+  // this input type above); this cross-check just refuses a caller who is
+  // a member of ProfileA from editing an event that actually belongs to
+  // ProfileB by claiming ProfileA in the request.
+  if (event.curatorProfileId !== input.curatorProfileId) {
+    throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+  }
+  if (event.status !== "draft" && event.status !== "published") {
+    throw new HttpsError("failed-precondition", `Cannot edit an event in status "${event.status}".`);
+  }
+
+  await eventRef.update({
+    title: input.title.trim(), description: input.description.trim(),
+    startsAt: input.startsAt, endsAt: input.endsAt,
+    maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
+    lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
+    posterPath, updatedAt: Date.now(),
+  });
+  return { ok: true };
+});
+
+export const setEventTiers = onCall<SetEventTiersInput>({ region: "us-central1" }, async (req) => {
+  const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
+  const input = req.data;
+  if (!isValidDocId(input?.curatorProfileId)) {
+    throw new HttpsError("invalid-argument", "A curator profile id is required.");
+  }
+  if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+  if (!Array.isArray(input.tiers) || input.tiers.length < 1 || input.tiers.length > MAX_TIERS_PER_EVENT) {
+    throw new HttpsError("invalid-argument", `An event must have 1-${MAX_TIERS_PER_EVENT} ticket tiers.`);
+  }
+  const seenIds = new Set<string>();
+  for (const t of input.tiers) {
+    validateTierInput(t);
+    if (t.tierId !== undefined) {
+      if (!isValidDocId(t.tierId)) throw new HttpsError("invalid-argument", "Invalid tier id.");
+      if (seenIds.has(t.tierId)) throw new HttpsError("invalid-argument", "Duplicate tier id.");
+      seenIds.add(t.tierId);
+    }
+  }
+
+  await requireProfileMember(input.curatorProfileId, uid);
+  await requireApprovedCuratorProfile(input.curatorProfileId);
+
+  const db = getFirestore();
+  const eventRef = db.doc(`events/${input.eventId}`);
+
+  await db.runTransaction(async (tx) => {
+    const eventSnap = await tx.get(eventRef);
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = eventSnap.data() as EventDoc;
+    if (event.curatorProfileId !== input.curatorProfileId) {
+      throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+    }
+    if (event.status !== "draft" && event.status !== "published") {
+      throw new HttpsError("failed-precondition", `Cannot set tiers on an event in status "${event.status}".`);
+    }
+
+    const tiersRef = eventRef.collection("tiers");
+    const existingSnap = await tx.get(tiersRef);
+    const existingById = new Map(existingSnap.docs.map((d) => [d.id, d.data() as TicketTierDoc]));
+
+    for (const t of input.tiers) {
+      if (t.tierId && !existingById.has(t.tierId)) {
+        throw new HttpsError("invalid-argument", `Unknown ticket tier: ${t.tierId}.`);
+      }
+    }
+
+    // Deletions: an existing tier omitted from this payload. Only legal
+    // while the event is still a draft: once published, a tier's id may be
+    // out there on an already-minted ticket/order, so it can only ever be
+    // upserted (capacity/window/name edits), never removed.
+    const keepIds = new Set(input.tiers.filter((t) => t.tierId).map((t) => t.tierId!));
+    for (const [id] of existingById) {
+      if (keepIds.has(id)) continue;
+      if (event.status !== "draft") {
+        throw new HttpsError("failed-precondition", "Tiers can only be removed while the event is a draft.");
+      }
+      tx.delete(tiersRef.doc(id));
+    }
+
+    // Upserts: sortOrder is always the tier's index in THIS payload (also
+    // how a reorder is expressed); soldCount is preserved from the prior
+    // doc for an existing tier, or starts at 0 for a new one, and a
+    // capacity drop below an already-sold count is refused regardless of
+    // draft/published (soldCount must never exceed capacity, independent of
+    // the delete-while-draft-only rule above).
+    input.tiers.forEach((t, index) => {
+      const prior = t.tierId ? existingById.get(t.tierId) : undefined;
+      if (prior && t.capacity < prior.soldCount) {
+        throw new HttpsError("invalid-argument",
+          `Capacity cannot drop below the ${prior.soldCount} tickets already sold for "${prior.name}".`);
+      }
+      const tier: TicketTierDoc = {
+        name: t.name.trim(), priceCents: t.priceCents, capacity: t.capacity,
+        soldCount: prior?.soldCount ?? 0,
+        saleStartsAt: t.saleStartsAt ?? null, saleEndsAt: t.saleEndsAt ?? null,
+        sortOrder: index,
+      };
+      tx.set(t.tierId ? tiersRef.doc(t.tierId) : tiersRef.doc(), tier);
+    });
+
+    tx.update(eventRef, { updatedAt: Date.now() });
+  });
+
+  return { ok: true };
+});
+
+export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" }, async (req) => {
+  const uid = requireAuthUid(req);
+  requireVerifiedEmail(req);
+  const input = req.data;
+  if (!isValidDocId(input?.curatorProfileId)) {
+    throw new HttpsError("invalid-argument", "A curator profile id is required.");
+  }
+  if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+
+  await requireProfileMember(input.curatorProfileId, uid);
+  // Deliberately no requireCuratorChargeable here (or anywhere in this
+  // file): ticket money collects on the platform Stripe account, not a
+  // connected account, so publishing an event has no Stripe-onboarding
+  // precondition, unlike publishGig's booking-money path.
+  await requireApprovedCuratorProfile(input.curatorProfileId);
+
+  const db = getFirestore();
+  const eventRef = db.doc(`events/${input.eventId}`);
+  const eventSnap = await eventRef.get();
+  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+  const event = eventSnap.data() as EventDoc;
+  if (event.curatorProfileId !== input.curatorProfileId) {
+    throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+  }
+  if (event.status !== "draft") {
+    throw new HttpsError("failed-precondition", `Cannot publish an event in status "${event.status}".`);
+  }
+  // Mirrors publishGig's P1 guard: a draft can sit unpublished indefinitely,
+  // so without this a publish after startsAt has already elapsed would put
+  // a bookable-looking "published" event for a date that already passed
+  // onto the world-readable surface.
+  if (event.startsAt < Date.now()) {
+    throw new HttpsError("failed-precondition", "This event's date has already passed.");
+  }
+
+  const tiersSnap = await eventRef.collection("tiers").limit(1).get();
+  if (tiersSnap.empty) {
+    throw new HttpsError("failed-precondition", "Add at least one ticket tier before publishing.");
+  }
+
+  await eventRef.update({ status: "published", updatedAt: Date.now() });
+  return { ok: true };
+});
+
+// NOT an onCall export: this task only ships the status-flip mechanics.
+// Task 6's real `cancelEvent` callable wraps this with the guard chain and
+// the ticket-refund loop.
+export async function cancelEventCore(eventId: string, now: number): Promise<void> {
+  const db = getFirestore();
+  const eventRef = db.doc(`events/${eventId}`);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = snap.data() as EventDoc;
+    if (event.status !== "draft" && event.status !== "published") {
+      throw new HttpsError("failed-precondition", `Cannot cancel an event in status "${event.status}".`);
+    }
+    tx.update(eventRef, { status: "cancelled", cancelledAt: now, updatedAt: now });
+  });
+}
