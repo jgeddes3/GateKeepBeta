@@ -511,7 +511,7 @@ export const cancelEvent = onCall<CancelEventInput>(
     // escalated to adminAlerts rather than thrown back at the caller. The
     // event is cancelled either way, and the sweep's retry step finishes
     // whatever this call could not.
-    await refundOrdersForCancelledEvent(input.eventId, event.title, now);
+    await refundOrdersForCancelledEvent(input.eventId, event.title, now, input.reason);
 
     return { ok: true };
   });

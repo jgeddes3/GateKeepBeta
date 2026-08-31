@@ -329,6 +329,17 @@ function ticketCancelAlertId(orderId: string): string {
   return `ticket-cancel:${orderId}`;
 }
 
+// The buyer-facing cancellation notification body, shared by every order
+// this batch touches (a paid order, and a $0 one alike). `reason`, when the
+// curator gave one on cancelEvent's own input, is folded in here: this is
+// the one place it actually reaches a person, since EventDoc carries no
+// persisted cancel-reason field for anything else to read it back from.
+function cancellationNotificationBody(eventTitle: string, reason: string | undefined, refunded: boolean): string {
+  const reasonClause = reason ? `: ${reason}` : "";
+  const refundClause = refunded ? " Your payment has been refunded." : "";
+  return `"${eventTitle}" was cancelled${reasonClause}.${refundClause}`;
+}
+
 // Refunds ONE "paid" order's full remaining balance (face + service fee,
 // minus whatever a prior grace refund already returned) as part of an event
 // cancellation. Idempotent: only acts on an order still "paid". A doc
@@ -348,6 +359,7 @@ function ticketCancelAlertId(orderId: string): string {
 // sufficient.
 async function refundOrderForCancelledEvent(
   db: Firestore, orderRef: FirebaseFirestore.DocumentReference, eventTitle: string, now: number,
+  reason: string | undefined,
 ): Promise<"refunded" | "skipped"> {
   const orderSnap = await orderRef.get();
   const order = orderSnap.data() as TicketOrderDoc | undefined;
@@ -398,7 +410,20 @@ async function refundOrderForCancelledEvent(
 
     tx.update(orderRef, {
       status: "cancelled_refunded",
-      refundedTicketIds: FieldValue.arrayUnion(...refundableTicketIds),
+      // FieldValue.arrayUnion() called with ZERO elements throws synchronously
+      // (the Admin SDK requires >= 1 argument), reachable whenever every
+      // ticket on this order was already grace-refunded before the event was
+      // cancelled (refundableTicketIds is then empty). Without this guard the
+      // spread call above would throw on every single attempt, the order
+      // would never reach "cancelled_refunded", and this order would wedge
+      // permanently: the sweep's retry step (step 9) would keep finding it
+      // "paid" and keep re-throwing, alarming forever without converging.
+      // The status flip and the cents increments below must still happen
+      // unconditionally either way. remainingCents/remainingFaceCents can be
+      // 0 here (nothing left to refund), which is exactly the converging
+      // no-op case this order needs to reach.
+      ...(refundableTicketIds.length > 0
+        ? { refundedTicketIds: FieldValue.arrayUnion(...refundableTicketIds) } : {}),
       refundedCents: FieldValue.increment(remainingCents),
       refundedFaceCents: FieldValue.increment(remainingFaceCents),
     });
@@ -413,9 +438,7 @@ async function refundOrderForCancelledEvent(
 
   await notifyUser(order.buyerUid, {
     kind: "ticket", refId: order.eventId, title: "Event cancelled",
-    body: remainingCents > 0
-      ? `"${eventTitle}" was cancelled. Your payment has been refunded.`
-      : `"${eventTitle}" was cancelled.`,
+    body: cancellationNotificationBody(eventTitle, reason, remainingCents > 0),
   }).catch((e) => console.error(`refundOrderForCancelledEvent: notification failed for order ${orderRef.id}`, e));
 
   return "refunded";
@@ -482,12 +505,15 @@ export interface CancelledEventOrdersResult {
 
 // The whole batch: every "paid" order refunded in full, every "pending" one
 // expired. Called once by events.ts's `cancelEvent` right after it flips the
-// event to "cancelled", and again by paymentsSweep.ts's retry step for any
-// event that still has unresolved orders. Same idempotent function either
-// way, per the brief's "batched loop, not one transaction" ruling (each order
-// resolves independently, so one failure never wedges the rest of the loop).
+// event to "cancelled" (with the curator's own cancellation `reason`, if
+// they gave one), and again by paymentsSweep.ts's retry step for any event
+// that still has unresolved orders (with no `reason`: EventDoc does not
+// persist one, so a retry pass has nothing to pass along). Same idempotent
+// function either way, per the brief's "batched loop, not one transaction"
+// ruling (each order resolves independently, so one failure never wedges
+// the rest of the loop).
 export async function refundOrdersForCancelledEvent(
-  eventId: string, eventTitle: string, now: number,
+  eventId: string, eventTitle: string, now: number, reason?: string,
 ): Promise<CancelledEventOrdersResult> {
   const db = getFirestore();
   const result: CancelledEventOrdersResult = { ordersRefunded: 0, pendingExpired: 0, pendingDeferred: 0, errors: 0 };
@@ -496,7 +522,7 @@ export async function refundOrdersForCancelledEvent(
     .where("eventId", "==", eventId).where("status", "==", "paid").get();
   for (const doc of paidSnap.docs) {
     try {
-      const outcome = await refundOrderForCancelledEvent(db, doc.ref, eventTitle, now);
+      const outcome = await refundOrderForCancelledEvent(db, doc.ref, eventTitle, now, reason);
       if (outcome === "refunded") result.ordersRefunded++;
     } catch (e) {
       result.errors++;

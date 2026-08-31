@@ -238,6 +238,107 @@ describe("cancelEvent", () => {
     expect(cancelledAtAfter).toBe(cancelledAtBefore); // the flip itself did not re-run
   });
 
+  it("nets the cancellation refund against a prior grace refund on the same order", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cx7");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cx7buyer");
+    const orderId = await payOrder(eventId, tierId, 2, buyer.user);
+    const order0 = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    const intentId = order0.paymentIntentId!;
+    const originalTotal = order0.faceTotalCents + order0.serviceFeeCents; // 2000 + 338 = 2338
+
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    expect(tickets).toHaveLength(2);
+    const [ticket1, ticket2] = tickets;
+
+    // Grace-refund ONE of the two tickets before the event is cancelled at all.
+    await callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId: ticket1.id }, owner.user);
+    const afterGrace = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(afterGrace.refundedCents).toBe(1169); // 1000 face + 169 fee, that ticket only
+    expect(afterGrace.status).toBe("paid");
+
+    await callFn("cancelEvent", { curatorProfileId: profileId, eventId }, owner.user);
+
+    // The cancellation refund must be the REMAINING balance only (originalTotal
+    // minus the grace refund already returned), not the full original total,
+    // otherwise the buyer is refunded twice for the same ticket.
+    const expectedCancelAmount = originalTotal - 1169; // 1169
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.status).toBe("cancelled_refunded");
+    expect(order.refundedCents).toBe(originalTotal); // fully refunded, netted correctly
+    expect(order.refundedFaceCents).toBe(2000);
+    expect(order.refundedTicketIds.sort()).toEqual([ticket1.id, ticket2.id].sort());
+
+    const t1After = (await adb.doc(`users/${buyer.uid}/tickets/${ticket1.id}`).get()).data() as TicketDoc;
+    const t2After = (await adb.doc(`users/${buyer.uid}/tickets/${ticket2.id}`).get()).data() as TicketDoc;
+    expect(t1After.status).toBe("refunded");
+    expect(t2After.status).toBe("refunded");
+
+    const idx = await adb.doc(`users/${buyer.uid}/ticketIndex/${eventId}`).get();
+    expect(idx.exists).toBe(false);
+
+    // No double-refund on Stripe: two separate refund objects (grace + cancel)
+    // against the SAME intent, summing to exactly the original charge.
+    const refunds = await refundDocsForIntent(intentId);
+    expect(refunds).toHaveLength(2);
+    const sum = refunds.reduce((s, d) => s + (d.data().amountCents as number), 0);
+    expect(sum).toBe(originalTotal);
+    expect(refunds.some((d) => d.data().amountCents === expectedCancelAmount)).toBe(true);
+    const pi = (await adb.doc(`stripeFake/state/objects/${intentId}`).get()).data();
+    expect(pi?.refundedCents).toBe(originalTotal);
+  });
+
+  it("converges when every ticket on the order was already grace-refunded before cancellation (no throw, no Stripe call, sweep finds nothing left)", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cx8");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cx8buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const order0 = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    const intentId = order0.paymentIntentId!;
+
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    expect(tickets).toHaveLength(1);
+    const ticketId = tickets[0].id;
+
+    // Grace-refund the order's ONLY ticket first: the order is now fully
+    // refunded in cents (1000 face + 169 fee == the whole order total) even
+    // though its status is still "paid" and no tickets remain valid/checked_in.
+    await callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId }, owner.user);
+    const afterGrace = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(afterGrace.refundedCents).toBe(afterGrace.faceTotalCents + afterGrace.serviceFeeCents);
+    const refundsAfterGrace = await refundDocsForIntent(intentId);
+    expect(refundsAfterGrace).toHaveLength(1);
+
+    // The regression case for the arrayUnion-with-zero-elements bug:
+    // refundableTicketIds is empty here (the order's one ticket is already
+    // "refunded"), and remainingCents is 0 (nothing left to refund). This
+    // must still converge the order to "cancelled_refunded" in one call,
+    // never throw, and never call Stripe again.
+    const result = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "cancelEvent", { curatorProfileId: profileId, eventId }, owner.user);
+    expect(result.ok).toBe(true);
+
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.status).toBe("cancelled_refunded");
+    expect(order.refundedTicketIds).toEqual([ticketId]); // untouched by the cancellation pass
+    expect(order.refundedCents).toBe(afterGrace.refundedCents); // unchanged, nothing left to add
+
+    // No second Stripe call: still exactly the one grace-refund object.
+    const refundsAfterCancel = await refundDocsForIntent(intentId);
+    expect(refundsAfterCancel).toHaveLength(1);
+
+    // The sweep's retry step finds nothing left to do: the order already
+    // converged inline, so a retry pass must not re-throw or re-alarm.
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.errors.cancelledEventRefund ?? 0).toBe(0);
+    const orderAfterSweep = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(orderAfterSweep.status).toBe("cancelled_refunded");
+  });
+
   it("cancels a still-pending order too: releases inventory and cancels its PaymentIntent", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("cx3");
     await addTiersAndPublish(profileId, eventId, owner.user,
