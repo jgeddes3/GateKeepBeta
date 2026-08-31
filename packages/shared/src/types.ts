@@ -801,7 +801,14 @@ export type AdminAlertKind =
   // resolved for its cancelled event and the sweep's retry step will try it
   // again next hour. bookingId/gigId are always null (ticket orders are not
   // booking-scoped); the order and event ids are named in `detail`.
-  | "ticket_cancel_refund_failed";
+  | "ticket_cancel_refund_failed"
+  // SP6 Task 7: a T+1 ticket settlement transfer could not be made because
+  // the curator has no payout-ready Stripe account (no connected account, or
+  // one that has not finished onboarding). bookingId/gigId are always null
+  // (event-scoped, like ticket_cancel_refund_failed above); the event is
+  // named in `detail` and left "published" so the sweep retries it every
+  // pass until the curator finishes onboarding.
+  | "ticket_settlement_blocked";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -851,7 +858,13 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // (not the order id: one order can carry several of these rows, one per
   // refunded ticket), so a duplicate refundTicket call for the same ticket
   // never double-counts.
-  | "ticket_grace_refund";
+  | "ticket_grace_refund"
+  // SP6 Task 7: the T+1 post-event payout of ticket face value to the
+  // curator's connected account. Keyed off the transfer id (writeLedger's
+  // `{kind}:{stripeId}` doc-id discipline), so a sweep retry that reissues
+  // the same idempotency key and gets back the same transfer never
+  // double-counts the payout.
+  | "ticket_settlement";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign
@@ -886,6 +899,11 @@ export interface EventDoc {
   gigId: string | null;                    // set when promoted from a filled gig
   createdAt: number; updatedAt: number;
   cancelledAt?: number; completedAt?: number;
+  // SP6 Task 7: epoch ms the "starts within 24h" reminder was sent, stamped
+  // once by the daily sweep so a second run never re-notifies the same
+  // event's attendees. Absent means "not yet reminded" (every pre-Task-7
+  // event, and every event whose startsAt is still more than 24h out).
+  reminderSentAt?: number;
 }
 export interface TicketTierDoc {
   name: string; priceCents: number;        // 0 = free RSVP

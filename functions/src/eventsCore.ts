@@ -28,6 +28,16 @@ export const EVENT_SETTLE_DELAY_MS = 24 * 60 * 60 * 1000;
 // organizer-set override on the event doc.
 export const DEFAULT_MAX_TICKETS_PER_BUYER = 8;
 
+// SP6 Task 7: the adminAlerts id for "this event's T+1 ticket settlement
+// transfer is blocked because its curator has no payout-ready Stripe
+// account". Deterministic per event, same discipline as paymentsCore.ts's own
+// alert-id vocabulary (stuckSagaAlertId and friends) — kept here, rather than
+// beside that vocabulary, so paymentsSweep.ts's ticket-settlement step never
+// has to reach into an SP5 file for an SP6-only escalation.
+export function ticketSettlementBlockedAlertId(eventId: string): string {
+  return `ticket-settlement:${eventId}`;
+}
+
 // Server-minted ticket QR payload. Possession of this string is door proof
 // (see TicketDoc.qrSecret): 32 random bytes, hex-encoded, so it is both
 // unguessable and a plain string a QR code can carry.
