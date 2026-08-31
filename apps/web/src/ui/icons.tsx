@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Bell,
   Buildings,
+  CalendarBlank,
   CalendarCheck,
   CaretDown,
   CaretLeft,
@@ -162,6 +163,17 @@ export const IconWebsite = pin(Globe);
 // the existing IconPlus for increment).
 export const IconTicket = pin(Ticket);
 export const IconMinus = pin(Minus);
+
+// Sub-project 6 task 10: the curator events manager's own nav destination
+// and list-view heading need an icon distinct from IconTicket (which stays
+// pinned to "a ticket itself" everywhere it already appears: the buy flow's
+// poster placeholder, the fan tickets page's QR/empty-state icon), since the
+// curator nav shows Events and Tickets as two separate items in the same
+// bar (antislop R-04: two different destinations should never share one
+// glyph). CalendarCheck is already spoken for by Bookings in that same nav,
+// so this is the plain calendar mark, "a scheduled thing" rather than
+// "a booking already confirmed."
+export const IconEvents = pin(CalendarBlank);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At

@@ -1,4 +1,4 @@
-import { LAUNCH_TIMEZONE, ticketServiceFeeCents, type EventStatus, type TicketFeePolicy } from "@gatekeep/shared";
+import { LAUNCH_TIMEZONE, ticketServiceFeeCents, type EventStatus, type TicketFeePolicy, type TicketStatus } from "@gatekeep/shared";
 import { formatGigTime } from "../../app/u/[handle]/gigDisplay";
 
 // Plain (non-"use client") display helpers for sub-project 6's public event
@@ -95,3 +95,30 @@ export function formatEventFullDate(startsAtMs: number): string {
     weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: LAUNCH_TIMEZONE,
   }).format(new Date(startsAtMs));
 }
+
+// Sub-project 6 task 10: the curator events manager's StatusBadge tone map
+// (controller ruling 4, binding, verbatim): draft neutral, published
+// success, completed neutral, cancelled destructive. "neutral" here means
+// the same "secondary" Badge variant Dashboard's own STATUS_BADGE map and
+// gigs/page.tsx's GIG_STATUS_BADGE both already use for a non-outcome
+// status, not a fourth status color DESIGN.md doesn't define.
+export type EventStatusBadgeVariant = "secondary" | "success" | "destructive";
+export const EVENT_STATUS_LABEL: Record<EventStatus, string> = {
+  draft: "Draft", published: "Published", completed: "Completed", cancelled: "Cancelled",
+};
+export const EVENT_STATUS_BADGE: Record<EventStatus, EventStatusBadgeVariant> = {
+  draft: "secondary", published: "success", completed: "secondary", cancelled: "destructive",
+};
+
+// The attendee roster's per-ticket status: AttendeeList (curator side) and
+// the fan tickets page both need the same four-way label. "valid" reads as
+// "Confirmed" to a fan/curator (the ticket's own doc-level union names it
+// "valid", an implementation detail; nobody reading a roster or a ticket
+// card thinks in terms of a schema literal).
+export type TicketStatusBadgeVariant = "success" | "outline" | "destructive" | "secondary";
+export const TICKET_STATUS_LABEL: Record<TicketStatus, string> = {
+  valid: "Confirmed", checked_in: "Checked in", refunded: "Refunded", transferred: "Transferred",
+};
+export const TICKET_STATUS_BADGE: Record<TicketStatus, TicketStatusBadgeVariant> = {
+  valid: "success", checked_in: "outline", refunded: "destructive", transferred: "secondary",
+};
