@@ -180,6 +180,49 @@ describe("createEvent", () => {
     expect(event.lineupMusicianProfileIds).toEqual([musician.profileId]);
   });
 
+  it("rejects a fabricated booking act referencing a nonexistent booking", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ce10", "venue");
+    await expect(callFn("createEvent", {
+      curatorProfileId: profileId, source: { kind: "standalone" },
+      ...eventContent({
+        lineup: [{ kind: "booking", bookingId: "nonexistentBookingId1", musicianProfileId: "nonexistentMusicianId1", name: "Ghost Act" }],
+      }),
+    }, owner.user)).rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("rejects a booking act whose booking belongs to a different curator profile", async () => {
+    const { musician, bookingId } = await makeFilledGig("ce11a");
+    const { owner: ownerB, profileId: profileB } = await makeApprovedCuratorProfile("ce11b", "venue");
+    await expect(callFn("createEvent", {
+      curatorProfileId: profileB, source: { kind: "standalone" },
+      ...eventContent({
+        lineup: [{ kind: "booking", bookingId, musicianProfileId: musician.profileId, name: "The Act" }],
+      }),
+    }, ownerB.user)).rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("rejects a booking act whose musicianProfileId doesn't match the booking", async () => {
+    const { curator, bookingId } = await makeFilledGig("ce12");
+    const { profileId: otherMusicianProfileId } = await makeApprovedMusicianProfile("ce12other");
+    await expect(callFn("createEvent", {
+      curatorProfileId: curator.profileId, source: { kind: "standalone" },
+      ...eventContent({
+        lineup: [{ kind: "booking", bookingId, musicianProfileId: otherMusicianProfileId, name: "Wrong Act" }],
+      }),
+    }, curator.owner.user)).rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("rejects a booking act whose booking is not confirmed", async () => {
+    const { curator, musician, bookingId } = await makeFilledGig("ce13");
+    await adb.doc(`bookings/${bookingId}`).update({ status: "completed" });
+    await expect(callFn("createEvent", {
+      curatorProfileId: curator.profileId, source: { kind: "standalone" },
+      ...eventContent({
+        lineup: [{ kind: "booking", bookingId, musicianProfileId: musician.profileId, name: "The Act" }],
+      }),
+    }, curator.owner.user)).rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
   it("rejects a non-member with permission-denied", async () => {
     const { profileId } = await makeApprovedCuratorProfile("ce4", "venue");
     const { user: stranger } = await signUpTestUser(`ce4b-${Date.now()}@test.com`);
@@ -368,5 +411,36 @@ describe("updateEvent", () => {
       { curatorProfileId: profileId, eventId, ...eventContent({ title: "x".repeat(200) }) },
       owner.user,
     )).rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+
+  it("re-verifies lineup booking acts on update: a real booking passes, a fabricated one is rejected", async () => {
+    const { curator, musician, gigId, bookingId } = await makeFilledGig("ue3");
+    const { eventId } = await callFn<Record<string, unknown>, { eventId: string }>(
+      "createEvent",
+      { curatorProfileId: curator.profileId, source: { kind: "gig", gigId }, ...eventContent() },
+      curator.owner.user);
+
+    await callFn(
+      "updateEvent",
+      {
+        curatorProfileId: curator.profileId, eventId,
+        ...eventContent({
+          lineup: [{ kind: "booking", bookingId, musicianProfileId: musician.profileId, name: "The Act" }],
+        }),
+      },
+      curator.owner.user);
+    const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(event.lineupMusicianProfileIds).toEqual([musician.profileId]);
+
+    await expect(callFn(
+      "updateEvent",
+      {
+        curatorProfileId: curator.profileId, eventId,
+        ...eventContent({
+          lineup: [{ kind: "booking", bookingId: "totallyFakeBookingId1", musicianProfileId: musician.profileId, name: "Ghost" }],
+        }),
+      },
+      curator.owner.user,
+    )).rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
 });

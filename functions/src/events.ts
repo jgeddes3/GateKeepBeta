@@ -17,11 +17,11 @@
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import {
   isValidDocId,
   type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
-  type TicketTierDoc, type CuratorSubtype, type CuratorDetails,
+  type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
@@ -107,6 +107,52 @@ function validateLineupIdentity(lineup: EventAct[]): void {
   }
 }
 
+// validateLineupIdentity above only checks a booking act's ids LOOK like doc
+// ids; it has no Firestore access to check they name a REAL relationship.
+// Without this, a curator could fabricate { kind: "booking", bookingId:
+// "<any doc id>", musicianProfileId: "<any real musician profile>" } with no
+// actual booking behind it, and that id would land in
+// lineupMusicianProfileIds, which Task 9's musician-page query trusts as
+// proof the musician actually played this event, faking "X plays our venue"
+// on musician X's own public page with zero real relationship. This loads
+// every referenced booking (batched via getAll, same idiom SP5's sweep uses
+// for a bounded id list, rather than one get() per act) and requires ALL of:
+// the booking exists, it belongs to THIS curator profile, its
+// musicianProfileId matches the act's, and it's "confirmed" (the one
+// BookingStatus meaning an accepted, booked engagement; bookings.ts exports
+// no broader status set that fits "booked", so this checks the single
+// literal directly rather than inventing a grouping for one caller).
+async function verifyLineupBookingActs(
+  db: Firestore, curatorProfileId: string, lineup: EventAct[],
+): Promise<void> {
+  const bookingActs = lineup.filter(
+    (act): act is Extract<EventAct, { kind: "booking" }> => act.kind === "booking");
+  if (bookingActs.length === 0) return;
+
+  const uniqueIds = [...new Set(bookingActs.map((act) => act.bookingId))];
+  const snaps = await db.getAll(...uniqueIds.map((id) => db.doc(`bookings/${id}`)));
+  const byId = new Map(snaps.map((snap) => [snap.id, snap]));
+
+  for (const act of bookingActs) {
+    const snap = byId.get(act.bookingId);
+    if (!snap?.exists) {
+      throw new HttpsError("failed-precondition", `Booking ${act.bookingId} does not exist.`);
+    }
+    const booking = snap.data() as BookingRequestDoc;
+    if (booking.curatorProfileId !== curatorProfileId) {
+      throw new HttpsError("failed-precondition",
+        `Booking ${act.bookingId} does not belong to this curator profile.`);
+    }
+    if (booking.musicianProfileId !== act.musicianProfileId) {
+      throw new HttpsError("failed-precondition",
+        `Booking ${act.bookingId} does not name the musician profile given in the lineup.`);
+    }
+    if (booking.status !== "confirmed") {
+      throw new HttpsError("failed-precondition", `Booking ${act.bookingId} is not a confirmed booking.`);
+    }
+  }
+}
+
 // EventDoc.lineupMusicianProfileIds: server-maintained projection of the
 // lineup's "booking" acts' musicianProfileId, deduplicated. Recomputed
 // wherever lineup is written (create and update both replace lineup
@@ -155,6 +201,8 @@ export const createEvent = onCall<CreateEventInput>(
     const profile = profileSnap.data()!;
 
     const db = getFirestore();
+    await verifyLineupBookingActs(db, input.curatorProfileId, input.lineup);
+
     let location: GigPublicLocation;
     let privateAddress: EventPrivateAddress;
     let gigId: string | null = null;
@@ -230,6 +278,8 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
   await requireApprovedCuratorProfile(input.curatorProfileId);
 
   const db = getFirestore();
+  await verifyLineupBookingActs(db, input.curatorProfileId, input.lineup);
+
   const eventRef = db.doc(`events/${input.eventId}`);
   const eventSnap = await eventRef.get();
   if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
