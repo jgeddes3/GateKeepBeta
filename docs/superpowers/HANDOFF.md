@@ -1,6 +1,6 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-08-30, after the 9B
+Read this first in any new session or on a new machine. Last updated 2026-08-31, after the 6
 merge. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
@@ -28,8 +28,15 @@ Done and merged (each has a rulings doc that is the authority for its area):
    branded skeleton/empty/error states, money-sentence colon parity restored. Pure presentation
    (touched only apps/mobile + lockfile + README); backend/shared/web gates unchanged by
    construction. NOT visually verified here (no dev client on this machine); owner EAS smoke owed.
+6. Events and ticketing (`sp6-rulings.md`): curator-published events (standalone or promoted from
+   a filled gig), paid/free multi-tier tickets on the sub-5 Stripe rails, QR door check-in, curator
+   grace refunds, event cancel with full auto-refund, and in-app ticket transfers (mobile-only,
+   email-targeted). Owner smoke owed: the sub-6 checklist in README, both web and mobile, both
+   themes; the paid-ticket path needs real Stripe test keys, and the door scanner needs the new EAS
+   dev build and is this sub-project's single highest on-device priority since it's entirely
+   unverified off a real camera.
 
-NEXT: **6 Events and ticketing**, then 7 Fan discovery, 8 Search. Deferred: 5c band payout splits.
+NEXT: **7 Fan discovery**, then 8 Search. Deferred: 5c band payout splits.
 
 ## Binding rules for ALL work
 
@@ -56,8 +63,8 @@ NEXT: **6 Events and ticketing**, then 7 Fan discovery, 8 Search. Deferred: 5c b
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (153), `pnpm emu:test` (578,
-  single blocking call), `pnpm emu:rules` (77), web lint + build, mobile lint.
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (158), `pnpm emu:test` (704,
+  single blocking call), `pnpm emu:rules` (103), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
   locally; EAS cloud is unaffected).
