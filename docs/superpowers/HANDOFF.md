@@ -1,6 +1,6 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-08-29, after the 9A
+Read this first in any new session or on a new machine. Last updated 2026-08-30, after the 9B
 merge. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
@@ -23,10 +23,13 @@ Done and merged (each has a rulings doc that is the authority for its area):
    payouts. 5b (`sp5b-rulings.md`): native mobile payment sheets.
 9A. Web UI/UX redesign (`sp9a-rulings.md`): the "Ember, Deeper Night" design language, both
    themes, every web surface restyled. Repo-root `DESIGN.md` is now the BINDING brand contract.
+9B. Mobile UI/UX redesign (`sp9b-rulings.md`): DESIGN.md carried to apps/mobile (token theme
+   layer + owned src/ui primitives, Syne/Sora, Phosphor duotone), every screen restyled with
+   branded skeleton/empty/error states, money-sentence colon parity restored. Pure presentation
+   (touched only apps/mobile + lockfile + README); backend/shared/web gates unchanged by
+   construction. NOT visually verified here (no dev client on this machine); owner EAS smoke owed.
 
-NEXT: **9B, the mobile app redesign** (apply DESIGN.md to apps/mobile; must mirror the web's
-colon treatment on the shared money sentences to restore SP5 string parity). Then 6 Events and
-ticketing, 7 Fan discovery, 8 Search. Deferred: 5c band payout splits.
+NEXT: **6 Events and ticketing**, then 7 Fan discovery, 8 Search. Deferred: 5c band payout splits.
 
 ## Binding rules for ALL work
 
@@ -63,6 +66,9 @@ ticketing, 7 Fan discovery, 8 Search. Deferred: 5c band payout splits.
 
 - Signed-in visual smoke of the redesigned web app (checklist in `sp9a-rulings.md`): the hard
   pre-launch gate.
+- Visual smoke of the redesigned mobile app on the next EAS build (checklist in README, "Sub-project
+  9B smoke checklist"; both themes, phone width): the hard mobile pre-launch gate, since this machine
+  cannot run the dev client.
 - Eyeball two derived colors (light focus rust #BF5038, on-destructive white) on /design.
 - Real concert photos into `apps/web/public/hero/` (2560x1440 JPG) replacing placeholders.
 - Stripe go-live checklist (`sp5-rulings.md`), sp5b device-testing steps (merchant id, EAS env
