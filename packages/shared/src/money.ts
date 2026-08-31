@@ -1,4 +1,4 @@
-import type { BudgetStructure, FeePolicy } from "./types.js";
+import type { BudgetStructure, FeePolicy, TicketFeePolicy, TicketOrderItem } from "./types.js";
 import {
   CURATOR_FEE_PCT, MUSICIAN_FEE_PCT, INSTANT_FEE_PCT, LATE_FEE_PCT, LATE_FEE_MUSICIAN_PCT,
 } from "./types.js";
@@ -125,4 +125,34 @@ export const DEFAULT_FEE_POLICY: FeePolicy = Object.freeze({
 
 export function resolveFeePolicy(feePolicy: FeePolicy | null | undefined): FeePolicy {
   return feePolicy ?? DEFAULT_FEE_POLICY;
+}
+
+// ---------- Sub-project 6: ticketing ----------
+
+// Snapshotted onto every TicketOrderDoc at creation, mirroring
+// DEFAULT_FEE_POLICY's own snapshot discipline above: later fee-constant
+// changes never touch an existing order. Frozen for the identical reason
+// (resolveFeePolicy-style callers must read this by reference, never
+// hand-roll a fallback that could drift from it).
+export const DEFAULT_TICKET_FEE_POLICY: TicketFeePolicy = Object.freeze({
+  ticketFeePct: 7, ticketFeeFixedCents: 99, ticketFeeCapCents: 399,
+});
+
+/** Per-ticket service fee. Free tickets carry no fee. */
+export function ticketServiceFeeCents(unitPriceCents: number, policy: TicketFeePolicy): number {
+  if (unitPriceCents <= 0) return 0;
+  const pct = Math.round(unitPriceCents * policy.ticketFeePct / 100);
+  return Math.min(pct + policy.ticketFeeFixedCents, policy.ticketFeeCapCents);
+}
+
+/** Order totals from line items. quantity >= 1 per item, validated upstream. */
+export function ticketOrderTotals(
+  items: TicketOrderItem[], policy: TicketFeePolicy,
+): { faceTotalCents: number; serviceFeeCents: number } {
+  let face = 0, fee = 0;
+  for (const it of items) {
+    face += it.unitPriceCents * it.quantity;
+    fee += ticketServiceFeeCents(it.unitPriceCents, policy) * it.quantity;
+  }
+  return { faceTotalCents: face, serviceFeeCents: fee };
 }

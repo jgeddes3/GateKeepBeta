@@ -1,4 +1,4 @@
-import type { CuratorLoaded, PublicGig, ShowEntry } from "./page";
+import type { CuratorLoaded, PublicGig, ShowEntry, UpcomingEventSummary } from "./page";
 import { type CuratorDetails, type CuratorSubtype } from "@gatekeep/shared";
 import { formatGigTime, gigLocationLabel } from "./gigDisplay";
 import { GalleryLightbox } from "./GalleryLightbox";
@@ -172,6 +172,23 @@ function FactsCard({ amenities, address, addressHref }: {
 // DateBlockRow already wraps the whole row in one <Link>, and nesting an
 // anchor inside an anchor is invalid HTML (MusicianProfile.tsx's own
 // ShowRow comment documents the same constraint).
+// Sub-project 6 task 9: "Upcoming events" row, sharing DateBlockRow's own
+// anatomy with ShowRow below (same date-chip-plus-location pattern), linked
+// to the new public event page instead of a gig. No `detail` slot: unlike a
+// Show's "featuring {other party}" line, this row's own subtitle (the
+// event's public-precision location, gigLocationLabel again) is the whole
+// story a curator's own profile page needs to tell about its own event.
+function UpcomingEventRow({ event }: { event: UpcomingEventSummary }) {
+  return (
+    <DateBlockRow
+      dateMs={event.startsAtMs}
+      title={event.title || "Untitled event"}
+      subtitle={gigLocationLabel(event.location)}
+      href={`/e/${event.eventId}`}
+    />
+  );
+}
+
 function ShowRow({ show, isVenue }: { show: ShowEntry; isVenue: boolean }) {
   const time = formatGigTime(show.startsAtMs);
   return (
@@ -186,7 +203,7 @@ function ShowRow({ show, isVenue }: { show: ShowEntry; isVenue: boolean }) {
 }
 
 export function CuratorProfile({ data }: { data: CuratorLoaded }) {
-  const { profile, photoUrls, openGigs, upcomingShows, pastShows } = data;
+  const { profile, photoUrls, openGigs, upcomingShows, pastShows, upcomingEvents } = data;
   const c = profile.curator;
   const subtype = profile.subtype as CuratorSubtype;
   const isVenue = subtype === "venue";
@@ -203,7 +220,8 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
   const lookingFor = c?.lookingFor;
   const hasLookingFor = !!lookingFor && (lookingFor.genres.length > 0 || lookingFor.actSizes.length > 0 || !!lookingFor.notes);
   const hasShows = upcomingShows.length > 0 || pastShows.length > 0;
-  const hasAnyContent = photoUrls.length > 0 || !!c?.about || hasAnyAmenity || hasLookingFor;
+  const hasAnyContent = photoUrls.length > 0 || !!c?.about || hasAnyAmenity || hasLookingFor
+    || upcomingEvents.length > 0;
 
   const chips = [SUBTYPE_LABEL[subtype]];
   if (c?.location?.neighborhood) chips.push(c.location.neighborhood);
@@ -294,6 +312,19 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
             their full address in the facts card above). */}
         {!isVenue && c?.location?.city && (
           <p className="mt-8 font-sora text-sm text-gk-muted">{c.location.city}</p>
+        )}
+
+        {/* Upcoming events (Task 9, SP6): this curator's own published,
+            ticketed events, hidden entirely (not an empty-state message)
+            when there are none, per the SP3 "hidden while empty" contract
+            every other optional section on this page already follows. */}
+        {upcomingEvents.length > 0 && (
+          <section className="mt-8">
+            <h2 className="font-syne text-lg font-semibold text-gk-text">Upcoming events</h2>
+            <div className="mt-2">
+              {upcomingEvents.map((e) => <UpcomingEventRow key={e.eventId} event={e} />)}
+            </div>
+          </section>
         )}
 
         {/* Shows (Task 11): this curator's own filled/closed-booked gigs,

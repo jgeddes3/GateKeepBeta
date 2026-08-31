@@ -48,11 +48,11 @@
  */
 
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { getFirestore, FieldPath } from "firebase-admin/firestore";
+import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type GigDoc, type PaymentDoc,
+  type BookingRequestDoc, type EventDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
@@ -73,6 +73,10 @@ import {
 } from "./bookings.js";
 import { notifyProfileMembers } from "./notifications.js";
 import { paginate } from "./scheduled.js";
+import { refundOrdersForCancelledEvent } from "./ticketing.js";
+import {
+  EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId,
+} from "./eventsCore.js";
 
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -179,6 +183,36 @@ export interface PaymentsSweepReport {
   // was already flagged does not count again.
   delinquenciesDeclared: number;
   expiredRefunds: number;          // step 7: future-dated deposits refunded off an expired booking
+  // --- step 8: ticket order expiry (SP6 Task 5) ---
+  ticketOrdersExpired: number;         // pending -> expired, tier inventory released
+  // The intent could not be confirmed cancelable (most likely: it already
+  // succeeded), left "pending" with no write at all, for finalizeTicketOrder
+  // or the webhook to complete normally. Not an error: this is the expected
+  // shape of "money always wins over expiry".
+  ticketOrdersExpiryDeferred: number;
+  // --- step 9: retry cancelled-event ticket refunds (SP6 Task 6) ---
+  // Orders resolved by THIS retry pass only. cancelEvent's own inline call
+  // already resolved the common case, so these are ordinarily 0 and only
+  // grow when that inline call left something unresolved (a transient
+  // Stripe/Firestore failure, or the pending-order race documented on
+  // events.ts's cancelEvent).
+  cancelledEventOrdersRefunded: number;
+  cancelledEventOrdersPendingExpired: number;
+  // --- step 10: T+1 ticket revenue settlement (SP6 Task 7) ---
+  // Events flipped "published" -> "completed" this run, whether or not any
+  // money moved for them (a zero-revenue event still completes).
+  ticketSettlementsCompleted: number;
+  // Of those, the subset whose curator actually received a transfer: a
+  // strict subset of ticketSettlementsCompleted, never additional to it.
+  ticketSettlementsTransferred: number;
+  // Curator has no payout-ready Stripe account: left "published" for the
+  // next pass (see ticketSettlementBlockedAlertId), never counted above.
+  ticketSettlementsBlocked: number;
+  // --- step 11: expire stale ticket transfer offers (SP6 Task 8) ---
+  // "offered" -> "expired" once past TRANSFER_TTL_MS. No money and no ticket
+  // doc changes: the ticket itself stays exactly "valid" under its sender,
+  // free to be offered again.
+  ticketTransfersExpired: number;
   // Per-step and per-anomaly failure counts — keyed, not fixed, so a new
   // anomaly gets a name instead of being folded into a neighbour's bucket.
   // NAMING: a per-doc/per-booking key is a SINGULAR noun phrase for the thing
@@ -197,6 +231,10 @@ function emptyReport(): PaymentsSweepReport {
     settlementsCharged: 0, settlementsDeclined: 0, settlementsPending: 0, settlementsRaced: 0,
     transfersMade: 0, retriesAttempted: 0,
     delinquenciesDeclared: 0, expiredRefunds: 0,
+    ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0,
+    cancelledEventOrdersRefunded: 0, cancelledEventOrdersPendingExpired: 0,
+    ticketSettlementsCompleted: 0, ticketSettlementsTransferred: 0, ticketSettlementsBlocked: 0,
+    ticketTransfersExpired: 0,
     errors: {},
   };
 }
@@ -1145,6 +1183,398 @@ async function refundExpiredBookingDeposits(
 }
 
 // ---------------------------------------------------------------------------
+// Step 8: EXPIRE stale ticket orders (SP6 Task 5)
+// ---------------------------------------------------------------------------
+// A "pending" ticket order holds its tier inventory (soldCount was
+// incremented at createTicketOrder) until either the buyer completes payment
+// (completeOrderTx flips it to "paid") or its TTL elapses. This step reclaims
+// the latter case.
+//
+// MONEY ALWAYS WINS OVER EXPIRY, the same SP5 invariant paymentsCore.ts's
+// header states for the booking side. The PaymentIntent cancel is attempted
+// FIRST, entirely outside any Firestore transaction (Stripe calls never run
+// inside one, same rule every other step in this file follows). Only once
+// the cancel is CONFIRMED to have left the intent canceled (either because
+// this call's own cancelIntent just succeeded, or because a throw from it is
+// followed by a retrieveIntentStatus read confirming "canceled", see
+// expireOneTicketOrder below) does this step touch Firestore to release the
+// inventory and mark the order expired. A throw from cancelIntent that
+// cannot be confirmed "canceled" this way (most commonly because the intent
+// already succeeded, i.e. money moved) makes NO write at all for that order:
+// it is left exactly "pending", so finalizeTicketOrder or the
+// payment_intent.succeeded webhook can still complete it normally on the next
+// attempt.
+//
+// THE retrieveIntentStatus FALLBACK EXISTS BECAUSE cancelIntent's OWN THROW
+// IS AMBIGUOUS between "already succeeded" and "already canceled" (see its
+// doc comment on StripeLike): a prior sweep pass can have its cancelIntent
+// call succeed and then crash before the Firestore transaction below
+// commits, leaving the order "pending" with an intent that is now, on this
+// pass, ALREADY canceled. Treating that ambiguous throw as "always defer"
+// would strand such an order pending, with its inventory held, forever.
+
+async function expireOneTicketOrder(
+  db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
+  report: PaymentsSweepReport,
+): Promise<void> {
+  // FRESH read: this step may cancel a Stripe intent off what it reads here,
+  // and the paginated page it arrived in can be minutes (and hundreds of
+  // docs) old.
+  const freshSnap = await doc.ref.get();
+  const order = freshSnap.data() as TicketOrderDoc | undefined;
+  if (!order || order.status !== "pending") return; // resolved since the page was read
+
+  if (order.paymentIntentId) {
+    try {
+      await getStripe().cancelIntent(order.paymentIntentId);
+    } catch (e) {
+      // The cancel call itself failed. Two distinct causes throw identically
+      // here (cancelIntent's own doc comment): the intent already succeeded
+      // (money moved), or it was already canceled, most likely by THIS
+      // step's own cancelIntent call on a prior pass whose Firestore
+      // transaction below then failed to commit (a crash, contention). A
+      // canceled intent can NEVER later succeed, so that second case is safe
+      // to proceed on; anything else (including a failure to even read the
+      // status) must stay deferred, per money always wins over expiry.
+      let status: string | undefined;
+      try {
+        status = (await getStripe().retrieveIntentStatus(order.paymentIntentId)).status;
+      } catch (statusError) {
+        console.error(
+          `paymentsSweep: ticket order ${doc.id} could not confirm intent ${order.paymentIntentId}'s status after a failed cancel, left pending`, statusError);
+      }
+      if (status !== "canceled") {
+        console.info(
+          `paymentsSweep: ticket order ${doc.id} expiry deferred, intent ${order.paymentIntentId} could not be confirmed cancelable (status=${status ?? "unknown"}), left pending for finalize/webhook`, e);
+        report.ticketOrdersExpiryDeferred++;
+        return;
+      }
+      // Confirmed already canceled: fall through to the same expiry
+      // transaction the ordinary cancel-succeeded path runs below.
+    }
+  }
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(doc.ref);
+      const o = snap.data() as TicketOrderDoc | undefined;
+      if (!o || o.status !== "pending") return; // raced since the fresh read above
+      for (const item of o.items) {
+        tx.update(db.doc(`events/${o.eventId}/tiers/${item.tierId}`), {
+          soldCount: FieldValue.increment(-item.quantity),
+        });
+      }
+      tx.update(doc.ref, { status: "expired" });
+    });
+    report.ticketOrdersExpired++;
+  } catch (e) {
+    console.error(`paymentsSweep: failed to expire ticket order ${doc.id}`, e);
+    bumpError(report, "ticketOrderExpire");
+  }
+}
+
+async function expireTicketOrders(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("orders")
+    .where("status", "==", "pending")
+    .where("expiresAt", "<", now)
+    .orderBy("expiresAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        await expireOneTicketOrder(db, doc, report);
+      } catch (e) {
+        console.error(`paymentsSweep: ticket order expiry failed for ${doc.id}`, e);
+        bumpError(report, "ticketOrderExpire");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step 9: RETRY cancelled-event ticket refunds (SP6 Task 6)
+// ---------------------------------------------------------------------------
+// events.ts's `cancelEvent` callable already ran refundOrdersForCancelledEvent
+// once, inline, right after flipping the event to "cancelled". This is that
+// same idempotent function's retry backstop, the ticketing equivalent of
+// step 7's expired-booking refund backstop, for whatever it could not
+// finish: a per-order Stripe/Firestore failure (already escalated to
+// adminAlerts by refundOrdersForCancelledEvent itself), or the pending-order
+// race documented on cancelEvent (createTicketOrder checks event status
+// non-transactionally, so a pending order can be born in the ms-wide window
+// right around the cancellation and miss cancelEvent's own pass entirely).
+//
+// SCOPED to a lookback window off `cancelledAt`, same rationale as step 7's
+// EXPIRED_LOOKBACK_MS: an event cancelled longer ago than this and still not
+// fully resolved needs a human, not an ever-growing rescan of the whole
+// events collection every hour forever.
+
+async function retryCancelledEventRefunds(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("events")
+    .where("status", "==", "cancelled")
+    .where("cancelledAt", ">=", now - EXPIRED_LOOKBACK_MS)
+    .orderBy("cancelledAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        const event = doc.data() as EventDoc;
+        const result = await refundOrdersForCancelledEvent(doc.id, event.title, now);
+        report.cancelledEventOrdersRefunded += result.ordersRefunded;
+        report.cancelledEventOrdersPendingExpired += result.pendingExpired;
+        // refundOrdersForCancelledEvent already escalated each individual
+        // order failure to adminAlerts (with its own throttled log); this
+        // just keeps the step-level error count honest so an operator
+        // scanning report.errors sees SOMETHING moved for this event.
+        if (result.errors > 0) bumpError(report, "cancelledEventRefund");
+      } catch (e) {
+        console.error(`paymentsSweep: cancelled-event refund retry failed for event ${doc.id}`, e);
+        bumpError(report, "cancelledEventRefund");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step 10: SETTLE ticket revenue T+1 (SP6 Task 7)
+// ---------------------------------------------------------------------------
+// A "published" event whose endsAt is more than EVENT_SETTLE_DELAY_MS (T+1)
+// in the past owes its curator the face value of every ticket actually sold:
+// summed across the event's "paid" orders as faceTotalCents minus
+// refundedFaceCents (Task 6's grace refunds and cancellations both maintain
+// that field, so this is a field read, never a join). "cancelled" orders are
+// excluded by the "paid" filter alone.
+//
+// THE AMOUNT IS FROZEN BEFORE THIS STEP EVER RUNS (fix round 1, money review
+// Critical 1): ticketing.ts's refundTicket refuses once `now >= event.endsAt`
+// (TICKET_REFUND_WINDOW_CLOSED_MESSAGE), and EVENT_SETTLE_DELAY_MS is a full
+// 24h AFTER endsAt. So by the time an event is even ELIGIBLE for this step,
+// no grace refund can ever land again, and re-summing the same "paid" orders
+// on every retry is GUARANTEED to reproduce the exact same faceCents. That is
+// what makes the static per-event idempotency key `ticket_settlement:{id}`
+// safe to replay: a fingerprint-checking fake (or a same-key-different-amount
+// rejection from real Stripe) would otherwise catch a drifted retry and wedge
+// the event forever with only a counter as the operator's signal.
+//
+// Mirrors SP5's settlement discipline (paymentsSettlement.ts): the Stripe
+// transfer happens OUTSIDE any Firestore transaction, then the event flips to
+// "completed" and the ledger row is written. `claimSettlementStart` below is
+// the CAS a retry re-enters: it transactionally stamps `settlementStartedAt`
+// on the event iff unset, immediately before the transfer call, and a retry
+// whose transfer succeeded but whose completion write then failed finds the
+// field ALREADY set on its next pass and proceeds straight to replaying the
+// SAME idempotency key. That same field is also what cancelEventCore now
+// refuses to cancel through (Important 2): once it is set, a cancel can never
+// refund buyers on top of a transfer the curator already received.
+//
+// A curator with no payout-ready Stripe account gets an escalated adminAlert
+// (throttled) and a notification to finish onboarding, GATED ON THE SAME
+// throttle signal (Important 3, so a slow onboarder is nudged once a day, not
+// once an hour); the event is left "published" for the next hourly pass
+// rather than wedged or silently dropped. An unexpected Stripe error DURING
+// the transfer call gets its own escalated adminAlert (Critical 1d): the
+// event is now wedged (settlementStartedAt is set, so it can't be cancelled
+// either), and a bare error counter is not an escalation an operator sees.
+//
+// A zero-revenue event (every ticket free, or every paid ticket refunded
+// away) still completes: there is simply nothing to transfer or to ledger,
+// and settlementStartedAt is never stamped for it (see claimSettlementStart's
+// own comment for why that is safe).
+
+// Transactionally stamps `settlementStartedAt` on the event iff unset, and
+// re-confirms "published" in the SAME read. Two jobs, one CAS:
+//  - it is the re-check immediately before the Stripe call this step's retry
+//    contract needs (see this step's header comment): a retry lands on this
+//    exact transaction again and finds the field already set, so it proceeds
+//    rather than skipping or re-deriving a fresh key;
+//  - it is the field cancelEventCore now refuses to cancel through, closing
+//    the cancel-vs-settle double-spend window (Important 2).
+// Returns false when the event is no longer "published" (raced by a cancel,
+// or already resolved by a concurrent run); the caller must not transfer.
+async function claimSettlementStart(
+  db: FirebaseFirestore.Firestore, eventRef: FirebaseFirestore.DocumentReference, now: number,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(eventRef);
+    const event = snap.data() as EventDoc | undefined;
+    if (!event || event.status !== "published") return false;
+    if (event.settlementStartedAt == null) {
+      tx.update(eventRef, { settlementStartedAt: now, updatedAt: now });
+    }
+    return true;
+  });
+}
+
+async function settleOneEvent(
+  db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
+  now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  // FRESH read: the paginated page this doc arrived in can be minutes (and
+  // hundreds of docs) old, and every decision below is made off this read.
+  const freshSnap = await doc.ref.get();
+  const event = freshSnap.data() as EventDoc | undefined;
+  if (!event || event.status !== "published") return; // resolved since the page was read
+
+  const ordersSnap = await db.collection("orders")
+    .where("eventId", "==", doc.id).where("status", "==", "paid").get();
+  let faceCents = 0;
+  for (const orderDoc of ordersSnap.docs) {
+    const order = orderDoc.data() as TicketOrderDoc;
+    faceCents += order.faceTotalCents - order.refundedFaceCents;
+  }
+
+  if (faceCents > 0) {
+    const curatorStripe = await getStripeProfileDoc(event.curatorProfileId);
+    if (!curatorStripe?.accountId || curatorStripe.transfersEnabled !== true) {
+      const alertId = ticketSettlementBlockedAlertId(doc.id);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "ticket_settlement_blocked",
+        detail: `event ${doc.id} ("${event.title}") owes ${faceCents}c in ticket settlement, but curator `
+          + `${event.curatorProfileId} has no payout-ready Stripe account; left "published" for the next sweep pass`,
+        bookingId: null, gigId: null, now,
+      });
+      // Gated on the SAME day-boundary/kind-change throttle recordAdminAlert
+      // uses (Important 3): without this, a slow onboarder is paged by this
+      // step's own hourly cadence, forever, until they finish. One nudge a
+      // day is the right cadence for "please finish onboarding".
+      if (shouldLog) {
+        console.error(
+          `paymentsSweep: event ${doc.id} ticket settlement blocked, curator ${event.curatorProfileId} not payout-ready (see adminAlerts/${alertId})`);
+        try {
+          await notifyProfileMembers(event.curatorProfileId, {
+            kind: "ticket", refId: doc.id, title: "Finish payout setup to receive ticket revenue",
+            body: `"${event.title}" has ticket revenue ready to settle. Finish Stripe onboarding to receive it.`,
+          });
+        } catch (e) {
+          console.error(`paymentsSweep: ticket settlement blocked notification failed for event ${doc.id}`, e);
+        }
+      }
+      report.ticketSettlementsBlocked++;
+      return;
+    }
+
+    const claimed = await claimSettlementStart(db, doc.ref, now);
+    if (!claimed) return; // raced (cancelled, or resolved) since the read above
+
+    let transfer: { id: string };
+    try {
+      transfer = await getStripe().transferToAccount({
+        accountId: curatorStripe.accountId, amountCents: faceCents,
+        idempotencyKey: `ticket_settlement:${doc.id}`,
+        meta: { purpose: "ticket_settlement", eventId: doc.id },
+      });
+    } catch (e) {
+      // The event is now wedged: settlementStartedAt is set (so it can never
+      // be cancelled either), and every future pass will hit this same catch
+      // until the underlying Stripe problem is fixed. Escalated durably
+      // (Critical 1d) rather than left as a bare error count nobody reads;
+      // the per-event try/catch in settleTicketRevenue still lets every OTHER
+      // due event settle this run.
+      const alertId = ticketSettlementFailedAlertId(doc.id);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "ticket_settlement_failed",
+        detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${faceCents}c to curator `
+          + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}`,
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) {
+        console.error(
+          `paymentsSweep: event ${doc.id} ticket settlement transfer failed (see adminAlerts/${alertId})`, e);
+      }
+      bumpError(report, "ticketSettlementTransfer");
+      return;
+    }
+
+    await writeLedger({
+      kind: "ticket_settlement", amountCents: faceCents, bookingId: null, gigId: null,
+      profileId: event.curatorProfileId, stripeId: transfer.id,
+      detail: `ticket settlement (T+1) for "${event.title}"`,
+      eventId: doc.id, buyerUid: null,
+    }).catch((e) => console.error(`paymentsSweep: ticket_settlement ledger row failed for event ${doc.id}`, e));
+    report.ticketSettlementsTransferred++;
+  }
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(doc.ref);
+      const e = snap.data() as EventDoc | undefined;
+      if (!e || e.status !== "published") return; // raced
+      tx.update(doc.ref, { status: "completed", completedAt: now, updatedAt: now });
+    });
+    report.ticketSettlementsCompleted++;
+  } catch (e) {
+    console.error(`paymentsSweep: failed to complete event ${doc.id} after ticket settlement`, e);
+    bumpError(report, "ticketSettlementComplete");
+  }
+}
+
+async function settleTicketRevenue(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("events")
+    .where("status", "==", "published")
+    .where("endsAt", "<", now - EVENT_SETTLE_DELAY_MS)
+    .orderBy("endsAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        await settleOneEvent(db, doc, now, report);
+      } catch (e) {
+        console.error(`paymentsSweep: ticket settlement failed for event ${doc.id}`, e);
+        bumpError(report, "ticketSettlement");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step 11: EXPIRE stale ticket transfer offers (SP6 Task 8)
+// ---------------------------------------------------------------------------
+// ADDITIVE ONLY: the rest of this file (every SP5 behavior, and SP6 Tasks
+// 5-7's own steps 8-10 above) is unchanged by this step. A ticket transfer
+// offer (offerTransfer, ticketing.ts) that nobody responds to within
+// TRANSFER_TTL_MS is swept here from "offered" to "expired" so a stale offer
+// stops blocking the sender from offering the same ticket again (offerTransfer
+// refuses a second concurrent offer on one ticket) and stops counting against
+// the recipient's held-cap check at a future offer time. No money and no
+// ticket/attendee/ticketIndex write of any kind: the underlying ticket was
+// never touched by the offer in the first place, and stays exactly "valid"
+// under its original owner either way.
+
+async function expireOneTicketTransfer(
+  db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot, now: number,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(doc.ref);
+    const transfer = snap.data() as TicketTransferDoc | undefined;
+    if (!transfer || transfer.status !== "offered") return false; // resolved since the page was read
+    tx.update(doc.ref, { status: "expired", resolvedAt: now });
+    return true;
+  });
+}
+
+async function expireTicketTransfers(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("transfers")
+    .where("status", "==", "offered")
+    .where("expiresAt", "<", now)
+    .orderBy("expiresAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        if (await expireOneTicketTransfer(db, doc, now)) report.ticketTransfersExpired++;
+      } catch (e) {
+        console.error(`paymentsSweep: ticket transfer expiry failed for ${doc.id}`, e);
+        bumpError(report, "ticketTransferExpire");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 // Every step is isolated: one failing step is logged and counted, and the rest
 // still run. Ordering is deliberate — reconciliation first (it can turn staged
@@ -1172,6 +1602,10 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
       }),
     },
     { name: "expiredRefunds", run: () => refundExpiredBookingDeposits(db, now, report) },
+    { name: "ticketOrderExpiry", run: () => expireTicketOrders(db, now, report) },
+    { name: "cancelledEventRefunds", run: () => retryCancelledEventRefunds(db, now, report) },
+    { name: "ticketSettlement", run: () => settleTicketRevenue(db, now, report) },
+    { name: "ticketTransferExpiry", run: () => expireTicketTransfers(db, now, report) },
   ];
 
   for (const step of steps) {

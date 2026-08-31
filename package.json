@@ -20,6 +20,7 @@
     "tsx": "^4.23.12"
   },
   "dependencies": {
+    "firebase": "^11.10.0",
     "firebase-admin": "^12.7.0"
   }
 }

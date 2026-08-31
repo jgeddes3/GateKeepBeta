@@ -3,11 +3,12 @@ import { getFirestore, FieldPath } from "firebase-admin/firestore";
 import {
   SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE,
   type GigSeriesDoc, type GigDoc, type SeriesCadence, type BookingRequestDoc, type ReliabilityDoc,
+  type EventDoc, type AttendeeDoc,
 } from "@gatekeep/shared";
 import { INVITE_MAX_AGE_MS } from "./members.js";
 import { syncCuratorAccess } from "./curator.js";
 import { recomputeReliability } from "./bookingLifecycle.js";
-import { notifyProfileMembers } from "./notifications.js";
+import { notifyProfileMembers, notifyUser } from "./notifications.js";
 import { buildPaymentDoc } from "./paymentsCore.js";
 
 const DAY_MS = 86_400_000;
@@ -15,6 +16,29 @@ const DAY_MS = 86_400_000;
 // "processing" this long means the transcode trigger never ran (the upload
 // was abandoned mid-flight) — the reaper below frees its slot.
 const PROCESSING_STALE_MS = 24 * 60 * 60 * 1000;
+
+// SP6 Task 7: the "starts within" window for the event-tomorrow reminder
+// step below.
+const EVENT_REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Months spelled out by hand (rather than a locale-dependent Intl call) so a
+// reminder's date is stable across every server locale and never risks a
+// formatter substituting a dash character this codebase's copy rules forbid.
+const REMINDER_MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+// The event-tomorrow reminder body's date clause, e.g. "September 5, 2026 at
+// 8:00 PM UTC". UTC throughout, matching this codebase's existing v1 gap
+// (see the timezone note just below): the event's own startsAt has no
+// per-curator timezone attached to interpret it against.
+function formatEventReminderDate(ms: number): string {
+  const d = new Date(ms);
+  const hour24 = d.getUTCHours();
+  const period = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = ((hour24 + 11) % 12) + 1;
+  const minute = d.getUTCMinutes().toString().padStart(2, "0");
+  return `${REMINDER_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} at ${hour12}:${minute} ${period} UTC`;
+}
 
 // v1 stores every timestamp as epoch ms with no per-profile timezone, so the
 // recurrence's weekday/hour/minute is interpreted in a FIXED timezone (UTC)
@@ -242,6 +266,11 @@ export interface SweepReport {
   // dashboard reader into thinking only the former counts here. A
   // diagnostic sub-metric, not an additional outcome.
   wholeRunResolutions: number;
+  // SP6 Task 7, step 8: "published" events reminded this run (startsAt
+  // within 24h, reminderSentAt stamped for the first time). Counts the
+  // EVENT, not the notification: an event with several distinct ticket
+  // holders still counts once here.
+  eventRemindersSent: number;
   // S3: per-step failure counts — a step that throws is caught, logged, and
   // counted here rather than aborting the remaining steps.
   errors: {
@@ -257,6 +286,10 @@ export interface SweepReport {
     // pagination itself, or the step's writer.commit()) — vanishingly rare
     // in practice post-this-fix.
     seriesMaterialize: number;
+    // SP6 Task 7, step 8: a single event's reminder body threw (a poisoned
+    // doc, a Firestore hiccup on the attendees read). Per-event isolated,
+    // same S3 philosophy as every other step here.
+    eventReminders: number;
   };
 }
 
@@ -279,9 +312,10 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
     occurrencesBornFilled: 0, seriesSelfHealed: 0,
     bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
+    eventRemindersSent: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
-      bookingExpiry: 0, bookingCompletion: 0, seriesMaterialize: 0,
+      bookingExpiry: 0, bookingCompletion: 0, seriesMaterialize: 0, eventReminders: 0,
     },
   };
 
@@ -857,6 +891,60 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   } catch (e) {
     console.error("dailySweep: booking completion sweep step failed", e);
     report.errors.bookingCompletion++;
+  }
+
+  // 8) Event-tomorrow reminder sweep (SP6 Task 7): a "published" event whose
+  // startsAt falls within the next 24h gets its ticket holders reminded
+  // once. Recipients are the DISTINCT ownerUids of the event's attendees
+  // projection (events/{eventId}/attendees) whose status is "valid" or
+  // "checked_in" (a collectionGroup query keyed off the eventId alone is not
+  // available, so this reads the event's OWN subcollection instead, which is
+  // small and already scoped to the one event).
+  //
+  // reminderSentAt is checked in application code, not added to the query:
+  // same trade the track reaper's own age check makes above (a second
+  // composite index for one small, self-excluding field buys nothing when
+  // the candidate set, events starting in the next 24h, is already tiny).
+  // Stamped with a PLAIN update (never the chunked writer): one small write
+  // per due event is simplest, and this step's own write must never be lost
+  // to another step's writer rotating batches out from under it.
+  try {
+    const reminderWindowEnd = now + EVENT_REMINDER_WINDOW_MS;
+    const reminderQuery = db.collection("events")
+      .where("status", "==", "published")
+      .where("startsAt", ">", now).where("startsAt", "<=", reminderWindowEnd)
+      .orderBy("startsAt");
+    for await (const page of paginate(reminderQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        try {
+          const event = doc.data() as EventDoc;
+          if (event.reminderSentAt != null) continue; // already reminded
+
+          const attendeesSnap = await db.collection(`events/${doc.id}/attendees`)
+            .where("status", "in", ["valid", "checked_in"]).get();
+          const ownerUids = new Set<string>();
+          for (const a of attendeesSnap.docs) ownerUids.add((a.data() as AttendeeDoc).ownerUid);
+
+          const body = `"${event.title}" starts ${formatEventReminderDate(event.startsAt)}.`;
+          for (const uid of ownerUids) {
+            try {
+              await notifyUser(uid, { kind: "ticket", refId: doc.id, title: "Event tomorrow", body });
+            } catch (e) {
+              console.error(`dailySweep: reminder notify failed for event ${doc.id}, user ${uid}`, e);
+            }
+          }
+
+          await doc.ref.update({ reminderSentAt: now });
+          report.eventRemindersSent++;
+        } catch (e) {
+          console.error(`dailySweep: event reminder failed for event ${doc.id}`, e);
+          report.errors.eventReminders++;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("dailySweep: event reminder sweep step failed", e);
+    report.errors.eventReminders++;
   }
 
   return report;

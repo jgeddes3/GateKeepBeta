@@ -217,9 +217,18 @@ export interface LocationValue { address: string; visibility: AddressVisibility;
 // ALREADY-SAVED address/visibility is displayed, so the page composing this
 // is responsible for building that string (from the gig's private/location
 // subdoc on edit, or the curator profile's own address on create).
-export function LocationFields({ isVenue, addressRequired, currentLabel, value, onChange }: {
+// Sub-project 6 task 10 fix round 1 (Important, code review round 1): this
+// component is shared by the gig composer/editor (every pre-existing call
+// site) AND, as of Task 10, the standalone event creator
+// (src/events/EventEditor.tsx), and two of the copy strings below used to
+// name "gig" directly rather than reading it off a prop, so a curator
+// creating an EVENT saw gig-specific copy. `entityNoun` defaults to "gig"
+// so every existing gig call site renders byte-identical copy without
+// passing anything; EventEditor.tsx is the one caller that passes "event".
+export function LocationFields({ isVenue, addressRequired, currentLabel, value, onChange, entityNoun = "gig" }: {
   isVenue: boolean; addressRequired: boolean; currentLabel: string;
   value: LocationValue; onChange: (v: LocationValue) => void;
+  entityNoun?: string;
 }) {
   return (
     <div className="grid gap-3">
@@ -230,7 +239,7 @@ export function LocationFields({ isVenue, addressRequired, currentLabel, value, 
           placeholder={isVenue ? "Leave blank to use your venue's address on file" : "Street address"}
           maxLength={MAX_ADDRESS_LENGTH} value={value.address} onChange={(e) => onChange({ ...value, address: e.target.value })} />
       </div>
-      {addressRequired && <p className="font-sora text-sm text-gk-warning">An address is required for this gig.</p>}
+      {addressRequired && <p className="font-sora text-sm text-gk-warning">An address is required for this {entityNoun}.</p>}
       <div className="grid gap-1.5 max-w-64">
         <label htmlFor="gig-address-visibility" className="font-sora text-sm font-medium text-gk-text">
           Show address to musicians as
@@ -250,8 +259,8 @@ export function LocationFields({ isVenue, addressRequired, currentLabel, value, 
       <p className="font-sora text-xs text-gk-muted">
         {isVenue
           ? "Venues default to a full public address. Switch to neighborhood-only if you'd rather not show it."
-          : "Non-venue gigs show only the neighborhood publicly by default, to protect privacy. Switch to a full " +
-            "public address if you want one shown (e.g. a block party or a rented hall)."}
+          : `Non-venue ${entityNoun}s show only the neighborhood publicly by default, to protect privacy. Switch to a ` +
+            "full public address if you want one shown (e.g. a block party or a rented hall)."}
       </p>
     </div>
   );

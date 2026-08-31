@@ -159,9 +159,70 @@
       { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
       { "fieldPath": "deposit.status", "order": "ASCENDING" },
       { "fieldPath": "deposit.depositAttempts", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "expiresAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "buyerUid", "order": "ASCENDING" },
+      { "fieldPath": "eventId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "eventId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "cancelledAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "endsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "lineupMusicianProfileIds", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "transfers", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "ticketId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "transfers", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "toUid", "order": "ASCENDING" },
+      { "fieldPath": "eventId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "transfers", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "expiresAt", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
+    "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
+  { "collectionGroup": "tickets", "fieldPath": "orderId",
     "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
   { "collectionGroup": "tracks", "fieldPath": "status",
     "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },

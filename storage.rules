@@ -60,12 +60,14 @@ service firebase.storage {
       // "gallery" is the curator profile's photo-gallery kind (Task 4b) —
       // processUpload gates it to curator profiles only, same as it gates
       // avatar/cover to musician profiles; these rules only police shape.
+      // "poster" (SP6) is also curator-side, gated the same way as gallery,
+      // processed identically, just with no profile-doc destination field.
       allow create, update: if isOwner(uid)
         && profileId.matches('[A-Za-z0-9_-]{1,64}')
         && request.resource.size > 0
         && request.resource.size <= 10 * 1024 * 1024
         && request.resource.contentType.matches('image/(jpeg|png|webp)')
-        && fileName.matches('(avatar|cover|gallery)-[A-Za-z0-9-]{1,80}');
+        && fileName.matches('(avatar|cover|gallery|poster)-[A-Za-z0-9-]{1,80}');
       allow delete: if false; // the processUpload trigger owns staging cleanup
       allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
                                // fail by design — upload UIs must not read back staging.

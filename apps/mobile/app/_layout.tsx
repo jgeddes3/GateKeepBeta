@@ -79,6 +79,10 @@ function Gate() {
             a native header's auto-hidden back arrow would not. */}
         <Stack.Screen name="join" options={{ headerShown: true, title: "Create a profile" }} />
         <Stack.Screen name="artist/[handle]" options={{ headerShown: true, title: "Artist" }} />
+        {/* Sub-project 6 task 11: the fan event detail + buy screen, pushed
+            from Home's upcoming list, the Tickets tab, and (later, sub-7)
+            discovery. Same themed native header as artist/[handle] above. */}
+        <Stack.Screen name="event/[eventId]" options={{ headerShown: true, title: "Event" }} />
       </Stack>
     </>
   );

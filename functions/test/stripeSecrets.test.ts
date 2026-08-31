@@ -46,7 +46,11 @@ const STRIPE_REACHING: ReadonlyArray<{ name: string; file: string; why: string }
   { name: "pauseSeries", file: "gigSeries.ts", why: "cancelActiveRunBookingTolerant -> executeCancellation -> resolveDepositPending" },
   { name: "endSeries", file: "gigSeries.ts", why: "cancelActiveRunBookingTolerant -> executeCancellation -> resolveDepositPending" },
   { name: "stripeWebhook", file: "paymentsWebhook.ts", why: "onRequest — dispatches every SP5 money finalizer" },
-  { name: "paymentsSweep", file: "paymentsSweep.ts", why: "onSchedule — the T+3 charge / dunning / deposit sweep" },
+  { name: "paymentsSweep", file: "paymentsSweep.ts", why: "onSchedule: the T+3 charge / dunning / deposit sweep, also the SP6 ticket-order expiry step's getStripe().cancelIntent and Task 6's cancelled-event retry step (refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent)" },
+  { name: "createTicketOrder", file: "ticketing.ts", why: "SP6 Task 5: mints the ticket checkout PaymentIntent (getStripe().createIntent)" },
+  { name: "finalizeTicketOrder", file: "ticketing.ts", why: "SP6 Task 5: verifies the PaymentIntent status (getStripe().retrieveIntentStatus)" },
+  { name: "cancelEvent", file: "events.ts", why: "SP6 Task 6: refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent" },
+  { name: "refundTicket", file: "ticketing.ts", why: "SP6 Task 6: the curator grace refund -> getStripe().refund" },
 ];
 
 const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");

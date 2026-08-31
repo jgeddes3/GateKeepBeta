@@ -4,7 +4,9 @@ import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import { validateHandle, type ProfileDoc, type TrackDoc, type GigDoc, type GigPublicLocation } from "@gatekeep/shared";
+import {
+  validateHandle, type ProfileDoc, type TrackDoc, type GigDoc, type GigPublicLocation, type EventDoc,
+} from "@gatekeep/shared";
 import { MusicianProfile } from "./MusicianProfile";
 import { CuratorProfile } from "./CuratorProfile";
 
@@ -46,12 +48,23 @@ export type ShowEntry = {
   otherProfileName: string; otherProfileHandle: string | null;
 };
 
+// Sub-project 6 task 9: the "Upcoming events" section's row shape, both
+// pages. Deliberately carries no poster: resolving posterPath ->
+// getDownloadURL for every row would cost one extra Storage round trip per
+// event on a section that already has DateBlockRow's own no-photo precedent
+// (the Shows sections above render the same way, title + date + location,
+// no image), so this stays cheap-to-fetch and consistent with that
+// existing pattern rather than inventing a photo treatment nothing else on
+// this page uses.
+export type UpcomingEventSummary = { eventId: string; title: string; startsAtMs: number; location: GigPublicLocation };
+
 export type MusicianLoaded = {
   kind: "musician";
   profileId: string;
   profile: ProfileDoc; tracks: LoadedTrack[];
   avatarUrl: string | null; coverUrl: string | null;
   upcomingShows: ShowEntry[]; pastShows: ShowEntry[];
+  upcomingEvents: UpcomingEventSummary[];
 };
 export type CuratorLoaded = {
   kind: "curator";
@@ -60,6 +73,7 @@ export type CuratorLoaded = {
   photoUrls: string[];
   openGigs: PublicGig[];
   upcomingShows: ShowEntry[]; pastShows: ShowEntry[];
+  upcomingEvents: UpcomingEventSummary[];
 };
 type Loaded = MusicianLoaded | CuratorLoaded;
 
@@ -222,12 +236,68 @@ async function loadCuratorShows(profileId: string): Promise<{ upcoming: ShowEntr
   }
 }
 
+// Sub-project 6 task 9: the musician page's "Upcoming events" query. The
+// event doc's server-maintained lineupMusicianProfileIds array (functions/
+// src/events.ts's deriveLineupMusicianProfileIds) is what makes an
+// array-contains query provable at all: rules-provability here comes
+// entirely from the status=='published' equality filter, exactly like
+// loadCurator's own open-gigs query below (see that query's own comment);
+// array-contains adds no further rules exposure of its own (firestore.rules
+// only ever sees per-document field values, never which array element
+// matched). See firestore.indexes.json for the composite index this needs
+// (lineupMusicianProfileIds CONTAINS + status ASC + startsAt ASC).
+async function loadMusicianUpcomingEvents(profileId: string): Promise<UpcomingEventSummary[]> {
+  try {
+    const { db } = getServerFirebase();
+    const snap = await getDocs(query(
+      collection(db, "events"),
+      where("lineupMusicianProfileIds", "array-contains", profileId),
+      where("status", "==", "published"),
+      orderBy("startsAt")));
+    return snap.docs.map((d) => {
+      const e = d.data() as EventDoc;
+      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, location: e.location };
+    });
+  } catch (e) {
+    // Same "auxiliary content shouldn't 500 the whole page" tradeoff as
+    // loadMusicianShows below: an empty section (indistinguishable from the
+    // legitimate no-upcoming-events case, per this section's own
+    // hidden-while-empty contract) beats a 500 for every visitor.
+    console.error("loadMusicianUpcomingEvents failed", profileId, e);
+    return [];
+  }
+}
+
+// Curator-page equivalent of loadMusicianUpcomingEvents above: a single
+// query is provable here (unlike loadCuratorShows' own split-query gigs
+// case) because curatorProfileId pins nothing the events read rule needs
+// beyond status=='published', which the query already carries as its own
+// equality filter, matching loadCurator's open-gigs query below one for
+// one.
+async function loadCuratorUpcomingEvents(profileId: string): Promise<UpcomingEventSummary[]> {
+  try {
+    const { db } = getServerFirebase();
+    const snap = await getDocs(query(
+      collection(db, "events"),
+      where("curatorProfileId", "==", profileId),
+      where("status", "==", "published"),
+      orderBy("startsAt")));
+    return snap.docs.map((d) => {
+      const e = d.data() as EventDoc;
+      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, location: e.location };
+    });
+  } catch (e) {
+    console.error("loadCuratorUpcomingEvents failed", profileId, e);
+    return [];
+  }
+}
+
 async function loadMusician(profileId: string, profile: ProfileDoc): Promise<MusicianLoaded> {
   const { db } = getServerFirebase();
   const trackSnap = await getDocs(query(
     collection(db, `profiles/${profileId}/tracks`),
     where("status", "==", "approved"), orderBy("order")));
-  const [tracks, avatarUrl, coverUrl, shows] = await Promise.all([
+  const [tracks, avatarUrl, coverUrl, shows, upcomingEvents] = await Promise.all([
     Promise.all(trackSnap.docs.map(async (t) => {
       const d = t.data() as TrackDoc;
       const url = await storageUrl(d.storagePath);
@@ -236,10 +306,11 @@ async function loadMusician(profileId: string, profile: ProfileDoc): Promise<Mus
     storageUrl(profile.portfolio?.avatarPhotoPath),
     storageUrl(profile.portfolio?.coverPhotoPath),
     loadMusicianShows(profileId),
+    loadMusicianUpcomingEvents(profileId),
   ]);
   return {
     kind: "musician", profileId, profile, tracks, avatarUrl, coverUrl,
-    upcomingShows: shows.upcoming, pastShows: shows.past,
+    upcomingShows: shows.upcoming, pastShows: shows.past, upcomingEvents,
   };
 }
 
@@ -255,7 +326,7 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
   // further rules exposure (rules only ever see per-document field values,
   // never result ordering): it only changes which composite index the
   // query needs at the datastore layer (see firestore.indexes.json).
-  const [gigsSnap, photoUrls, shows] = await Promise.all([
+  const [gigsSnap, photoUrls, shows, upcomingEvents] = await Promise.all([
     getDocs(query(
       collection(db, "gigs"),
       where("curatorProfileId", "==", profileId),
@@ -263,11 +334,12 @@ async function loadCurator(profileId: string, profile: ProfileDoc): Promise<Cura
       orderBy("startsAt"))),
     Promise.all(photoPaths.map((p) => storageUrl(p))).then((urls) => urls.filter((u): u is string => u !== null)),
     loadCuratorShows(profileId),
+    loadCuratorUpcomingEvents(profileId),
   ]);
   const openGigs = gigsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }));
   return {
     kind: "curator", profileId, profile, photoUrls, openGigs,
-    upcomingShows: shows.upcoming, pastShows: shows.past,
+    upcomingShows: shows.upcoming, pastShows: shows.past, upcomingEvents,
   };
 }
 

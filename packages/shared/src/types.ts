@@ -85,7 +85,9 @@ export interface AuditLogDoc {
 export interface NotificationDoc {
   title: string;
   body: string;
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking";
+  // SP6 Task 5: "ticket" is a ticket-order purchase confirmation; its refId
+  // is the eventId (see refId's own comment below).
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -791,7 +793,40 @@ export type AdminAlertKind =
   // hand, or net it off a future payout). The ONE alert kind in SP5 that is
   // profile-scoped rather than booking-scoped: its row carries a null
   // bookingId/gigId and names the profile in `detail`.
-  | "payout_fee_uncollected";
+  | "payout_fee_uncollected"
+  // SP6 Task 6: an event cancellation's order-level money move (the full
+  // refund of a paid order, or the PaymentIntent cancel + expiry of a pending
+  // one) failed. Covers both cases with one kind, the same way stuck-saga's
+  // three kinds share one operator remedy: either way, this order is not yet
+  // resolved for its cancelled event and the sweep's retry step will try it
+  // again next hour. bookingId/gigId are always null (ticket orders are not
+  // booking-scoped); the order and event ids are named in `detail`.
+  | "ticket_cancel_refund_failed"
+  // SP6 Task 7: a T+1 ticket settlement transfer could not be made because
+  // the curator has no payout-ready Stripe account (no connected account, or
+  // one that has not finished onboarding). bookingId/gigId are always null
+  // (event-scoped, like ticket_cancel_refund_failed above); the event is
+  // named in `detail` and left "published" so the sweep retries it every
+  // pass until the curator finishes onboarding.
+  | "ticket_settlement_blocked"
+  // SP6 Task 7 fix round 1 (money review, Critical 1d): a T+1 ticket
+  // settlement transfer was attempted (the curator IS payout-ready) but
+  // Stripe returned an unexpected error. bookingId/gigId are always null
+  // (event-scoped, like the two kinds above); the event and the failure are
+  // named in `detail`. Distinct from ticket_settlement_blocked, which never
+  // reaches Stripe at all: this kind means the call was made and refused, not
+  // that it was withheld.
+  | "ticket_settlement_failed"
+  // SP6 Task 8 fix round 1 (security review, Important, silent money drift):
+  // refundTicket's Stripe refund succeeded, but the ticket it was refunding
+  // had (raced) become "transferred" out from under it, AND the CURRENT
+  // live descendant ticket could not be automatically torn down to match
+  // (it was already refunded, already checked in, missing, or ambiguous).
+  // bookingId/gigId are always null (ticket-scoped, like the two kinds
+  // above); the ticket id, order id, and amount are named in `detail`.
+  // Never a silent no-op: refundTicket THROWS after raising this, so the
+  // caller (and the curator) sees the refund did not cleanly resolve.
+  | "ticket_refund_convergence_failed";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -825,11 +860,131 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // it a failed payout would be indistinguishable in the ledger from a paid
   // one. Keyed off the payout's own id, so it can never collide with the
   // request-time row (different kind, same object).
-  | "payout_failed";
+  | "payout_failed"
+  // SP6 Task 5: a completed ticket order (paid or free). Keyed deterministically
+  // off the order's own id (writeLedger's `{kind}:{stripeId}` doc-id discipline,
+  // stripeId set to orderId here since a free order has no PaymentIntent at all),
+  // so a redelivered webhook and a racing finalize/webhook pair can never double
+  // count the same order.
+  | "ticket_sale"
+  // SP6 Task 6: an event cancellation's automatic full refund of one order's
+  // remaining balance. Keyed off the order id (same discipline as ticket_sale
+  // above), so a cancelEvent retry (the callable called twice, or the sweep's
+  // retry step re-driving the same loop) never double-counts one order's row.
+  | "ticket_cancel_refund"
+  // SP6 Task 6: a curator's per-ticket grace refund. Keyed off the ticket id
+  // (not the order id: one order can carry several of these rows, one per
+  // refunded ticket), so a duplicate refundTicket call for the same ticket
+  // never double-counts.
+  | "ticket_grace_refund"
+  // SP6 Task 7: the T+1 post-event payout of ticket face value to the
+  // curator's connected account. Keyed off the transfer id (writeLedger's
+  // `{kind}:{stripeId}` doc-id discipline), so a sweep retry that reissues
+  // the same idempotency key and gets back the same transfer never
+  // double-counts the payout.
+  | "ticket_settlement";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign
   bookingId: string | null; gigId: string | null; profileId: string | null;
   stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
   detail: string; at: number;
+  // SP6 ticketing rows only (eventId/buyerUid have no SP5 booking-money
+  // equivalent, so every SP5 entry simply omits them). Optional so every
+  // existing SP5 call site keeps compiling unchanged.
+  eventId?: string | null; buyerUid?: string | null;
 }
+
+// ---------- Sub-project 6: events & ticketing ----------
+
+export type EventStatus = "draft" | "published" | "completed" | "cancelled";
+export type EventAct =
+  | { kind: "booking"; bookingId: string; musicianProfileId: string; name: string }
+  | { kind: "external"; name: string };
+export interface EventDoc {
+  curatorProfileId: string; title: string; description: string;
+  location: GigPublicLocation;             // reuses SP3's public-precision location type
+  startsAt: number; endsAt: number;
+  posterPath: string | null;               // a processed "poster" photo path belonging to the curator profile
+  status: EventStatus;
+  maxTicketsPerBuyer: number;              // default 8
+  lineup: EventAct[];
+  // Server-maintained projection of lineup's "booking" acts' musicianProfileId
+  // values, kept in sync wherever lineup is written. Task 9's musician public
+  // page query (array-contains on this field) needs a flat array rather than
+  // scanning lineup's discriminated-union entries per read.
+  lineupMusicianProfileIds: string[];
+  gigId: string | null;                    // set when promoted from a filled gig
+  createdAt: number; updatedAt: number;
+  cancelledAt?: number; completedAt?: number;
+  // SP6 Task 7: epoch ms the "starts within 24h" reminder was sent, stamped
+  // once by the daily sweep so a second run never re-notifies the same
+  // event's attendees. Absent means "not yet reminded" (every pre-Task-7
+  // event, and every event whose startsAt is still more than 24h out).
+  reminderSentAt?: number;
+  // SP6 Task 7 fix round 1 (money review, Critical 1 / Important 2): epoch ms
+  // the T+1 ticket settlement transfer was first claimed, stamped exactly
+  // once (transactionally, iff unset) immediately before paymentsSweep.ts
+  // calls Stripe. Two jobs: it is the CAS a retried sweep pass reads to
+  // replay the SAME transfer call rather than starting a fresh one, and it is
+  // the guard cancelEventCore checks to refuse a cancellation once settlement
+  // has begun, closing the window where a cancel would refund every buyer on
+  // top of a transfer the curator already received. Absent means settlement
+  // has never started for this event (every pre-fix-round-1 event, and every
+  // event not yet past its T+1 window).
+  settlementStartedAt?: number;
+}
+export interface TicketTierDoc {
+  name: string; priceCents: number;        // 0 = free RSVP
+  capacity: number; soldCount: number;     // server-maintained
+  saleStartsAt: number | null; saleEndsAt: number | null;
+  sortOrder: number;
+}
+export interface TicketFeePolicy { ticketFeePct: number; ticketFeeFixedCents: number; ticketFeeCapCents: number; }
+export type TicketOrderStatus = "pending" | "paid" | "expired" | "cancelled_refunded";
+export interface TicketOrderItem { tierId: string; quantity: number; unitPriceCents: number; tierName: string; }
+export interface TicketOrderDoc {
+  buyerUid: string; eventId: string; curatorProfileId: string;
+  items: TicketOrderItem[];
+  faceTotalCents: number; serviceFeeCents: number;
+  feePolicy: TicketFeePolicy;              // snapshotted at order creation, mirrors SP5's FeePolicy discipline
+  paymentIntentId: string | null;          // null for free orders
+  status: TicketOrderStatus;
+  refundedTicketIds: string[]; refundedCents: number;
+  // Face-value portion of refundedCents only (excludes any refunded service
+  // fee). Initialized 0 wherever an order is born; Task 6 maintains it on
+  // every refund, Task 7 reads it to compute the curator's T+1 payout base
+  // (100% of face value of paid, non-refunded tickets).
+  refundedFaceCents: number;
+  createdAt: number; expiresAt: number; paidAt?: number;
+}
+export type TicketStatus = "valid" | "checked_in" | "refunded" | "transferred";
+export interface TicketDoc {
+  eventId: string; tierId: string; tierName: string; orderId: string;
+  curatorProfileId: string;
+  qrSecret: string;                        // server-minted, owner-readable, possession = door proof
+  status: TicketStatus;
+  createdAt: number; checkedInAt?: number; transferredTo?: string;
+}
+export interface AttendeeDoc {             // events/{eventId}/attendees/{ticketId}, server-written projection
+  ownerUid: string; ownerName: string; tierId: string; tierName: string;
+  status: TicketStatus; checkedInAt?: number;
+}
+// Task 8 fix round 1 (security review, money drift): "voided" is a distinct
+// terminal status from "declined": the recipient never chose anything here.
+// A curator's grace refund on the underlying ticket, run BEFORE the Stripe
+// call, transactionally flips any still-"offered" transfer for that ticket
+// to "voided" so no accept can complete against a ticket about to be
+// refunded out from under it. Both "declined" and "voided" are equally
+// terminal to respondToTransfer/offerTransfer (either simply fails the
+// `status === "offered"` check), so nothing downstream needs to distinguish
+// the two beyond the audit trail this value preserves.
+export type TicketTransferStatus = "offered" | "accepted" | "declined" | "expired" | "voided";
+export interface TicketTransferDoc {
+  ticketId: string; eventId: string; fromUid: string; toUid: string;
+  status: TicketTransferStatus; createdAt: number; expiresAt: number; resolvedAt?: number;
+}
+// users/{uid}/ticketIndex/{eventId}: the valid-ticket proof firestore.rules
+// reads to prove a caller holds a ticket for THIS event, without a rules
+// read against the tickets collection itself. Server-written only.
+export interface TicketIndexDoc { count: number }

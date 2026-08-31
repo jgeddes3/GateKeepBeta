@@ -866,6 +866,75 @@ sheets entirely.
     hours through the mobile true-up form. Expect: the preview delta shown before submitting matches
     the amount actually charged once the true-up settles.
 
+### Sub-project 6 launch checklist (events & ticketing)
+
+- **No new Stripe secrets or webhook registration needed.** Ticket checkout rides the existing
+  `stripeWebhook` endpoint and `stripeEvents` claim machine with a new `metadata.purpose: "tickets"`
+  value; the webhook subscription list and the `stripeEvents.expireAt` TTL policy set up for
+  sub-project 5 (see above, unchanged) already cover it.
+- **New composite indexes deploy with `firebase deploy`**: sub-project 6 adds 11 composite indexes
+  to `firestore.indexes.json` (3 `orders`, 5 `events`, 3 `transfers`) plus a `tickets.orderId`
+  collection-group field override. Same caveat as every prior sub-project's indexes: the emulator
+  does not enforce composite indexes, so a green `pnpm emu:test`/`pnpm emu:rules` proves nothing
+  about them, confirm they build on the real project (Firebase console → Firestore → Indexes)
+  after the first deploy before the events/orders/transfers queries that depend on them will work
+  in production.
+- **Poster upload is not wired end to end.** `functions/src/media.ts`'s `processPhoto` already
+  accepts `kind: "poster"` and transcodes it, but persists the processed path nowhere the client can
+  read back (a poster has no profile-doc field the way avatar/cover/gallery photos do), so every
+  event on both web and mobile renders text-only (`PhotoPlaceholder`) regardless of what a curator
+  uploads. Fixing it is a small functions change (a watchable doc field, or a synchronous callable
+  that returns the processed path), a follow-up, not shipped in sub-project 6.
+- **Transfers are mobile-only in v1.** The web fan tickets page shows a "manage transfers in the
+  GateKeep app" hint and never calls `offerTransfer`/`respondToTransfer`; only the mobile app can
+  send or accept a transfer. Transfer targeting is email-only (handles denote group profiles, not
+  individual people; the spec's "@handle or email" language resolved this way, recorded for the
+  rulings doc).
+
+### Sub-project 6 smoke checklist (events & ticketing)
+
+Sub-project 6 opens ticketing to fans: curator-published events (standalone or promoted from a
+filled gig), paid/free multi-tier tickets on the sub-5 Stripe rails, QR door check-in, curator grace
+refunds and cancel-refunds, and in-app ticket transfers. The emulator suite covers every
+server-side saga against FakeStripe; the paid-checkout path is the one thing it cannot prove.
+**In the keyless local emulator a paid tier's checkout only verifies as far as the Elements/Payment
+Sheet mount** (the Pay button correctly stays disabled with no publishable key), so the walkthrough
+below must run at least once against **real Stripe test mode**
+(`NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` set for the web build, same posture as the "Manual smoke
+walkthrough" above) to prove a real charge completes.
+
+**Web, both themes:**
+- Create a standalone event, and separately promote a filled gig into one.
+- Tier editor: add/remove tiers freely while the event is a draft; after publish, capacity can only
+  go up, never down.
+- Publish the event.
+- Load the public page (`/e/[eventId]`) signed out: the exact address is hidden, tiers render with
+  price and sale-window state, and a sold-out tier shows as sold out.
+- Buy a free RSVP tier as a fan.
+- Buy a PAID tier end to end **with real Stripe test keys** (`4242 4242 4242 4242` through Elements
+  should produce a confirmed order and a minted ticket).
+- Fan "Your tickets" page: the QR renders and the exact address reveals for a valid ticket.
+- Curator attendee list updates live as tickets sell or check in.
+- Grace-refund one ticket from the attendee list (refunds close once the event's own end time
+  passes).
+- Cancel the event (this auto-refunds every paid order in full).
+
+**Mobile, both themes, needs a new EAS dev-client build:** `expo-camera` and
+`react-native-qrcode-svg` joined the native dependency list this sub-project, so device testing
+needs a fresh dev-client build before any of this works
+(`npx eas-cli build --profile development --platform all`).
+- Buy a ticket from the event screen via the native `PaymentSheet`.
+- Ticket wallet: the QR renders full-screen.
+- Transfer a ticket between two test accounts (email-targeted, 24h expiry, cap enforcement on
+  accept).
+- Accept and decline an incoming transfer offer.
+- Curator: tiers editor, publish, cancel.
+- **Door scanner, the single top on-device priority.** This screen is entirely unverified off
+  device: scan a real ticket QR, scan the same one twice and confirm the duplicate-scan state shows
+  the original check-in time, then deny camera permission once and confirm the Settings fallback
+  (not a dead button).
+- Attendee list tap-to-check-in fallback.
+
 ### Sub-project 2 polish follow-ups (non-blocking)
 
 Smaller items from the sub-project 2 quality-review rounds — recorded in full in

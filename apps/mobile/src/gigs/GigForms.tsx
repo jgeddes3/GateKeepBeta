@@ -279,9 +279,17 @@ export interface LocationValue { address: string; visibility: AddressVisibility;
 // invalid-argument otherwise). `currentLabel` is the only place the
 // ALREADY-SAVED address/visibility is displayed, so the screen composing this
 // is responsible for building that string.
-export function LocationFields({ isVenue, addressRequired, currentLabel, value, onChange }: {
+// `entityNoun` (default "gig", Task 12): web's LocationFields grew the same
+// prop in its own fix round 1 (apps/web/src/gigs/GigForms.tsx) once its
+// event-creation surface reused this component and its two hardcoded "gig"
+// strings started leaking onto a screen creating something else. Adding it
+// here BEFORE this component gets its own second caller (Task 12's
+// standalone event create form) avoids shipping the identical bug knowingly.
+// Every existing gig/series call site omits the prop and keeps rendering
+// "gig" unchanged.
+export function LocationFields({ isVenue, addressRequired, currentLabel, value, onChange, entityNoun = "gig" }: {
   isVenue: boolean; addressRequired: boolean; currentLabel: string;
-  value: LocationValue; onChange: (v: LocationValue) => void;
+  value: LocationValue; onChange: (v: LocationValue) => void; entityNoun?: string;
 }) {
   const tok = useTokens();
   return (
@@ -289,7 +297,7 @@ export function LocationFields({ isVenue, addressRequired, currentLabel, value, 
       <UiText muted>{currentLabel}</UiText>
       <Input placeholder={isVenue ? "Street address (leave blank to use your venue's address on file)" : "Street address"}
         maxLength={MAX_ADDRESS_LENGTH} value={value.address} onChangeText={(t) => onChange({ ...value, address: t })} />
-      {addressRequired && <UiText variant="meta" color={tok.warning}>An address is required for this gig.</UiText>}
+      {addressRequired && <UiText variant="meta" color={tok.warning}>An address is required for this {entityNoun}.</UiText>}
       <UiText>Show address to musicians as</UiText>
       <View style={{ flexDirection: "row", gap: 6 }}>
         <UiChip label="Full address (public)" active={value.visibility === "public"}
@@ -304,8 +312,8 @@ export function LocationFields({ isVenue, addressRequired, currentLabel, value, 
       <UiText variant="meta" muted>
         {isVenue
           ? "Venues default to a full public address, switch to neighborhood-only if you'd rather not show it."
-          : "Non-venue gigs show only the neighborhood publicly by default, to protect privacy, switch to a full " +
-            "public address if you want one shown (e.g. a block party or a rented hall)."}
+          : `Non-venue ${entityNoun}s show only the neighborhood publicly by default, to protect privacy, switch to a ` +
+            "full public address if you want one shown (e.g. a block party or a rented hall)."}
       </UiText>
     </View>
   );

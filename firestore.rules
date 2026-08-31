@@ -246,6 +246,86 @@ service cloud.firestore {
     // internal bookkeeping only, same as geocodeBudgets above.
     match /curatorAccessRetries/{uid} { allow read, write: if false; }
 
+    // ---------- Sub-project 6: events & ticketing ----------
+    // All writes across this section are Cloud Functions only (event
+    // creation/publish, order/ticket minting, check-in, refunds, and the
+    // transfer saga): no client create/update/delete anywhere below, not
+    // even for a curator-side member or an admin.
+    match /events/{eventId} {
+      // Public once published, and stays visible after the event completes
+      // (past-event pages); curator-side members preview their own
+      // draft/cancelled events; admin sees all.
+      allow read: if resource.data.status == 'published' || resource.data.status == 'completed'
+        || isMember(resource.data.curatorProfileId) || isAdmin();
+      allow write: if false; // Cloud Functions only
+
+      match /tiers/{tierId} {
+        // Same audience as the parent event, but a tier doc carries neither
+        // status nor curatorProfileId itself, so it's proven via a get() on
+        // the parent, same idiom as gigs/private/location above.
+        allow read: if get(/databases/$(database)/documents/events/$(eventId)).data.status in ['published', 'completed']
+          || isMember(get(/databases/$(database)/documents/events/$(eventId)).data.curatorProfileId) || isAdmin();
+        allow write: if false;
+      }
+
+      match /private/address {
+        // The door address: admin, curator-side members, or a signed-in
+        // caller holding a valid ticket for THIS event. Rules cannot query
+        // "any ticket for this event" directly, so the server maintains
+        // users/{uid}/ticketIndex/{eventId} = { count } wherever tickets are
+        // minted/refunded/transferred (Tasks 5, 6, 8); exists() on that doc
+        // is the valid-ticket proof. signedIn() ordered first in that
+        // disjunct: an anon caller's request.auth.uid is null, which throws
+        // building the exists() path rather than absorbing into `false`,
+        // same idiom as private/curatorBooking above.
+        allow read: if isAdmin()
+          || isMember(get(/databases/$(database)/documents/events/$(eventId)).data.curatorProfileId)
+          || (signedIn()
+              && exists(/databases/$(database)/documents/users/$(request.auth.uid)/ticketIndex/$(eventId)));
+        allow write: if false;
+      }
+
+      match /attendees/{ticketId} {
+        // The door list / check-in roster: curator-side members and admin
+        // only. Never the attendee themselves via ownerUid: their own
+        // ticket is read via users/{uid}/tickets/{ticketId} below.
+        allow read: if isMember(get(/databases/$(database)/documents/events/$(eventId)).data.curatorProfileId) || isAdmin();
+        allow write: if false;
+      }
+    }
+
+    match /orders/{orderId} {
+      // The buyer, curator-side members of the event's curator profile
+      // (the order's own curatorProfileId, not a parent get(): orders are
+      // top-level and self-declared, server-written), or admin.
+      allow read: if signedIn()
+        && (resource.data.buyerUid == request.auth.uid || isMember(resource.data.curatorProfileId) || isAdmin());
+      allow write: if false; // Cloud Functions only
+    }
+
+    match /users/{uid}/tickets/{ticketId} {
+      allow read: if isOwner(uid);
+      allow write: if false; // Cloud Functions only
+    }
+
+    // The address gate's valid-ticket proof doc (TicketIndexDoc), owner-read
+    // only. The whole point of exists()-checking it from another uid's
+    // request in the private/address rule above is that it stays opaque to
+    // everyone except its own owner (and the server that maintains it).
+    match /users/{uid}/ticketIndex/{eventId} {
+      allow read: if isOwner(uid);
+      allow write: if false; // Cloud Functions only
+    }
+
+    match /transfers/{transferId} {
+      // Visible to both parties of the transfer, or admin, never the
+      // event's curator (transfers are a buyer-to-buyer handoff, no curator
+      // stake in who holds which ticket).
+      allow read: if signedIn()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid || isAdmin());
+      allow write: if false; // Cloud Functions only
+    }
+
     // Recursive-wildcard match needed for collectionGroup('members') queries —
     // the nested /profiles/{profileId}/members/{memberUid} rule above does NOT
     // apply to collection-group queries. Mirrors the self-read clause so the

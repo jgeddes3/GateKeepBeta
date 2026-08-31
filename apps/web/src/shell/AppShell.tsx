@@ -10,7 +10,7 @@ import { Footer } from "./Footer";
 import {
   Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger,
 } from "../ui/sheet";
-import { IconBookings, IconEarnings, IconGigs, IconHouse, IconMenu, type IconProps } from "../ui/icons";
+import { IconBookings, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconTicket, type IconProps } from "../ui/icons";
 
 // Routes that get the signed-in shell (slim top bar + footer). An allowlist
 // of prefixes rather than a blocklist: everything under these is the
@@ -34,7 +34,13 @@ import { IconBookings, IconEarnings, IconGigs, IconHouse, IconMenu, type IconPro
 // proves the shell mounts safely ahead of a signed-in check elsewhere on
 // the page, so /gigs's own signed-out visitors get that same brand + "Sign
 // in" treatment for free, no other change needed here.
-const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs"];
+//
+// Sub-project 6 task 10: /tickets joined this list for the identical
+// reason /gigs did above: it's the one primary-nav destination ("Tickets")
+// the nav array below now points every signed-in context at, so leaving it
+// out would strand a fan on the one page this task adds with no shell
+// chrome at all (no way back to the rest of the app, no account switcher).
+const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs", "/tickets"];
 
 function isShellRoute(pathname: string): boolean {
   return SHELL_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
@@ -75,20 +81,33 @@ function resolveContext(pathname: string, profiles: ProfileSummary[]): NavContex
   return { kind: "generic" };
 }
 
-// Every href below is a route that exists today (no new destinations): the
-// browse-gigs page, the profile's own editor page (where its BookingInbox
-// section already lives), and the earnings page. "Messages" isn't included
-// anywhere: there's no messaging surface on web (or mobile, where its own
-// Messages tab is still a "coming in a later phase" placeholder), so no
-// context has a real destination for it.
+// Every href below is a route that exists today (no new destinations, sub-
+// project 6 task 10's own two new pages included): the browse-gigs page,
+// the profile's own editor page (where its BookingInbox section already
+// lives), the earnings page, the curator events manager, and the fan
+// tickets page. "Messages" isn't included anywhere: there's no messaging
+// surface on web (or mobile, where its own Messages tab is still a "coming
+// in a later phase" placeholder), so no context has a real destination for
+// it.
+//
+// Tickets is in EVERY context's array, deliberately, unlike Events below:
+// buying a ticket needs no musician/curator profile at all (any signed-in
+// account can hold one), so a fan with no profiles yet (the "generic"
+// context) still needs a way back to what they bought. Events is
+// curator-only (controller ruling 9: "add an Events entry beside the
+// existing dashboard nav entries"): only a curator profile can own an
+// event, so it appears solely in that one context's array, matching the
+// same profile-gated shape Bookings/Gigs already have there.
 function navItemsFor(context: NavContext): NavItem[] {
   const dashboard: NavItem = { label: "Dashboard", href: "/dashboard", icon: IconHouse };
+  const tickets: NavItem = { label: "Tickets", href: "/tickets", icon: IconTicket };
   if (context.kind === "musician") {
     return [
       dashboard,
       { label: "Gigs", href: "/gigs", icon: IconGigs },
       { label: "Bookings", href: `/dashboard/portfolio/${context.profileId}`, icon: IconBookings },
       { label: "Earnings", href: "/dashboard/earnings", icon: IconEarnings },
+      tickets,
     ];
   }
   if (context.kind === "curator") {
@@ -96,9 +115,11 @@ function navItemsFor(context: NavContext): NavItem[] {
       dashboard,
       { label: "Gigs", href: `/dashboard/curator/${context.profileId}/gigs`, icon: IconGigs },
       { label: "Bookings", href: `/dashboard/curator/${context.profileId}`, icon: IconBookings },
+      { label: "Events", href: "/dashboard/events", icon: IconEvents },
+      tickets,
     ];
   }
-  return [dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }];
+  return [dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
 }
 
 // Which single nav item, if any, is "active" for the current route. A
