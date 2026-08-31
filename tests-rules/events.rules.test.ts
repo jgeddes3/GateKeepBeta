@@ -4,7 +4,7 @@ import {
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
 import {
-  collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc,
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, query, where,
 } from "firebase/firestore";
 
 // Sub-project 6 (events and ticketing) rules matrix: the six new
@@ -305,6 +305,39 @@ describe("orders", () => {
     await assertFails(getDoc(doc(anon, "orders/ord1")));
   });
 
+  it("list-query provability: a buyer's own-uid-pinned list succeeds; an unfiltered list, and a stranger's list pinned to someone else's buyerUid, are denied; a curator member's own-profile-pinned list succeeds", async () => {
+    await seedCast();
+    await seedOrder("ord1", { buyerUid: "bob", curatorProfileId: "prof1" });
+    await seedOrder("ord2", { buyerUid: "bob", curatorProfileId: "prof1", eventId: "ev2" });
+    const bob = env.authenticatedContext("bob").firestore();     // the buyer
+    const carol = env.authenticatedContext("carol").firestore(); // a stranger to both orders
+    const alice = env.authenticatedContext("alice").firestore(); // curator-side member of prof1
+
+    // Pinning buyerUid == <own uid> makes the buyer disjunct a query-wide
+    // constant, so this is provable regardless of curatorProfileId. This is
+    // the shape a buyer's "my orders" list ships as.
+    const buyerSnap = await assertSucceeds(getDocs(query(collection(bob, "orders"), where("buyerUid", "==", "bob"))));
+    if (buyerSnap.size < 2) throw new Error("expected both of bob's orders back for his own-uid-pinned list");
+
+    // Unfiltered: buyerUid and curatorProfileId are both unconstrained, so
+    // neither disjunct is provable query-wide, even for the real buyer.
+    await assertFails(getDocs(collection(bob, "orders")));
+
+    // A stranger pinning the query to someone ELSE's buyerUid does not fool
+    // the rule: buyerUid == request.auth.uid still evaluates false for every
+    // doc (carol's uid is not "bob"), and carol is not a curator-side member
+    // of prof1 either. This is the exact crafted-query probe the read rule's
+    // resource.data equality checks need pinned against a regression.
+    await assertFails(getDocs(query(collection(carol, "orders"), where("buyerUid", "==", "bob"))));
+
+    // Curator-side member pinning to their own curatorProfileId: isMember
+    // ('prof1') is a query-wide constant, provable for every result,
+    // regardless of each doc's (unconstrained by this query) buyerUid.
+    const curatorSnap = await assertSucceeds(
+      getDocs(query(collection(alice, "orders"), where("curatorProfileId", "==", "prof1"))));
+    if (curatorSnap.size < 2) throw new Error("expected both orders back for the curator member's profile-pinned list");
+  });
+
   it("no client writes orders, not even the buyer, a curator member, or an admin", async () => {
     await seedCast();
     await seedOrder("ord1");
@@ -388,6 +421,28 @@ describe("transfers", () => {
     await assertFails(getDoc(doc(dave, "transfers/tr1")));
     await assertSucceeds(getDoc(doc(admin, "transfers/tr1")));
     await assertFails(getDoc(doc(anon, "transfers/tr1")));
+  });
+
+  it("list-query provability: fromUid- and toUid-pinned lists succeed for the respective party; an unfiltered list is denied for a non-admin", async () => {
+    await seedTransfer("tr1", { fromUid: "bob", toUid: "carol" });
+    await seedTransfer("tr2", { fromUid: "bob", toUid: "dave", ticketId: "tk2" });
+    const bob = env.authenticatedContext("bob").firestore();     // sender of both
+    const carol = env.authenticatedContext("carol").firestore(); // recipient of tr1 only
+
+    // Pinning fromUid == <own uid> makes the sender disjunct a query-wide
+    // constant, provable regardless of toUid. This is bob's "transfers I
+    // sent" list.
+    const fromSnap = await assertSucceeds(getDocs(query(collection(bob, "transfers"), where("fromUid", "==", "bob"))));
+    if (fromSnap.size < 2) throw new Error("expected both of bob's outgoing transfers back for his fromUid-pinned list");
+
+    // Pinning toUid == <own uid> makes the recipient disjunct a query-wide
+    // constant. Carol only appears as toUid on tr1.
+    const toSnap = await assertSucceeds(getDocs(query(collection(carol, "transfers"), where("toUid", "==", "carol"))));
+    if (toSnap.size < 1) throw new Error("expected carol's incoming transfer back for her toUid-pinned list");
+
+    // Unfiltered: fromUid and toUid are both unconstrained, so neither
+    // disjunct is provable query-wide, even for a real party to tr1/tr2.
+    await assertFails(getDocs(collection(bob, "transfers")));
   });
 
   it("no client writes transfers, not even either party or an admin", async () => {
