@@ -51,4 +51,8 @@ export const IconFunnel = wrap(Ph.FunnelIcon);
 export const IconBell = wrap(Ph.BellIcon);
 export const IconStar = wrap(Ph.StarIcon);
 export const IconHandshake = wrap(Ph.HandshakeIcon);
+// Sub-project 6 task 11: the tier stepper (-) and the ticket transfer flow.
+export const IconMinus = wrap(Ph.MinusIcon);
+export const IconArrowsLeftRight = wrap(Ph.ArrowsLeftRightIcon);
+export const IconPaperPlaneTilt = wrap(Ph.PaperPlaneTiltIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.
