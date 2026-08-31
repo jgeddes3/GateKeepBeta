@@ -190,9 +190,27 @@
     "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "transfers", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "ticketId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "transfers", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "toUid", "order": "ASCENDING" },
+      { "fieldPath": "eventId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "transfers", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "expiresAt", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
+    "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
+  { "collectionGroup": "tickets", "fieldPath": "orderId",
     "indexes": [ { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" } ] },
   { "collectionGroup": "tracks", "fieldPath": "status",
     "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },

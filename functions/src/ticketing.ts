@@ -28,15 +28,19 @@
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
+import { getAuth } from "firebase-admin/auth";
 import {
   isValidDocId, ticketOrderTotals, ticketServiceFeeCents,
   EVENT_NOT_ON_SALE_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_SOLD_OUT_MESSAGE, EVENT_BUYER_CAP_MESSAGE,
   EVENT_CANCELLED_MESSAGE, TICKET_NOT_REFUNDABLE_MESSAGE, TICKET_REFUND_WINDOW_CLOSED_MESSAGE,
+  TICKET_NOT_VALID_MESSAGE, TICKET_ALREADY_CHECKED_IN_MESSAGE, TRANSFER_OFFER_SENT_MESSAGE,
   type EventDoc, type TicketTierDoc, type TicketOrderDoc, type TicketOrderStatus,
-  type TicketIndexDoc, type TicketDoc, type AttendeeDoc,
+  type TicketIndexDoc, type TicketDoc, type TicketStatus, type AttendeeDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile } from "./guards.js";
-import { ORDER_TTL_MS, mintQrSecret, currentTicketFeePolicy, tierOnSale, buildOrderItems } from "./eventsCore.js";
+import {
+  ORDER_TTL_MS, TRANSFER_TTL_MS, mintQrSecret, currentTicketFeePolicy, tierOnSale, buildOrderItems,
+} from "./eventsCore.js";
 import { getStripe, stripeSecretKey } from "./stripeClient.js";
 import { writeLedger, recordAdminAlert } from "./paymentsCore.js";
 import { notifyUser } from "./notifications.js";
@@ -340,6 +344,16 @@ function cancellationNotificationBody(eventTitle: string, reason: string | undef
   return `"${eventTitle}" was cancelled${reasonClause}.${refundClause}`;
 }
 
+// Task 8: the body for a CURRENT owner of a TRANSFERRED ticket. They hold no
+// stake in the order's money (that always returns to the order's own buyer,
+// notified separately via cancellationNotificationBody above) but still need
+// to know their live ticket for this event is dead, so this deliberately
+// never mentions a refund.
+function transferredTicketCancellationBody(eventTitle: string, reason: string | undefined): string {
+  const reasonClause = reason ? `: ${reason}` : "";
+  return `"${eventTitle}" was cancelled${reasonClause}. Your ticket has been cancelled.`;
+}
+
 // Refunds ONE "paid" order's full remaining balance (face + service fee,
 // minus whatever a prior grace refund already returned) as part of an event
 // cancellation. Idempotent: only acts on an order still "paid". A doc
@@ -379,35 +393,64 @@ async function refundOrderForCancelledEvent(
     });
   }
 
-  // Non-transactional read of the order's tickets, safe because nothing else
-  // can be writing to them right now (see this function's doc comment): the
-  // event is already "cancelled", which blocks refundTicket, and no other
-  // path mutates ticket status.
-  const ticketsSnap = await db.collection(`users/${order.buyerUid}/tickets`)
-    .where("orderId", "==", orderRef.id).get();
-  const refundableTicketIds = ticketsSnap.docs
-    .filter((d) => {
-      const s = (d.data() as TicketDoc).status;
-      return s === "valid" || s === "checked_in";
+  // Non-transactional read of this order's tickets, safe because nothing
+  // else can be writing to them right now (see this function's doc comment):
+  // the event is already "cancelled", which blocks refundTicket AND (Task 8)
+  // offerTransfer/respondToTransfer's own published-event checks, so no
+  // other path mutates ticket status while this runs.
+  //
+  // COLLECTION-GROUP, not the order's buyer's own subcollection (Task 8,
+  // carried cross-task requirement): a ticket transferred away from the
+  // buyer now lives under its RECIPIENT's uid (respondToTransfer mints a
+  // fresh ticket doc there), not the buyer's. Every doc this order ever
+  // minted still carries THIS order's id regardless of which uid it lives
+  // under today, so filtering on `orderId` alone finds the buyer's own
+  // remaining tickets AND every ticket transferred out of this order, in one
+  // query. See firestore.indexes.json's `tickets`/`orderId` fieldOverride:
+  // a collection-group query needs its own index even for a lone equality
+  // filter.
+  const ticketsSnap = await db.collectionGroup("tickets").where("orderId", "==", orderRef.id).get();
+  const refundable = ticketsSnap.docs
+    .map((d) => {
+      const ownerRef = d.ref.parent.parent; // users/{ownerUid}/tickets/{ticketId} -> users/{ownerUid}
+      return ownerRef ? { ticketId: d.id, ownerUid: ownerRef.id, status: (d.data() as TicketDoc).status } : null;
     })
-    .map((d) => d.id);
+    .filter((t): t is { ticketId: string; ownerUid: string; status: TicketStatus } => t !== null)
+    .filter((t) => t.status === "valid" || t.status === "checked_in");
 
   await db.runTransaction(async (tx) => {
     const freshSnap = await tx.get(orderRef);
     const fresh = freshSnap.data() as TicketOrderDoc | undefined;
     if (!fresh || fresh.status !== "paid") return; // raced/idempotent no-op
 
-    const idxRef = db.doc(`users/${order.buyerUid}/ticketIndex/${order.eventId}`);
-    const idxSnap = await tx.get(idxRef);
-    const idxCount = (idxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
-
-    for (const ticketId of refundableTicketIds) {
-      tx.update(db.doc(`users/${order.buyerUid}/tickets/${ticketId}`), { status: "refunded" });
-      tx.update(db.doc(`events/${order.eventId}/attendees/${ticketId}`), { status: "refunded" });
+    // Grouped by CURRENT owner: a transferred ticket's teardown (status flip,
+    // attendee mirror, ticketIndex decrement) always keys off whoever holds
+    // it today, never the order's buyer. Only the MONEY (the Stripe refund
+    // above, and the buyerUid this function's ledger/notification below
+    // name) stays pinned to the buyer.
+    const byOwner = new Map<string, string[]>();
+    for (const t of refundable) {
+      const list = byOwner.get(t.ownerUid) ?? [];
+      list.push(t.ticketId);
+      byOwner.set(t.ownerUid, list);
     }
-    const remainingIdx = idxCount - refundableTicketIds.length;
-    if (remainingIdx <= 0) tx.delete(idxRef); else tx.update(idxRef, { count: remainingIdx });
+    const owners = [...byOwner.keys()];
+    const idxSnaps = await Promise.all(
+      owners.map((ownerUid) => tx.get(db.doc(`users/${ownerUid}/ticketIndex/${order.eventId}`))));
 
+    owners.forEach((ownerUid, i) => {
+      const ticketIds = byOwner.get(ownerUid)!;
+      for (const ticketId of ticketIds) {
+        tx.update(db.doc(`users/${ownerUid}/tickets/${ticketId}`), { status: "refunded" });
+        tx.update(db.doc(`events/${order.eventId}/attendees/${ticketId}`), { status: "refunded" });
+      }
+      const idxRef = db.doc(`users/${ownerUid}/ticketIndex/${order.eventId}`);
+      const idxCount = (idxSnaps[i].data() as TicketIndexDoc | undefined)?.count ?? 0;
+      const remainingIdx = idxCount - ticketIds.length;
+      if (remainingIdx <= 0) tx.delete(idxRef); else tx.update(idxRef, { count: remainingIdx });
+    });
+
+    const refundableTicketIds = refundable.map((t) => t.ticketId);
     tx.update(orderRef, {
       status: "cancelled_refunded",
       // FieldValue.arrayUnion() called with ZERO elements throws synchronously
@@ -436,10 +479,23 @@ async function refundOrderForCancelledEvent(
     eventId: order.eventId, buyerUid: order.buyerUid, at: now,
   }).catch((e) => console.error(`refundOrderForCancelledEvent: ledger write failed for order ${orderRef.id}`, e));
 
+  // The BUYER (money): always notified, whether or not they still hold any
+  // of this order's tickets themselves.
   await notifyUser(order.buyerUid, {
     kind: "ticket", refId: order.eventId, title: "Event cancelled",
     body: cancellationNotificationBody(eventTitle, reason, remainingCents > 0),
   }).catch((e) => console.error(`refundOrderForCancelledEvent: notification failed for order ${orderRef.id}`, e));
+
+  // Every OTHER current owner (Task 8: a transfer recipient) whose live
+  // ticket this pass just tore down, distinct from the buyer above so a
+  // buyer who still holds some of their own tickets is never notified twice.
+  const otherOwners = new Set(refundable.map((t) => t.ownerUid).filter((ownerUid) => ownerUid !== order.buyerUid));
+  for (const ownerUid of otherOwners) {
+    await notifyUser(ownerUid, {
+      kind: "ticket", refId: order.eventId, title: "Event cancelled",
+      body: transferredTicketCancellationBody(eventTitle, reason),
+    }).catch((e) => console.error(`refundOrderForCancelledEvent: transferred-owner notification failed for order ${orderRef.id}, owner ${ownerUid}`, e));
+  }
 
   return "refunded";
 }
@@ -694,4 +750,328 @@ export const refundTicket = onCall<RefundTicketInput>(
     }).catch((e) => console.error(`refundTicket: notification failed for ticket ${input.ticketId}`, e));
 
     return { ok: true };
+  });
+
+/**
+ * SP6 Task 8: the door (QR check-in) and capped in-app ticket transfers.
+ *
+ * No money moves in this file's remaining three callables (checkInTicket,
+ * offerTransfer, respondToTransfer): the only Stripe-money paths in
+ * ticketing.ts remain checkout (above) and the two refund paths (above).
+ * Transfers move a ticket, not a cent: the buyer already paid, and a
+ * transfer just re-points who may present it at the door.
+ */
+
+// v1 target is EMAIL ONLY (spec deviation, recorded ruling): the spec's
+// "@handle or email" reads naturally for a person, but a "@handle" in this
+// codebase resolves to a PROFILE (a musician/curator, often a group with
+// several members) via handles/{handle}, never an individual account.
+// Handle targeting is therefore ambiguous by construction for a person-to-
+// person ticket handoff, so this callable only ever resolves email, via
+// Admin Auth's getUserByEmail (emails are not public; see the anti-
+// enumeration discipline below, mirroring members.ts's inviteMember).
+const TICKET_NOT_TRANSFERABLE_MESSAGE = "Only a valid ticket can be transferred.";
+const TRANSFERS_CLOSED_MESSAGE = "Transfers are closed for this event.";
+const DUPLICATE_TRANSFER_OFFER_MESSAGE = "This ticket already has a pending transfer offer.";
+const SELF_TRANSFER_MESSAGE = "You can't transfer a ticket to yourself.";
+const TRANSFER_NOT_OPEN_MESSAGE = "This transfer is no longer open.";
+const TRANSFER_EXPIRED_MESSAGE = "This transfer offer has expired.";
+const CHECK_IN_NOT_PUBLISHED_MESSAGE = "Check-in is only available for a published event.";
+
+export interface CheckInTicketInput {
+  curatorProfileId: string; eventId: string; ticketId: string; qrSecret?: string; override?: boolean;
+}
+export interface CheckInTicketResult { ownerName: string; tierName: string; checkedInAt: number; }
+
+// Curator-side door scan. Resolution is attendee -> ownerUid -> ticket doc
+// (never the other way): the attendees roster is what a curator's member can
+// read (firestore.rules), and it names the ticket's CURRENT owner, which is
+// where the live ticket doc, and its qrSecret (which attendees deliberately
+// never carries), actually lives (a transferred ticket's attendee doc is
+// keyed by the NEW ticketId respondToTransfer mints, so this path never sees
+// a stale owner). qrSecret is checked BEFORE status, always: a wrong secret
+// must read identically whether the ticket is untouched or already checked
+// in, or a stolen/guessed secret could fish for "already used" as a signal.
+// `override: true` (the curator's list-fallback, no scanner) skips it.
+export const checkInTicket = onCall<CheckInTicketInput>(
+  { region: "us-central1" }, async (req): Promise<CheckInTicketResult> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.curatorProfileId)) {
+      throw new HttpsError("invalid-argument", "A curator profile id is required.");
+    }
+    if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+    if (!isValidDocId(input?.ticketId)) throw new HttpsError("invalid-argument", "A ticket id is required.");
+    if (input.override !== true && (typeof input.qrSecret !== "string" || input.qrSecret.length === 0)) {
+      throw new HttpsError("invalid-argument", "A QR secret or override is required.");
+    }
+
+    await requireProfileMember(input.curatorProfileId, uid);
+    await requireApprovedCuratorProfile(input.curatorProfileId);
+
+    const db = getFirestore();
+    const eventRef = db.doc(`events/${input.eventId}`);
+    const eventSnap = await eventRef.get();
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = eventSnap.data() as EventDoc;
+    if (event.curatorProfileId !== input.curatorProfileId) {
+      throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+    }
+    // Doors can run late relative to endsAt (no time-of-day gate here at
+    // all), but only a "published" event has a live door: draft never sold,
+    // cancelled/completed have nothing left to check in.
+    if (event.status !== "published") {
+      throw new HttpsError("failed-precondition", CHECK_IN_NOT_PUBLISHED_MESSAGE);
+    }
+
+    const attendeeRef = eventRef.collection("attendees").doc(input.ticketId);
+    const attendeeSnap = await attendeeRef.get();
+    if (!attendeeSnap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const attendee = attendeeSnap.data() as AttendeeDoc;
+    const ticketRef = db.doc(`users/${attendee.ownerUid}/tickets/${input.ticketId}`);
+
+    return db.runTransaction(async (tx) => {
+      const ticketSnap = await tx.get(ticketRef);
+      const ticket = ticketSnap.data() as TicketDoc | undefined;
+      if (!ticket || ticket.eventId !== input.eventId || ticket.curatorProfileId !== input.curatorProfileId) {
+        throw new HttpsError("not-found", "Ticket not found.");
+      }
+      if (!input.override && ticket.qrSecret !== input.qrSecret) {
+        throw new HttpsError("failed-precondition", TICKET_NOT_VALID_MESSAGE);
+      }
+      if (ticket.status === "checked_in") {
+        // Original checkedInAt in `details`, not the message: the client
+        // shows "already checked in at <time>" without a second round trip.
+        throw new HttpsError(
+          "failed-precondition", TICKET_ALREADY_CHECKED_IN_MESSAGE, { checkedInAt: ticket.checkedInAt });
+      }
+      if (ticket.status !== "valid") {
+        throw new HttpsError("failed-precondition", TICKET_NOT_VALID_MESSAGE); // refunded or transferred
+      }
+
+      const now = Date.now();
+      tx.update(ticketRef, { status: "checked_in", checkedInAt: now });
+      tx.update(attendeeRef, { status: "checked_in", checkedInAt: now });
+      return { ownerName: attendee.ownerName, tierName: ticket.tierName, checkedInAt: now };
+    });
+  });
+
+export interface OfferTransferInput { ticketId: string; target: string; }
+export interface OfferTransferResult { message: string; }
+
+// Owner-initiated: offers ONE valid ticket to another account by email.
+//
+// ANTI-ENUMERATION (mirrors members.ts's inviteMember): whether or not
+// `target` names a real account, and whether or not that account is already
+// at its ticket cap for this event, the SENDER always gets back the same
+// generic { message: TRANSFER_OFFER_SENT_MESSAGE }. Nothing in the response
+// shape or error code may let a sender fish for "does this email have a
+// GateKeep account" or "is that account already holding a lot of tickets".
+// A transfer doc + notification are created ONLY when the target resolves,
+// is not the sender, and is under its cap.
+//
+// By contrast, every check ABOVE that line is about the SENDER's OWN ticket
+// (its validity, the event's own sale window, whether IT already has an open
+// offer), safe to fail loudly since it reveals nothing about anyone else.
+export const offerTransfer = onCall<OfferTransferInput>(
+  { region: "us-central1" }, async (req): Promise<OfferTransferResult> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.ticketId)) throw new HttpsError("invalid-argument", "A ticket id is required.");
+    if (typeof input?.target !== "string" || input.target.trim().length === 0 || input.target.length > 320) {
+      throw new HttpsError("invalid-argument", "A recipient email is required.");
+    }
+
+    const db = getFirestore();
+    const ticketRef = db.doc(`users/${uid}/tickets/${input.ticketId}`);
+    const ticketSnap = await ticketRef.get();
+    if (!ticketSnap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const ticket = ticketSnap.data() as TicketDoc;
+    if (ticket.status !== "valid") throw new HttpsError("failed-precondition", TICKET_NOT_TRANSFERABLE_MESSAGE);
+
+    const eventSnap = await db.doc(`events/${ticket.eventId}`).get();
+    const event = eventSnap.data() as EventDoc | undefined;
+    if (!event || event.status !== "published" || event.startsAt <= Date.now()) {
+      throw new HttpsError("failed-precondition", TRANSFERS_CLOSED_MESSAGE);
+    }
+
+    const now = Date.now();
+    // A ticket already carrying an open (unexpired) offer cannot get a
+    // second one, sender-safe to reveal (see this callable's doc comment).
+    const openOfferSnap = await db.collection("transfers")
+      .where("ticketId", "==", input.ticketId).where("status", "==", "offered").get();
+    if (openOfferSnap.docs.some((d) => (d.data() as TicketTransferDoc).expiresAt > now)) {
+      throw new HttpsError("failed-precondition", DUPLICATE_TRANSFER_OFFER_MESSAGE);
+    }
+
+    let toUid: string;
+    try {
+      const record = await getAuth().getUserByEmail(input.target.trim());
+      toUid = record.uid;
+    } catch {
+      // Unknown email: fall through to the SAME generic response a known-
+      // but-capped-out or known-but-self target also gets below.
+      return { message: TRANSFER_OFFER_SENT_MESSAGE };
+    }
+    if (toUid === uid) throw new HttpsError("failed-precondition", SELF_TRANSFER_MESSAGE);
+
+    // Recipient held-cap re-check: ticketIndex.count (tickets already minted
+    // to them) PLUS every other still-open offer already addressed to them
+    // for THIS event (not yet accepted, so not yet in ticketIndex, but would
+    // push them over the cap the moment any subset of those + this one are
+    // accepted) must leave room for one more. Mirrors createTicketOrder's own
+    // "held + in-flight" cap shape (eventsCore.ts), with pending TRANSFER
+    // OFFERS standing in for that callable's pending ORDERS.
+    const [toIdxSnap, pendingIncomingSnap] = await Promise.all([
+      db.doc(`users/${toUid}/ticketIndex/${ticket.eventId}`).get(),
+      db.collection("transfers")
+        .where("toUid", "==", toUid).where("eventId", "==", ticket.eventId).where("status", "==", "offered").get(),
+    ]);
+    const toIdxCount = (toIdxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+    const pendingIncomingCount = pendingIncomingSnap.docs
+      .filter((d) => (d.data() as TicketTransferDoc).expiresAt > now).length;
+    if (toIdxCount + pendingIncomingCount + 1 > event.maxTicketsPerBuyer) {
+      // Silent, same anti-enumeration reasoning as the unknown-email branch
+      // above: a distinct error here would tell the sender the account
+      // exists AND is near its cap, which is exactly the kind of fact about
+      // someone else's account this callable must never leak.
+      return { message: TRANSFER_OFFER_SENT_MESSAGE };
+    }
+
+    const transferRef = db.collection("transfers").doc();
+    const transfer: TicketTransferDoc = {
+      ticketId: input.ticketId, eventId: ticket.eventId, fromUid: uid, toUid,
+      status: "offered", createdAt: now, expiresAt: now + TRANSFER_TTL_MS,
+    };
+    await transferRef.set(transfer);
+
+    await notifyUser(toUid, {
+      kind: "ticket", refId: ticket.eventId, title: "You've been offered a ticket",
+      body: `You've been offered a "${ticket.tierName}" ticket to "${event.title}".`,
+    }).catch((e) => console.error(`offerTransfer: notification failed for transfer ${transferRef.id}`, e));
+
+    return { message: TRANSFER_OFFER_SENT_MESSAGE };
+  });
+
+export interface RespondToTransferInput { transferId: string; accept: boolean; }
+export interface RespondToTransferResult { ok: true; newTicketId: string | null; }
+
+// Recipient-only. Decline is a plain status flip. Accept is the whole
+// handoff in ONE transaction: re-validates the ticket is still "valid" and
+// the event still "published" (a cancelled/completed event kills a pending
+// offer at accept time, rather than the sweep having to hunt down every
+// offer against every such event), re-checks the SAME held-cap this ticket's
+// offer was checked against (ticketIndex.count, fresh: accepting is
+// immediate and transactional, so unlike the offer-time check there is no
+// "other pending offers" term to add: a second concurrent accept for a
+// DIFFERENT offer to this same recipient either commits first and this
+// transaction's own count read then reflects it, or contends and retries),
+// mints a FRESH ticket doc under the recipient with a FRESH qrSecret (the
+// old QR must die), replaces the attendees projection (delete the old
+// ticketId's entry, write a new one keyed by the NEW ticketId), moves both
+// sides' ticketIndex, and flips the old ticket to "transferred".
+export const respondToTransfer = onCall<RespondToTransferInput>(
+  { region: "us-central1" }, async (req): Promise<RespondToTransferResult> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.transferId)) throw new HttpsError("invalid-argument", "A transfer id is required.");
+    if (typeof input?.accept !== "boolean") throw new HttpsError("invalid-argument", "An accept flag is required.");
+
+    const db = getFirestore();
+    const transferRef = db.doc(`transfers/${input.transferId}`);
+    const now = Date.now();
+
+    type Outcome =
+      | { accepted: false; fromUid: string; eventId: string }
+      | { accepted: true; fromUid: string; eventId: string; eventTitle: string; newTicketId: string };
+
+    const outcome = await db.runTransaction<Outcome>(async (tx) => {
+      const transferSnap = await tx.get(transferRef);
+      if (!transferSnap.exists) throw new HttpsError("not-found", "Transfer not found.");
+      const transfer = transferSnap.data() as TicketTransferDoc;
+      if (transfer.toUid !== uid) throw new HttpsError("permission-denied", "This transfer does not belong to you.");
+      if (transfer.status !== "offered") throw new HttpsError("failed-precondition", TRANSFER_NOT_OPEN_MESSAGE);
+      if (transfer.expiresAt <= now) throw new HttpsError("failed-precondition", TRANSFER_EXPIRED_MESSAGE);
+
+      if (!input.accept) {
+        tx.update(transferRef, { status: "declined", resolvedAt: now });
+        return { accepted: false, fromUid: transfer.fromUid, eventId: transfer.eventId };
+      }
+
+      const oldTicketRef = db.doc(`users/${transfer.fromUid}/tickets/${transfer.ticketId}`);
+      const eventRef = db.doc(`events/${transfer.eventId}`);
+      const toIdxRef = db.doc(`users/${uid}/ticketIndex/${transfer.eventId}`);
+      const fromIdxRef = db.doc(`users/${transfer.fromUid}/ticketIndex/${transfer.eventId}`);
+      const toUserRef = db.doc(`users/${uid}`);
+
+      // All reads before any write, per the Admin SDK's transaction contract.
+      const [oldTicketSnap, eventSnap, toIdxSnap, fromIdxSnap, toUserSnap] = await Promise.all([
+        tx.get(oldTicketRef), tx.get(eventRef), tx.get(toIdxRef), tx.get(fromIdxRef), tx.get(toUserRef),
+      ]);
+
+      const oldTicket = oldTicketSnap.data() as TicketDoc | undefined;
+      if (!oldTicket || oldTicket.status !== "valid") {
+        throw new HttpsError("failed-precondition", TICKET_NOT_VALID_MESSAGE);
+      }
+      const event = eventSnap.data() as EventDoc | undefined;
+      if (!event || event.status !== "published") {
+        throw new HttpsError("failed-precondition", TRANSFERS_CLOSED_MESSAGE);
+      }
+      const toIdxCount = (toIdxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+      if (toIdxCount + 1 > event.maxTicketsPerBuyer) {
+        throw new HttpsError("failed-precondition", EVENT_BUYER_CAP_MESSAGE);
+      }
+
+      const ownerName = (toUserSnap.data() as { displayName?: string } | undefined)?.displayName ?? "Guest";
+      const newTicketRef = db.collection(`users/${uid}/tickets`).doc();
+      const newTicket: TicketDoc = {
+        eventId: transfer.eventId, tierId: oldTicket.tierId, tierName: oldTicket.tierName,
+        orderId: oldTicket.orderId, curatorProfileId: oldTicket.curatorProfileId,
+        qrSecret: mintQrSecret(), status: "valid", createdAt: now,
+      };
+      tx.set(newTicketRef, newTicket);
+      const newAttendee: AttendeeDoc = {
+        ownerUid: uid, ownerName, tierId: oldTicket.tierId, tierName: oldTicket.tierName, status: "valid",
+      };
+      tx.set(db.doc(`events/${transfer.eventId}/attendees/${newTicketRef.id}`), newAttendee);
+      // The old ticketId's attendee entry dies with it: a scan of the OLD
+      // QR (attendee -> ownerUid -> ticket, checkInTicket's own resolution
+      // order) now finds no attendee doc at all, rather than resolving
+      // through to a "transferred" ticket.
+      tx.delete(db.doc(`events/${transfer.eventId}/attendees/${transfer.ticketId}`));
+      tx.update(oldTicketRef, { status: "transferred", transferredTo: uid });
+
+      const fromIdxCount = (fromIdxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+      if (fromIdxCount <= 1) tx.delete(fromIdxRef); else tx.update(fromIdxRef, { count: fromIdxCount - 1 });
+      tx.set(toIdxRef, { count: FieldValue.increment(1) }, { merge: true });
+
+      tx.update(transferRef, { status: "accepted", resolvedAt: now });
+
+      return {
+        accepted: true, fromUid: transfer.fromUid, eventId: transfer.eventId,
+        eventTitle: event.title, newTicketId: newTicketRef.id,
+      };
+    });
+
+    // Post-commit, best-effort notifications, both ways (to the SENDER
+    // either way, since the recipient is the caller and already knows the
+    // outcome).
+    if (outcome.accepted) {
+      await notifyUser(outcome.fromUid, {
+        kind: "ticket", refId: outcome.eventId, title: "Ticket transfer accepted",
+        body: `Your ticket transfer for "${outcome.eventTitle}" was accepted.`,
+      }).catch((e) => console.error(`respondToTransfer: accepted notification failed for transfer ${input.transferId}`, e));
+      return { ok: true, newTicketId: outcome.newTicketId };
+    }
+
+    const eventSnap = await db.doc(`events/${outcome.eventId}`).get();
+    const eventTitle = (eventSnap.data() as EventDoc | undefined)?.title ?? "the event";
+    await notifyUser(outcome.fromUid, {
+      kind: "ticket", refId: outcome.eventId, title: "Ticket transfer declined",
+      body: `Your ticket transfer offer for "${eventTitle}" was declined.`,
+    }).catch((e) => console.error(`respondToTransfer: declined notification failed for transfer ${input.transferId}`, e));
+    return { ok: true, newTicketId: null };
   });

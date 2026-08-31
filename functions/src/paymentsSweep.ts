@@ -52,7 +52,7 @@ import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type EventDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc,
+  type BookingRequestDoc, type EventDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
@@ -208,6 +208,11 @@ export interface PaymentsSweepReport {
   // Curator has no payout-ready Stripe account: left "published" for the
   // next pass (see ticketSettlementBlockedAlertId), never counted above.
   ticketSettlementsBlocked: number;
+  // --- step 11: expire stale ticket transfer offers (SP6 Task 8) ---
+  // "offered" -> "expired" once past TRANSFER_TTL_MS. No money and no ticket
+  // doc changes: the ticket itself stays exactly "valid" under its sender,
+  // free to be offered again.
+  ticketTransfersExpired: number;
   // Per-step and per-anomaly failure counts — keyed, not fixed, so a new
   // anomaly gets a name instead of being folded into a neighbour's bucket.
   // NAMING: a per-doc/per-booking key is a SINGULAR noun phrase for the thing
@@ -229,6 +234,7 @@ function emptyReport(): PaymentsSweepReport {
     ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0,
     cancelledEventOrdersRefunded: 0, cancelledEventOrdersPendingExpired: 0,
     ticketSettlementsCompleted: 0, ticketSettlementsTransferred: 0, ticketSettlementsBlocked: 0,
+    ticketTransfersExpired: 0,
     errors: {},
   };
 }
@@ -1524,6 +1530,51 @@ async function settleTicketRevenue(
 }
 
 // ---------------------------------------------------------------------------
+// Step 11: EXPIRE stale ticket transfer offers (SP6 Task 8)
+// ---------------------------------------------------------------------------
+// ADDITIVE ONLY: the rest of this file (every SP5 behavior, and SP6 Tasks
+// 5-7's own steps 8-10 above) is unchanged by this step. A ticket transfer
+// offer (offerTransfer, ticketing.ts) that nobody responds to within
+// TRANSFER_TTL_MS is swept here from "offered" to "expired" so a stale offer
+// stops blocking the sender from offering the same ticket again (offerTransfer
+// refuses a second concurrent offer on one ticket) and stops counting against
+// the recipient's held-cap check at a future offer time. No money and no
+// ticket/attendee/ticketIndex write of any kind: the underlying ticket was
+// never touched by the offer in the first place, and stays exactly "valid"
+// under its original owner either way.
+
+async function expireOneTicketTransfer(
+  db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot, now: number,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(doc.ref);
+    const transfer = snap.data() as TicketTransferDoc | undefined;
+    if (!transfer || transfer.status !== "offered") return false; // resolved since the page was read
+    tx.update(doc.ref, { status: "expired", resolvedAt: now });
+    return true;
+  });
+}
+
+async function expireTicketTransfers(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("transfers")
+    .where("status", "==", "offered")
+    .where("expiresAt", "<", now)
+    .orderBy("expiresAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        if (await expireOneTicketTransfer(db, doc, now)) report.ticketTransfersExpired++;
+      } catch (e) {
+        console.error(`paymentsSweep: ticket transfer expiry failed for ${doc.id}`, e);
+        bumpError(report, "ticketTransferExpire");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 // Every step is isolated: one failing step is logged and counted, and the rest
 // still run. Ordering is deliberate — reconciliation first (it can turn staged
@@ -1554,6 +1605,7 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
     { name: "ticketOrderExpiry", run: () => expireTicketOrders(db, now, report) },
     { name: "cancelledEventRefunds", run: () => retryCancelledEventRefunds(db, now, report) },
     { name: "ticketSettlement", run: () => settleTicketRevenue(db, now, report) },
+    { name: "ticketTransferExpiry", run: () => expireTicketTransfers(db, now, report) },
   ];
 
   for (const step of steps) {
