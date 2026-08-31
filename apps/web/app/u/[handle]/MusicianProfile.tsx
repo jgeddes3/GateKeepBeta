@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { TrackPlayer } from "./TrackPlayer";
 import { HeroPlayButton } from "./HeroPlayButton";
-import type { MusicianLoaded, ShowEntry } from "./page";
+import type { MusicianLoaded, ShowEntry, UpcomingEventSummary } from "./page";
 import { formatGigTime, gigLocationLabel } from "./gigDisplay";
 import { type ActSize, type AvailabilityPattern, type ExternalLinkKind, type MusicianSubtype } from "@gatekeep/shared";
 import { DateBlockRow } from "../../../src/components/DateBlockRow";
@@ -56,6 +56,23 @@ const EXTERNAL_LINK_LABEL: Record<ExternalLinkKind, string> = {
 // second nested link: DateBlockRow already wraps the whole row in one
 // <Link>, and nesting an anchor inside an anchor is invalid HTML (the same
 // rule GigCard/MusicianCard's own "whole card clickable" comments state).
+// Sub-project 6 task 9: "Upcoming events" row, sharing DateBlockRow's own
+// anatomy with ShowRow below, linked to the new public event page instead
+// of a gig. No `detail` slot: unlike a Show's "featuring {other party}"
+// line, this musician IS the "other party" of their own lineup listing, so
+// the row's own subtitle (the event's public-precision location) is the
+// whole story.
+function UpcomingEventRow({ event }: { event: UpcomingEventSummary }) {
+  return (
+    <DateBlockRow
+      dateMs={event.startsAtMs}
+      title={event.title || "Untitled event"}
+      subtitle={gigLocationLabel(event.location)}
+      href={`/e/${event.eventId}`}
+    />
+  );
+}
+
 function ShowRow({ show }: { show: ShowEntry }) {
   return (
     <DateBlockRow
@@ -69,7 +86,7 @@ function ShowRow({ show }: { show: ShowEntry }) {
 }
 
 export function MusicianProfile({ data }: { data: MusicianLoaded }) {
-  const { profileId, profile, tracks, avatarUrl, coverUrl, upcomingShows, pastShows } = data;
+  const { profileId, profile, tracks, avatarUrl, coverUrl, upcomingShows, pastShows, upcomingEvents } = data;
   const pf = profile.portfolio;
   const subtype = profile.subtype as MusicianSubtype;
   const genres = (pf?.genres ?? []).slice(0, 2);
@@ -86,7 +103,8 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
     publicBooking.actSize != null || publicBooking.typicalSetMinutes != null
     || publicBooking.bringsOwnPA != null || publicBooking.availabilityPattern != null);
 
-  const hasAnyContent = tracks.length > 0 || !!pf?.bio || hasShows || links.length > 0 || hasAnyBookingPref;
+  const hasAnyContent = tracks.length > 0 || !!pf?.bio || hasShows || links.length > 0 || hasAnyBookingPref
+    || upcomingEvents.length > 0;
 
   return (
     <main className="flex-1 pb-24">
@@ -182,6 +200,22 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
                 </div>
               )}
             </dl>
+          </section>
+        )}
+
+        {/* Upcoming events (Task 9, SP6): published events whose lineup
+            includes this musician, hidden entirely (not an empty-state
+            message) when there are none, per the SP3 "hidden while empty"
+            contract every other optional section on this page already
+            follows. Placed right before Shows: both are schedule content,
+            and this keeps the six-item locked anatomy's own relative order
+            (spec section 6.4) completely undisturbed. */}
+        {upcomingEvents.length > 0 && (
+          <section className="mt-8">
+            <h2 className="font-syne text-lg font-semibold text-gk-text">Upcoming events</h2>
+            <div className="mt-2">
+              {upcomingEvents.map((e) => <UpcomingEventRow key={e.eventId} event={e} />)}
+            </div>
           </section>
         )}
 

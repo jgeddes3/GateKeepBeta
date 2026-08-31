@@ -191,6 +191,18 @@
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "startsAt", "order": "ASCENDING" }
     ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "lineupMusicianProfileIds", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
   { "collectionGroup": "transfers", "queryScope": "COLLECTION",
     "fields": [
       { "fieldPath": "ticketId", "order": "ASCENDING" },

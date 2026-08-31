@@ -26,6 +26,7 @@ import {
   List,
   MagnifyingGlass,
   MapPin,
+  Minus,
   Monitor,
   Moon,
   MusicNotes,
@@ -35,6 +36,7 @@ import {
   Plus,
   SpotifyLogo,
   Sun,
+  Ticket,
   Trash,
   UploadSimple,
   UserCircle,
@@ -151,6 +153,15 @@ export const IconSpotify = pin(SpotifyLogo);
 export const IconYoutube = pin(YoutubeLogo);
 export const IconInstagram = pin(InstagramLogo);
 export const IconWebsite = pin(Globe);
+
+// Sub-project 6 task 9: the public event page. Ticket names the poster
+// placeholder (a real event has a physical or admission-token association,
+// same "genuinely relevant to the content" bar GigCard's IconGigs/
+// MusicianProfile's IconUser placeholders already set, antislop R-04) and
+// the buy flow's per-tier quantity stepper's decrement control (paired with
+// the existing IconPlus for increment).
+export const IconTicket = pin(Ticket);
+export const IconMinus = pin(Minus);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At
