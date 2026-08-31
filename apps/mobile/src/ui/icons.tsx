@@ -55,4 +55,11 @@ export const IconHandshake = wrap(Ph.HandshakeIcon);
 export const IconMinus = wrap(Ph.MinusIcon);
 export const IconArrowsLeftRight = wrap(Ph.ArrowsLeftRightIcon);
 export const IconPaperPlaneTilt = wrap(Ph.PaperPlaneTiltIcon);
+// Sub-project 6 task 12: tier/lineup row removal, the attendee list's empty
+// state, the door scanner's permission explainer and QR-decode results.
+export const IconTrash = wrap(Ph.TrashIcon);
+export const IconUser = wrap(Ph.UserIcon);
+export const IconCamera = wrap(Ph.CameraIcon);
+export const IconCameraSlash = wrap(Ph.CameraSlashIcon);
+export const IconCheckCircle = wrap(Ph.CheckCircleIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.

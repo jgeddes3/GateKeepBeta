@@ -12,7 +12,8 @@
       "bundleIdentifier": "app.gatekeep.mobile",
       "supportsTablet": false,
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "GateKeep scans ticket QR codes at the door."
       }
     },
     "android": {

@@ -15,6 +15,9 @@ export default function EventsStack() {
       <Stack.Screen name="new" options={{ title: "Post a gig" }} />
       <Stack.Screen name="[gigId]" options={{ title: "Gig" }} />
       <Stack.Screen name="series/[seriesId]" options={{ title: "Series" }} />
+      {/* Sub-project 6 task 12: ticketed-event management + the door. */}
+      <Stack.Screen name="event/[eventId]" options={{ title: "Event" }} />
+      <Stack.Screen name="scan/[eventId]" options={{ title: "Door" }} />
     </Stack>
   );
 }

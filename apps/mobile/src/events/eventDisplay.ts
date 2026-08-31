@@ -79,7 +79,11 @@ export function eventSalesClosedReason(status: EventStatus, startsAt: number, no
 // try/catch per GigForms.tsx's own defensive note on Hermes's
 // Intl.DateTimeFormat timeZone/formatToParts support not being
 // independently verified on-device in this environment.
-function formatGigTime(startsAtMs: number): string {
+//
+// Exported (Task 12): the door scanner's duplicate-scan result ("already
+// checked in at 9:14 PM") and the attendee list's checked-in label both need
+// a time-only render, mirroring web's AttendeeList.tsx checkedInLabel.
+export function formatGigTime(startsAtMs: number): string {
   const date = new Date(startsAtMs);
   try {
     const formatted = date.toLocaleString("en-US", { timeStyle: "short", timeZone: LAUNCH_TIMEZONE });
