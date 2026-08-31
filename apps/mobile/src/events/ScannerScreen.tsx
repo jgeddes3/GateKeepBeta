@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Linking, StyleSheet, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { httpsCallable } from "firebase/functions";
+import { FunctionsError, httpsCallable } from "firebase/functions";
 import { TICKET_ALREADY_CHECKED_IN_MESSAGE } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { formatGigTime } from "./eventDisplay";
@@ -49,14 +49,13 @@ type ScanResult =
 
 // A FunctionsError's `details` (checkInTicket's original checkedInAt on a
 // duplicate scan, see functions/src/ticketing.ts's own comment on why it
-// rides in details rather than the message) isn't in @firebase/functions'
-// public error type, only `.details?: unknown` on the class itself; this
-// reads it defensively without importing that internal class.
+// rides in details rather than the message) IS part of firebase/functions'
+// public types (`FunctionsError extends FirebaseError` with a public
+// `readonly details?: unknown`, exported from @firebase/functions'
+// functions-public.d.ts, the package's declared `types` entry point).
+// `instanceof FunctionsError` is the precise, typed way to read it.
 function errorDetails(e: unknown): { checkedInAt?: number } | undefined {
-  if (e && typeof e === "object" && "details" in e) {
-    return (e as { details?: { checkedInAt?: number } }).details;
-  }
-  return undefined;
+  return e instanceof FunctionsError ? (e.details as { checkedInAt?: number } | undefined) : undefined;
 }
 
 function ResultPanel({ result }: { result: ScanResult }) {
@@ -104,21 +103,42 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
   const [permission, requestPermission] = useCameraPermissions();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
+  // Fix round 1 (code review, Important): expo-camera fires
+  // `onBarcodeScanned` per analyzed frame on both platforms, so a queued
+  // burst of callbacks can all read the SAME stale `busy`/`result` state
+  // before any of them commits a re-render (React state reads are a
+  // closure snapshot, not synchronous). A plain `useRef` boolean sidesteps
+  // that: reading and writing `.current` is synchronous and happens
+  // immediately in the handler, so the SECOND frame in a burst already sees
+  // the lock the first one just set, before either has a chance to call
+  // checkInTicket twice (the hazard: two in-flight calls racing to set
+  // `result`, where a legitimate first "success" can be overwritten by a
+  // second call's "duplicate", flashing the wrong state at the door). The
+  // `busy`/`result` STATE stays exactly as before for rendering only
+  // (spinner text, which panel to show); the ref is the sole gate on
+  // whether a decode is allowed to proceed.
+  const scanLockRef = useRef(false);
 
   // Auto-ready for the next scan ~1.5s after a result appears (brief's own
-  // anatomy), cleared on unmount and whenever a new result replaces this one.
+  // anatomy), cleared on unmount and whenever a new result replaces this
+  // one; also where the scan lock re-arms, so the very same tick that
+  // clears the result is the tick that allows a new decode.
   useEffect(() => {
     if (!result) return;
-    const timer = setTimeout(() => setResult(null), 1500);
+    const timer = setTimeout(() => {
+      setResult(null);
+      scanLockRef.current = false;
+    }, 1500);
     return () => clearTimeout(timer);
   }, [result]);
 
-  // Debounced twice over: the CameraView itself unmounts while `result` is
-  // showing (see the branch below), so no further decode events can even
-  // fire, and this early return additionally covers the brief window between
-  // a decode landing and `busy` flipping true.
+  // The CameraView itself also unmounts while `result` is showing (see the
+  // branch below), so no further decode events can even fire once a result
+  // lands; `scanLockRef` is what closes the window BEFORE that, between the
+  // first frame of a burst locking and the camera actually unmounting.
   const handleScan = ({ data }: { data: string }) => {
-    if (busy || result) return;
+    if (scanLockRef.current) return;
+    scanLockRef.current = true;
     const payload = parseQrPayload(data);
     if (!payload || payload.eventId !== eventId) {
       setResult({ kind: "invalid", message: "This QR code isn't a ticket for this event." });
@@ -164,9 +184,15 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
           <Text muted style={{ textAlign: "center" }}>
             GateKeep scans ticket QR codes at the door. Grant camera access to start checking guests in.
           </Text>
+          {/* Fix round 1 (code review, Important): once canAskAgain is
+              false (permanently denied, e.g. after "Don't ask again"), the
+              OS permission dialog itself is gone for good, requestPermission()
+              is a silent no-op in that state. The button must fall through
+              to the Settings app instead (same Linking.openURL precedent as
+              TicketDetail.tsx's map link, here openSettings()). */}
           <Button
             title={permission.canAskAgain ? "Grant camera access" : "Open Settings to grant access"}
-            onPress={() => void requestPermission()}
+            onPress={() => void (permission.canAskAgain ? requestPermission() : Linking.openSettings())}
           />
         </View>
       </View>
