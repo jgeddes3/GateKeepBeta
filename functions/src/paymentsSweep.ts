@@ -74,7 +74,9 @@ import {
 import { notifyProfileMembers } from "./notifications.js";
 import { paginate } from "./scheduled.js";
 import { refundOrdersForCancelledEvent } from "./ticketing.js";
-import { EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId } from "./eventsCore.js";
+import {
+  EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId,
+} from "./eventsCore.js";
 
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1339,21 +1341,65 @@ async function retryCancelledEventRefunds(
 // that field, so this is a field read, never a join). "cancelled" orders are
 // excluded by the "paid" filter alone.
 //
+// THE AMOUNT IS FROZEN BEFORE THIS STEP EVER RUNS (fix round 1, money review
+// Critical 1): ticketing.ts's refundTicket refuses once `now >= event.endsAt`
+// (TICKET_REFUND_WINDOW_CLOSED_MESSAGE), and EVENT_SETTLE_DELAY_MS is a full
+// 24h AFTER endsAt. So by the time an event is even ELIGIBLE for this step,
+// no grace refund can ever land again, and re-summing the same "paid" orders
+// on every retry is GUARANTEED to reproduce the exact same faceCents. That is
+// what makes the static per-event idempotency key `ticket_settlement:{id}`
+// safe to replay: a fingerprint-checking fake (or a same-key-different-amount
+// rejection from real Stripe) would otherwise catch a drifted retry and wedge
+// the event forever with only a counter as the operator's signal.
+//
 // Mirrors SP5's settlement discipline (paymentsSettlement.ts): the Stripe
-// transfer happens OUTSIDE any Firestore transaction (an idempotency key
-// keyed on the event protects a retry), then the event flips to "completed"
-// and the ledger row is written. The event's own status doubles as the CAS:
-// a retry whose transfer succeeded but whose completion write then failed
-// finds the event still "published" on its next pass and re-enters this same
-// path, re-checking "published" immediately before the transfer call so the
-// retry replays the SAME idempotency key rather than minting a second one.
+// transfer happens OUTSIDE any Firestore transaction, then the event flips to
+// "completed" and the ledger row is written. `claimSettlementStart` below is
+// the CAS a retry re-enters: it transactionally stamps `settlementStartedAt`
+// on the event iff unset, immediately before the transfer call, and a retry
+// whose transfer succeeded but whose completion write then failed finds the
+// field ALREADY set on its next pass and proceeds straight to replaying the
+// SAME idempotency key. That same field is also what cancelEventCore now
+// refuses to cancel through (Important 2): once it is set, a cancel can never
+// refund buyers on top of a transfer the curator already received.
 //
 // A curator with no payout-ready Stripe account gets an escalated adminAlert
-// and a notification to finish onboarding; the event is left "published" for
-// the next hourly pass rather than wedged or silently dropped.
+// (throttled) and a notification to finish onboarding, GATED ON THE SAME
+// throttle signal (Important 3, so a slow onboarder is nudged once a day, not
+// once an hour); the event is left "published" for the next hourly pass
+// rather than wedged or silently dropped. An unexpected Stripe error DURING
+// the transfer call gets its own escalated adminAlert (Critical 1d): the
+// event is now wedged (settlementStartedAt is set, so it can't be cancelled
+// either), and a bare error counter is not an escalation an operator sees.
 //
 // A zero-revenue event (every ticket free, or every paid ticket refunded
-// away) still completes: there is simply nothing to transfer or to ledger.
+// away) still completes: there is simply nothing to transfer or to ledger,
+// and settlementStartedAt is never stamped for it (see claimSettlementStart's
+// own comment for why that is safe).
+
+// Transactionally stamps `settlementStartedAt` on the event iff unset, and
+// re-confirms "published" in the SAME read. Two jobs, one CAS:
+//  - it is the re-check immediately before the Stripe call this step's retry
+//    contract needs (see this step's header comment): a retry lands on this
+//    exact transaction again and finds the field already set, so it proceeds
+//    rather than skipping or re-deriving a fresh key;
+//  - it is the field cancelEventCore now refuses to cancel through, closing
+//    the cancel-vs-settle double-spend window (Important 2).
+// Returns false when the event is no longer "published" (raced by a cancel,
+// or already resolved by a concurrent run); the caller must not transfer.
+async function claimSettlementStart(
+  db: FirebaseFirestore.Firestore, eventRef: FirebaseFirestore.DocumentReference, now: number,
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(eventRef);
+    const event = snap.data() as EventDoc | undefined;
+    if (!event || event.status !== "published") return false;
+    if (event.settlementStartedAt == null) {
+      tx.update(eventRef, { settlementStartedAt: now, updatedAt: now });
+    }
+    return true;
+  });
+}
 
 async function settleOneEvent(
   db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
@@ -1383,37 +1429,57 @@ async function settleOneEvent(
           + `${event.curatorProfileId} has no payout-ready Stripe account; left "published" for the next sweep pass`,
         bookingId: null, gigId: null, now,
       });
+      // Gated on the SAME day-boundary/kind-change throttle recordAdminAlert
+      // uses (Important 3): without this, a slow onboarder is paged by this
+      // step's own hourly cadence, forever, until they finish. One nudge a
+      // day is the right cadence for "please finish onboarding".
       if (shouldLog) {
         console.error(
           `paymentsSweep: event ${doc.id} ticket settlement blocked, curator ${event.curatorProfileId} not payout-ready (see adminAlerts/${alertId})`);
-      }
-      try {
-        await notifyProfileMembers(event.curatorProfileId, {
-          kind: "ticket", refId: doc.id, title: "Finish payout setup to receive ticket revenue",
-          body: `"${event.title}" has ticket revenue ready to settle. Finish Stripe onboarding to receive it.`,
-        });
-      } catch (e) {
-        console.error(`paymentsSweep: ticket settlement blocked notification failed for event ${doc.id}`, e);
+        try {
+          await notifyProfileMembers(event.curatorProfileId, {
+            kind: "ticket", refId: doc.id, title: "Finish payout setup to receive ticket revenue",
+            body: `"${event.title}" has ticket revenue ready to settle. Finish Stripe onboarding to receive it.`,
+          });
+        } catch (e) {
+          console.error(`paymentsSweep: ticket settlement blocked notification failed for event ${doc.id}`, e);
+        }
       }
       report.ticketSettlementsBlocked++;
       return;
     }
 
-    // RE-CHECK "published" immediately before the Stripe call: this step's
-    // own retry contract (see this step's header comment). The read above is
-    // now one Stripe-profile lookup old, and this is what makes a retry after
-    // a failed completion write land on this exact line again with the SAME
-    // idempotency key, curator and amount, so Stripe replays the original
-    // transfer instead of minting a second one.
-    const reSnap = await doc.ref.get();
-    const reEvent = reSnap.data() as EventDoc | undefined;
-    if (!reEvent || reEvent.status !== "published") return; // raced since the read above
+    const claimed = await claimSettlementStart(db, doc.ref, now);
+    if (!claimed) return; // raced (cancelled, or resolved) since the read above
 
-    const transfer = await getStripe().transferToAccount({
-      accountId: curatorStripe.accountId, amountCents: faceCents,
-      idempotencyKey: `ticket_settlement:${doc.id}`,
-      meta: { purpose: "ticket_settlement", eventId: doc.id },
-    });
+    let transfer: { id: string };
+    try {
+      transfer = await getStripe().transferToAccount({
+        accountId: curatorStripe.accountId, amountCents: faceCents,
+        idempotencyKey: `ticket_settlement:${doc.id}`,
+        meta: { purpose: "ticket_settlement", eventId: doc.id },
+      });
+    } catch (e) {
+      // The event is now wedged: settlementStartedAt is set (so it can never
+      // be cancelled either), and every future pass will hit this same catch
+      // until the underlying Stripe problem is fixed. Escalated durably
+      // (Critical 1d) rather than left as a bare error count nobody reads;
+      // the per-event try/catch in settleTicketRevenue still lets every OTHER
+      // due event settle this run.
+      const alertId = ticketSettlementFailedAlertId(doc.id);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "ticket_settlement_failed",
+        detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${faceCents}c to curator `
+          + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}`,
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) {
+        console.error(
+          `paymentsSweep: event ${doc.id} ticket settlement transfer failed (see adminAlerts/${alertId})`, e);
+      }
+      bumpError(report, "ticketSettlementTransfer");
+      return;
+    }
 
     await writeLedger({
       kind: "ticket_settlement", amountCents: faceCents, bookingId: null, gigId: null,

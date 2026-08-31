@@ -443,6 +443,18 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
 // wraps with the guard chain and the ticket-refund loop. paymentsSweep.ts's
 // retry step never calls this directly (it only re-drives the refund loop
 // for events already "cancelled", and this throws on any other status).
+//
+// REFUSED once `event.settlementStartedAt` is set (Task 7 fix round 1, money
+// review Important 2). paymentsSweep.ts's T+1 ticket settlement stamps that
+// field, transactionally, immediately before it transfers the event's ticket
+// revenue to the curator, and this is the other half of that CAS: without
+// this guard, a cancel landing in the gap between the transfer succeeding and
+// the settlement's own completion write committing would refund every buyer
+// on top of a transfer the curator already received, a double spend against
+// the platform. An event that ended but has NOT yet reached settlement
+// (settlementStartedAt still unset, whether or not it is even T+1 yet) is
+// still cancellable, matching the "the show never happened" case this
+// callable exists for.
 export async function cancelEventCore(eventId: string, now: number): Promise<void> {
   const db = getFirestore();
   const eventRef = db.doc(`events/${eventId}`);
@@ -452,6 +464,10 @@ export async function cancelEventCore(eventId: string, now: number): Promise<voi
     const event = snap.data() as EventDoc;
     if (event.status !== "draft" && event.status !== "published") {
       throw new HttpsError("failed-precondition", `Cannot cancel an event in status "${event.status}".`);
+    }
+    if (event.settlementStartedAt != null) {
+      throw new HttpsError("failed-precondition",
+        "This event's ticket settlement has already started and can no longer be cancelled.");
     }
     tx.update(eventRef, { status: "cancelled", cancelledAt: now, updatedAt: now });
   });

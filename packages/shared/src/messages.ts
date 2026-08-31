@@ -141,3 +141,9 @@ export const TRANSFER_OFFER_SENT_MESSAGE = "If that account exists, the ticket o
 // Task 6: cancellation and refunds.
 export const EVENT_CANCELLED_MESSAGE = "This event has been cancelled.";
 export const TICKET_NOT_REFUNDABLE_MESSAGE = "Only a valid or checked-in ticket can be refunded.";
+// Task 7 fix round 1 (money review, Critical 1): a grace refund is for a
+// pre-show change of plans, not a post-show dispute, and freezing it at
+// endsAt is what keeps the T+1 settlement's face-value basis from ever
+// drifting once the sweep starts transferring it. Post-show disputes are a
+// manual/support path, not this callable.
+export const TICKET_REFUND_WINDOW_CLOSED_MESSAGE = "Refunds are closed for this event.";

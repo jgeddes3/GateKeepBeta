@@ -1559,6 +1559,7 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   payout_fee_uncollected: "Payout fee uncollected",
   ticket_cancel_refund_failed: "Ticket order not refunded for cancelled event",
   ticket_settlement_blocked: "Ticket settlement blocked, no payout account",
+  ticket_settlement_failed: "Ticket settlement transfer failed",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on

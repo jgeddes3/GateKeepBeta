@@ -31,7 +31,7 @@ import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firesto
 import {
   isValidDocId, ticketOrderTotals, ticketServiceFeeCents,
   EVENT_NOT_ON_SALE_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_SOLD_OUT_MESSAGE, EVENT_BUYER_CAP_MESSAGE,
-  EVENT_CANCELLED_MESSAGE, TICKET_NOT_REFUNDABLE_MESSAGE,
+  EVENT_CANCELLED_MESSAGE, TICKET_NOT_REFUNDABLE_MESSAGE, TICKET_REFUND_WINDOW_CLOSED_MESSAGE,
   type EventDoc, type TicketTierDoc, type TicketOrderDoc, type TicketOrderStatus,
   type TicketIndexDoc, type TicketDoc, type AttendeeDoc,
 } from "@gatekeep/shared";
@@ -577,6 +577,19 @@ export interface RefundTicketInput { curatorProfileId: string; eventId: string; 
 // projection is exactly what tracks the current owner (see completeOrderTx,
 // which writes both docs under the same id). The money, by contrast, always
 // returns to the ORDER's buyer, the person who actually paid Stripe.
+//
+// REFUSED once `now >= event.endsAt` (Task 7 fix round 1, money review
+// Critical 1). Product rationale: a grace refund is for a pre-show change of
+// plans; a post-show dispute is a manual/support path, not this callable.
+// Load-bearing for money, not just policy: paymentsSweep.ts's T+1 ticket
+// settlement sums each paid order's `faceTotalCents - refundedFaceCents` and
+// transfers it to the curator under a STATIC per-event idempotency key. If a
+// grace refund could still land after endsAt, a transfer that crashed after
+// Stripe accepted it but before the completion write landed would recompute
+// a SMALLER amount on retry, and replaying that key with a different amount
+// is refused by Stripe forever. Freezing refunds a full T+1 window (24h)
+// before any transfer can even become due removes the drift at its source
+// instead of trying to re-scope the key around it.
 export const refundTicket = onCall<RefundTicketInput>(
   { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
     const uid = requireAuthUid(req);
@@ -600,6 +613,9 @@ export const refundTicket = onCall<RefundTicketInput>(
       throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
     }
     if (event.status === "cancelled") throw new HttpsError("failed-precondition", EVENT_CANCELLED_MESSAGE);
+    if (Date.now() >= event.endsAt) {
+      throw new HttpsError("failed-precondition", TICKET_REFUND_WINDOW_CLOSED_MESSAGE);
+    }
 
     const attendeeRef = eventRef.collection("attendees").doc(input.ticketId);
     const attendeeSnap = await attendeeRef.get();

@@ -808,7 +808,15 @@ export type AdminAlertKind =
   // (event-scoped, like ticket_cancel_refund_failed above); the event is
   // named in `detail` and left "published" so the sweep retries it every
   // pass until the curator finishes onboarding.
-  | "ticket_settlement_blocked";
+  | "ticket_settlement_blocked"
+  // SP6 Task 7 fix round 1 (money review, Critical 1d): a T+1 ticket
+  // settlement transfer was attempted (the curator IS payout-ready) but
+  // Stripe returned an unexpected error. bookingId/gigId are always null
+  // (event-scoped, like the two kinds above); the event and the failure are
+  // named in `detail`. Distinct from ticket_settlement_blocked, which never
+  // reaches Stripe at all: this kind means the call was made and refused, not
+  // that it was withheld.
+  | "ticket_settlement_failed";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -904,6 +912,17 @@ export interface EventDoc {
   // event's attendees. Absent means "not yet reminded" (every pre-Task-7
   // event, and every event whose startsAt is still more than 24h out).
   reminderSentAt?: number;
+  // SP6 Task 7 fix round 1 (money review, Critical 1 / Important 2): epoch ms
+  // the T+1 ticket settlement transfer was first claimed, stamped exactly
+  // once (transactionally, iff unset) immediately before paymentsSweep.ts
+  // calls Stripe. Two jobs: it is the CAS a retried sweep pass reads to
+  // replay the SAME transfer call rather than starting a fresh one, and it is
+  // the guard cancelEventCore checks to refuse a cancellation once settlement
+  // has begun, closing the window where a cancel would refund every buyer on
+  // top of a transfer the curator already received. Absent means settlement
+  // has never started for this event (every pre-fix-round-1 event, and every
+  // event not yet past its T+1 window).
+  settlementStartedAt?: number;
 }
 export interface TicketTierDoc {
   name: string; priceCents: number;        // 0 = free RSVP

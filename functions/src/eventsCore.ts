@@ -31,11 +31,21 @@ export const DEFAULT_MAX_TICKETS_PER_BUYER = 8;
 // SP6 Task 7: the adminAlerts id for "this event's T+1 ticket settlement
 // transfer is blocked because its curator has no payout-ready Stripe
 // account". Deterministic per event, same discipline as paymentsCore.ts's own
-// alert-id vocabulary (stuckSagaAlertId and friends) — kept here, rather than
-// beside that vocabulary, so paymentsSweep.ts's ticket-settlement step never
+// alert-id vocabulary (stuckSagaAlertId and friends), kept here rather than
+// beside that vocabulary so paymentsSweep.ts's ticket-settlement step never
 // has to reach into an SP5 file for an SP6-only escalation.
 export function ticketSettlementBlockedAlertId(eventId: string): string {
   return `ticket-settlement:${eventId}`;
+}
+
+// SP6 Task 7 fix round 1 (money review, Critical 1d): the adminAlerts id for
+// "a T+1 ticket settlement transfer was attempted but Stripe returned an
+// unexpected error". Distinct from ticketSettlementBlockedAlertId above (that
+// one fires before Stripe is ever called; this one fires when the call was
+// made and refused), so the two conditions never collapse into one row an
+// operator has to disambiguate from the detail text alone.
+export function ticketSettlementFailedAlertId(eventId: string): string {
+  return `ticket-settlement-failed:${eventId}`;
 }
 
 // Server-minted ticket QR payload. Possession of this string is door proof

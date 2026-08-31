@@ -3,7 +3,8 @@ import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from ".
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
-  type TicketOrderDoc, type EventDoc, type AdminAlertDoc, type AttendeeDoc,
+  type TicketOrderDoc, type EventDoc, type AdminAlertDoc, type AttendeeDoc, type TicketDoc,
+  TICKET_REFUND_WINDOW_CLOSED_MESSAGE,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
 import { runDailySweep } from "../src/scheduled.js";
@@ -114,7 +115,7 @@ async function makeCuratorPayoutReady(profileId: string, ownerUser: import("fire
 }
 
 // Pushes an event's endsAt to `hoursPastSettle` hours beyond the T+1 window
-// (default just past it) — called immediately before the sweep under test,
+// (default just past it), called immediately before the sweep under test,
 // same "move the timestamp via admin SDK right before the boundary-sensitive
 // call" precedent helpers.ts's setGigStartsAt establishes. Ticket sales must
 // already be complete before this runs: createTicketOrder refuses once
@@ -157,6 +158,7 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
     expect(event.status).toBe("completed");
     expect(event.completedAt).toBeTypeOf("number");
+    expect(event.settlementStartedAt).toBeTypeOf("number"); // claimed before the transfer
 
     // FakeStripe actually recorded the transfer: the curator's connected
     // account balance moved by exactly the face value of the 2 remaining
@@ -184,6 +186,10 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
     expect(event.status).toBe("completed");
     expect(event.completedAt).toBeTypeOf("number");
+    // No transfer was ever attempted for a zero-revenue event, so the
+    // settlement-start claim (which only runs immediately before the Stripe
+    // call) is never stamped.
+    expect(event.settlementStartedAt).toBeUndefined();
 
     const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");
     expect(rows).toHaveLength(0);
@@ -208,7 +214,7 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     expect(rows).toHaveLength(0);
   });
 
-  it("leaves a curator-without-Stripe event published, raises an adminAlert, and notifies the curator", async () => {
+  it("leaves a curator-without-Stripe event published, raises an adminAlert, and notifies the curator at most once a day", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("set4");
     await addTiersAndPublish(profileId, eventId, owner.user,
       [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
@@ -225,17 +231,32 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
     expect(event.status).toBe("published"); // left for retry, never wedged
     expect(event.completedAt).toBeUndefined();
+    expect(event.settlementStartedAt).toBeUndefined(); // never claimed: no transfer was attempted
 
     const alertId = ticketSettlementBlockedAlertId(eventId);
     const alert = (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc | undefined;
     expect(alert?.kind).toBe("ticket_settlement_blocked");
     expect(alert?.resolvedAt).toBeNull();
+    expect(alert?.runCount).toBe(1);
 
-    const notifSnap = await adb.collection(`users/${owner.uid}/notifications`).get();
-    expect(notifSnap.docs.some((d) => d.data().kind === "ticket" && d.data().refId === eventId)).toBe(true);
+    const blockedNotifs = () => adb.collection(`users/${owner.uid}/notifications`).get().then((snap) => snap.docs
+      .filter((d) => d.data().kind === "ticket" && d.data().refId === eventId
+        && d.data().title === "Finish payout setup to receive ticket revenue"));
+    expect(await blockedNotifs()).toHaveLength(1);
 
     const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");
     expect(rows).toHaveLength(0);
+
+    // Money review Important 3: a second sweep pass within the SAME day must
+    // not send a second nudge, even though the curator is still blocked and
+    // the alert row is observed again (runCount advances). The notification
+    // is gated on recordAdminAlert's own day-boundary/kind-change throttle,
+    // the same signal the console.error line uses.
+    const report2 = await runPaymentsSweep(Date.now());
+    expect(report2.ticketSettlementsBlocked).toBeGreaterThanOrEqual(1);
+    const alertAfterSecond = (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc;
+    expect(alertAfterSecond.runCount).toBe(2); // the row still tracks every observation
+    expect(await blockedNotifs()).toHaveLength(1); // still just the one nudge
   });
 
   it("is idempotent on a sweep re-run: no second transfer, no duplicate ledger row", async () => {
@@ -264,13 +285,14 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     expect(rows).toHaveLength(1); // no duplicate row
   });
 
-  it("does not double-transfer when the completion write is retried after the transfer already landed", async () => {
+  it("does not double-transfer when the completion write is retried, and refunds are frozen so the recomputed amount cannot drift", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("set6");
     await addTiersAndPublish(profileId, eventId, owner.user,
       [{ name: "General", priceCents: 1200, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
     const tierId = await tierIdByName(eventId, "General");
     const buyer = await makeBuyer("set6buyer");
-    await payOrder(eventId, tierId, 1, buyer.user);
+    const orderId = await payOrder(eventId, tierId, 2, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
 
     const accountId = await makeCuratorPayoutReady(profileId, owner.user);
     await pushEventPastSettleWindow(eventId);
@@ -278,26 +300,118 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     await runPaymentsSweep(Date.now());
     const afterFirst = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
     expect(afterFirst.status).toBe("completed");
+    expect(afterFirst.settlementStartedAt).toBeTypeOf("number");
+    const acctAfterFirst = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+    expect(acctAfterFirst?.balanceCents).toBe(2400);
+
+    // A grace refund attempted DURING the crash window below is refused
+    // (endsAt already passed before the first sweep pass): this is the money
+    // review's Critical 1 fix, and it is what guarantees the retry recomputes
+    // the exact same amount rather than a drifted one.
+    await expect(callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId: tickets[0].id }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: TICKET_REFUND_WINDOW_CLOSED_MESSAGE });
 
     // Simulate the "transfer succeeded, then the completion transaction was
     // lost" crash this step's own contract must survive: revert the event
-    // back to "published" by hand, leaving completedAt behind (as a real
-    // crash between the transfer and the flip would).
+    // back to "published" by hand, leaving settlementStartedAt (and
+    // completedAt) behind, as a real crash between the transfer and the flip
+    // would.
     await adb.doc(`events/${eventId}`).update({ status: "published" });
 
     const report = await runPaymentsSweep(Date.now());
     expect(report.ticketSettlementsCompleted).toBeGreaterThanOrEqual(1);
+    // If the recomputed amount had drifted, FakeStripe's idempotency-key
+    // fingerprint check (same key, different amount) would reject the retry
+    // and this step would count it as a failed transfer instead of a clean
+    // replay.
+    expect(report.errors.ticketSettlementTransfer ?? 0).toBe(0);
 
     const afterRetry = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
     expect(afterRetry.status).toBe("completed");
+    expect(afterRetry.settlementStartedAt).toBe(afterFirst.settlementStartedAt); // claimed once, never re-stamped
 
     // The idempotency key (`ticket_settlement:{eventId}`) protected the
     // retry: Stripe replayed the SAME transfer instead of minting a second
-    // one, so the account balance moved by 1200 total, not 2400.
+    // one, so the account balance moved by 2400 total, not 4800.
     const acct = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
-    expect(acct?.balanceCents).toBe(1200);
+    expect(acct?.balanceCents).toBe(2400);
     const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");
     expect(rows).toHaveLength(1);
+
+    const failedAlert = await adb.doc(`adminAlerts/ticket-settlement-failed:${eventId}`).get();
+    expect(failedAlert.exists).toBe(false);
+  });
+});
+
+describe("cancelEvent: blocked once ticket settlement has started", () => {
+  it("rejects cancellation once settlementStartedAt is stamped, even if the completion write has not landed yet", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("csv1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("csv1buyer");
+    await payOrder(eventId, tierId, 1, buyer.user);
+
+    await makeCuratorPayoutReady(profileId, owner.user);
+    await pushEventPastSettleWindow(eventId);
+    await runPaymentsSweep(Date.now());
+
+    const afterSettle = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(afterSettle.status).toBe("completed");
+    expect(afterSettle.settlementStartedAt).toBeTypeOf("number");
+
+    // Simulate the crash window (same technique as the double-transfer test
+    // above): the transfer succeeded and settlementStartedAt is stamped, but
+    // the completion write is reverted, leaving the event "published" again
+    // as it would be mid-crash.
+    await adb.doc(`events/${eventId}`).update({ status: "published" });
+
+    await expect(callFn("cancelEvent", { curatorProfileId: profileId, eventId }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+
+    const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(event.status).toBe("published"); // untouched by the rejected cancel
+    expect(event.cancelledAt).toBeUndefined();
+  });
+
+  it("still allows cancelling an ended event whose settlement has not started yet", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("csv2");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("csv2buyer");
+    await payOrder(eventId, tierId, 1, buyer.user);
+
+    // Ended, but well inside the T+1 window: settlement has not begun.
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - HOUR_MS });
+
+    const result = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "cancelEvent", { curatorProfileId: profileId, eventId }, owner.user);
+    expect(result.ok).toBe(true);
+    const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(event.status).toBe("cancelled");
+  });
+});
+
+describe("refundTicket: settlement freeze window", () => {
+  it("rejects a grace refund once the event has ended", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rtf1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rtf1buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+
+    // Push endsAt into the past: the event has ended, well before it is even
+    // T+1-eligible for settlement.
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - HOUR_MS });
+
+    await expect(callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId: tickets[0].id }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: TICKET_REFUND_WINDOW_CLOSED_MESSAGE });
+
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${tickets[0].id}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("valid"); // untouched
   });
 });
 
@@ -311,7 +425,7 @@ describe("dailySweep: event-tomorrow reminders", () => {
     const tierId = await tierIdByName(eventId, "General");
     const buyerA = await makeBuyer("rem1a");
     const buyerB = await makeBuyer("rem1b");
-    // buyerA holds 2 tickets on one order — must still get exactly ONE
+    // buyerA holds 2 tickets on one order, and must still get exactly ONE
     // reminder notification, not two.
     await payOrder(eventId, tierId, 2, buyerA.user);
     await payOrder(eventId, tierId, 1, buyerB.user);
