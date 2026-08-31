@@ -52,7 +52,7 @@ import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc,
+  type BookingRequestDoc, type EventDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc,
 } from "@gatekeep/shared";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
@@ -73,6 +73,7 @@ import {
 } from "./bookings.js";
 import { notifyProfileMembers } from "./notifications.js";
 import { paginate } from "./scheduled.js";
+import { refundOrdersForCancelledEvent } from "./ticketing.js";
 
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -186,6 +187,14 @@ export interface PaymentsSweepReport {
   // or the webhook to complete normally. Not an error: this is the expected
   // shape of "money always wins over expiry".
   ticketOrdersExpiryDeferred: number;
+  // --- step 9: retry cancelled-event ticket refunds (SP6 Task 6) ---
+  // Orders resolved by THIS retry pass only. cancelEvent's own inline call
+  // already resolved the common case, so these are ordinarily 0 and only
+  // grow when that inline call left something unresolved (a transient
+  // Stripe/Firestore failure, or the pending-order race documented on
+  // events.ts's cancelEvent).
+  cancelledEventOrdersRefunded: number;
+  cancelledEventOrdersPendingExpired: number;
   // Per-step and per-anomaly failure counts — keyed, not fixed, so a new
   // anomaly gets a name instead of being folded into a neighbour's bucket.
   // NAMING: a per-doc/per-booking key is a SINGULAR noun phrase for the thing
@@ -205,6 +214,7 @@ function emptyReport(): PaymentsSweepReport {
     transfersMade: 0, retriesAttempted: 0,
     delinquenciesDeclared: 0, expiredRefunds: 0,
     ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0,
+    cancelledEventOrdersRefunded: 0, cancelledEventOrdersPendingExpired: 0,
     errors: {},
   };
 }
@@ -1263,6 +1273,51 @@ async function expireTicketOrders(
 }
 
 // ---------------------------------------------------------------------------
+// Step 9: RETRY cancelled-event ticket refunds (SP6 Task 6)
+// ---------------------------------------------------------------------------
+// events.ts's `cancelEvent` callable already ran refundOrdersForCancelledEvent
+// once, inline, right after flipping the event to "cancelled". This is that
+// same idempotent function's retry backstop, the ticketing equivalent of
+// step 7's expired-booking refund backstop, for whatever it could not
+// finish: a per-order Stripe/Firestore failure (already escalated to
+// adminAlerts by refundOrdersForCancelledEvent itself), or the pending-order
+// race documented on cancelEvent (createTicketOrder checks event status
+// non-transactionally, so a pending order can be born in the ms-wide window
+// right around the cancellation and miss cancelEvent's own pass entirely).
+//
+// SCOPED to a lookback window off `cancelledAt`, same rationale as step 7's
+// EXPIRED_LOOKBACK_MS: an event cancelled longer ago than this and still not
+// fully resolved needs a human, not an ever-growing rescan of the whole
+// events collection every hour forever.
+
+async function retryCancelledEventRefunds(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("events")
+    .where("status", "==", "cancelled")
+    .where("cancelledAt", ">=", now - EXPIRED_LOOKBACK_MS)
+    .orderBy("cancelledAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        const event = doc.data() as EventDoc;
+        const result = await refundOrdersForCancelledEvent(doc.id, event.title, now);
+        report.cancelledEventOrdersRefunded += result.ordersRefunded;
+        report.cancelledEventOrdersPendingExpired += result.pendingExpired;
+        // refundOrdersForCancelledEvent already escalated each individual
+        // order failure to adminAlerts (with its own throttled log); this
+        // just keeps the step-level error count honest so an operator
+        // scanning report.errors sees SOMETHING moved for this event.
+        if (result.errors > 0) bumpError(report, "cancelledEventRefund");
+      } catch (e) {
+        console.error(`paymentsSweep: cancelled-event refund retry failed for event ${doc.id}`, e);
+        bumpError(report, "cancelledEventRefund");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 // Every step is isolated: one failing step is logged and counted, and the rest
 // still run. Ordering is deliberate — reconciliation first (it can turn staged
@@ -1291,6 +1346,7 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
     },
     { name: "expiredRefunds", run: () => refundExpiredBookingDeposits(db, now, report) },
     { name: "ticketOrderExpiry", run: () => expireTicketOrders(db, now, report) },
+    { name: "cancelledEventRefunds", run: () => retryCancelledEventRefunds(db, now, report) },
   ];
 
   for (const step of steps) {

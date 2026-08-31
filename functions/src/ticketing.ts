@@ -27,17 +27,18 @@
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, ticketOrderTotals,
+  isValidDocId, ticketOrderTotals, ticketServiceFeeCents,
   EVENT_NOT_ON_SALE_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_SOLD_OUT_MESSAGE, EVENT_BUYER_CAP_MESSAGE,
+  EVENT_CANCELLED_MESSAGE, TICKET_NOT_REFUNDABLE_MESSAGE,
   type EventDoc, type TicketTierDoc, type TicketOrderDoc, type TicketOrderStatus,
   type TicketIndexDoc, type TicketDoc, type AttendeeDoc,
 } from "@gatekeep/shared";
-import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
+import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile } from "./guards.js";
 import { ORDER_TTL_MS, mintQrSecret, currentTicketFeePolicy, tierOnSale, buildOrderItems } from "./eventsCore.js";
 import { getStripe, stripeSecretKey } from "./stripeClient.js";
-import { writeLedger } from "./paymentsCore.js";
+import { writeLedger, recordAdminAlert } from "./paymentsCore.js";
 import { notifyUser } from "./notifications.js";
 
 const MAX_ORDER_ITEMS = 20;
@@ -297,3 +298,358 @@ export async function completeOrderTicketsHandler(
   }
   await completeOrderTx(orderId);
 }
+
+/**
+ * SP6 Task 6: cancellation and refunds.
+ *
+ * Two money paths land here:
+ *  - refundOrdersForCancelledEvent: the batch that events.ts's `cancelEvent`
+ *    callable runs right after flipping an event to "cancelled" (and that
+ *    paymentsSweep.ts's retry step re-drives for any event that still has
+ *    unresolved orders). Refunds every "paid" order in full and expires
+ *    every still-"pending" one, releasing its inventory hold; money always
+ *    wins over expiry, same as the Task 5 expiry sweep step this pending-
+ *    order path deliberately mirrors.
+ *  - refundTicket: the curator-triggered single-ticket "grace" refund, which
+ *    never touches the order's status.
+ *
+ * Both follow the SP5 invariant every money file in this codebase repeats:
+ * Stripe calls never run inside a Firestore transaction (a transaction can be
+ * silently retried by the SDK on contention, which would replay the Stripe
+ * call too), so each does its Stripe call OUTSIDE any transaction, then
+ * applies every resulting Firestore write together in ONE transaction.
+ */
+
+// The adminAlerts id for "this order was not resolved for its cancelled
+// event" (see AdminAlertKind's ticket_cancel_refund_failed). One id per
+// order, scoped to this file the same way ticketing's own doc-id disciplines
+// are: the caller does not need to know this string, only
+// refundOrdersForCancelledEvent's own retry-safety.
+function ticketCancelAlertId(orderId: string): string {
+  return `ticket-cancel:${orderId}`;
+}
+
+// Refunds ONE "paid" order's full remaining balance (face + service fee,
+// minus whatever a prior grace refund already returned) as part of an event
+// cancellation. Idempotent: only acts on an order still "paid". A doc
+// already "cancelled_refunded" (a prior pass, or this exact call replayed
+// after a crash) is a silent no-op, matching completeOrderTx's own
+// "transitions OUT of one state" discipline. Safe to re-run freely: the
+// Stripe call carries a deterministic per-order idempotency key, so a retry
+// that reaches Stripe again (because a prior pass's Firestore transaction
+// never committed) replays the SAME refund rather than issuing a second one.
+//
+// No two-phase "refund_pending" marker (unlike SP5's deposit refunds): the
+// event is ALREADY flipped to "cancelled" by the time this runs (cancelEvent
+// flips status before calling this, and the sweep only ever calls this for
+// an event already "cancelled"), and refundTicket refuses on a cancelled
+// event, so nothing else can be racing this order's tickets/index/tier
+// fields, and a single Firestore transaction after the Stripe call is
+// sufficient.
+async function refundOrderForCancelledEvent(
+  db: Firestore, orderRef: FirebaseFirestore.DocumentReference, eventTitle: string, now: number,
+): Promise<"refunded" | "skipped"> {
+  const orderSnap = await orderRef.get();
+  const order = orderSnap.data() as TicketOrderDoc | undefined;
+  if (!order || order.status !== "paid") return "skipped";
+
+  const remainingCents = order.faceTotalCents + order.serviceFeeCents - order.refundedCents;
+  const remainingFaceCents = order.faceTotalCents - order.refundedFaceCents;
+
+  // A "paid" order with a positive remaining balance always carries a
+  // PaymentIntent. The only way remainingCents can be 0 with nothing left
+  // to refund is a free order, or one already grace-refunded down to zero.
+  if (remainingCents > 0 && order.paymentIntentId) {
+    await getStripe().refund({
+      intentId: order.paymentIntentId, amountCents: remainingCents,
+      idempotencyKey: `ticket_cancel_refund:${orderRef.id}`,
+      meta: { orderId: orderRef.id, eventId: order.eventId, purpose: "ticket_cancel_refund" },
+    });
+  }
+
+  // Non-transactional read of the order's tickets, safe because nothing else
+  // can be writing to them right now (see this function's doc comment): the
+  // event is already "cancelled", which blocks refundTicket, and no other
+  // path mutates ticket status.
+  const ticketsSnap = await db.collection(`users/${order.buyerUid}/tickets`)
+    .where("orderId", "==", orderRef.id).get();
+  const refundableTicketIds = ticketsSnap.docs
+    .filter((d) => {
+      const s = (d.data() as TicketDoc).status;
+      return s === "valid" || s === "checked_in";
+    })
+    .map((d) => d.id);
+
+  await db.runTransaction(async (tx) => {
+    const freshSnap = await tx.get(orderRef);
+    const fresh = freshSnap.data() as TicketOrderDoc | undefined;
+    if (!fresh || fresh.status !== "paid") return; // raced/idempotent no-op
+
+    const idxRef = db.doc(`users/${order.buyerUid}/ticketIndex/${order.eventId}`);
+    const idxSnap = await tx.get(idxRef);
+    const idxCount = (idxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+
+    for (const ticketId of refundableTicketIds) {
+      tx.update(db.doc(`users/${order.buyerUid}/tickets/${ticketId}`), { status: "refunded" });
+      tx.update(db.doc(`events/${order.eventId}/attendees/${ticketId}`), { status: "refunded" });
+    }
+    const remainingIdx = idxCount - refundableTicketIds.length;
+    if (remainingIdx <= 0) tx.delete(idxRef); else tx.update(idxRef, { count: remainingIdx });
+
+    tx.update(orderRef, {
+      status: "cancelled_refunded",
+      refundedTicketIds: FieldValue.arrayUnion(...refundableTicketIds),
+      refundedCents: FieldValue.increment(remainingCents),
+      refundedFaceCents: FieldValue.increment(remainingFaceCents),
+    });
+  });
+
+  await writeLedger({
+    kind: "ticket_cancel_refund", amountCents: remainingCents, bookingId: null, gigId: null,
+    profileId: order.curatorProfileId, stripeId: orderRef.id,
+    detail: `event cancelled, refunded remaining balance for "${eventTitle}"`,
+    eventId: order.eventId, buyerUid: order.buyerUid, at: now,
+  }).catch((e) => console.error(`refundOrderForCancelledEvent: ledger write failed for order ${orderRef.id}`, e));
+
+  await notifyUser(order.buyerUid, {
+    kind: "ticket", refId: order.eventId, title: "Event cancelled",
+    body: remainingCents > 0
+      ? `"${eventTitle}" was cancelled. Your payment has been refunded.`
+      : `"${eventTitle}" was cancelled.`,
+  }).catch((e) => console.error(`refundOrderForCancelledEvent: notification failed for order ${orderRef.id}`, e));
+
+  return "refunded";
+}
+
+// Cancels ONE "pending" order's PaymentIntent (if any) and expires it,
+// releasing its held tier inventory. Reuses the SP6 Task 5 expiry sweep's own
+// money-wins pattern (paymentsSweep.ts's expireOneTicketOrder) rather than
+// importing it: that step is keyed off `expiresAt` and carries its own
+// report-counter side effects, and duplicating its small, already-tested
+// shape here keeps this event-cancellation path independent of the sweep's
+// internals (and vice versa) per the "additive only" constraint on
+// paymentsSweep.ts. A pending order that goes on to PAY anyway despite the
+// event being cancelled (createTicketOrder's own known race, see events.ts's
+// cancelEvent) is caught by refundOrderForCancelledEvent above the next time
+// the sweep retries this event: this function only ever expires, never
+// refunds, a still-pending order.
+async function cancelPendingOrderForCancelledEvent(
+  db: Firestore, orderRef: FirebaseFirestore.DocumentReference,
+): Promise<"expired" | "deferred" | "skipped"> {
+  const freshSnap = await orderRef.get();
+  const order = freshSnap.data() as TicketOrderDoc | undefined;
+  if (!order || order.status !== "pending") return "skipped"; // resolved since the query ran
+
+  if (order.paymentIntentId) {
+    try {
+      await getStripe().cancelIntent(order.paymentIntentId);
+    } catch (e) {
+      // Ambiguous throw (cancelIntent's own doc comment): either the intent
+      // already succeeded (money moved, defer to refundOrderForCancelledEvent
+      // on the next retry) or it was already canceled by a prior pass whose
+      // Firestore transaction below never committed. Only the second case is
+      // safe to proceed on.
+      let status: string | undefined;
+      try {
+        status = (await getStripe().retrieveIntentStatus(order.paymentIntentId)).status;
+      } catch (statusError) {
+        console.error(
+          `cancelPendingOrderForCancelledEvent: could not confirm intent ${order.paymentIntentId}'s status after a failed cancel for order ${orderRef.id}`, statusError);
+      }
+      if (status !== "canceled") {
+        console.info(
+          `cancelPendingOrderForCancelledEvent: order ${orderRef.id} left pending, intent ${order.paymentIntentId} could not be confirmed cancelable (status=${status ?? "unknown"})`, e);
+        return "deferred";
+      }
+    }
+  }
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(orderRef);
+    const o = snap.data() as TicketOrderDoc | undefined;
+    if (!o || o.status !== "pending") return; // raced since the fresh read above
+    for (const item of o.items) {
+      tx.update(db.doc(`events/${o.eventId}/tiers/${item.tierId}`), { soldCount: FieldValue.increment(-item.quantity) });
+    }
+    tx.update(orderRef, { status: "expired" });
+  });
+  return "expired";
+}
+
+export interface CancelledEventOrdersResult {
+  ordersRefunded: number; pendingExpired: number; pendingDeferred: number; errors: number;
+}
+
+// The whole batch: every "paid" order refunded in full, every "pending" one
+// expired. Called once by events.ts's `cancelEvent` right after it flips the
+// event to "cancelled", and again by paymentsSweep.ts's retry step for any
+// event that still has unresolved orders. Same idempotent function either
+// way, per the brief's "batched loop, not one transaction" ruling (each order
+// resolves independently, so one failure never wedges the rest of the loop).
+export async function refundOrdersForCancelledEvent(
+  eventId: string, eventTitle: string, now: number,
+): Promise<CancelledEventOrdersResult> {
+  const db = getFirestore();
+  const result: CancelledEventOrdersResult = { ordersRefunded: 0, pendingExpired: 0, pendingDeferred: 0, errors: 0 };
+
+  const paidSnap = await db.collection("orders")
+    .where("eventId", "==", eventId).where("status", "==", "paid").get();
+  for (const doc of paidSnap.docs) {
+    try {
+      const outcome = await refundOrderForCancelledEvent(db, doc.ref, eventTitle, now);
+      if (outcome === "refunded") result.ordersRefunded++;
+    } catch (e) {
+      result.errors++;
+      const alertId = ticketCancelAlertId(doc.id);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "ticket_cancel_refund_failed",
+        detail: `event ${eventId} ("${eventTitle}") cancelled but order ${doc.id} could not be refunded: ${e instanceof Error ? e.message : String(e)}`,
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) {
+        console.error(`refundOrdersForCancelledEvent: order ${doc.id} refund failed (see adminAlerts/${alertId})`, e);
+      }
+    }
+  }
+
+  const pendingSnap = await db.collection("orders")
+    .where("eventId", "==", eventId).where("status", "==", "pending").get();
+  for (const doc of pendingSnap.docs) {
+    try {
+      const outcome = await cancelPendingOrderForCancelledEvent(db, doc.ref);
+      if (outcome === "expired") result.pendingExpired++;
+      else if (outcome === "deferred") result.pendingDeferred++;
+    } catch (e) {
+      result.errors++;
+      const alertId = ticketCancelAlertId(doc.id);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "ticket_cancel_refund_failed",
+        detail: `event ${eventId} ("${eventTitle}") cancelled but pending order ${doc.id} could not be expired: ${e instanceof Error ? e.message : String(e)}`,
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) {
+        console.error(`refundOrdersForCancelledEvent: pending order ${doc.id} expiry failed (see adminAlerts/${alertId})`, e);
+      }
+    }
+  }
+
+  return result;
+}
+
+export interface RefundTicketInput { curatorProfileId: string; eventId: string; ticketId: string; }
+
+// Curator-triggered single-ticket "grace" refund: refunds ONE ticket's
+// face+fee off its order's shared PaymentIntent without touching the order's
+// own status (it stays "paid", see TicketOrderDoc.refundedTicketIds/
+// refundedCents/refundedFaceCents, which every refund path, this one and
+// cancellation, maintains the same way).
+//
+// The ticket OWNER, read off events/{eventId}/attendees/{ticketId}.ownerUid
+// (NOT the order's buyerUid), keys the ticketIndex decrement, the attendee
+// projection, and the notification: a transferred ticket's live doc lives
+// under its CURRENT owner's users/{uid}/tickets subcollection, and that
+// projection is exactly what tracks the current owner (see completeOrderTx,
+// which writes both docs under the same id). The money, by contrast, always
+// returns to the ORDER's buyer, the person who actually paid Stripe.
+export const refundTicket = onCall<RefundTicketInput>(
+  { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.curatorProfileId)) {
+      throw new HttpsError("invalid-argument", "A curator profile id is required.");
+    }
+    if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+    if (!isValidDocId(input?.ticketId)) throw new HttpsError("invalid-argument", "A ticket id is required.");
+
+    await requireProfileMember(input.curatorProfileId, uid);
+    await requireApprovedCuratorProfile(input.curatorProfileId);
+
+    const db = getFirestore();
+    const eventRef = db.doc(`events/${input.eventId}`);
+    const eventSnap = await eventRef.get();
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = eventSnap.data() as EventDoc;
+    if (event.curatorProfileId !== input.curatorProfileId) {
+      throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+    }
+    if (event.status === "cancelled") throw new HttpsError("failed-precondition", EVENT_CANCELLED_MESSAGE);
+
+    const attendeeRef = eventRef.collection("attendees").doc(input.ticketId);
+    const attendeeSnap = await attendeeRef.get();
+    if (!attendeeSnap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const attendee = attendeeSnap.data() as AttendeeDoc;
+    const ownerUid = attendee.ownerUid;
+
+    const ticketRef = db.doc(`users/${ownerUid}/tickets/${input.ticketId}`);
+    const ticketSnap = await ticketRef.get();
+    if (!ticketSnap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const ticket = ticketSnap.data() as TicketDoc;
+    if (ticket.eventId !== input.eventId || ticket.curatorProfileId !== input.curatorProfileId) {
+      throw new HttpsError("not-found", "Ticket not found.");
+    }
+    if (ticket.status !== "valid" && ticket.status !== "checked_in") {
+      throw new HttpsError("failed-precondition", TICKET_NOT_REFUNDABLE_MESSAGE);
+    }
+
+    const orderRef = db.doc(`orders/${ticket.orderId}`);
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) throw new HttpsError("internal", "This ticket's order could not be found.");
+    const order = orderSnap.data() as TicketOrderDoc;
+    const item = order.items.find((it) => it.tierId === ticket.tierId);
+    if (!item) throw new HttpsError("internal", "This ticket's order line item could not be found.");
+
+    const unitPriceCents = item.unitPriceCents;
+    const feeCents = ticketServiceFeeCents(unitPriceCents, order.feePolicy);
+    const amountCents = unitPriceCents + feeCents;
+
+    if (amountCents > 0) {
+      await getStripe().refund({
+        intentId: order.paymentIntentId!, amountCents,
+        idempotencyKey: `ticket_grace_refund:${input.ticketId}`,
+        meta: { orderId: ticket.orderId, ticketId: input.ticketId, eventId: input.eventId, purpose: "ticket_grace_refund" },
+      });
+    }
+
+    const tierRef = eventRef.collection("tiers").doc(ticket.tierId);
+    const idxRef = db.doc(`users/${ownerUid}/ticketIndex/${input.eventId}`);
+
+    const applied = await db.runTransaction(async (tx) => {
+      const [tSnap, tierSnap, idxSnap] = await Promise.all([tx.get(ticketRef), tx.get(tierRef), tx.get(idxRef)]);
+      const t = tSnap.data() as TicketDoc | undefined;
+      // Idempotent no-op: a racer (a duplicate call, or a crash-recovery retry
+      // after the Stripe call above already succeeded once) already resolved
+      // this exact ticket.
+      if (!t || (t.status !== "valid" && t.status !== "checked_in")) return false;
+
+      tx.update(ticketRef, { status: "refunded" });
+      tx.update(attendeeRef, { status: "refunded" });
+      if (tierSnap.exists) tx.update(tierRef, { soldCount: FieldValue.increment(-1) });
+
+      const idxCount = (idxSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
+      if (idxCount <= 1) tx.delete(idxRef); else tx.update(idxRef, { count: idxCount - 1 });
+
+      tx.update(orderRef, {
+        refundedTicketIds: FieldValue.arrayUnion(input.ticketId),
+        refundedCents: FieldValue.increment(amountCents),
+        refundedFaceCents: FieldValue.increment(unitPriceCents),
+      });
+      return true;
+    });
+
+    if (!applied) return { ok: true };
+
+    await writeLedger({
+      kind: "ticket_grace_refund", amountCents, bookingId: null, gigId: null,
+      profileId: input.curatorProfileId, stripeId: input.ticketId,
+      detail: `curator grace refund for one ticket ("${item.tierName}")`,
+      eventId: input.eventId, buyerUid: order.buyerUid,
+    }).catch((e) => console.error(`refundTicket: ledger write failed for ticket ${input.ticketId}`, e));
+
+    await notifyUser(ownerUid, {
+      kind: "ticket", refId: input.eventId, title: "Ticket refunded",
+      body: `The organizer refunded your "${item.tierName}" ticket.`,
+    }).catch((e) => console.error(`refundTicket: notification failed for ticket ${input.ticketId}`, e));
+
+    return { ok: true };
+  });

@@ -29,6 +29,8 @@ import {
 import { validateEventInput, validateTierInput, DEFAULT_MAX_TICKETS_PER_BUYER } from "./eventsCore.js";
 import { resolveGigLocation, validateLocationInput, type GigLocationInput } from "./gigs.js";
 import { geocoderApiKey } from "./geocode.js";
+import { stripeSecretKey } from "./stripeClient.js";
+import { refundOrdersForCancelledEvent } from "./ticketing.js";
 
 const MAX_TIERS_PER_EVENT = 20;
 
@@ -437,9 +439,10 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
   return { ok: true };
 });
 
-// NOT an onCall export: this task only ships the status-flip mechanics.
-// Task 6's real `cancelEvent` callable wraps this with the guard chain and
-// the ticket-refund loop.
+// NOT an onCall export: the plain status-flip mechanics `cancelEvent` below
+// wraps with the guard chain and the ticket-refund loop. paymentsSweep.ts's
+// retry step never calls this directly (it only re-drives the refund loop
+// for events already "cancelled", and this throws on any other status).
 export async function cancelEventCore(eventId: string, now: number): Promise<void> {
   const db = getFirestore();
   const eventRef = db.doc(`events/${eventId}`);
@@ -453,3 +456,62 @@ export async function cancelEventCore(eventId: string, now: number): Promise<voi
     tx.update(eventRef, { status: "cancelled", cancelledAt: now, updatedAt: now });
   });
 }
+
+export interface CancelEventInput { curatorProfileId: string; eventId: string; reason?: string; }
+
+// Task 6: flips a draft/published event to "cancelled" (halting sales,
+// since createTicketOrder checks status) and then refunds every affected order.
+//
+// IDEMPOTENT AT THE EVENT LEVEL, deliberately: a second call against an
+// already-cancelled event skips the status flip (cancelEventCore only
+// accepts draft/published, so calling it again would throw) and goes
+// straight to re-driving the refund loop, which, for an event whose orders
+// are all already "cancelled_refunded"/"expired", finds nothing left to do.
+// This is the exact same idempotent function paymentsSweep.ts's retry step
+// calls for any cancelled event that still has unresolved orders, so a
+// curator retrying a failed cancel and the hourly sweep converge on
+// identical behavior.
+//
+// `reason`, when given, is folded into the cancellation notification only.
+// EventDoc carries no persisted cancel-reason field (nothing downstream reads
+// one yet), so there is nothing else to store it on.
+export const cancelEvent = onCall<CancelEventInput>(
+  { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.curatorProfileId)) {
+      throw new HttpsError("invalid-argument", "A curator profile id is required.");
+    }
+    if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+    if (input.reason !== undefined && (typeof input.reason !== "string" || input.reason.length > 500)) {
+      throw new HttpsError("invalid-argument", "Invalid cancellation reason.");
+    }
+
+    await requireProfileMember(input.curatorProfileId, uid);
+    await requireApprovedCuratorProfile(input.curatorProfileId);
+
+    const db = getFirestore();
+    const eventRef = db.doc(`events/${input.eventId}`);
+    const eventSnap = await eventRef.get();
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = eventSnap.data() as EventDoc;
+    if (event.curatorProfileId !== input.curatorProfileId) {
+      throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+    }
+
+    const now = Date.now();
+    if (event.status !== "cancelled") {
+      await cancelEventCore(input.eventId, now);
+    }
+
+    // Batched loop, not one transaction (binding money invariant): each
+    // order resolves independently inside refundOrdersForCancelledEvent, so
+    // one order's failure can never wedge another's, and a failure here is
+    // escalated to adminAlerts rather than thrown back at the caller. The
+    // event is cancelled either way, and the sweep's retry step finishes
+    // whatever this call could not.
+    await refundOrdersForCancelledEvent(input.eventId, event.title, now);
+
+    return { ok: true };
+  });

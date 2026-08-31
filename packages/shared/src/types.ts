@@ -793,7 +793,15 @@ export type AdminAlertKind =
   // hand, or net it off a future payout). The ONE alert kind in SP5 that is
   // profile-scoped rather than booking-scoped: its row carries a null
   // bookingId/gigId and names the profile in `detail`.
-  | "payout_fee_uncollected";
+  | "payout_fee_uncollected"
+  // SP6 Task 6: an event cancellation's order-level money move (the full
+  // refund of a paid order, or the PaymentIntent cancel + expiry of a pending
+  // one) failed. Covers both cases with one kind, the same way stuck-saga's
+  // three kinds share one operator remedy: either way, this order is not yet
+  // resolved for its cancelled event and the sweep's retry step will try it
+  // again next hour. bookingId/gigId are always null (ticket orders are not
+  // booking-scoped); the order and event ids are named in `detail`.
+  | "ticket_cancel_refund_failed";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -833,7 +841,17 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // stripeId set to orderId here since a free order has no PaymentIntent at all),
   // so a redelivered webhook and a racing finalize/webhook pair can never double
   // count the same order.
-  | "ticket_sale";
+  | "ticket_sale"
+  // SP6 Task 6: an event cancellation's automatic full refund of one order's
+  // remaining balance. Keyed off the order id (same discipline as ticket_sale
+  // above), so a cancelEvent retry (the callable called twice, or the sweep's
+  // retry step re-driving the same loop) never double-counts one order's row.
+  | "ticket_cancel_refund"
+  // SP6 Task 6: a curator's per-ticket grace refund. Keyed off the ticket id
+  // (not the order id: one order can carry several of these rows, one per
+  // refunded ticket), so a duplicate refundTicket call for the same ticket
+  // never double-counts.
+  | "ticket_grace_refund";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign

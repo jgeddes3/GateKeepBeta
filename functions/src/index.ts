@@ -26,5 +26,5 @@ export {
 // Also the edge that loads paymentsPayouts.ts's payout.paid/payout.failed
 // webhook registrations (see paymentsWebhook.ts's header).
 export { requestPayout } from "./paymentsPayouts.js";
-export { createEvent, updateEvent, setEventTiers, publishEvent } from "./events.js";
-export { createTicketOrder, finalizeTicketOrder } from "./ticketing.js";
+export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } from "./events.js";
+export { createTicketOrder, finalizeTicketOrder, refundTicket } from "./ticketing.js";

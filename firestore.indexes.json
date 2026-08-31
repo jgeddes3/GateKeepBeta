@@ -170,6 +170,16 @@
       { "fieldPath": "buyerUid", "order": "ASCENDING" },
       { "fieldPath": "eventId", "order": "ASCENDING" },
       { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "eventId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "cancelledAt", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

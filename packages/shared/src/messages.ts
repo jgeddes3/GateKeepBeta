@@ -138,3 +138,6 @@ export const EVENT_NOT_ON_SALE_MESSAGE = "This event is not on sale.";
 export const TICKET_ALREADY_CHECKED_IN_MESSAGE = "Ticket already checked in.";
 export const TICKET_NOT_VALID_MESSAGE = "This ticket is not valid for entry.";
 export const TRANSFER_OFFER_SENT_MESSAGE = "If that account exists, the ticket offer is on its way.";
+// Task 6: cancellation and refunds.
+export const EVENT_CANCELLED_MESSAGE = "This event has been cancelled.";
+export const TICKET_NOT_REFUNDABLE_MESSAGE = "Only a valid or checked-in ticket can be refunded.";

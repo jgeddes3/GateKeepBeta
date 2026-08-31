@@ -1557,6 +1557,7 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   deposit_raced: "Deposit raced",
   clawback_failed: "Clawback failed",
   payout_fee_uncollected: "Payout fee uncollected",
+  ticket_cancel_refund_failed: "Ticket order not refunded for cancelled event",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on
