@@ -70,6 +70,14 @@ describe("storage: staging/photos", () => {
     // widened by one literal alternative, not loosened to accept anything.
     await assertFails(uploadBytes(ref(alice, "staging/photos/alice/p1/banner-abc"), bytes, meta("image/jpeg")));
   });
+  it("owner uploads a poster-kind image (events, SP6 Task 4); a junk kind still fails", async () => {
+    const alice = env.authenticatedContext("alice").storage();
+    await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/poster-abc123"), bytes, meta("image/jpeg")));
+    await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/poster-xyz"), bytes, meta("image/png")));
+    // Junk kind (not avatar/cover/gallery/poster) is still rejected: the
+    // pattern widened by one literal alternative, not loosened to accept anything.
+    await assertFails(uploadBytes(ref(alice, "staging/photos/alice/p1/banner-abc"), bytes, meta("image/jpeg")));
+  });
   it("owner cannot delete a staging photo either; the trigger owns cleanup", async () => {
     const alice = env.authenticatedContext("alice").storage();
     await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/avatar-del1"), bytes, meta("image/jpeg")));

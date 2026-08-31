@@ -218,8 +218,11 @@ async function processAudio(objectName: string, generation: string | number): Pr
 // too (not just trusted from the rules) before it's used to pick a Firestore
 // field or an output path. "gallery" is the curator equivalent of
 // avatar/cover (see storagePaths.ts's PhotoKind and the kind/type gating
-// below).
-const PHOTO_FILENAME_RE = /^(avatar|cover|gallery)-[A-Za-z0-9-]{1,80}$/;
+// below). "poster" (SP6) is a curator-profile upload too, a single-photo
+// slot on an EventDoc rather than an array/field on the profile itself, so
+// it's processed like gallery but has no profile-doc write of its own (see
+// the kind === "poster" branch below).
+const PHOTO_FILENAME_RE = /^(avatar|cover|gallery|poster)-[A-Za-z0-9-]{1,80}$/;
 
 async function processPhoto(objectName: string, generation: string | number): Promise<void> {
   // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
@@ -233,7 +236,7 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     await stagingFile.delete().catch(logDeleteFailure("processUpload", "malformed staging photo path", objectName));
     return;
   }
-  const kind = nameMatch[1] as "avatar" | "cover" | "gallery";
+  const kind = nameMatch[1] as "avatar" | "cover" | "gallery" | "poster";
   const db = getFirestore();
   const profileRef = db.doc(`profiles/${profileId}`);
 
@@ -250,15 +253,19 @@ async function processPhoto(objectName: string, generation: string | number): Pr
 
     // Each kind belongs to exactly one profile type's destination model:
     // avatar/cover are the musician portfolio's two single-photo slots;
-    // gallery is the curator profile's append-only curator.photoPaths array.
-    // Neither model has a field for the other type's kind (CuratorDetails
-    // has no avatarPhotoPath/coverPhotoPath, PortfolioData has no
-    // photoPaths), so a mismatched kind/type pairing — forged, or a stale
-    // client pointed at the wrong profile type — is discarded the same way
-    // a non-member upload is above: nothing to write it into.
+    // gallery is the curator profile's append-only curator.photoPaths array;
+    // poster (SP6) is also curator-side, uploaded against the curator
+    // PROFILE, but it has no Firestore destination of its own here (see
+    // below): createEvent/updateEvent take the processed path directly as
+    // posterPath once the curator has it. Neither model has a field for the
+    // other type's kind (CuratorDetails has no avatarPhotoPath/
+    // coverPhotoPath, PortfolioData has no photoPaths), so a mismatched
+    // kind/type pairing (forged, or a stale client pointed at the wrong
+    // profile type) is discarded the same way a non-member upload is
+    // above: nothing to write it into.
     const profileType = (await profileRef.get()).data()?.type;
     if ((kind === "avatar" || kind === "cover") && profileType !== "musician") return;
-    if (kind === "gallery" && profileType !== "curator") return;
+    if ((kind === "gallery" || kind === "poster") && profileType !== "curator") return;
 
     const [bytes] = await stagingFile.download();
     // Re-encode via sharp: strips EXIF (GPS!) and bounds dimensions.
@@ -347,6 +354,16 @@ async function processPhoto(objectName: string, generation: string | number): Pr
           .catch(logDeleteFailure("processUpload",
             outcome === "cap" ? "gallery cap reached" : "orphaned public gallery photo (profile gone)", destPath));
       }
+      return;
+    }
+
+    if (kind === "poster") {
+      // No Firestore write here at all: a poster has no destination field
+      // on the profile doc (it isn't the profile's own photo). The curator
+      // passes this processed destPath straight back to createEvent/
+      // updateEvent as posterPath once the upload finishes; those callables
+      // are the ones that persist it, on an EventDoc, after their own
+      // string-prefix ownership check against it.
       return;
     }
 

@@ -448,3 +448,46 @@ describe("processUpload: curator gallery photos", () => {
     expect(files).toHaveLength(0);
   });
 });
+
+// SP6 Task 4 (carried Task 1 finding): "poster" is a curator-side kind too,
+// processed the same way as gallery (bounded 1600x1600, no upscale), but
+// unlike gallery it has NO Firestore destination of its own here: createEvent/
+// updateEvent are the ones that persist the resulting path, as EventDoc.posterPath.
+describe("processUpload: curator poster photos", () => {
+  const tinyJpeg = () => Uint8Array.from(atob(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
+    "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
+
+  it("processes a poster into public/photos with no profile-doc write", async () => {
+    const { user, uid, profileId } = await makeCurator("p1");
+    const path = `staging/photos/${uid}/${profileId}/poster-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let files: { name: string }[] = [];
+    while (Date.now() < deadline && files.length === 0) {
+      [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/poster-` });
+      if (files.length === 0) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(files).toHaveLength(1);
+    // No gallery/portfolio field was touched by a poster upload.
+    const p = await adb.doc(`profiles/${profileId}`).get();
+    expect(p.data()?.curator?.photoPaths ?? []).toHaveLength(0);
+    expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull();
+  });
+
+  it("rejects a poster upload aimed at a musician profile", async () => {
+    const { user, uid, profileId } = await makeMusician("p2");
+    const path = `staging/photos/${uid}/${profileId}/poster-${Date.now()}`;
+    await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
+    const deadline = Date.now() + 30_000;
+    let stagingGone = false;
+    while (Date.now() < deadline && !stagingGone) {
+      stagingGone = !(await abucket.file(path).exists())[0];
+      if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(stagingGone).toBe(true); // finally still cleans up staging
+    const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
+    expect(files).toHaveLength(0);
+  });
+});
