@@ -121,14 +121,22 @@ function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, d
         </View>
         {selected && canPick && (
           <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+            {/* Floor of 1 while a tier is selected (fix round 1, review
+                finding): the minus button used to let quantity reach 0 with
+                the tier still visually selected and the stepper still
+                shown, a dead-end the radio dot's own on/off semantics don't
+                explain. Deselecting is the radio's job (tap another tier,
+                or this one again reselects nothing since selectTier only
+                switches tiers); the stepper stays within the 1..10 framing
+                its own max clamp already documents. */}
             <Pressable
-              onPress={() => onQuantityChange(Math.max(0, quantity - 1))}
-              disabled={quantity <= 0}
+              onPress={() => onQuantityChange(Math.max(1, quantity - 1))}
+              disabled={quantity <= 1}
               accessibilityRole="button"
               accessibilityLabel={`Fewer ${tier.name} tickets`}
               style={{
                 width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: t.border,
-                alignItems: "center", justifyContent: "center", opacity: quantity <= 0 ? 0.4 : 1,
+                alignItems: "center", justifyContent: "center", opacity: quantity <= 1 ? 0.4 : 1,
               }}
             >
               <IconMinus size={16} color={t.text} />
