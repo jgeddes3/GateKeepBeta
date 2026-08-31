@@ -126,3 +126,15 @@ export const TRUE_UP_CHARGE_IN_FLIGHT_MESSAGE =
 // confirmOccurrenceActuals throws instead of a second, hand-typed copy that
 // could silently drift from it.
 export const TRUE_UP_INCREASE_ONLY_MESSAGE = "Reported actuals can only increase.";
+
+// ---------- Sub-project 6 events & ticketing ----------
+// Ticketing gate/status copy the web and mobile clients key on (pattern-
+// match an exact HttpsError message to branch UI behavior). Exact strings:
+// clients compare with ===.
+export const EVENT_SOLD_OUT_MESSAGE = "This tier is sold out.";
+export const EVENT_SALE_CLOSED_MESSAGE = "Ticket sales for this tier are closed.";
+export const EVENT_BUYER_CAP_MESSAGE = "You have reached the ticket limit for this event.";
+export const EVENT_NOT_ON_SALE_MESSAGE = "This event is not on sale.";
+export const TICKET_ALREADY_CHECKED_IN_MESSAGE = "Ticket already checked in.";
+export const TICKET_NOT_VALID_MESSAGE = "This ticket is not valid for entry.";
+export const TRANSFER_OFFER_SENT_MESSAGE = "If that account exists, the ticket offer is on its way.";

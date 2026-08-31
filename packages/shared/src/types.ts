@@ -833,3 +833,72 @@ export interface LedgerEntry {
   stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
   detail: string; at: number;
 }
+
+// ---------- Sub-project 6: events & ticketing ----------
+
+export type EventStatus = "draft" | "published" | "completed" | "cancelled";
+export type EventAct =
+  | { kind: "booking"; bookingId: string; musicianProfileId: string; name: string }
+  | { kind: "external"; name: string };
+export interface EventDoc {
+  curatorProfileId: string; title: string; description: string;
+  location: GigPublicLocation;             // reuses SP3's public-precision location type
+  startsAt: number; endsAt: number;
+  posterPath: string | null;               // a processed "poster" photo path belonging to the curator profile
+  status: EventStatus;
+  maxTicketsPerBuyer: number;              // default 8
+  lineup: EventAct[];
+  // Server-maintained projection of lineup's "booking" acts' musicianProfileId
+  // values, kept in sync wherever lineup is written. Task 9's musician public
+  // page query (array-contains on this field) needs a flat array rather than
+  // scanning lineup's discriminated-union entries per read.
+  lineupMusicianProfileIds: string[];
+  gigId: string | null;                    // set when promoted from a filled gig
+  createdAt: number; updatedAt: number;
+  cancelledAt?: number; completedAt?: number;
+}
+export interface TicketTierDoc {
+  name: string; priceCents: number;        // 0 = free RSVP
+  capacity: number; soldCount: number;     // server-maintained
+  saleStartsAt: number | null; saleEndsAt: number | null;
+  sortOrder: number;
+}
+export interface TicketFeePolicy { ticketFeePct: number; ticketFeeFixedCents: number; ticketFeeCapCents: number; }
+export type TicketOrderStatus = "pending" | "paid" | "expired" | "cancelled_refunded";
+export interface TicketOrderItem { tierId: string; quantity: number; unitPriceCents: number; tierName: string; }
+export interface TicketOrderDoc {
+  buyerUid: string; eventId: string; curatorProfileId: string;
+  items: TicketOrderItem[];
+  faceTotalCents: number; serviceFeeCents: number;
+  feePolicy: TicketFeePolicy;              // snapshotted at order creation, mirrors SP5's FeePolicy discipline
+  paymentIntentId: string | null;          // null for free orders
+  status: TicketOrderStatus;
+  refundedTicketIds: string[]; refundedCents: number;
+  // Face-value portion of refundedCents only (excludes any refunded service
+  // fee). Initialized 0 wherever an order is born; Task 6 maintains it on
+  // every refund, Task 7 reads it to compute the curator's T+1 payout base
+  // (100% of face value of paid, non-refunded tickets).
+  refundedFaceCents: number;
+  createdAt: number; expiresAt: number; paidAt?: number;
+}
+export type TicketStatus = "valid" | "checked_in" | "refunded" | "transferred";
+export interface TicketDoc {
+  eventId: string; tierId: string; tierName: string; orderId: string;
+  curatorProfileId: string;
+  qrSecret: string;                        // server-minted, owner-readable, possession = door proof
+  status: TicketStatus;
+  createdAt: number; checkedInAt?: number; transferredTo?: string;
+}
+export interface AttendeeDoc {             // events/{eventId}/attendees/{ticketId}, server-written projection
+  ownerUid: string; ownerName: string; tierId: string; tierName: string;
+  status: TicketStatus; checkedInAt?: number;
+}
+export type TicketTransferStatus = "offered" | "accepted" | "declined" | "expired";
+export interface TicketTransferDoc {
+  ticketId: string; eventId: string; fromUid: string; toUid: string;
+  status: TicketTransferStatus; createdAt: number; expiresAt: number; resolvedAt?: number;
+}
+// users/{uid}/ticketIndex/{eventId}: the valid-ticket proof firestore.rules
+// reads to prove a caller holds a ticket for THIS event, without a rules
+// read against the tickets collection itself. Server-written only.
+export interface TicketIndexDoc { count: number }
