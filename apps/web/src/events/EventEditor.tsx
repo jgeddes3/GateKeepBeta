@@ -425,7 +425,10 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
         <Card>
           <CardHeader><CardTitle>Location</CardTitle></CardHeader>
           <CardContent>
-            <LocationFields isVenue={isVenue} addressRequired={!isVenue} currentLabel={currentLabel} value={location} onChange={setLocation} />
+            <LocationFields
+              isVenue={isVenue} addressRequired={!isVenue} currentLabel={currentLabel} value={location} onChange={setLocation}
+              entityNoun="event"
+            />
           </CardContent>
         </Card>
       )}
@@ -470,6 +473,17 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
       const payload: UpdateEventPayload = {
         curatorProfileId: profileId, eventId: event.id, title: trimmedTitle, description: description.trim(),
         startsAt, endsAt, maxTicketsPerBuyer: maxTix, lineup,
+        // Fix round 1 (Important): updateEvent's own full-replace convention
+        // treats an absent posterPath as "clear it" (resolvePosterPath in
+        // functions/src/events.ts returns null for both undefined and
+        // null), the same discipline this callable family already applies
+        // to every other field. Without this, the first Save on any event
+        // that ever picks up a poster (today: none, since this task ships
+        // poster-less creation, see EventEditor's own header note) would
+        // silently wipe it. Carrying the event's own current value forward
+        // is this form's explicit "no change" signal, not a real edit: this
+        // form has no poster field of its own to edit.
+        posterPath: event.posterPath ?? null,
       };
       await httpsCallable(getFirebase().functions, "updateEvent")(payload);
       setSaved(true);
