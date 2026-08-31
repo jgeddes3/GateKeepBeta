@@ -118,6 +118,31 @@ describe("FakeStripe", () => {
     expect(b.clientSecret).toBe(a.clientSecret);
   });
 
+  it("createIntent produces a customer-less intent with a clientSecret", async () => {
+    const { id, clientSecret } = await fake.createIntent({ amountCents: 1500, idempotencyKey: `ci-${Date.now()}`, meta: {} });
+    expect(id).toMatch(/^pi_fake_/);
+    expect(clientSecret).toBe(`${id}_secret_fake`);
+  });
+
+  it("retrieveIntentStatus reads back a created intent's status, and throws for an unknown id", async () => {
+    const { id } = await fake.createIntent({ amountCents: 500, idempotencyKey: `ris-${Date.now()}`, meta: {} });
+    expect(await fake.retrieveIntentStatus(id)).toEqual({ status: "requires_confirmation" });
+    await expect(fake.retrieveIntentStatus(`pi_never_existed_${Date.now()}`)).rejects.toThrow("unknown payment intent");
+  });
+
+  it("cancelIntent cancels a not-yet-succeeded intent, but refuses one that already succeeded (money always wins over expiry)", async () => {
+    const { id: pendingId } = await fake.createIntent({ amountCents: 700, idempotencyKey: `cxi-${Date.now()}`, meta: {} });
+    expect(await fake.cancelIntent(pendingId)).toEqual({ status: "canceled" });
+    expect(await fake.retrieveIntentStatus(pendingId)).toEqual({ status: "canceled" });
+    // A second cancel of an already-canceled intent is a no-op, not a throw.
+    expect(await fake.cancelIntent(pendingId)).toEqual({ status: "canceled" });
+
+    const { id: chargedId } = await fake.chargeOffSession(
+      { customerId: "cus_cancel_test", amountCents: 800, idempotencyKey: `cxi2-${Date.now()}`, meta: {} });
+    await expect(fake.cancelIntent(chargedId)).rejects.toThrow("already succeeded");
+    expect(await fake.retrieveIntentStatus(chargedId)).toEqual({ status: "succeeded" }); // untouched
+  });
+
   it("refund cannot exceed the charge", async () => {
     const { id } = await fake.chargeOffSession({ customerId: "cus_x", amountCents: 1000, idempotencyKey: `r-${Date.now()}`, meta: {} });
     await fake.refund({ intentId: id, amountCents: 600, idempotencyKey: `rr1-${Date.now()}`, meta: {} });

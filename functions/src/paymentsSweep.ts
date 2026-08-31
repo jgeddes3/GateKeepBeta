@@ -48,11 +48,11 @@
  */
 
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { getFirestore, FieldPath } from "firebase-admin/firestore";
+import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
   SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
-  type BookingRequestDoc, type GigDoc, type PaymentDoc,
+  type BookingRequestDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc,
 } from "@gatekeep/shared";
 import {
   getStripe, stripeSecretKey, StripeCardDeclinedError, StripePaymentPendingError,
@@ -179,6 +179,13 @@ export interface PaymentsSweepReport {
   // was already flagged does not count again.
   delinquenciesDeclared: number;
   expiredRefunds: number;          // step 7: future-dated deposits refunded off an expired booking
+  // --- step 8: ticket order expiry (SP6 Task 5) ---
+  ticketOrdersExpired: number;         // pending -> expired, tier inventory released
+  // The intent could not be confirmed cancelable (most likely: it already
+  // succeeded), left "pending" with no write at all, for finalizeTicketOrder
+  // or the webhook to complete normally. Not an error: this is the expected
+  // shape of "money always wins over expiry".
+  ticketOrdersExpiryDeferred: number;
   // Per-step and per-anomaly failure counts — keyed, not fixed, so a new
   // anomaly gets a name instead of being folded into a neighbour's bucket.
   // NAMING: a per-doc/per-booking key is a SINGULAR noun phrase for the thing
@@ -197,6 +204,7 @@ function emptyReport(): PaymentsSweepReport {
     settlementsCharged: 0, settlementsDeclined: 0, settlementsPending: 0, settlementsRaced: 0,
     transfersMade: 0, retriesAttempted: 0,
     delinquenciesDeclared: 0, expiredRefunds: 0,
+    ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0,
     errors: {},
   };
 }
@@ -1145,6 +1153,86 @@ async function refundExpiredBookingDeposits(
 }
 
 // ---------------------------------------------------------------------------
+// Step 8: EXPIRE stale ticket orders (SP6 Task 5)
+// ---------------------------------------------------------------------------
+// A "pending" ticket order holds its tier inventory (soldCount was
+// incremented at createTicketOrder) until either the buyer completes payment
+// (completeOrderTx flips it to "paid") or its TTL elapses. This step reclaims
+// the latter case.
+//
+// MONEY ALWAYS WINS OVER EXPIRY, the same SP5 invariant paymentsCore.ts's
+// header states for the booking side. The PaymentIntent cancel is attempted
+// FIRST, entirely outside any Firestore transaction (Stripe calls never run
+// inside one, same rule every other step in this file follows). Only once the
+// cancel has actually succeeded (or there was never an intent to cancel) does
+// this step touch Firestore to release the inventory and mark the order
+// expired. If the cancel throws for ANY reason, most likely because the
+// intent already succeeded, this step makes NO write at all for that order:
+// it is left exactly "pending", so finalizeTicketOrder or the
+// payment_intent.succeeded webhook can still complete it normally on the next
+// attempt.
+
+async function expireOneTicketOrder(
+  db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
+  report: PaymentsSweepReport,
+): Promise<void> {
+  // FRESH read: this step may cancel a Stripe intent off what it reads here,
+  // and the paginated page it arrived in can be minutes (and hundreds of
+  // docs) old.
+  const freshSnap = await doc.ref.get();
+  const order = freshSnap.data() as TicketOrderDoc | undefined;
+  if (!order || order.status !== "pending") return; // resolved since the page was read
+
+  if (order.paymentIntentId) {
+    try {
+      await getStripe().cancelIntent(order.paymentIntentId);
+    } catch (e) {
+      console.info(
+        `paymentsSweep: ticket order ${doc.id} expiry deferred, intent ${order.paymentIntentId} could not be confirmed cancelable, left pending for finalize/webhook`, e);
+      report.ticketOrdersExpiryDeferred++;
+      return;
+    }
+  }
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(doc.ref);
+      const o = snap.data() as TicketOrderDoc | undefined;
+      if (!o || o.status !== "pending") return; // raced since the fresh read above
+      for (const item of o.items) {
+        tx.update(db.doc(`events/${o.eventId}/tiers/${item.tierId}`), {
+          soldCount: FieldValue.increment(-item.quantity),
+        });
+      }
+      tx.update(doc.ref, { status: "expired" });
+    });
+    report.ticketOrdersExpired++;
+  } catch (e) {
+    console.error(`paymentsSweep: failed to expire ticket order ${doc.id}`, e);
+    bumpError(report, "ticketOrderExpire");
+  }
+}
+
+async function expireTicketOrders(
+  db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
+): Promise<void> {
+  const q = db.collection("orders")
+    .where("status", "==", "pending")
+    .where("expiresAt", "<", now)
+    .orderBy("expiresAt");
+  for await (const page of paginate(q, PAGE_SIZE)) {
+    for (const doc of page) {
+      try {
+        await expireOneTicketOrder(db, doc, report);
+      } catch (e) {
+        console.error(`paymentsSweep: ticket order expiry failed for ${doc.id}`, e);
+        bumpError(report, "ticketOrderExpire");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 // Every step is isolated: one failing step is logged and counted, and the rest
 // still run. Ordering is deliberate — reconciliation first (it can turn staged
@@ -1172,6 +1260,7 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
       }),
     },
     { name: "expiredRefunds", run: () => refundExpiredBookingDeposits(db, now, report) },
+    { name: "ticketOrderExpiry", run: () => expireTicketOrders(db, now, report) },
   ];
 
   for (const step of steps) {

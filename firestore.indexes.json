@@ -159,6 +159,11 @@
       { "fieldPath": "curatorProfileId", "order": "ASCENDING" },
       { "fieldPath": "deposit.status", "order": "ASCENDING" },
       { "fieldPath": "deposit.depositAttempts", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "expiresAt", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

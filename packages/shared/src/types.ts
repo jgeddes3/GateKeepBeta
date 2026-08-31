@@ -85,7 +85,9 @@ export interface AuditLogDoc {
 export interface NotificationDoc {
   title: string;
   body: string;
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking";
+  // SP6 Task 5: "ticket" is a ticket-order purchase confirmation; its refId
+  // is the eventId (see refId's own comment below).
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -825,13 +827,23 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // it a failed payout would be indistinguishable in the ledger from a paid
   // one. Keyed off the payout's own id, so it can never collide with the
   // request-time row (different kind, same object).
-  | "payout_failed";
+  | "payout_failed"
+  // SP6 Task 5: a completed ticket order (paid or free). Keyed deterministically
+  // off the order's own id (writeLedger's `{kind}:{stripeId}` doc-id discipline,
+  // stripeId set to orderId here since a free order has no PaymentIntent at all),
+  // so a redelivered webhook and a racing finalize/webhook pair can never double
+  // count the same order.
+  | "ticket_sale";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign
   bookingId: string | null; gigId: string | null; profileId: string | null;
   stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
   detail: string; at: number;
+  // SP6 ticketing rows only (eventId/buyerUid have no SP5 booking-money
+  // equivalent, so every SP5 entry simply omits them). Optional so every
+  // existing SP5 call site keeps compiling unchanged.
+  eventId?: string | null; buyerUid?: string | null;
 }
 
 // ---------- Sub-project 6: events & ticketing ----------

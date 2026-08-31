@@ -147,6 +147,25 @@ export interface StripeLike {
   createOnSessionIntent(params: {
     customerId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
   }): Promise<{ id: string; clientSecret: string }>;
+  // SP6 Task 5: a one-time, customer-less on-session PaymentIntent (ticket
+  // checkout's shape, a buyer with no saved Stripe Customer confirming once
+  // with Elements), distinct from createOnSessionIntent's customer-scoped
+  // past-due recovery contract above. Same idempotency semantics as every
+  // other creation call.
+  createIntent(params: {
+    amountCents: number; idempotencyKey: string; meta: Record<string, string>;
+  }): Promise<{ id: string; clientSecret: string }>;
+  // SP6 Task 5: reads a PaymentIntent's CURRENT status straight from Stripe,
+  // the server-side verification finalizeTicketOrder needs so it never
+  // simply trusts a client's own claim that a charge succeeded.
+  retrieveIntentStatus(intentId: string): Promise<{ status: string }>;
+  // SP6 Task 5: cancels a PaymentIntent, used by the ticket-order expiry sweep
+  // to release a card hold when a pending order's TTL elapses before payment.
+  // Throws if the intent is no longer cancelable (real Stripe: it already
+  // succeeded). Callers must treat ANY throw here as "the cancel is not
+  // confirmed safe" and leave the underlying order untouched rather than
+  // assume it took effect (money always wins over expiry).
+  cancelIntent(intentId: string): Promise<{ status: string }>;
   refund(params: { intentId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string> }): Promise<{ id: string }>;
   transferToAccount(params: {
     accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
@@ -461,6 +480,42 @@ export class FakeStripe implements StripeLike {
       return { id, clientSecret: `${id}_secret_fake` };
     }, `${p.customerId}:${p.amountCents}`);
   }
+  async createIntent(p: { amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
+    return this.idem(p.idempotencyKey, async () => {
+      const id = this.newId("pi");
+      await this.objRef(id).set({
+        kind: "payment_intent", amountCents: p.amountCents, customerId: null,
+        meta: p.meta, refundedCents: 0, status: "requires_confirmation",
+      });
+      return { id, clientSecret: `${id}_secret_fake` };
+    }, `${p.amountCents}`);
+  }
+  async retrieveIntentStatus(intentId: string): Promise<{ status: string }> {
+    const snap = await this.objRef(intentId).get();
+    if (!snap.exists || snap.data()?.kind !== "payment_intent") {
+      throw new Error(`FakeStripe: unknown payment intent ${intentId}`);
+    }
+    return { status: snap.data()!.status as string };
+  }
+  async cancelIntent(intentId: string): Promise<{ status: string }> {
+    const ref = this.objRef(intentId);
+    // Transactional: the status check and the flip to "canceled" must be one
+    // atomic read-then-write, same rationale as refund/transferToAccount
+    // below, so a racing chargeOffSession/confirm cannot land between them.
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists || snap.data()?.kind !== "payment_intent") {
+        throw new Error(`FakeStripe: unknown payment intent ${intentId}`);
+      }
+      const status = snap.data()!.status as string;
+      if (status === "succeeded") {
+        throw new Error(`FakeStripe: cannot cancel payment intent ${intentId}, it already succeeded`);
+      }
+      if (status === "canceled") return { status: "canceled" }; // already canceled: idempotent no-op
+      tx.update(ref, { status: "canceled" });
+      return { status: "canceled" };
+    });
+  }
   async refund(p: { intentId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
     return this.idem(p.idempotencyKey, async () => {
       const ref = this.objRef(p.intentId);
@@ -761,6 +816,21 @@ export class RealStripe implements StripeLike {
       setup_future_usage: "off_session",
     }, { idempotencyKey: p.idempotencyKey });
     return { id: pi.id, clientSecret: pi.client_secret! };
+  }
+  async createIntent(p: { amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
+    const pi = await this.s.paymentIntents.create({
+      amount: p.amountCents, currency: "usd", metadata: p.meta,
+      automatic_payment_methods: { enabled: true },
+    }, { idempotencyKey: p.idempotencyKey });
+    return { id: pi.id, clientSecret: pi.client_secret! };
+  }
+  async retrieveIntentStatus(intentId: string): Promise<{ status: string }> {
+    const pi = await this.s.paymentIntents.retrieve(intentId);
+    return { status: pi.status };
+  }
+  async cancelIntent(intentId: string): Promise<{ status: string }> {
+    const pi = await this.s.paymentIntents.cancel(intentId);
+    return { status: pi.status };
   }
   async refund(p: { intentId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
     const r = await this.s.refunds.create(

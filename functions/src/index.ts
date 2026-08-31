@@ -27,3 +27,4 @@ export {
 // webhook registrations (see paymentsWebhook.ts's header).
 export { requestPayout } from "./paymentsPayouts.js";
 export { createEvent, updateEvent, setEventTiers, publishEvent } from "./events.js";
+export { createTicketOrder, finalizeTicketOrder } from "./ticketing.js";

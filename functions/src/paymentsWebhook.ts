@@ -2,6 +2,10 @@ import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { isValidDocId } from "@gatekeep/shared";
 import { getStripe, stripeSecretKey, stripeWebhookSecret, StripeWebhookSecretMissingError } from "./stripeClient.js";
+// SP6 Task 5: registered directly below (not self-registered from
+// ticketing.ts, unlike the SP5 handlers this file's own header describes) so
+// this file stays the ONE place a reader finds the full purpose registry.
+import { completeOrderTicketsHandler } from "./ticketing.js";
 
 // The codebase's ONLY non-callable HTTPS entry point. Contract:
 //  - raw-body signature verification (RealStripe.constructWebhookEvent throws
@@ -51,6 +55,8 @@ export const webhookHandlers: Record<string, WebhookHandler> = {};
 //     "settlement"     -> paymentsSettlement.ts  (the T+3 charge's tail)
 //     "paydue"         -> paymentsSettlement.ts  (payPastDue, settlement debt)
 //     "paydue_deposit" -> paymentsSettlement.ts  (payPastDue, deposit debt)
+//     "tickets"        -> ticketing.ts (SP6 Task 5: ticket order completion,
+//                          registered below rather than self-registered)
 //   METADATA-ONLY, with NO handler BY DESIGN — these are not charges a saga
 //   waits on, they are outbound moves that either completed synchronously or
 //   have no follow-up state to write. The metadata exists as a RECOVERY
@@ -72,6 +78,10 @@ export const webhookHandlers: Record<string, WebhookHandler> = {};
 // in-flight intent whose metadata still carried the old spelling, with no
 // handler to finalize it. Add new purposes in snake_case.
 export const paymentIntentSucceededHandlers: Record<string, WebhookHandler> = {};
+// SP6 Task 5: ticket order completion. Registered here (see the import
+// above) rather than self-registered from ticketing.ts, per that task's
+// convention.
+paymentIntentSucceededHandlers["tickets"] = completeOrderTicketsHandler;
 
 webhookHandlers["payment_intent.succeeded"] = async (object, eventId, account) => {
   // M1 (branch audit): a payment_intent.succeeded carrying a top-level `account`
