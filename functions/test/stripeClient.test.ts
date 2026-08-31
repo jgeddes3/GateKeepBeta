@@ -134,13 +134,18 @@ describe("FakeStripe", () => {
     const { id: pendingId } = await fake.createIntent({ amountCents: 700, idempotencyKey: `cxi-${Date.now()}`, meta: {} });
     expect(await fake.cancelIntent(pendingId)).toEqual({ status: "canceled" });
     expect(await fake.retrieveIntentStatus(pendingId)).toEqual({ status: "canceled" });
-    // A second cancel of an already-canceled intent is a no-op, not a throw.
-    expect(await fake.cancelIntent(pendingId)).toEqual({ status: "canceled" });
 
     const { id: chargedId } = await fake.chargeOffSession(
       { customerId: "cus_cancel_test", amountCents: 800, idempotencyKey: `cxi2-${Date.now()}`, meta: {} });
     await expect(fake.cancelIntent(chargedId)).rejects.toThrow("already succeeded");
     expect(await fake.retrieveIntentStatus(chargedId)).toEqual({ status: "succeeded" }); // untouched
+  });
+
+  it("cancelIntent refuses a SECOND cancel of an already-canceled intent, mirroring real Stripe's rejection rather than treating it as an idempotent no-op", async () => {
+    const { id } = await fake.createIntent({ amountCents: 900, idempotencyKey: `cxi3-${Date.now()}`, meta: {} });
+    expect(await fake.cancelIntent(id)).toEqual({ status: "canceled" });
+    await expect(fake.cancelIntent(id)).rejects.toThrow("already canceled");
+    expect(await fake.retrieveIntentStatus(id)).toEqual({ status: "canceled" }); // untouched
   });
 
   it("refund cannot exceed the charge", async () => {

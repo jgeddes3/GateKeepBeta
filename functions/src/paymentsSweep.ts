@@ -1163,14 +1163,25 @@ async function refundExpiredBookingDeposits(
 // MONEY ALWAYS WINS OVER EXPIRY, the same SP5 invariant paymentsCore.ts's
 // header states for the booking side. The PaymentIntent cancel is attempted
 // FIRST, entirely outside any Firestore transaction (Stripe calls never run
-// inside one, same rule every other step in this file follows). Only once the
-// cancel has actually succeeded (or there was never an intent to cancel) does
-// this step touch Firestore to release the inventory and mark the order
-// expired. If the cancel throws for ANY reason, most likely because the
-// intent already succeeded, this step makes NO write at all for that order:
+// inside one, same rule every other step in this file follows). Only once
+// the cancel is CONFIRMED to have left the intent canceled (either because
+// this call's own cancelIntent just succeeded, or because a throw from it is
+// followed by a retrieveIntentStatus read confirming "canceled", see
+// expireOneTicketOrder below) does this step touch Firestore to release the
+// inventory and mark the order expired. A throw from cancelIntent that
+// cannot be confirmed "canceled" this way (most commonly because the intent
+// already succeeded, i.e. money moved) makes NO write at all for that order:
 // it is left exactly "pending", so finalizeTicketOrder or the
 // payment_intent.succeeded webhook can still complete it normally on the next
 // attempt.
+//
+// THE retrieveIntentStatus FALLBACK EXISTS BECAUSE cancelIntent's OWN THROW
+// IS AMBIGUOUS between "already succeeded" and "already canceled" (see its
+// doc comment on StripeLike): a prior sweep pass can have its cancelIntent
+// call succeed and then crash before the Firestore transaction below
+// commits, leaving the order "pending" with an intent that is now, on this
+// pass, ALREADY canceled. Treating that ambiguous throw as "always defer"
+// would strand such an order pending, with its inventory held, forever.
 
 async function expireOneTicketOrder(
   db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
@@ -1187,10 +1198,29 @@ async function expireOneTicketOrder(
     try {
       await getStripe().cancelIntent(order.paymentIntentId);
     } catch (e) {
-      console.info(
-        `paymentsSweep: ticket order ${doc.id} expiry deferred, intent ${order.paymentIntentId} could not be confirmed cancelable, left pending for finalize/webhook`, e);
-      report.ticketOrdersExpiryDeferred++;
-      return;
+      // The cancel call itself failed. Two distinct causes throw identically
+      // here (cancelIntent's own doc comment): the intent already succeeded
+      // (money moved), or it was already canceled, most likely by THIS
+      // step's own cancelIntent call on a prior pass whose Firestore
+      // transaction below then failed to commit (a crash, contention). A
+      // canceled intent can NEVER later succeed, so that second case is safe
+      // to proceed on; anything else (including a failure to even read the
+      // status) must stay deferred, per money always wins over expiry.
+      let status: string | undefined;
+      try {
+        status = (await getStripe().retrieveIntentStatus(order.paymentIntentId)).status;
+      } catch (statusError) {
+        console.error(
+          `paymentsSweep: ticket order ${doc.id} could not confirm intent ${order.paymentIntentId}'s status after a failed cancel, left pending`, statusError);
+      }
+      if (status !== "canceled") {
+        console.info(
+          `paymentsSweep: ticket order ${doc.id} expiry deferred, intent ${order.paymentIntentId} could not be confirmed cancelable (status=${status ?? "unknown"}), left pending for finalize/webhook`, e);
+        report.ticketOrdersExpiryDeferred++;
+        return;
+      }
+      // Confirmed already canceled: fall through to the same expiry
+      // transaction the ordinary cancel-succeeded path runs below.
     }
   }
 

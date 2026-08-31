@@ -84,13 +84,22 @@ export const createTicketOrder = onCall<CreateTicketOrderInput>(
     const uniqueTierIds = [...new Set(reqItems.map((it) => it.tierId))];
     const tierRefs = uniqueTierIds.map((id) => eventRef.collection("tiers").doc(id));
     const ticketIndexRef = db.doc(`users/${uid}/ticketIndex/${eventId}`);
+    // Cap-laundering guard: a buyer opening several PENDING orders for the
+    // same event in parallel (multiple tabs/devices, each individually under
+    // the cap) must not be able to jointly exceed maxTicketsPerBuyer just
+    // because none of them has paid yet. ticketIndex.count alone only counts
+    // tickets already MINTED, so it is blind to reservations still in
+    // flight; this query closes that gap. Bounded by the buyer's own pending
+    // orders for ONE event, which is small.
+    const pendingOrdersQuery = db.collection("orders")
+      .where("buyerUid", "==", uid).where("eventId", "==", eventId).where("status", "==", "pending");
 
     let faceTotalCents = 0;
     let serviceFeeCents = 0;
 
     await db.runTransaction(async (tx) => {
-      const [tierSnaps, ticketIndexSnap] = await Promise.all([
-        Promise.all(tierRefs.map((ref) => tx.get(ref))), tx.get(ticketIndexRef),
+      const [tierSnaps, ticketIndexSnap, pendingOrdersSnap] = await Promise.all([
+        Promise.all(tierRefs.map((ref) => tx.get(ref))), tx.get(ticketIndexRef), tx.get(pendingOrdersQuery),
       ]);
       const tiers = new Map<string, TicketTierDoc>();
       tierSnaps.forEach((snap) => { if (snap.exists) tiers.set(snap.id, snap.data() as TicketTierDoc); });
@@ -111,7 +120,11 @@ export const createTicketOrder = onCall<CreateTicketOrderInput>(
 
       const totalQty = items.reduce((sum, it) => sum + it.quantity, 0);
       const heldCount = (ticketIndexSnap.data() as TicketIndexDoc | undefined)?.count ?? 0;
-      if (heldCount + totalQty > event.maxTicketsPerBuyer) {
+      const pendingQty = pendingOrdersSnap.docs.reduce((sum, d) => {
+        const o = d.data() as TicketOrderDoc;
+        return sum + o.items.reduce((s, it) => s + it.quantity, 0);
+      }, 0);
+      if (heldCount + pendingQty + totalQty > event.maxTicketsPerBuyer) {
         throw new HttpsError("failed-precondition", EVENT_BUYER_CAP_MESSAGE);
       }
 

@@ -198,6 +198,40 @@ describe("createTicketOrder + finalizeTicketOrder", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: "You have reached the ticket limit for this event." });
   });
 
+  it("rejects cap laundering via a second PENDING order (parallel tabs/devices), and allows it again once the first order expires", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cap2", { maxTicketsPerBuyer: 4 });
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cap2buyer");
+
+    // First order: 3 tickets, under the cap of 4, left pending (never paid).
+    const first = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 3 }] }, buyer.user);
+    const firstOrder = (await adb.doc(`orders/${first.orderId}`).get()).data() as TicketOrderDoc;
+    expect(firstOrder.status).toBe("pending");
+
+    // A second, concurrent order for 2 more would total 5 held+pending
+    // tickets against a cap of 4 (ticketIndex.count is still 0; the first
+    // order hasn't paid). Rejected even though ticketIndex alone says
+    // nothing is held yet: the guard must count the buyer's OTHER pending
+    // orders for this event, not just minted tickets.
+    await expect(callFn("createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: "You have reached the ticket limit for this event." });
+
+    // Expire the first order (backdate + sweep, the real release path) and
+    // confirm the SAME request that was just rejected is allowed again.
+    await adb.doc(`orders/${first.orderId}`).update({ expiresAt: Date.now() - 1000 });
+    await runPaymentsSweep(Date.now());
+    const expiredFirst = (await adb.doc(`orders/${first.orderId}`).get()).data() as TicketOrderDoc;
+    expect(expiredFirst.status).toBe("expired");
+
+    const second = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user);
+    const secondOrder = (await adb.doc(`orders/${second.orderId}`).get()).data() as TicketOrderDoc;
+    expect(secondOrder.status).toBe("pending");
+  });
+
   it("rejects when a tier's sale window is closed", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("sw1");
     await addTiersAndPublish(profileId, eventId, owner.user,
@@ -327,6 +361,42 @@ describe("ticket order expiry sweep", () => {
 
     const intent = (await adb.doc(`stripeFake/state/objects/${intentId}`).get()).data();
     expect(intent?.status).toBe("canceled");
+  });
+
+  it("recovers from the cancel-then-transaction-fail crash window: a prior pass's successful cancel that never committed its own expiry write is finished, not deferred forever", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("exp4");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("exp4buyer");
+
+    const { orderId, clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user);
+    const intentId = clientSecret!.replace(/_secret_fake$/, "");
+
+    // Force the crash window directly: a PRIOR sweep pass's cancelIntent
+    // already succeeded (the intent is canceled), but its own Firestore
+    // transaction never committed, so the order is still "pending" and the
+    // tier still holds the reservation. A same-intent cancel on the next
+    // pass would otherwise throw "already canceled" forever and strand this
+    // order pending with its inventory held.
+    await adb.doc(`stripeFake/state/objects/${intentId}`).update({ status: "canceled" });
+    await adb.doc(`orders/${orderId}`).update({ expiresAt: Date.now() - 1000 });
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.ticketOrdersExpired).toBeGreaterThanOrEqual(1);
+
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.status).toBe("expired");
+    const tierAfter = (await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data();
+    expect(tierAfter?.soldCount).toBe(0);
+
+    // A second pass is a no-op: the order is no longer "pending", so the
+    // sweep's own query never revisits it, and inventory is released
+    // exactly once.
+    await runPaymentsSweep(Date.now());
+    const tierStill = (await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data();
+    expect(tierStill?.soldCount).toBe(0);
   });
 
   it("a free order (no PaymentIntent) that never should have stayed pending is unaffected: paid orders are never touched", async () => {

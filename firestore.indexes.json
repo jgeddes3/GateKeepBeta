@@ -164,6 +164,12 @@
     "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "expiresAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "buyerUid", "order": "ASCENDING" },
+      { "fieldPath": "eventId", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

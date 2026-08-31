@@ -161,10 +161,22 @@ export interface StripeLike {
   retrieveIntentStatus(intentId: string): Promise<{ status: string }>;
   // SP6 Task 5: cancels a PaymentIntent, used by the ticket-order expiry sweep
   // to release a card hold when a pending order's TTL elapses before payment.
-  // Throws if the intent is no longer cancelable (real Stripe: it already
-  // succeeded). Callers must treat ANY throw here as "the cancel is not
-  // confirmed safe" and leave the underlying order untouched rather than
-  // assume it took effect (money always wins over expiry).
+  // Throws if the intent is no longer cancelable: it already succeeded (real
+  // Stripe: money moved, cannot cancel a succeeded intent), OR it was already
+  // canceled by a prior call. The second case is real Stripe's actual
+  // behavior, not a modeling choice: canceling an already-canceled
+  // PaymentIntent is REJECTED, not treated as an idempotent no-op, so
+  // FakeStripe mirrors that exactly and a caller must not assume a double
+  // cancel silently succeeds.
+  //
+  // Callers must treat ANY throw here as "this call did not confirm the
+  // cancel took effect" and, by default, leave the underlying order
+  // untouched (money always wins over expiry). A caller that needs to tell
+  // "already succeeded" apart from "already canceled by an earlier call of
+  // my own" (e.g. to recover from a crash between its own successful cancel
+  // and the write that should have followed it) should call
+  // retrieveIntentStatus after the throw: "canceled" is safe to treat as if
+  // this call had just succeeded; anything else must stay deferred.
   cancelIntent(intentId: string): Promise<{ status: string }>;
   refund(params: { intentId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string> }): Promise<{ id: string }>;
   transferToAccount(params: {
@@ -511,7 +523,12 @@ export class FakeStripe implements StripeLike {
       if (status === "succeeded") {
         throw new Error(`FakeStripe: cannot cancel payment intent ${intentId}, it already succeeded`);
       }
-      if (status === "canceled") return { status: "canceled" }; // already canceled: idempotent no-op
+      if (status === "canceled") {
+        // Mirrors real Stripe: canceling an already-canceled PaymentIntent is
+        // REJECTED, not treated as an idempotent no-op (see cancelIntent's
+        // doc comment on StripeLike).
+        throw new Error(`FakeStripe: cannot cancel payment intent ${intentId}, it is already canceled`);
+      }
       tx.update(ref, { status: "canceled" });
       return { status: "canceled" };
     });
