@@ -2,7 +2,7 @@
 // owned by the seeded test-curator@gatekeep.dev account's @testvenue
 // profile (see seed-test-accounts.ts). Task 9 (the public event page and
 // buy flow) needs a real published event to load /e/[eventId] against, and
-// no curator-side UI to create one exists yet (that's Task 10) — this
+// no curator-side UI to create one exists yet (that's Task 10): this
 // script is the standalone alternative the task's own brief calls for.
 // Generically useful beyond this one task: any later manual or scripted
 // check of the public event page, the buy flow, or the two profile pages'
@@ -18,14 +18,14 @@
 // exercising that query path (it compiles and returns empty, not an error)
 // is exactly what Task 9's own live-verification recipe asks for.
 //
-// Usage (emulator only — start `pnpm emu`, then seed-test-accounts.ts,
+// Usage (emulator only, start `pnpm emu`, then seed-test-accounts.ts,
 // FIRST):
 //   FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 \
 //     pnpm tsx scripts/seed-test-event.ts
 //
 // Idempotent-ish: re-running creates a SECOND event each time (createEvent
 // has no natural idempotency key to collide on, unlike seed-test-accounts.ts's
-// handle-keyed profiles) — harmless for its purpose (a disposable local
+// handle-keyed profiles): harmless for its purpose (a disposable local
 // fixture), just prints a fresh eventId/URL each run.
 import { initializeApp as initAdminApp, getApps as getAdminApps } from "firebase-admin/app";
 import { getFirestore as getAdminFirestore } from "firebase-admin/firestore";
@@ -44,7 +44,7 @@ const inEmulator = !!process.env.FIREBASE_AUTH_EMULATOR_HOST || !!process.env.FI
 if (!inEmulator) {
   console.error(
     "Refusing: no emulator hosts set. This script authenticates as the seeded test-curator account, whose\n" +
-    "password is public in this repo — it must never run against a real project. Set FIREBASE_AUTH_EMULATOR_HOST\n" +
+    "password is public in this repo: it must never run against a real project. Set FIREBASE_AUTH_EMULATOR_HOST\n" +
     "and FIRESTORE_EMULATOR_HOST first (see seed-test-accounts.ts's own usage comment).");
   process.exit(1);
 }

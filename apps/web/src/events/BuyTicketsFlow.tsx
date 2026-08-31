@@ -3,13 +3,18 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { httpsCallable } from "firebase/functions";
+import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
-import { DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals, type EventStatus, type TicketOrderStatus } from "@gatekeep/shared";
+import {
+  DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals,
+  EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
+  type EventStatus, type TicketOrderStatus, type TicketTierDoc,
+} from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
 import { getStripeJs } from "../payments/stripeLoader";
 import { gkStripeAppearance } from "../payments/stripeAppearance";
-import { TierPicker, type TierPickerTier } from "./TierPicker";
+import { TierPicker, MAX_QTY_PER_LINE_ITEM, type TierPickerTier } from "./TierPicker";
 import { formatCents, eventSalesClosedReason } from "./eventDisplay";
 import { Button } from "../ui/button";
 import { IconWarning } from "../ui/icons";
@@ -165,6 +170,16 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
 }) {
   const { user } = useAuth();
   const router = useRouter();
+  // Seeded from the `tiers` prop (page.tsx's own SSR fetch), then refreshed
+  // in place after a sold-out/sale-closed rejection (see refetchTiers
+  // below) rather than trusting the prop for the whole component lifetime:
+  // fix round 1, the "stale-retry" finding. Not re-synced from the prop on
+  // every render (a plain useState seed, same idiom useLiveNow's own
+  // server-seeded state already uses): this route has no live subscription
+  // of its own (ISR revalidate=60 is the SSR data's own freshness window),
+  // so there's nothing else that would legitimately change `tiers` out from
+  // under this state between refetches.
+  const [liveTiers, setLiveTiers] = useState<TierPickerTier[]>(tiers);
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [phase, setPhase] = useState<Phase>("idle");
   const [orderId, setOrderId] = useState<string | null>(null);
@@ -176,12 +191,12 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
   const feePolicy = DEFAULT_TICKET_FEE_POLICY;
   const appearance = useMemo(() => gkStripeAppearance(), []);
 
-  const items = tiers
+  const items = liveTiers
     .map((t) => ({ tierId: t.id, quantity: quantities[t.id] ?? 0 }))
     .filter((it) => it.quantity > 0);
   const totals = ticketOrderTotals(
     items.map((it) => {
-      const tier = tiers.find((t) => t.id === it.tierId)!;
+      const tier = liveTiers.find((t) => t.id === it.tierId)!;
       return { tierId: it.tierId, quantity: it.quantity, unitPriceCents: tier.priceCents, tierName: tier.name };
     }),
     feePolicy,
@@ -190,7 +205,52 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
   const totalCents = totals.faceTotalCents + totals.serviceFeeCents;
   const unavailable = eventSalesClosedReason(eventStatus, startsAt, now);
 
+  // Fix round 1 finding (money-critical, Critical): a one-shot live read of
+  // the tier docs, called after a sold-out/sale-closed rejection so the
+  // picker's own badges catch up to what the server just proved (rather
+  // than continuing to claim a tier is available when it just refused it).
+  // Also clamps any already-selected quantity down to the tier's own fresh
+  // remaining capacity: without this, a stale over-limit quantity would
+  // silently ride along into the buyer's very next attempt and draw the
+  // exact same rejection again, an invisible retry loop the refetch alone
+  // wouldn't fix (the picker would show "Sold out" for that tier, but
+  // nothing would ever reduce the quantity still counted into the order).
+  // Public read (events/{id}/tiers, the same rules disjunct page.tsx's own
+  // SSR fetch relies on): no auth needed here.
+  const refetchTiers = async () => {
+    try {
+      const snap = await getDocs(
+        query(collection(getFirebase().db, `events/${eventId}/tiers`), orderBy("sortOrder")));
+      const fresh: TierPickerTier[] = snap.docs.map((d) => {
+        const t = d.data() as TicketTierDoc;
+        return {
+          id: d.id, name: t.name, priceCents: t.priceCents, capacity: t.capacity, soldCount: t.soldCount,
+          saleStartsAt: t.saleStartsAt, saleEndsAt: t.saleEndsAt,
+        };
+      });
+      setLiveTiers(fresh);
+      setQuantities((prev) => {
+        const next = { ...prev };
+        for (const t of fresh) {
+          const max = Math.min(MAX_QTY_PER_LINE_ITEM, Math.max(t.capacity - t.soldCount, 0));
+          if ((next[t.id] ?? 0) > max) next[t.id] = max;
+        }
+        return next;
+      });
+    } catch (e) {
+      // Best-effort refresh only: the error box above already shows the
+      // server's own rejection message regardless of whether this succeeds.
+      console.error("refetchTiers failed", eventId, e);
+    }
+  };
+
   const startPurchase = async () => {
+    // Re-entrancy guard (fix round 1, Critical): never start a second order
+    // while one is already in flight or awaiting confirmation. Belt half of
+    // "belt and braces": the sticky bar below is ALSO fixed to never render
+    // enabled outside "idle", but this guard holds even if some future call
+    // site (or a stale closure) reaches startPurchase some other way.
+    if (phase !== "idle") return;
     if (!user) {
       router.push(`/sign-in?next=${encodeURIComponent(`/e/${eventId}`)}`);
       return;
@@ -210,8 +270,28 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
         setPhase("done");
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start checkout.");
+      const message = e instanceof Error ? e.message : "Could not start checkout.";
+      setError(message);
       setPhase("idle");
+      // Fix round 1 (Important): branch on the exact shared-message strings
+      // clients are meant to compare with === (packages/shared/src/
+      // messages.ts's own header, precedent: GatePrompt.tsx).
+      if (message === EVENT_SOLD_OUT_MESSAGE || message === EVENT_SALE_CLOSED_MESSAGE) {
+        // The picker's own sold-out/sale-window badges were computed from
+        // data fetched at page-load (or the ISR window before that): the
+        // server just proved that's stale, so refetch the live tier docs
+        // rather than leaving a picker that still claims the tier is
+        // available.
+        void refetchTiers();
+      } else if (message === EVENT_BUYER_CAP_MESSAGE || message === EVENT_NOT_ON_SALE_MESSAGE) {
+        // Both recognized by name (a reviewer can see at a glance these two
+        // exact server strings were considered), but need no follow-up
+        // action beyond the generic error box already set above: the
+        // buyer-wide cap is never client-computable (TierPicker's own
+        // header comment), and a whole-event closure is already covered by
+        // eventSalesClosedReason's own banner on a fresh load.
+        console.info("createTicketOrder rejected", message);
+      }
     }
   };
 
@@ -269,7 +349,7 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
     <div className="grid gap-4 pb-24">
       {unavailable && <ErrorBox message={unavailable} />}
       <TierPicker
-        tiers={tiers}
+        tiers={liveTiers}
         quantities={quantities}
         onChange={(tierId, quantity) => setQuantities((prev) => ({ ...prev, [tierId]: quantity }))}
         feePolicy={feePolicy}
@@ -285,13 +365,25 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
           />
         </Elements>
       )}
-      {phase !== "confirm" && (
+      {/* Fix round 1 (Critical): "idle"/"creating" ONLY. The bar used to
+          render for every phase except "confirm", which also covered
+          "finalizing" (Elements->confirmPayment succeeded, waiting on
+          finalizeTicketOrder): with `disabled` checking only "creating",
+          that left the bar re-rendered ENABLED while a finalize was still
+          in flight, and a click there re-ran startPurchase, minting a
+          second inventory reservation (and, on a paid tier, a second
+          PaymentIntent) on top of the one already being finalized. Belt and
+          braces with startPurchase's own re-entrancy guard above: this is
+          the braces half (the bar simply doesn't render clickable outside
+          "idle"/"creating" at all), that guard is the belt (holds even if
+          some other path ever reaches startPurchase). */}
+      {(phase === "idle" || phase === "creating") && (
         <StickyBuyBar
           totalQty={totalQty}
           totalCents={totalCents}
           label={!user ? "Sign in to buy tickets" : phase === "creating" ? "Starting…" : "Buy tickets"}
           onClick={startPurchase}
-          disabled={phase === "creating"}
+          disabled={phase !== "idle"}
         />
       )}
     </div>

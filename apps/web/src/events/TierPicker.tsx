@@ -21,7 +21,10 @@ import { IconMinus, IconPlus } from "../ui/icons";
 // orders) is deliberately NOT pre-computed here (the brief's own ruling):
 // it depends on server-only state, so a rejection just surfaces
 // EVENT_BUYER_CAP_MESSAGE verbatim instead of guessing at it.
-const MAX_QTY_PER_LINE_ITEM = 10;
+// Exported so BuyTicketsFlow.tsx's own post-rejection quantity clamp (see
+// its refetchTiers) uses this exact same cap rather than a second, driftable
+// literal "10".
+export const MAX_QTY_PER_LINE_ITEM = 10;
 
 export interface TierPickerTier {
   id: string; name: string; priceCents: number; capacity: number; soldCount: number;

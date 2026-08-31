@@ -220,7 +220,8 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
   const lookingFor = c?.lookingFor;
   const hasLookingFor = !!lookingFor && (lookingFor.genres.length > 0 || lookingFor.actSizes.length > 0 || !!lookingFor.notes);
   const hasShows = upcomingShows.length > 0 || pastShows.length > 0;
-  const hasAnyContent = photoUrls.length > 0 || !!c?.about || hasAnyAmenity || hasLookingFor;
+  const hasAnyContent = photoUrls.length > 0 || !!c?.about || hasAnyAmenity || hasLookingFor
+    || upcomingEvents.length > 0;
 
   const chips = [SUBTYPE_LABEL[subtype]];
   if (c?.location?.neighborhood) chips.push(c.location.neighborhood);
