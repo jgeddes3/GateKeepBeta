@@ -47,7 +47,7 @@ Decisions taken so the build wouldn't stall. Each is reversible; the "cost if wr
 `git clone` the repo. Nothing else required. The spec, plan, and this file carry the context.
 
 ### To build, test, or run (execution phase)
-- **Node 20+** and **pnpm 9+**. Then `pnpm install` at the repo root.
+- **Node 22+** and **pnpm 9+**. Then `pnpm install` at the repo root.
 - **Java 11+ on PATH**, the Firestore emulator is Java-based. On the original dev machine a portable Temurin 21 JRE lives at `C:\Users\LeoArkos\.jre\jdk-21.0.12.1+1-jre\bin` and is prepended per-command; on any machine, any Java 11+ on PATH works. Without it, `pnpm emu` / `pnpm emu:test` / `pnpm emu:rules` fail with "Could not spawn `java -version`".
 - **Firebase CLI login**, `npx firebase-tools@latest login` (dev project: `gatekeep-dev-jg`).
 - **Xcode** (iOS) / **Android Studio + JDK** (Android) for native mobile builds; an Expo **dev build** (`expo-dev-client`) is required for Google/Apple native sign-in (Expo Go can't do it).

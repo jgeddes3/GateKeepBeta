@@ -9,3 +9,5 @@ dist/
 .worktrees/
 
 apps/web/AGENTS.md
+.claude/settings.local.json
+.claude/worktrees/

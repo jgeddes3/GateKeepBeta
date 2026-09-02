@@ -80,7 +80,7 @@ Apps own UI and only ever read Firestore directly or call callables.
 
 ## Prerequisites
 
-- **Node 20+** and **pnpm 9+** (repo pins `pnpm@11.23.0` via `packageManager`). If `pnpm` isn't on
+- **Node 22+** and **pnpm 9+** (repo pins `pnpm@11.23.0` via `packageManager`). If `pnpm` isn't on
   `PATH` yet on a machine without admin rights (Windows): `corepack enable --install-directory
   "$env:LOCALAPPDATA\Microsoft\WindowsApps"`.
 - **`pnpm --filter @gatekeep/web exec next typegen`**, run once per fresh clone. It generates the
