@@ -18,6 +18,7 @@ import {
 } from "../../src/events/eventDisplay";
 import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "../../src/payments/stripe";
 import { PostPurchaseGenrePrompt } from "../../src/discover/GenrePickerSheet";
+import { ShowPostsForAct } from "../../src/discover/ShowPosts";
 import {
   Text, Button, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconTicket, IconMapPin, IconMinus, IconPlus,
@@ -48,7 +49,11 @@ import { tokens } from "../../src/theme/tokens";
 const MAX_QTY_PER_LINE_ITEM = 10;
 
 type TierRow = { id: string } & TicketTierDoc;
-type LineupEntry = { name: string; handle: string | null };
+// profileId (SP7 Task 13, additive): a booking act's own musicianProfileId,
+// carried through so the Lineup section below can mount ShowPostsForAct per
+// row without a second lookup. null for an external act (no profile to post
+// through).
+type LineupEntry = { name: string; handle: string | null; profileId: string | null };
 type Loaded = { event: EventDoc; posterUrl: string | null; curatorName: string; tiers: TierRow[]; lineup: LineupEntry[] };
 
 interface CreateTicketOrderResult { orderId: string; clientSecret: string | null; }
@@ -78,8 +83,8 @@ async function resolveLineup(
     }
   }));
   return lineup.map((act) => act.kind === "booking"
-    ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null }
-    : { name: act.name, handle: null });
+    ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null, profileId: act.musicianProfileId }
+    : { name: act.name, handle: null, profileId: null });
 }
 
 function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, disabled }: {
@@ -479,20 +484,29 @@ export default function EventScreen() {
         </Card>
 
         {lineup.length > 0 && (
-          <View style={{ gap: tokens.space.xs }}>
+          <View style={{ gap: tokens.space.md }}>
             <Text variant="title">Lineup</Text>
             {lineup.map((act, i) => (
-              act.handle ? (
-                <Text
-                  key={`${act.name}-${i}`}
-                  style={{ textDecorationLine: "underline" }}
-                  onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } })}
-                >
-                  {act.name}
-                </Text>
-              ) : (
-                <Text key={`${act.name}-${i}`}>{act.name}</Text>
-              )
+              <View key={`${act.name}-${i}`} style={{ gap: tokens.space.xs }}>
+                {act.handle ? (
+                  <Text
+                    style={{ textDecorationLine: "underline" }}
+                    onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } })}
+                  >
+                    {act.name}
+                  </Text>
+                ) : (
+                  <Text>{act.name}</Text>
+                )}
+                {/* SP7 Task 13: a booking act (one with a real profileId) also
+                    gets its own show-post thread; an external act (no
+                    profile to post through) stays plain text. */}
+                {act.profileId && (
+                  <ShowPostsForAct
+                    eventId={eventId} musicianProfileId={act.profileId} artistName={act.name} endsAt={event.endsAt}
+                  />
+                )}
+              </View>
             ))}
           </View>
         )}

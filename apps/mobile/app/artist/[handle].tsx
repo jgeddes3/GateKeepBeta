@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import { ScrollView, View, Image, Pressable, Linking } from "react-native";
-import { useLocalSearchParams } from "expo-router";
-import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { doc, getDoc, getDocs, collection, query, where, orderBy, limit } from "firebase/firestore";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { getFirebase } from "../../src/lib/firebase";
 import { formatGigDateTime } from "../../src/gigs/GigForms";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
-import type { ProfileDoc, TrackDoc, GigDoc, GigPublicLocation, ActSize, AvailabilityPattern } from "@gatekeep/shared";
+import { formatEventFullDate } from "../../src/events/eventDisplay";
+import { useProfileContext } from "../../src/shell/ProfileContext";
+import { LatestPostLine, PostComposerSheet } from "../../src/discover/ShowPosts";
+import type {
+  ProfileDoc, TrackDoc, GigDoc, GigPublicLocation, ActSize, AvailabilityPattern, EventDoc,
+} from "@gatekeep/shared";
 import {
-  Text, Card, PageBackground, PhotoScrim, PhotoPlaceholder, Skeleton, SkeletonCard,
+  Text, Card, Button, PageBackground, PhotoScrim, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconPlay, IconPause, IconUserCircle,
 } from "../../src/ui";
 import { useTokens } from "../../src/theme/ThemeProvider";
@@ -82,6 +87,90 @@ async function loadShows(profileId: string): Promise<{ upcoming: ShowEntry[]; pa
   }
 }
 
+// SP7 Task 13: the "Upcoming events" section's row shape. Mirrors
+// apps/web/app/u/[handle]/page.tsx's own UpcomingEventSummary.
+type UpcomingEventSummary = {
+  eventId: string; title: string; startsAtMs: number; endsAtMs: number; location: GigPublicLocation;
+};
+
+// SP7 Task 13: the musician page's "Upcoming events" query, a controller
+// ruling on top of web's own loadMusicianUpcomingEvents (apps/web/app/u/
+// [handle]/page.tsx): this adds startsAt >= now and limit(20) as query
+// clauses instead of relying on the caller to filter/cap, since mobile has
+// no server render to bound the page weight before the client ever sees it.
+// The event doc's server-maintained lineupMusicianProfileIds array
+// (functions/src/events.ts's deriveLineupMusicianProfileIds) is what makes
+// an array-contains query provable at all; rules-provability comes from the
+// status=='published' equality filter. See firestore.indexes.json for the
+// composite index this needs (lineupMusicianProfileIds CONTAINS + status ASC
+// + startsAt ASC), the same index from sub-project 6.
+async function loadMusicianUpcomingEvents(profileId: string): Promise<UpcomingEventSummary[]> {
+  try {
+    const { db } = getFirebase();
+    const snap = await getDocs(query(
+      collection(db, "events"),
+      where("lineupMusicianProfileIds", "array-contains", profileId),
+      where("status", "==", "published"),
+      where("startsAt", ">=", Date.now()),
+      orderBy("startsAt"), limit(20)));
+    return snap.docs.map((d) => {
+      const e = d.data() as EventDoc;
+      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, endsAtMs: e.endsAt, location: e.location };
+    });
+  } catch (e) {
+    // Same "auxiliary content shouldn't take down the whole page" tradeoff as
+    // loadShows above: an empty section (indistinguishable from the
+    // legitimate no-upcoming-events case, per this section's own
+    // hidden-while-empty contract) beats crashing this screen.
+    console.error("loadMusicianUpcomingEvents failed", profileId, e);
+    return [];
+  }
+}
+
+// One "Upcoming events" row: title/date/location push to the event screen,
+// LatestPostLine adds a quiet preview underneath, and (for a signed-in
+// member of THIS profile, per useProfileContext().myProfiles) a "Post about
+// this show" trigger opens PostComposerSheet directly, no full posts list
+// here (that lives on the event screen's own Lineup section instead, see
+// ShowPostsForAct there). The trigger is hidden once the show has ended,
+// matching ShowPostsForAct's own eventEnded gate, so this never opens a
+// composer that would only ever be rejected by the server.
+function UpcomingEventRow({ event, profileId, artistName, onPress }: {
+  event: UpcomingEventSummary; profileId: string; artistName: string; onPress: () => void;
+}) {
+  const { myProfiles } = useProfileContext();
+  const isMember = myProfiles.some((p) => p.profileId === profileId);
+  const [now] = useState(() => Date.now());
+  const eventEnded = event.endsAtMs <= now;
+  const [composerOpen, setComposerOpen] = useState(false);
+
+  return (
+    <View style={{ gap: tokens.space.xs }}>
+      <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={event.title || "Untitled event"}>
+        <Card style={{ gap: 4 }}>
+          <Text variant="label" numberOfLines={1}>{event.title || "Untitled event"}</Text>
+          <Text variant="meta" muted>{formatEventFullDate(event.startsAtMs)}</Text>
+          <Text variant="meta" muted>{gigLocationLabel(event.location)}</Text>
+          <LatestPostLine eventId={event.eventId} musicianProfileId={profileId} />
+        </Card>
+      </Pressable>
+      {isMember && !eventEnded && (
+        <>
+          <Button
+            variant="secondary" title="Post about this show" onPress={() => setComposerOpen(true)}
+            style={{ alignSelf: "flex-start" }}
+          />
+          <PostComposerSheet
+            visible={composerOpen} onClose={() => setComposerOpen(false)}
+            eventId={event.eventId} musicianProfileId={profileId} artistName={artistName}
+            onPosted={() => setComposerOpen(false)}
+          />
+        </>
+      )}
+    </View>
+  );
+}
+
 // The curator name is plain text here, not a link: mobile has no public
 // curator-profile route (app/artist/[handle].tsx renders musicians only,
 // see the type!=="musician" guard below), unlike web's /@handle, which
@@ -127,12 +216,13 @@ export default function Artist() {
   const handle = (rawHandle ?? "").toLowerCase();
   const [state, setState] = useState<"loading" | "notfound" | {
     profile: ProfileDoc; tracks: LoadedTrack[]; avatarUrl: string | null; coverUrl: string | null;
-    upcomingShows: ShowEntry[]; pastShows: ShowEntry[];
+    upcomingShows: ShowEntry[]; pastShows: ShowEntry[]; upcomingEvents: UpcomingEventSummary[]; profileId: string;
   }>("loading");
   const [playingId, setPlayingId] = useState<string | null>(null);
   const player = useAudioPlayer(null);
   const status = useAudioPlayerStatus(player);
   const t = useTokens();
+  const router = useRouter();
 
   // Render-time reset, mirroring (musician)/portfolio.tsx's `lastProfileId`
   // pattern: if this screen instance is ever reused across a handle change
@@ -192,7 +282,7 @@ export default function Artist() {
         };
         const trackSnap = await getDocs(query(collection(db, `profiles/${profileId}/tracks`),
           where("status", "==", "approved"), orderBy("order")));
-        const [tracks, avatarUrl, coverUrl, shows] = await Promise.all([
+        const [tracks, avatarUrl, coverUrl, shows, upcomingEvents] = await Promise.all([
           Promise.all(trackSnap.docs.map(async (t) => {
             const d = t.data() as TrackDoc;
             const u = await url(d.storagePath);
@@ -201,8 +291,14 @@ export default function Artist() {
           url(profile.portfolio?.avatarPhotoPath),
           url(profile.portfolio?.coverPhotoPath),
           loadShows(profileId),
+          loadMusicianUpcomingEvents(profileId),
         ]);
-        if (!cancelled) setState({ profile, tracks, avatarUrl, coverUrl, upcomingShows: shows.upcoming, pastShows: shows.past });
+        if (!cancelled) {
+          setState({
+            profile, tracks, avatarUrl, coverUrl, upcomingShows: shows.upcoming, pastShows: shows.past,
+            upcomingEvents, profileId,
+          });
+        }
       } catch (e) {
         // permission-denied (a draft/pending/rejected profile's Firestore
         // rules deny the read) means "not approved", from the public's
@@ -248,7 +344,7 @@ export default function Artist() {
     );
   }
 
-  const { profile, tracks, avatarUrl, coverUrl, upcomingShows, pastShows } = state;
+  const { profile, tracks, avatarUrl, coverUrl, upcomingShows, pastShows, upcomingEvents, profileId } = state;
   const pf = profile.portfolio;
   // Optional (not `publicBooking:`) on ProfileDoc, legacy pre-SP4 docs lack
   // the field entirely; `?? null` treats "absent" identically to "present
@@ -338,6 +434,22 @@ export default function Artist() {
               {publicBooking.availabilityPattern != null && (
                 <Text>Availability: {AVAILABILITY_LABEL[publicBooking.availabilityPattern]}</Text>
               )}
+            </View>
+          )}
+          {/* Upcoming events (SP7 Task 13): published events whose lineup
+              includes this musician, hidden entirely (not an empty-state
+              message) when there are none, per this page's own
+              hidden-while-empty contract. Placed right before Shows: both
+              are schedule content, matching the web twin's own ordering. */}
+          {upcomingEvents.length > 0 && (
+            <View style={{ gap: 8 }}>
+              <Text variant="title">Upcoming events</Text>
+              {upcomingEvents.map((e) => (
+                <UpcomingEventRow
+                  key={e.eventId} event={e} profileId={profileId} artistName={profile.name}
+                  onPress={() => router.push({ pathname: "/event/[eventId]", params: { eventId: e.eventId } })}
+                />
+              ))}
             </View>
           )}
           {/* Shows (SP4 Task 12): this musician's own filled/closed-booked
