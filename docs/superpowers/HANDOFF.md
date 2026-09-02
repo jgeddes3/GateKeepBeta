@@ -38,6 +38,11 @@ Done and merged (each has a rulings doc that is the authority for its area):
 
 NEXT: **7 Fan discovery**, then 8 Search. Deferred: 5c band payout splits.
 
+**Read before the SP7 brainstorm:** `docs/superpowers/audit-2026-09-01.md`, the whole-project
+audit run after the 6 merge (19 blockers and near-blockers, per-area verdicts, the SP7 brief with
+the rulings the brainstorm must make, and the fix-before-SP7 list). Detail reports live in
+`docs/superpowers/audit/` and `anti-slop/audit-001-2026-09-01.md`.
+
 ## Binding rules for ALL work
 
 - `DESIGN.md` (repo root): tokens, fonts (Syne + Sora), radius tiers, accent dosage, glass cap.
