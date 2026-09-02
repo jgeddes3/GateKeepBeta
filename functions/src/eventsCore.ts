@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  DEFAULT_TICKET_FEE_POLICY,
+  DEFAULT_TICKET_FEE_POLICY, GENRES,
   type EventAct, type TicketFeePolicy, type TicketOrderItem, type TicketTierDoc,
 } from "@gatekeep/shared";
 
@@ -112,6 +112,24 @@ export function validateEventInput(input: {
       throw new HttpsError("invalid-argument", "Max tickets per buyer must be 1-20.");
     }
   }
+}
+
+// Untrusted onCall payload: optional, 1-3 distinct known genres when present.
+// A curator-set list wins over the derived-from-lineup genres (see
+// computeEventGenres in events.ts); this only validates the shape.
+export function validateCuratorGenres(input: unknown): string[] | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!Array.isArray(input) || input.length < 1 || input.length > 3) {
+    throw new HttpsError("invalid-argument", "Pick 1-3 genres.");
+  }
+  const seen = new Set<string>();
+  for (const g of input) {
+    if (typeof g !== "string" || !(GENRES as readonly string[]).includes(g) || seen.has(g)) {
+      throw new HttpsError("invalid-argument", "Unknown or repeated genre.");
+    }
+    seen.add(g);
+  }
+  return [...seen];
 }
 
 // Untrusted onCall payload shape for a tier create/update. Same defensive

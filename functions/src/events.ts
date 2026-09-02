@@ -19,14 +19,16 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import {
-  isValidDocId,
+  isValidDocId, deriveEventGenres, tierProjection,
   type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
-  type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc,
+  type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
 } from "./guards.js";
-import { validateEventInput, validateTierInput, DEFAULT_MAX_TICKETS_PER_BUYER } from "./eventsCore.js";
+import {
+  validateEventInput, validateTierInput, validateCuratorGenres, DEFAULT_MAX_TICKETS_PER_BUYER,
+} from "./eventsCore.js";
 import { resolveGigLocation, validateLocationInput, type GigLocationInput } from "./gigs.js";
 import { geocoderApiKey } from "./geocode.js";
 import { stripeSecretKey } from "./stripeClient.js";
@@ -56,12 +58,14 @@ export interface CreateEventInput {
   curatorProfileId: string; source: EventSourceInput;
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
+  curatorGenres?: string[];
 }
 
 export interface UpdateEventInput {
   curatorProfileId: string; eventId: string;
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
+  curatorGenres?: string[];
 }
 
 export interface SetEventTiersInput {
@@ -168,6 +172,21 @@ function deriveLineupMusicianProfileIds(lineup: EventAct[]): string[] {
   return [...ids];
 }
 
+// EventDoc.genres: the discovery-surface genre projection. A curator-set
+// curatorGenres list always wins (deriveEventGenres's own precedence rule);
+// otherwise this reads each booking act's profile once and derives the
+// event's genres from the union of their portfolio genres.
+export async function computeEventGenres(
+  db: Firestore, lineup: EventAct[], curatorGenres: string[] | undefined,
+): Promise<string[]> {
+  if (curatorGenres && curatorGenres.length > 0) return deriveEventGenres([], curatorGenres);
+  const ids = [...new Set(lineup.filter((a): a is Extract<EventAct, { kind: "booking" }> => a.kind === "booking")
+    .map((a) => a.musicianProfileId))];
+  const snaps = await Promise.all(ids.map((id) => db.doc(`profiles/${id}`).get()));
+  const actGenres = snaps.map((s) => ((s.data() as ProfileDoc | undefined)?.portfolio?.genres ?? []));
+  return deriveEventGenres(actGenres, null);
+}
+
 // posterPath, when set, must be a processed photo path belonging to THIS
 // curator profile (a string-prefix check against publicPhotoPath's own
 // shape, see storagePaths.ts): otherwise a curator could point an event at
@@ -193,6 +212,7 @@ export const createEvent = onCall<CreateEventInput>(
     validateEventInput(input);
     validateLineupIdentity(input.lineup);
     validateSourceInput(input.source);
+    const curatorGenres = validateCuratorGenres(input.curatorGenres);
     const posterPath = resolvePosterPath(input.posterPath, input.curatorProfileId);
 
     // sequential is deliberate, mirroring createGig's identical rationale:
@@ -204,6 +224,7 @@ export const createEvent = onCall<CreateEventInput>(
 
     const db = getFirestore();
     await verifyLineupBookingActs(db, input.curatorProfileId, input.lineup);
+    const genres = await computeEventGenres(db, input.lineup, curatorGenres);
 
     let location: GigPublicLocation;
     let privateAddress: EventPrivateAddress;
@@ -247,6 +268,7 @@ export const createEvent = onCall<CreateEventInput>(
       maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
       lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
       gigId, createdAt: now, updatedAt: now,
+      genres, curatorGenres: curatorGenres ?? [], priceFromCents: null, hasFreeTier: false,
     };
 
     const batch = db.batch();
@@ -274,6 +296,7 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
   // sense than doing so for a published one).
   validateEventInput(input);
   validateLineupIdentity(input.lineup);
+  const curatorGenres = validateCuratorGenres(input.curatorGenres);
   const posterPath = resolvePosterPath(input.posterPath, input.curatorProfileId);
 
   await requireProfileMember(input.curatorProfileId, uid);
@@ -281,6 +304,7 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
 
   const db = getFirestore();
   await verifyLineupBookingActs(db, input.curatorProfileId, input.lineup);
+  const genres = await computeEventGenres(db, input.lineup, curatorGenres);
 
   const eventRef = db.doc(`events/${input.eventId}`);
   const eventSnap = await eventRef.get();
@@ -303,6 +327,7 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
     maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
     lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
     posterPath, updatedAt: Date.now(),
+    genres, curatorGenres: curatorGenres ?? [],
   });
   return { ok: true };
 });
@@ -389,7 +414,8 @@ export const setEventTiers = onCall<SetEventTiersInput>({ region: "us-central1" 
       tx.set(t.tierId ? tiersRef.doc(t.tierId) : tiersRef.doc(), tier);
     });
 
-    tx.update(eventRef, { updatedAt: Date.now() });
+    const projection = tierProjection(input.tiers.map((t) => ({ priceCents: t.priceCents })));
+    tx.update(eventRef, { updatedAt: Date.now(), ...projection });
   });
 
   return { ok: true };
