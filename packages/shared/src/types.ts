@@ -16,6 +16,8 @@ export interface UserDoc {
   // hasOnly set). Optional because pre-Task-8 seed data / in-flight docs may
   // not have it yet until the trigger or backfillDisplayNameLower catches up.
   displayNameLower?: string;
+  // SP7, stamped by markGenrePickerSeen
+  genrePickerSeenAt?: number;
 }
 
 export interface ProfileDoc {
@@ -49,6 +51,8 @@ export interface ProfileDoc {
   // Server writers (createProfileDraft, rebuildBookingProjections) always
   // stamp it explicitly, present-and-nullable, going forward.
   publicBooking?: BookingPreferences | null;
+  // SP7, server-maintained by followTarget/unfollowTarget; absent means 0
+  followerCount?: number;
 }
 
 export interface MemberDoc {
@@ -87,7 +91,8 @@ export interface NotificationDoc {
   body: string;
   // SP6 Task 5: "ticket" is a ticket-order purchase confirmation; its refId
   // is the eventId (see refId's own comment below).
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket";
+  // SP7: "show_announced", "new_music", "show_rescheduled", "show_post" are added for fan discovery notifications
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -97,6 +102,7 @@ export interface NotificationDoc {
   // pre-Task-10 notification (profile/track review, gig moderation, system)
   // omits it, and readers must not assume it's present even on a "booking"
   // kind doc written before this field existed.
+  // SP7: eventId for show_announced / show_rescheduled / show_post; the artist's profileId for new_music.
   refId?: string;
 }
 
@@ -933,6 +939,13 @@ export interface EventDoc {
   // has never started for this event (every pre-fix-round-1 event, and every
   // event not yet past its T+1 window).
   settlementStartedAt?: number;
+  // SP7: server-derived discovery projections. Absent on pre-SP7 docs: readers
+  // treat absence as [] / null / false. genres = curatorGenres when set, else
+  // the union of lineup booking acts' portfolio.genres (max 5).
+  genres?: string[];
+  curatorGenres?: string[];
+  priceFromCents?: number | null;
+  hasFreeTier?: boolean;
 }
 export interface TicketTierDoc {
   name: string; priceCents: number;        // 0 = free RSVP
@@ -988,3 +1001,53 @@ export interface TicketTransferDoc {
 // reads to prove a caller holds a ticket for THIS event, without a rules
 // read against the tickets collection itself. Server-written only.
 export interface TicketIndexDoc { count: number }
+
+// ---------- Sub-project 7: fan discovery ----------
+
+export type FollowTargetType = "musician" | "curator" | "genre";
+export interface FollowDoc {
+  uid: string;
+  targetId: string;                 // profileId, or "genre:<name>" (name from GENRES)
+  targetType: FollowTargetType;
+  createdAt: number;
+}
+export const MAX_FOLLOWS_PER_USER = 500;
+
+export type ShowPostStatus = "live" | "removed";
+export interface ShowPostDoc {
+  eventId: string;
+  musicianProfileId: string;
+  authorUid: string;
+  text: string;                     // 1..SHOW_POST_MAX_CHARS after trim
+  createdAt: number;
+  status: ShowPostStatus;
+  removedBy?: "author" | "admin";
+  removedAt?: number;
+}
+export const SHOW_POST_MAX_CHARS = 280;
+export const SHOW_POST_MAX_PER_EVENT = 3;
+export const SHOW_POST_MIN_INTERVAL_MS = 10 * 60 * 1000;
+
+export const DECK_PAGE_SIZE = 20;
+export const DECK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+export const DECK_MAX_EXCLUDE_IDS = 200;
+export type DeckPreview = { trackPath: string; startSec: number; durationSec: number; artistName: string } | null;
+export type DeckNextShow = { eventId: string; title: string; venueName: string; startsAt: number } | null;
+export type DeckCard =
+  | { kind: "show"; id: string; eventId: string; title: string; startsAt: number; endsAt: number;
+      venueName: string; neighborhood: string | null; distanceMeters: number | null; posterPath: string | null;
+      lineupNames: string[]; curatorProfileId: string; curatorHandle: string | null;
+      priceFromCents: number | null; hasFreeTier: boolean;
+      latestPost: { text: string; artistName: string } | null; genres: string[]; preview: DeckPreview }
+  | { kind: "artist"; id: string; profileId: string; handle: string; name: string; subtype: MusicianSubtype;
+      genres: string[]; coverPhotoPath: string | null; avatarPhotoPath: string | null;
+      nextShow: DeckNextShow; preview: DeckPreview }
+  | { kind: "venue"; id: string; profileId: string; handle: string; name: string; neighborhood: string | null;
+      distanceMeters: number | null; photoPath: string | null; genres: string[];
+      nextShow: DeckNextShow; preview: DeckPreview };
+export interface GetDiscoverDeckInput {
+  location?: { lat: number; lng: number };
+  excludeIds?: string[];
+  seed?: number;
+}
+export interface GetDiscoverDeckResult { cards: DeckCard[]; seed: number; }

@@ -147,3 +147,9 @@ export const TICKET_NOT_REFUNDABLE_MESSAGE = "Only a valid or checked-in ticket 
 // drifting once the sweep starts transferring it. Post-show disputes are a
 // manual/support path, not this callable.
 export const TICKET_REFUND_WINDOW_CLOSED_MESSAGE = "Refunds are closed for this event.";
+
+// ---------- Sub-project 7 fan discovery ----------
+export const FOLLOW_LIMIT_MESSAGE = "You are following the maximum number of artists, venues, and genres.";
+export const SHOW_POST_LIMIT_MESSAGE = "You have already posted three times about this show.";
+export const SHOW_POST_RATE_MESSAGE = "Give it ten minutes before posting again.";
+export const SHOW_POST_EVENT_CLOSED_MESSAGE = "This show has ended, so posts are closed.";
