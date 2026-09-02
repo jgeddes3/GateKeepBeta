@@ -10,6 +10,7 @@ import { syncCuratorAccess } from "./curator.js";
 import { recomputeReliability } from "./bookingLifecycle.js";
 import { notifyProfileMembers, notifyUser } from "./notifications.js";
 import { buildPaymentDoc } from "./paymentsCore.js";
+import { EVENT_REMINDER_WINDOW_MS } from "./eventsCore.js";
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -17,9 +18,10 @@ const DAY_MS = 86_400_000;
 // was abandoned mid-flight) — the reaper below frees its slot.
 const PROCESSING_STALE_MS = 24 * 60 * 60 * 1000;
 
-// SP6 Task 7: the "starts within" window for the event-tomorrow reminder
-// step below.
-const EVENT_REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
+// EVENT_REMINDER_WINDOW_MS (the "starts within" window for the
+// event-tomorrow reminder step below) now lives in eventsCore.ts (imported
+// above), so Task 5's updateEvent reschedule hook can re-arm a reminder
+// using the same constant.
 // Months spelled out by hand (rather than a locale-dependent Intl call) so a
 // reminder's date is stable across every server locale and never risks a
 // formatter substituting a dash character this codebase's copy rules forbid.

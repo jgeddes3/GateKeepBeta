@@ -28,6 +28,12 @@ export const EVENT_SETTLE_DELAY_MS = 24 * 60 * 60 * 1000;
 // organizer-set override on the event doc.
 export const DEFAULT_MAX_TICKETS_PER_BUYER = 8;
 
+// SP6 Task 7: the "starts within" window for the event-tomorrow reminder
+// step in scheduled.ts. Exported here, rather than kept module-private in
+// scheduled.ts, so Task 5's updateEvent reschedule hook can re-arm a
+// reminder that was already sent, using the identical window value.
+export const EVENT_REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 // SP6 Task 7: the adminAlerts id for "this event's T+1 ticket settlement
 // transfer is blocked because its curator has no payout-ready Stripe
 // account". Deterministic per event, same discipline as paymentsCore.ts's own

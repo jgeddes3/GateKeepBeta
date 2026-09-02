@@ -17,22 +17,27 @@
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, type Firestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
   isValidDocId, deriveEventGenres, tierProjection,
   type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
   type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
+  type AttendeeDoc,
 } from "@gatekeep/shared";
 import {
   requireAuthUid, requireVerifiedEmail, requireProfileMember, requireApprovedCuratorProfile,
 } from "./guards.js";
 import {
   validateEventInput, validateTierInput, validateCuratorGenres, DEFAULT_MAX_TICKETS_PER_BUYER,
+  EVENT_REMINDER_WINDOW_MS,
 } from "./eventsCore.js";
 import { resolveGigLocation, validateLocationInput, type GigLocationInput } from "./gigs.js";
 import { geocoderApiKey } from "./geocode.js";
 import { stripeSecretKey } from "./stripeClient.js";
 import { refundOrdersForCancelledEvent } from "./ticketing.js";
+import { notifyFollowers } from "./follows.js";
+import { notifyUser } from "./notifications.js";
+import { announceTargets, showAnnouncedNote, onTheBillNote, showRescheduledNote } from "./announce.js";
 
 const MAX_TIERS_PER_EVENT = 20;
 
@@ -329,6 +334,43 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
     posterPath, updatedAt: Date.now(),
     genres, curatorGenres: curatorGenres ?? [],
   });
+
+  // SP7 Task 5: fan-out on a published event's edit. Only applies once the
+  // event is already public (a draft edit has no followers to tell yet).
+  if (event.status === "published") {
+    const updated: EventDoc = {
+      ...event, title: input.title.trim(), startsAt: input.startsAt, endsAt: input.endsAt,
+      lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup), genres,
+    };
+    // A lineup addition announces only to the NEW act(s)' own followers.
+    // announceTargets(updated) would re-notify the venue/genre followers who
+    // already got the publish-time announce under this same key, so it is
+    // deliberately not used here. This also tells the newly added act's own
+    // profile members they're on the bill.
+    const added = updated.lineupMusicianProfileIds.filter((id) => !event.lineupMusicianProfileIds.includes(id));
+    if (added.length > 0) {
+      await notifyFollowers(added, showAnnouncedNote(input.eventId, updated), `announce:${input.eventId}`);
+      for (const musicianProfileId of added) {
+        const members = await db.collection(`profiles/${musicianProfileId}/members`).get();
+        await Promise.all(members.docs.map((m) => notifyUser(m.id, onTheBillNote(input.eventId, updated), `bill:${input.eventId}`)));
+      }
+    }
+    // A date change reaches every existing follower (venue/artist/genre) AND
+    // every current valid/checked-in ticket holder, keyed per new date so a
+    // second reschedule to a DIFFERENT date notifies again.
+    if (input.startsAt !== event.startsAt) {
+      const attendees = await db.collection(`events/${input.eventId}/attendees`)
+        .where("status", "in", ["valid", "checked_in"]).get();
+      const holders = [...new Set(attendees.docs.map((a) => (a.data() as AttendeeDoc).ownerUid))];
+      await notifyFollowers(announceTargets(updated), showRescheduledNote(input.eventId, updated, input.startsAt),
+        `resched:${input.eventId}:${input.startsAt}`, holders);
+      // Re-arm the 24h reminder when the show moved back out of its window.
+      if (event.reminderSentAt !== undefined && input.startsAt - Date.now() > EVENT_REMINDER_WINDOW_MS) {
+        await eventRef.update({ reminderSentAt: FieldValue.delete() });
+      }
+    }
+  }
+
   return { ok: true };
 });
 
@@ -462,6 +504,20 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
   }
 
   await eventRef.update({ status: "published", updatedAt: Date.now() });
+
+  // SP7 Task 5: fan-out on publish. Followers of the venue, every lineup
+  // act's musician profile, and the event's genres all hear "show
+  // announced" once, keyed per event, so a later lineup addition's own
+  // fan-out (see updateEvent below) never re-notifies these same fans.
+  // Every lineup act's own profile members separately hear "you're on the
+  // bill", under their own key.
+  const published: EventDoc = { ...event, status: "published" };
+  await notifyFollowers(announceTargets(published), showAnnouncedNote(input.eventId, published), `announce:${input.eventId}`);
+  for (const musicianProfileId of published.lineupMusicianProfileIds) {
+    const members = await db.collection(`profiles/${musicianProfileId}/members`).get();
+    await Promise.all(members.docs.map((m) => notifyUser(m.id, onTheBillNote(input.eventId, published), `bill:${input.eventId}`)));
+  }
+
   return { ok: true };
 });
 

@@ -2,12 +2,14 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   validateTrackCreate, isValidDocId, stagingAudioPath, reviewTrackPath, publicTrackPath, MAX_TRACKS,
-  type CreateTrackInput, type TrackDoc,
+  type CreateTrackInput, type TrackDoc, type ProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 import { bucket, logDeleteFailure } from "./storage.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
+import { notifyFollowers } from "./follows.js";
+import { newMusicNote } from "./announce.js";
 
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
 // docs (for the reason display) but don't count. This is slot occupancy for
@@ -342,6 +344,13 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         title: `"${prior.title ?? "Your track"}" is live!`,
         body: "Your track passed review and now plays on your public portfolio.",
       });
+      // SP7 Task 5: fan-out to the artist's followers, distinct from the
+      // profile-member notification just above (that one tells the
+      // musician their own track is live; this tells fans of the profile
+      // there's new music).
+      const profileSnap = await db.doc(`profiles/${profileId}`).get();
+      const artistName = (profileSnap.data() as ProfileDoc | undefined)?.name ?? "An artist you follow";
+      await notifyFollowers([profileId], newMusicNote(profileId, artistName, prior.title ?? "New track"), `track:${trackId}`);
     }
     return { ok: true };
   });
