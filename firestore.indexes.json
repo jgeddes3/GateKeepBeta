@@ -218,6 +218,54 @@
     "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "expiresAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "genres", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "events", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "hasFreeTier", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "profiles", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "name", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "profiles", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "portfolio.genres", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "name", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "profiles", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "updatedAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "profiles", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" },
+      { "fieldPath": "subtype", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "follows", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "uid", "order": "ASCENDING" },
+      { "fieldPath": "targetType", "order": "ASCENDING" },
+      { "fieldPath": "createdAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "posts", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "createdAt", "order": "DESCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

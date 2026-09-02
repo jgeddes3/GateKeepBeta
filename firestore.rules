@@ -326,6 +326,28 @@ service cloud.firestore {
       allow write: if false; // Cloud Functions only
     }
 
+    // ---------- Sub-project 7: fan discovery ----------
+    // follows/{uid}_{targetId}: owner-read only (get + list pinned on uid),
+    // callable-only writes (followTarget/unfollowTarget). The doc's own
+    // uid field is the truth for list queries; the id is a convenience.
+    match /follows/{followId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow write: if false; // Cloud Functions only
+    }
+
+    // events/{eventId}/posts/{postId}: a musician's show note. Public when
+    // the parent event is public AND the post is live; the event's curator
+    // members, the author profile's members, and admin see all (removed
+    // posts stay for moderation history). Callable-only writes.
+    match /events/{eventId}/posts/{postId} {
+      allow read: if isAdmin()
+        || (resource.data.status == 'live'
+            && get(/databases/$(database)/documents/events/$(eventId)).data.status in ['published', 'completed'])
+        || isMember(get(/databases/$(database)/documents/events/$(eventId)).data.curatorProfileId)
+        || isMember(resource.data.musicianProfileId);
+      allow write: if false; // Cloud Functions only
+    }
+
     // Recursive-wildcard match needed for collectionGroup('members') queries —
     // the nested /profiles/{profileId}/members/{memberUid} rule above does NOT
     // apply to collection-group queries. Mirrors the self-read clause so the
