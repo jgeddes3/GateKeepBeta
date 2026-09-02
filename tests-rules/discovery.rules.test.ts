@@ -87,6 +87,19 @@ describe("show posts", () => {
     await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "events/ev2/posts/p1")));
     await assertSucceeds(getDoc(doc(env.authenticatedContext("alice").firestore(), "events/ev2/posts/p1")));
   });
+  it("a signed-in stranger who is no one's member is denied a removed post and a live post on a draft event", async () => {
+    await seedEvent("ev1"); await seedPost("ev1", "p1", "removed");
+    const dave = env.authenticatedContext("dave").firestore();
+    await assertFails(getDoc(doc(dave, "events/ev1/posts/p1")));
+    await seedEvent("ev2", "draft"); await seedPost("ev2", "p1");
+    await assertFails(getDoc(doc(dave, "events/ev2/posts/p1")));
+  });
+  it("anyone reads a live post on a completed event, including anonymous", async () => {
+    await seedEvent("ev3", "completed"); await seedPost("ev3", "p1");
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "events/ev3/posts/p1")));
+    await assertSucceeds(getDocs(query(collection(anon, "events/ev3/posts"), where("status", "==", "live"))));
+  });
   it("no client writes posts", async () => {
     await seedEvent("ev1");
     await assertFails(setDoc(doc(env.authenticatedContext("musowner").firestore(), "events/ev1/posts/p9"),
