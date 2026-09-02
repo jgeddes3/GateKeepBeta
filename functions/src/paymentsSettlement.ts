@@ -326,7 +326,7 @@ export async function recordSettlementFailure(args: {
       await notifyProfileMembers(p.curatorProfileId, {
         kind: "booking", refId: bookingId,
         title: "Payment failed",
-        body: "A settlement charge was declined, we'll retry, or pay now from the booking page.",
+        body: "A settlement charge was declined: we'll retry, or pay now from the booking page.",
       });
     } catch (e) {
       console.error(`recordSettlementFailure: notification failed for ${bookingId}/${gigId}`, e);
@@ -411,7 +411,7 @@ export async function recordSettlementFailure(args: {
   await notifySafely(p.musicianProfileId, {
     kind: "booking", refId: bookingId,
     title: "Payment delayed",
-    body: "The curator's payment is overdue, a late fee (yours to keep most of) was added. We'll keep collecting.",
+    body: "The curator's payment is overdue: a late fee (yours to keep most of) was added. We'll keep collecting.",
   }, `delinquency ${bookingId}/${gigId}`);
   return ran("declined", false, declared ? "delinquent" : undefined);
 }
