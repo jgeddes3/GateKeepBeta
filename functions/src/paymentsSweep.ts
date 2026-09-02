@@ -6,7 +6,7 @@
  * by a date the materializer only just created, a settlement that becomes due
  * while nobody is looking, and the expired-booking refund backstop.
  *
- * MONEY MOVES IN EVERY STEP — step 4 is easy to misread as bookkeeping
+ * MONEY MOVES IN EVERY STEP, step 4 is easy to misread as bookkeeping
  * because its headline job is scheduling, but its waive branch refunds a
  * deposit outright, and steps 5/6 charge the settlement and transfer the
  * musician's earnings (inside `chargeSettlement`, paymentsSettlement.ts).
@@ -21,7 +21,7 @@
  *    starves the others queued behind it;
  *  - every unbounded query is paginated with scheduled.ts's own `paginate`.
  *
- * THREE RULES THIS FILE IS BUILT AROUND — do not "simplify" any of them away:
+ * THREE RULES THIS FILE IS BUILT AROUND, do not "simplify" any of them away:
  *
  *  1. SETTLEMENT SWEEPS NEVER FILTER BY PARENT BOOKING STATUS. A booking that
  *     is cancelled, expired or completed can still own a past-start payment
@@ -35,7 +35,7 @@
  *     SECOND charge/refund/transfer. So anything stuck longer than that is
  *     REFUSED, logged, and escalated to `adminAlerts` rather than replayed.
  *
- *  3. A BOOKING WITH `depositChargePending === true` BELONGS TO STEP 1 — no
+ *  3. A BOOKING WITH `depositChargePending === true` BELONGS TO STEP 1, no
  *     other step may touch its `unpaid` docs. Those docs are an accept saga's
  *     STAGED set: transaction A wrote them, a charge is in flight against
  *     exactly that set, and step 1's commit accounts the charge against
@@ -65,7 +65,7 @@ import {
 } from "./paymentsCore.js";
 // Steps 5/6's whole job. Importing it here is ALSO what loads
 // paymentsSettlement's `payment_intent.succeeded` registrations from index.ts
-// (see that file's header) — do not drop this edge for a lazy import.
+// (see that file's header), do not drop this edge for a lazy import.
 import { chargeSettlement } from "./paymentsSettlement.js";
 import {
   abortAcceptAfterFailedCommit, commitAcceptAfterCharge, detectSelfDeal, runAcceptPostCommit,
@@ -90,18 +90,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // adding a dedicated timestamp field to two doc shapes.
 //
 // The proxy is only honest if nothing ELSE bumps `updatedAt` while the doc
-// sits in that state — otherwise a busy doc's clock resets and the guard
+// sits in that state, otherwise a busy doc's clock resets and the guard
 // never fires. What keeps it honest:
 //  - BOOKING side: while `depositChargePending` is true, every mutating
 //    booking callable refuses (acceptBooking's in-txn check; counter/decline/
 //    withdrawBooking's, added in this task's review round; cancellation
 //    requires `confirmed`). recomputePaymentSummary deliberately does not bump
 //    updatedAt. The only writer left is this sweep recording a pending intent
-//    id — which moves the booking to the webhook's care and out of this
+//    id, which moves the booking to the webhook's care and out of this
 //    guard's path entirely.
 //  - PAYMENT-DOC side: the only sweep write to an already-`*_pending` doc is
 //    the raced-cancellation merge in the birth-deposit charge below, which
-//    bumps updatedAt for a doc whose refund has not been ISSUED yet — so
+//    bumps updatedAt for a doc whose refund has not been ISSUED yet, so
 //    there is no key in flight for the window to protect, and extending it
 //    is correct rather than merely benign. (Birth dunning also bumps
 //    updatedAt, but only ever on `unpaid` docs, which this guard never sees.)
@@ -123,7 +123,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //        also be settlement-`pending`.
 //      * `payPastDue` bumps `updatedAt` on both of its paths. Its SETTLEMENT
 //        path requires `settlement.status === "past_due"`, and a `past_due`
-//        settlement's deposit cannot be `*_pending` either — the same waive
+//        settlement's deposit cannot be `*_pending` either, the same waive
 //        coupling holds (every path that marks a deposit pending waives a
 //        not-yet-terminal settlement with it, and the ones that don't waive a
 //        `past_due` settlement also leave the deposit alone). Its DEPOSIT path
@@ -134,7 +134,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //    callable can reach one.
 
 // Step 7's scan bound. An unwind older than this was either already refunded
-// by an earlier run of this step or needs a human — either way, re-scanning
+// by an earlier run of this step or needs a human, either way, re-scanning
 // every expired booking the app has ever had, every hour, forever, is not the
 // price of catching it.
 const EXPIRED_LOOKBACK_MS = 14 * DAY_MS;
@@ -143,18 +143,18 @@ export interface PaymentsSweepReport {
   // --- step 1: stuck accept sagas (bookings flagged depositChargePending) ---
   acceptSagasReconciled: number;   // charge replayed + accept committed + fan-out run
   acceptSagasAborted: number;      // charge replayed, commit impossible, deposit refunded
-  acceptSagasDeclined: number;     // the replayed charge declined — staging removed, booking left open
-  acceptSagasPending: number;      // intent still `processing` — the webhook finalizes it, not us
-  acceptSagasReleased: number;     // marker set with nothing staged — released, nothing was charged
+  acceptSagasDeclined: number;     // the replayed charge declined, staging removed, booking left open
+  acceptSagasPending: number;      // intent still `processing`, the webhook finalizes it, not us
+  acceptSagasReleased: number;     // marker set with nothing staged, released, nothing was charged
   acceptSagasRacedOut: number;     // a racer (webhook/callable) had already committed this accept
-  acceptSagasStale: number;        // >24h staged — NOT replayed (see IDEMPOTENCY_WINDOW_MS)
+  acceptSagasStale: number;        // >24h staged, NOT replayed (see IDEMPOTENCY_WINDOW_MS)
   // --- step 2: `*_pending` deposits whose post-commit executor never ran ---
   pendingDepositsResolved: number;
-  pendingDepositsStale: number;    // >24h pending — NOT re-issued (see IDEMPOTENCY_WINDOW_MS)
+  pendingDepositsStale: number;    // >24h pending, NOT re-issued (see IDEMPOTENCY_WINDOW_MS)
   // --- step 3: per-birth deposits for materializer-created occurrences ---
   birthDepositsCharged: number;
   birthDepositsDeclined: number;   // counts every declined ATTEMPT, retries included
-  birthDepositsPending: number;    // intent left `processing` — never re-charged, needs admin attention
+  birthDepositsPending: number;    // intent left `processing`, never re-charged, needs admin attention
   // --- step 4: settlements scheduled once their occurrence has ended ---
   settlementsScheduled: number;    // not_due -> pending (the date was performed)
   // not_due -> waived (taken down / reopened / re-owned / gig gone) in step 4,
@@ -165,8 +165,8 @@ export interface PaymentsSweepReport {
   // --- steps 5/6: settlement charges + past_due retries ---
   settlementsCharged: number;
   settlementsDeclined: number;
-  settlementsPending: number;      // charge left `processing` — the webhook finalizes it, not us
-  // Occurrences whose settlement was RACED — a concurrent writer (a no-show
+  settlementsPending: number;      // charge left `processing`, the webhook finalizes it, not us
+  // Occurrences whose settlement was RACED, a concurrent writer (a no-show
   // waive, another finalizer) moved the doc mid-run. Reported as `skipped`
   // outcomes, so this is the only place the sweep looks at
   // SettlementRunResult.reason: a race is invisible in the outcome counters
@@ -177,7 +177,7 @@ export interface PaymentsSweepReport {
   transfersMade: number;           // earnings transfers (one per charged settlement)
   retriesAttempted: number;        // past_due docs handed to chargeSettlement this run
   // --- shared ---
-  // Curator profiles newly flagged delinquent this run — counted for BOTH
+  // Curator profiles newly flagged delinquent this run, counted for BOTH
   // declaring paths (step 3's exhausted birth deposit, and steps 5/6's
   // exhausted settlement ladder), and only on the transition: a profile that
   // was already flagged does not count again.
@@ -213,7 +213,7 @@ export interface PaymentsSweepReport {
   // doc changes: the ticket itself stays exactly "valid" under its sender,
   // free to be offered again.
   ticketTransfersExpired: number;
-  // Per-step and per-anomaly failure counts — keyed, not fixed, so a new
+  // Per-step and per-anomaly failure counts, keyed, not fixed, so a new
   // anomaly gets a name instead of being folded into a neighbour's bucket.
   // NAMING: a per-doc/per-booking key is a SINGULAR noun phrase for the thing
   // that failed (`birthDeposit`, `expiredRefundMark`); a step-level key is the
@@ -254,7 +254,7 @@ function locate(doc: FirebaseFirestore.QueryDocumentSnapshot): PaymentLocation |
   if (!bookingRef) {
     // Unreachable: every payments doc lives under bookings/{id}. Guarded
     // rather than asserted because a collection-group query is a wide net.
-    console.error(`paymentsSweep: payments doc ${doc.ref.path} has no parent booking — skipped`);
+    console.error(`paymentsSweep: payments doc ${doc.ref.path} has no parent booking, skipped`);
     return null;
   }
   return { bookingId: bookingRef.id, gigId: doc.id };
@@ -276,7 +276,7 @@ async function notifySafely(
 // ---------------------------------------------------------------------------
 // Escalation
 // ---------------------------------------------------------------------------
-// The sweep has four ABSORBING states — money situations it deliberately
+// The sweep has four ABSORBING states, money situations it deliberately
 // refuses to act on because acting would risk moving money twice. Refusing is
 // correct; refusing SILENTLY is not, and an hourly console.error is not an
 // escalation either (it is 24 identical lines a day that nobody is paged on).
@@ -288,16 +288,16 @@ async function notifySafely(
 // this file's half of that naming contract.
 
 // The id builders live in paymentsCore beside recordAdminAlert (review round 3,
-// I3) — every raiser AND every reader shares one vocabulary. See that block for
+// I3), every raiser AND every reader shares one vocabulary. See that block for
 // why two of the ids are deliberately shared across kinds.
 
 // ---------------------------------------------------------------------------
-// Step 1 — RECONCILE stuck accept sagas
+// Step 1, RECONCILE stuck accept sagas
 // ---------------------------------------------------------------------------
 // A booking flagged `depositChargePending` crashed between transaction A
 // (stage + mark) and the commit. The recovery is to replay the charge on the
-// PERSISTED attempt key — same key ⇒ Stripe hands back the original intent,
-// never a second charge — and then run the very same transaction B + post-
+// PERSISTED attempt key, same key ⇒ Stripe hands back the original intent,
+// never a second charge, and then run the very same transaction B + post-
 // commit tail the callable would have run.
 
 async function reconcileOneAcceptSaga(
@@ -317,9 +317,9 @@ async function reconcileOneAcceptSaga(
   if (booking.status !== "open") {
     // The marker only ever rides an OPEN booking: transaction A sets it, and
     // the commit and every unstage path clear it. Still set on a non-open
-    // booking means a write was lost. There is no safe automatic move here —
+    // booking means a write was lost. There is no safe automatic move here,
     // committing is impossible, and refunding could hand back a CONFIRMED
-    // booking's real escrow — so it is escalated and left exactly as it is.
+    // booking's real escrow, so it is escalated and left exactly as it is.
     const shouldLog = await recordAdminAlert({
       alertId: stuckSagaAlertId(bookingId), kind: "stuck_saga_marker",
       detail: `booking is "${booking.status}" but still flagged depositChargePending`,
@@ -327,7 +327,7 @@ async function reconcileOneAcceptSaga(
     });
     if (shouldLog) {
       console.error(
-        `paymentsSweep: booking ${bookingId} is "${booking.status}" but still flagged depositChargePending — needs admin attention (see adminAlerts/${stuckSagaAlertId(bookingId)})`);
+        `paymentsSweep: booking ${bookingId} is "${booking.status}" but still flagged depositChargePending, needs admin attention (see adminAlerts/${stuckSagaAlertId(bookingId)})`);
     }
     bumpError(report, "reconcileStuckMarker");
     return;
@@ -335,7 +335,7 @@ async function reconcileOneAcceptSaga(
 
   // BEFORE the staleness guard, deliberately: a recorded pending intent means
   // chargeOffSession came back `processing`, and a same-key retry is
-  // IMPOSSIBLE for it (the cached `processing` outcome replays forever — as-
+  // IMPOSSIBLE for it (the cached `processing` outcome replays forever, as-
   // built contract #7). Such a saga is the WEBHOOK's to finish however old it
   // is, so calling it "stale" would raise a permanent alert about a booking
   // nobody should be touching, and would hide it behind an escalation that has
@@ -346,19 +346,19 @@ async function reconcileOneAcceptSaga(
   }
 
   // Staleness guard (see IDEMPOTENCY_WINDOW_MS). Past 24h the attempt key is
-  // no longer a replay handle — re-charging on it would be a brand-new charge
-  // — so this is refused outright and escalated. Adopting the original intent
+  // no longer a replay handle, re-charging on it would be a brand-new charge
+  //, so this is refused outright and escalated. Adopting the original intent
   // via its `{bookingId, purpose}` metadata is the future enhancement that
   // would let this recover automatically.
   if (booking.updatedAt < now - IDEMPOTENCY_WINDOW_MS) {
     const shouldLog = await recordAdminAlert({
       alertId: stuckSagaAlertId(bookingId), kind: "stale_accept_saga",
-      detail: `staged since ${new Date(booking.updatedAt).toISOString()} (>24h) — charge key can no longer be replayed`,
+      detail: `staged since ${new Date(booking.updatedAt).toISOString()} (>24h), charge key can no longer be replayed`,
       bookingId, gigId: null, now,
     });
     if (shouldLog) {
       console.error(
-        `paymentsSweep: booking ${bookingId} has been staged since ${new Date(booking.updatedAt).toISOString()} (>24h) — refusing to replay an expired idempotency key; needs admin attention (see adminAlerts/${stuckSagaAlertId(bookingId)})`);
+        `paymentsSweep: booking ${bookingId} has been staged since ${new Date(booking.updatedAt).toISOString()} (>24h), refusing to replay an expired idempotency key; needs admin attention (see adminAlerts/${stuckSagaAlertId(bookingId)})`);
     }
     report.acceptSagasStale++;
     return;
@@ -370,7 +370,7 @@ async function reconcileOneAcceptSaga(
     // pair cannot occur in normal flow. Without it there is no key to replay
     // on, and inventing one would risk a second charge.
     console.error(
-      `paymentsSweep: booking ${bookingId} is staged with no depositChargeAttempt — cannot replay its charge key; needs admin attention`);
+      `paymentsSweep: booking ${bookingId} is staged with no depositChargeAttempt, cannot replay its charge key; needs admin attention`);
     bumpError(report, "reconcileNoAttempt");
     return;
   }
@@ -388,7 +388,7 @@ async function reconcileOneAcceptSaga(
       // Held escrow under a booking that is still `open`: the commit's own
       // transaction writes both, so these cannot legitimately disagree.
       console.error(
-        `paymentsSweep: booking ${bookingId} is open+staged but already holds deposits — needs admin attention`);
+        `paymentsSweep: booking ${bookingId} is open+staged but already holds deposits, needs admin attention`);
       bumpError(report, "reconcileHeldOnOpen");
       return;
     }
@@ -405,7 +405,7 @@ async function reconcileOneAcceptSaga(
   const curatorStripe = await getStripeProfileDoc(booking.curatorProfileId);
   if (!curatorStripe?.customerId) {
     console.error(
-      `paymentsSweep: booking ${bookingId} is staged but curator ${booking.curatorProfileId} has no Stripe customer — cannot replay the charge`);
+      `paymentsSweep: booking ${bookingId} is staged but curator ${booking.curatorProfileId} has no Stripe customer, cannot replay the charge`);
     bumpError(report, "reconcileNoCustomer");
     return;
   }
@@ -415,7 +415,7 @@ async function reconcileOneAcceptSaga(
   try {
     const r = await getStripe().chargeOffSession({
       customerId: curatorStripe.customerId, amountCents: totalChargeCents,
-      // The PERSISTED attempt (as-built contract #2) — this is the whole
+      // The PERSISTED attempt (as-built contract #2), this is the whole
       // point of the counter: same key, same intent, never a second charge.
       idempotencyKey: `${bookingId}:accept:deposit:${attempt}`,
       meta: { bookingId, purpose: "deposit" },
@@ -432,7 +432,7 @@ async function reconcileOneAcceptSaga(
       return;
     }
     if (e instanceof StripeCardDeclinedError) {
-      // A decline moved NO money, so there is nothing to refund — the staged
+      // A decline moved NO money, so there is nothing to refund, the staged
       // docs go and the marker is released, leaving the booking open for a
       // clean retry on a fresh attempt key. Same call acceptBooking makes.
       await unstageAccept(db, bookingId, occurrences, false);
@@ -442,7 +442,7 @@ async function reconcileOneAcceptSaga(
     throw e;
   }
 
-  // The charge is real (or was, on the original attempt — the replay returns
+  // The charge is real (or was, on the original attempt, the replay returns
   // the same intent). Record it before the commit, for the same reason
   // acceptBooking does: the money left the card whether or not the accept goes
   // on to commit. Deterministic ledger id ⇒ the original attempt's row, if it
@@ -474,36 +474,36 @@ async function reconcileOneAcceptSaga(
   // PERMANENT validation family (gig closed, series moved, F2 guard, $0
   // tripwire) and the accept can never commit; anything else is transient
   // (Firestore contention/infra) and the next hourly run replays the SAME key
-  // — no new money — so leave it staged rather than refunding a charge that
+  //, no new money, so leave it staged rather than refunding a charge that
   // may still be about to be consumed.
   if (commitError && !(commitError instanceof HttpsError)) {
     console.error(
-      `paymentsSweep: transient commit failure for ${bookingId} (intent ${intentId}) — left staged for the next run`, commitError);
+      `paymentsSweep: transient commit failure for ${bookingId} (intent ${intentId}), left staged for the next run`, commitError);
     bumpError(report, "reconcileCommit");
     return;
   }
 
   // commitAcceptAfterCharge contract point 2: `null` means THIS CALL did not
-  // commit, NOT that nothing committed. Re-read before refunding — a racer
+  // commit, NOT that nothing committed. Re-read before refunding, a racer
   // (the webhook, or a concurrent callable) may have committed the very accept
   // this call was completing, and refunding a committed accept's deposit is
   // the worst failure mode in this codebase.
   const after = (await bookingRef.get()).data() as BookingRequestDoc | undefined;
   if (after?.status === "confirmed") {
-    console.info(`paymentsSweep: ${bookingId} was confirmed by another writer — nothing to reconcile`);
+    console.info(`paymentsSweep: ${bookingId} was confirmed by another writer, nothing to reconcile`);
     report.acceptSagasRacedOut++;
     return;
   }
   if (!after || after.status !== "open" || after.depositChargePending !== true) {
     console.error(
-      `paymentsSweep: ${bookingId} left commit in an unexpected state (status=${String(after?.status)}, pending=${String(after?.depositChargePending)}) — not refunding; needs admin attention`);
+      `paymentsSweep: ${bookingId} left commit in an unexpected state (status=${String(after?.status)}, pending=${String(after?.depositChargePending)}), not refunding; needs admin attention`);
     bumpError(report, "reconcileUnexpectedState");
     return;
   }
 
   if (commitError) {
     console.error(
-      `paymentsSweep: commit permanently rejected for ${bookingId} (intent ${intentId}) — refunding`, commitError);
+      `paymentsSweep: commit permanently rejected for ${bookingId} (intent ${intentId}), refunding`, commitError);
   }
   const { refunded } = await abortAcceptAfterFailedCommit({
     bookingId, intentId, attempt, amountCents: totalChargeCents,
@@ -537,13 +537,13 @@ async function reconcileAcceptSagas(
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 — RESOLVE stuck `*_pending` deposits
+// Step 2, RESOLVE stuck `*_pending` deposits
 // ---------------------------------------------------------------------------
 // The `*_pending` states are the transactional intent-to-move-money written by
 // whichever cancellation/no-show path decided it; a crash between that commit
 // and its post-commit executor leaves a doc only this step will finish.
 //
-// Queried on `deposit.status` ALONE — never joined to the parent booking (see
+// Queried on `deposit.status` ALONE, never joined to the parent booking (see
 // rule 1). Rule 3 does not apply here either: a `*_pending` doc is by
 // definition no longer part of any staging set.
 
@@ -564,10 +564,10 @@ async function resolvePendingDeposits(
           // Does resolving this doc actually touch Stripe? Only then is there
           // an idempotency key that can expire:
           //  - forfeit_pending ALWAYS transfers (resolveDepositPending's
-          //    forfeit branch calls transferToAccount regardless of intentId —
+          //    forfeit branch calls transferToAccount regardless of intentId,
           //    a never-charged deposit still owes the musician its slice), so
           //    it is never exempt;
-          //  - refund_pending with NO intentId moves no money at all — it
+          //  - refund_pending with NO intentId moves no money at all, it
           //    resolves straight to terminal `refunded` with no Stripe call,
           //    so refusing it would strand a doc forever over a key hazard
           //    that does not exist for it.
@@ -575,7 +575,7 @@ async function resolvePendingDeposits(
           // Staleness guard (see IDEMPOTENCY_WINDOW_MS). resolveDepositPending
           // is only safe to re-run freely INSIDE the 24h key window; past it,
           // the same key would mint a SECOND refund or a SECOND transfer.
-          // Its own doc comment specifies the eventual recovery — look the
+          // Its own doc comment specifies the eventual recovery, look the
           // existing object up by the `{bookingId, gigId, purpose}` metadata
           // every call stamps, and adopt it. That lookup needs a Stripe
           // search/list surface StripeLike does not expose yet, so the
@@ -585,18 +585,18 @@ async function resolvePendingDeposits(
             const alertId = stalePendingAlertId(at.bookingId, at.gigId);
             const shouldLog = await recordAdminAlert({
               alertId, kind: "stale_pending_deposit",
-              detail: `${status} since ${new Date(p.updatedAt).toISOString()} (>24h) — refund/transfer key can no longer be re-issued`,
+              detail: `${status} since ${new Date(p.updatedAt).toISOString()} (>24h), refund/transfer key can no longer be re-issued`,
               bookingId: at.bookingId, gigId: at.gigId, now,
             });
             if (shouldLog) {
               console.error(
-                `paymentsSweep: ${at.bookingId}/${at.gigId} has been ${status} since ${new Date(p.updatedAt).toISOString()} (>24h) — refusing to re-issue on an expired idempotency key; needs admin attention (see adminAlerts/${alertId})`);
+                `paymentsSweep: ${at.bookingId}/${at.gigId} has been ${status} since ${new Date(p.updatedAt).toISOString()} (>24h), refusing to re-issue on an expired idempotency key; needs admin attention (see adminAlerts/${alertId})`);
             }
             report.pendingDepositsStale++;
             continue;
           }
           // One summary recompute per doc: accepted cost, because these are
-          // one-off crash recoveries scattered across DIFFERENT bookings — the
+          // one-off crash recoveries scattered across DIFFERENT bookings, the
           // per-booking batching step 7 does would buy nothing here.
           await resolveDepositPending(at.bookingId, at.gigId);
           // Counted from the doc's ACTUAL post-state, not from "the executor
@@ -615,7 +615,7 @@ async function resolvePendingDeposits(
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — BIRTH deposits
+// Step 3, BIRTH deposits
 // ---------------------------------------------------------------------------
 // A whole-run booking's newly materialized occurrence is staged `unpaid` by the
 // daily sweep's materializer (no Stripe call in a batch write path) and charged
@@ -635,14 +635,14 @@ async function recordBirthCharge(
 }
 
 // Records a declined birth-deposit attempt and schedules (or gives up on) the
-// next one. A decline is NOT a state change — the doc stays `unpaid`; only the
+// next one. A decline is NOT a state change, the doc stays `unpaid`; only the
 // attempt counter and the retry clock move.
 async function dunBirthDeposit(
   doc: FirebaseFirestore.QueryDocumentSnapshot, at: PaymentLocation, p: PaymentDoc,
   attempts: number, chargeBaseline: FirebaseFirestore.Timestamp, now: number, report: PaymentsSweepReport,
 ): Promise<void> {
   const nextAttempts = attempts + 1;
-  // SETTLEMENT_RETRY_OFFSETS_MS is +1d, +2d, +2d — three retries after the
+  // SETTLEMENT_RETRY_OFFSETS_MS is +1d, +2d, +2d, three retries after the
   // initial attempt. `nextAttempts` indexes the retry it schedules, so the
   // schedule is exhausted once it reaches DEPOSIT_EXHAUSTED_ATTEMPTS.
   const exhausted = isDepositScheduleExhausted(nextAttempts);
@@ -659,12 +659,12 @@ async function dunBirthDeposit(
   } catch (e) {
     if (!isFailedPrecondition(e)) throw e;
     // The doc left `unpaid` under us. Nothing was charged (this is the decline
-    // path), so there is no money to account for — and no dunning to do for a
+    // path), so there is no money to account for, and no dunning to do for a
     // deposit that is no longer owed. No counter, and deliberately NO
     // notifications: telling both sides a payment failed for a date that was
     // just cancelled is a confusing lie.
     console.error(
-      `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} changed under a declined charge — dunning skipped`);
+      `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} changed under a declined charge, dunning skipped`);
     bumpError(report, "birthDepositRaced");
     return;
   }
@@ -679,7 +679,7 @@ async function dunBirthDeposit(
   }
 
   const retryLine = exhausted
-    ? "We've stopped retrying — settle it from your dashboard to book again."
+    ? "We've stopped retrying. Settle it from your dashboard to book again."
     : "We'll try again automatically.";
   await notifySafely(p.curatorProfileId, {
     kind: "booking", refId: at.bookingId,
@@ -689,7 +689,7 @@ async function dunBirthDeposit(
   await notifySafely(p.musicianProfileId, {
     kind: "booking", refId: at.bookingId,
     title: "A deposit didn't go through",
-    body: "The deposit for one of your booked dates couldn't be collected — we've let the curator know.",
+    body: "The deposit for one of your booked dates couldn't be collected: we've let the curator know.",
   }, `birth deposit decline ${at.bookingId}/${at.gigId}`);
 }
 
@@ -697,7 +697,7 @@ async function chargeOneBirthDeposit(
   db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
   at: PaymentLocation, now: number, report: PaymentsSweepReport,
 ): Promise<void> {
-  // FRESH read, and every decision below is made against it — the paginated
+  // FRESH read, and every decision below is made against it, the paginated
   // page this doc arrived in can be hundreds of docs old, and this step
   // CHARGES A CARD off what it reads. Its updateTime also becomes the CAS
   // baseline for the write that records the charge.
@@ -711,22 +711,22 @@ async function chargeOneBirthDeposit(
   if (p.deposit.intentId != null) {
     // Unpaid but already carrying an intent: a birth charge that came back
     // `processing` and never resolved, or an on-session pay-now intent the
-    // curator has not confirmed. NEVER re-charged — that outstanding intent can
+    // curator has not confirmed. NEVER re-charged, that outstanding intent can
     // still succeed, so a fresh-key retry would be a real double charge.
     //
     // ESCALATED to the durable queue rather than logged bare (review round 2):
     // this is one of the sweep's absorbing states, and an hourly console.error
-    // nobody reads is not an escalation — the row is the signal, the log is a
+    // nobody reads is not an escalation, the row is the signal, the log is a
     // convenience, and recordAdminAlert throttles the latter to once a day.
     const alertId = depositPendingAlertId(at.bookingId, at.gigId);
     const shouldLog = await recordAdminAlert({
       alertId, kind: "deposit_pending_stuck",
-      detail: `birth deposit is unpaid but holds intent ${p.deposit.intentId} — never re-charged; resolve the intent in Stripe, then clear deposit.intentId`,
+      detail: `birth deposit is unpaid but holds intent ${p.deposit.intentId}, never re-charged; resolve the intent in Stripe, then clear deposit.intentId`,
       bookingId: at.bookingId, gigId: at.gigId, now,
     });
     if (shouldLog) {
       console.error(
-        `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} is unpaid but holds intent ${p.deposit.intentId} — not re-charged; needs admin attention (see adminAlerts/${alertId})`);
+        `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} is unpaid but holds intent ${p.deposit.intentId}, not re-charged; needs admin attention (see adminAlerts/${alertId})`);
     }
     report.birthDepositsPending++;
     return;
@@ -734,8 +734,8 @@ async function chargeOneBirthDeposit(
 
   const attempts = p.deposit.depositAttempts ?? 0;
 
-  // TERMINATOR. The retry SCHEDULE is what runs out, and the counter — not the
-  // clock — is what says so: exhaustion deliberately clears
+  // TERMINATOR. The retry SCHEDULE is what runs out, and the counter, not the
+  // clock, is what says so: exhaustion deliberately clears
   // `depositNextRetryAt` to null (there is no next retry), so a clock-only
   // gate would read null as "due now" and re-charge this doc every hour
   // forever, minting a fresh key and a fresh decline each time. Dunning stops
@@ -745,7 +745,7 @@ async function chargeOneBirthDeposit(
 
   // Dunning backoff. Filtered in application code rather than by a second
   // composite index: the candidate set is bounded by "future booked dates
-  // whose deposit hasn't landed", which is tiny — same trade the daily sweep's
+  // whose deposit hasn't landed", which is tiny, same trade the daily sweep's
   // track reaper and invite sweep already make for their own age checks.
   const retryAt = p.deposit.depositNextRetryAt;
   if (typeof retryAt === "number" && retryAt > now) return;
@@ -753,8 +753,8 @@ async function chargeOneBirthDeposit(
   const booking = (await db.doc(`bookings/${at.bookingId}`).get()).data() as BookingRequestDoc | undefined;
   // NOT a violation of rule 1: an unpaid doc under a non-confirmed booking is
   // an accept saga's STAGED doc (transaction A wrote it; its own charge is in
-  // flight or about to be), and charging it here — on a key that saga knows
-  // nothing about — would double-charge the very accept step 1 exists to
+  // flight or about to be), and charging it here, on a key that saga knows
+  // nothing about, would double-charge the very accept step 1 exists to
   // reconcile. Rule 1 governs the SETTLEMENT sweeps, which must not care.
   if (!booking || booking.status !== "confirmed") return;
   // Rule 3, the explicit half: even a CONFIRMED booking can be mid-saga
@@ -766,7 +766,7 @@ async function chargeOneBirthDeposit(
   // PERSIST the counter BEFORE the attempt it names (as-built contract #2): a
   // crash between the charge and recording its outcome must re-derive the SAME
   // key next run. Absent already means 0, so this write only ever runs once
-  // per doc — it makes the doc self-describing rather than relying on the
+  // per doc, it makes the doc self-describing rather than relying on the
   // reader's default. Its WriteResult carries the doc's new updateTime, which
   // becomes the CAS baseline (no second read needed).
   if (p.deposit.depositAttempts == null) {
@@ -775,10 +775,10 @@ async function chargeOneBirthDeposit(
   }
   // Explicit, because the failure mode is SILENT: `{ lastUpdateTime: undefined }`
   // is not a weaker precondition, it is NO precondition. Only a non-existent
-  // doc has no updateTime (already excluded above) — so this can't fire, and
+  // doc has no updateTime (already excluded above), so this can't fire, and
   // if it ever did, refusing to charge is the right answer.
   if (!chargeBaseline) {
-    console.error(`paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} has no updateTime — refusing to charge without a CAS baseline`);
+    console.error(`paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} has no updateTime, refusing to charge without a CAS baseline`);
     bumpError(report, "birthDepositNoBaseline");
     return;
   }
@@ -786,7 +786,7 @@ async function chargeOneBirthDeposit(
   const curatorStripe = await getStripeProfileDoc(p.curatorProfileId);
   if (!curatorStripe?.customerId) {
     console.error(
-      `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} — curator ${p.curatorProfileId} has no Stripe customer`);
+      `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId}, curator ${p.curatorProfileId} has no Stripe customer`);
     bumpError(report, "birthDepositNoCustomer");
     return;
   }
@@ -798,7 +798,7 @@ async function chargeOneBirthDeposit(
       idempotencyKey: `${at.bookingId}:${at.gigId}:deposit:${attempts}`,
       meta: { bookingId: at.bookingId, gigId: at.gigId, purpose: "deposit" },
     });
-    // Optimistic precondition — the same hazard step 4's waive branch guards:
+    // Optimistic precondition, the same hazard step 4's waive branch guards:
     // the charge is a non-transactional gap during which a cancellation can
     // move this deposit to `refund_pending`/`forfeit_pending`. Writing `held`
     // blindly would erase that marker, and with it the executor's entire
@@ -814,7 +814,7 @@ async function chargeOneBirthDeposit(
       markedHeld = false;
       const raced = (await doc.ref.get()).data() as PaymentDoc | undefined;
       if (raced?.deposit.status === "refund_pending" || raced?.deposit.status === "forfeit_pending") {
-        // A cancellation won. The money DID move, so record what paid for it —
+        // A cancellation won. The money DID move, so record what paid for it,
         // and deliberately NOT the status: the pending marker is now the
         // truth, and step 2's executor needs the intent id (to refund against)
         // and the charge id (as a forfeit transfer's sourceChargeId) that this
@@ -825,19 +825,19 @@ async function chargeOneBirthDeposit(
           "deposit.intentId": r.id, "deposit.chargeId": r.chargeId, "deposit.chargedAt": now, updatedAt: now,
         });
         console.error(
-          `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} was cancelled (${raced.deposit.status}) while charging intent ${r.id} — recorded the charge and left it for the pending executor`);
+          `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} was cancelled (${raced.deposit.status}) while charging intent ${r.id}, recorded the charge and left it for the pending executor`);
       } else {
         // Something else moved it. The charge is real and now unaccounted
-        // for — never silently overwritten, always surfaced.
+        // for, never silently overwritten, always surfaced.
         console.error(
-          `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} changed under intent ${r.id} (now ${String(raced?.deposit.status)}) — charge recorded in the ledger only; needs admin attention`);
+          `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} changed under intent ${r.id} (now ${String(raced?.deposit.status)}), charge recorded in the ledger only; needs admin attention`);
       }
       bumpError(report, "birthDepositRaced");
     }
     await recordBirthCharge(at, p.curatorProfileId, amountCents, r.id);
     // Counts the deposits that actually became ESCROW. A charge that landed on
     // a doc a cancellation had already claimed is money that moved but escrow
-    // that never existed — it is counted in errors.birthDepositRaced instead.
+    // that never existed, it is counted in errors.birthDepositRaced instead.
     if (markedHeld) report.birthDepositsCharged++;
     // A charge that lands after a dunning run may have paid off the very debt
     // that flagged this curator. Only a query over the whole obligation set can
@@ -854,7 +854,7 @@ async function chargeOneBirthDeposit(
       await doc.ref.update({ "deposit.intentId": e.intentId, updatedAt: now })
         .catch((we) => console.error(`paymentsSweep: failed to record pending intent ${e.intentId} on ${at.bookingId}/${at.gigId}`, we));
       console.error(
-        `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} left processing on intent ${e.intentId} — needs admin attention`);
+        `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} left processing on intent ${e.intentId}, needs admin attention`);
       report.birthDepositsPending++;
       return;
     }
@@ -870,7 +870,7 @@ async function chargeBirthDeposits(
   db: FirebaseFirestore.Firestore, now: number, report: PaymentsSweepReport,
 ): Promise<void> {
   // Future-dated only: a deposit is escrow against a date that hasn't happened
-  // yet, so an already-started occurrence has nothing left to secure — its
+  // yet, so an already-started occurrence has nothing left to secure, its
   // money is settled in full by Task 10 instead (which must therefore treat an
   // uncharged deposit as "nothing to credit", not as an error).
   const q = db.collectionGroup("payments")
@@ -892,7 +892,7 @@ async function chargeBirthDeposits(
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — RESOLVE due occurrences (schedule the settlement, or waive it)
+// Step 4, RESOLVE due occurrences (schedule the settlement, or waive it)
 // ---------------------------------------------------------------------------
 // Queried on settlement fields ALONE (rule 1): a cancelled/expired booking's
 // past-start date still settles here if it was genuinely performed. The waive
@@ -910,7 +910,7 @@ async function resolveDueOccurrence(
     // `durationMinutes` is minutes; the * 60_000 is load-bearing (without it
     // this asks "has it STARTED", which the query already answered).
     const gigEnd = gig.startsAt + gig.durationMinutes * 60_000;
-    if (gigEnd > now) return;   // started but not finished — nothing is due yet
+    if (gigEnd > now) return;   // started but not finished, nothing is due yet
     if (gig.bookingId === at.bookingId && gig.status === "filled") {
       // The date stayed booked to THIS booking through to its end: it was
       // performed as far as anything here can know. Settlement opens now and
@@ -922,7 +922,7 @@ async function resolveDueOccurrence(
       await notifySafely(p.curatorProfileId, {
         kind: "booking", refId: at.bookingId,
         title: `Report actuals for "${gig.title}"`,
-        body: "Tell us what actually happened (extra time, extra songs) within 3 days — after that we settle the balance as booked.",
+        body: "Tell us what actually happened (extra time, extra songs) within 3 days. After that we settle the balance as booked.",
       }, `settlement scheduled ${at.bookingId}/${at.gigId}`);
       return;
     }
@@ -934,14 +934,14 @@ async function resolveDueOccurrence(
   // whatever deposit is still outstanding goes back.
   if (p.deposit.status === "unpaid") {
     // Rule 3. An unpaid doc under a booking with the saga marker set is an
-    // accept saga's STAGED doc — transaction A wrote it and step 1 owns its
+    // accept saga's STAGED doc, transaction A wrote it and step 1 owns its
     // money. Resolving it here would delete that doc from the staged set the
     // in-flight charge was sized against, so step 1's commit would find the
     // totals no longer agree and abort an accept whose money already moved.
     const booking = (await db.doc(`bookings/${at.bookingId}`).get()).data() as BookingRequestDoc | undefined;
     if (booking?.depositChargePending === true) {
       console.warn(
-        `paymentsSweep: ${at.bookingId}/${at.gigId} is due but its booking has a staged charge — left for step 1`);
+        `paymentsSweep: ${at.bookingId}/${at.gigId} is due but its booking has a staged charge, left for step 1`);
       return;
     }
   }
@@ -949,7 +949,7 @@ async function resolveDueOccurrence(
   const updates: Record<string, unknown> = { "settlement.status": "waived", updatedAt: now };
   let resolvePending = false;
   if (p.deposit.status === "held" || (p.deposit.status === "unpaid" && p.deposit.intentId != null)) {
-    // Held escrow — or an unpaid doc whose birth charge is still in flight —
+    // Held escrow, or an unpaid doc whose birth charge is still in flight,
     // goes back through the pending state, so the executor (here, or step 2 on
     // a later run if the refund fails) is what actually moves the money.
     updates["deposit.status"] = "refund_pending";
@@ -976,7 +976,7 @@ async function resolveDueOccurrence(
     // One summary recompute per doc: accepted cost. Waived occurrences of ONE
     // booking normally arrive on different runs (their dates end days apart),
     // so batching per booking here would almost never have anything to batch.
-    // The executor also owns the delinquency lift for this path — one place
+    // The executor also owns the delinquency lift for this path, one place
     // per path (see resolveDepositPending's tail).
     await resolveDepositPending(at.bookingId, at.gigId);
   } else {
@@ -984,8 +984,8 @@ async function resolveDueOccurrence(
       .catch((e) => console.error(`paymentsSweep: summary recompute failed for ${at.bookingId}`, e));
     // The no-executor path: an `unpaid` deposit went straight to `refunded`
     // just above (or there was nothing left to move). That still EXTINGUISHES
-    // the obligation — and an exhausted birth deposit is exactly the kind that
-    // gates a curator — so the lift belongs here, where no executor will run.
+    // the obligation, and an exhausted birth deposit is exactly the kind that
+    // gates a curator, so the lift belongs here, where no executor will run.
     await clearDelinquencyIfSettled(p.curatorProfileId, now)
       .catch((e) => console.error(`paymentsSweep: delinquency clear failed for ${p.curatorProfileId}`, e));
   }
@@ -1013,15 +1013,15 @@ async function resolveDueOccurrences(
 }
 
 // ---------------------------------------------------------------------------
-// Steps 5 & 6 — CHARGE due settlements, RETRY past_due ones
+// Steps 5 & 6, CHARGE due settlements, RETRY past_due ones
 // ---------------------------------------------------------------------------
 // MONEY MOVES HERE. `chargeSettlement` (paymentsSettlement.ts) owns everything about
-// one occurrence's settlement — the true-up read, the T+3 charge, the earnings
+// one occurrence's settlement, the true-up read, the T+3 charge, the earnings
 // transfer, and all of the attempts/nextRetryAt/delinquency bookkeeping. These
 // loops only find the due docs, isolate per-doc failures, and count outcomes.
 //
 // Queried on settlement fields ALONE (rule 1): a cancelled or expired
-// booking's past-start occurrence settles here exactly like any other — the
+// booking's past-start occurrence settles here exactly like any other, the
 // musician performed that night.
 
 async function runSettlementCharges(
@@ -1050,7 +1050,7 @@ async function runSettlementCharges(
         if (reason === "raced") report.settlementsRaced++;
         // The 4th decline of the dunning ladder is still a decline, so it is
         // already counted above; this counts the DELINQUENCY it declared,
-        // which the outcome cannot express. Only the transition reports it —
+        // which the outcome cannot express. Only the transition reports it,
         // recordSettlementFailure sets the reason off declareCuratorDelinquent's
         // own "was it me who declared it" answer, so a profile already flagged
         // by another occurrence is never double-counted.
@@ -1070,10 +1070,10 @@ async function runSettlementCharges(
 }
 
 // ---------------------------------------------------------------------------
-// Step 7 — EXPIRED-booking refund backstop
+// Step 7, EXPIRED-booking refund backstop
 // ---------------------------------------------------------------------------
 // unwindBookingsForModeration (profile rejection/deletion cascades) expires a
-// confirmed booking without touching its money — deliberately, so the refund
+// confirmed booking without touching its money, deliberately, so the refund
 // decision lives in one place. This is that place: expired + a deposit still
 // out = refund.
 //
@@ -1091,25 +1091,25 @@ async function refundOneExpiredBooking(
   // problems at once: a charge may be in flight against its unpaid docs, and
   // expiring a staged booking should not have been possible in the first
   // place (that is the anomaly step 1 escalates). Refunding here would race a
-  // live charge on a set step 1 is still accounting for — so this booking is
+  // live charge on a set step 1 is still accounting for, so this booking is
   // left entirely alone until a human releases the saga.
   if (booking.depositChargePending === true) {
     const alertId = stuckSagaAlertId(bookingId);
     const shouldLog = await recordAdminAlert({
       alertId, kind: "expired_booking_saga_marker",
-      detail: "expired booking still flagged depositChargePending — deposits left for step 1 / an operator",
+      detail: "expired booking still flagged depositChargePending, deposits left for step 1 / an operator",
       bookingId, gigId: null, now,
     });
     if (shouldLog) {
       console.error(
-        `paymentsSweep: expired booking ${bookingId} still has a staged charge — skipping its deposits (see adminAlerts/${alertId})`);
+        `paymentsSweep: expired booking ${bookingId} still has a staged charge, skipping its deposits (see adminAlerts/${alertId})`);
     }
     bumpError(report, "expiredStagedSaga");
     return;
   }
 
   // Bounded by occurrences-per-booking (the dates one booking covers), never
-  // by the payments collection — same read shape recomputePaymentSummary
+  // by the payments collection, same read shape recomputePaymentSummary
   // already makes.
   const paymentsSnap = await db.collection(`bookings/${bookingId}/payments`).get();
   const marked: string[] = [];
@@ -1120,7 +1120,7 @@ async function refundOneExpiredBooking(
     try {
       const updates: Record<string, unknown> = { "deposit.status": "refund_pending", updatedAt: now };
       // A date that will never happen never settles. Guarded to the two
-      // "hasn't happened yet" states — a paid/past_due settlement is a real
+      // "hasn't happened yet" states, a paid/past_due settlement is a real
       // money record and must never be erased (markDepositsPendingInTx makes
       // the identical distinction).
       if (p.settlement.status === "not_due" || p.settlement.status === "pending") {
@@ -1577,7 +1577,7 @@ async function expireTicketTransfers(
 // ---------------------------------------------------------------------------
 
 // Every step is isolated: one failing step is logged and counted, and the rest
-// still run. Ordering is deliberate — reconciliation first (it can turn staged
+// still run. Ordering is deliberate, reconciliation first (it can turn staged
 // docs into held ones the later steps then see), then the pending executors,
 // then charges, then scheduling, then the settlement loops, then the backstop.
 export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport> {
@@ -1620,13 +1620,13 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
   return report;
 }
 
-// Thin wrapper — all logic lives in runPaymentsSweep above so it's directly
+// Thin wrapper, all logic lives in runPaymentsSweep above so it's directly
 // testable with an injected clock (same shape as dailySweep).
 //
 // HOURLY, not daily: every deadline this sweep enforces (a stuck saga's 24h
 // idempotency window, a settlement's T+3 due time, a dunning retry offset) is
 // measured in hours or days, and a daily cadence would put up to 24h of drift
-// on each of them. `secrets: [stripeSecretKey]` is mandatory — steps 1 and 3
+// on each of them. `secrets: [stripeSecretKey]` is mandatory, steps 1 and 3
 // both reach getStripe(), which fails CLOSED outside the emulator without it.
 export const paymentsSweep = onSchedule(
   { schedule: "every 1 hours", region: "us-central1", timeoutSeconds: 540, memory: "512MiB", secrets: [stripeSecretKey] },

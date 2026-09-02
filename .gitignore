@@ -7,3 +7,5 @@ dist/
 .next/
 .superpowers/
 .worktrees/
+
+apps/web/AGENTS.md

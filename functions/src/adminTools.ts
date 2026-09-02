@@ -9,11 +9,11 @@ const SEARCH_LIMIT = 10;
 
 // Prefix range query over the lowercase index field: everything from `lower`
 // (inclusive) up to the first string that is NOT prefixed by `lower`.
-// U+F8FF (Private Use Area) is Firestore's own documented idiom for this — a
+// U+F8FF (Private Use Area) is Firestore's own documented idiom for this, a
 // codepoint high enough that it sorts after virtually any realistic name
-// character — so `< lower + ""` captures every doc whose
+// character, so `< lower + ""` captures every doc whose
 // displayNameLower starts with `lower`. Range is on a single field, so this
-// needs only Firestore's automatic single-field index — no composite index
+// needs only Firestore's automatic single-field index, no composite index
 // entry.
 export const searchUsersByName = onCall<{ q: string }>({ region: "us-central1" }, async (req) => {
   requireAdmin(req);
@@ -83,7 +83,7 @@ export const backfillDisplayNameLower = onCall<Record<string, never>>(
 const MAX_FLAG_TEXT_LENGTH = 500;
 
 // Appends a note to adminNotes/{uid} (keyed by the USER's uid, matching
-// firestore.rules' existing adminNotes/{uid} wildcard — that collection is
+// firestore.rules' existing adminNotes/{uid} wildcard, that collection is
 // admin-read-only and write:false for every client, so the Admin SDK write
 // here is the only path that can ever touch it).
 //
@@ -115,11 +115,11 @@ export const flagAccount = onCall<{ uid: string; text: string }>({ region: "us-c
     const existing = (snap.data()?.notes as AdminNoteDoc["notes"] | undefined) ?? [];
     // P6: an unbounded notes array is both a moderation-UX problem (an
     // ever-growing, never-archived history) and a doc-size risk (a
-    // Firestore doc caps at 1 MiB) — 200 is a generous ceiling for how many
+    // Firestore doc caps at 1 MiB), 200 is a generous ceiling for how many
     // flags one account should accumulate before someone actually archives
     // the history, not a number expected to be hit in routine moderation.
     if (existing.length >= 200) {
-      throw new HttpsError("resource-exhausted", "note limit reached — archive this account's notes");
+      throw new HttpsError("resource-exhausted", "note limit reached: archive this account's notes");
     }
     const notes: AdminNoteDoc["notes"] = [...existing, entry];
     tx.set(ref, { notes });

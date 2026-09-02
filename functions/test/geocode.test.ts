@@ -11,7 +11,7 @@ import {
 describe("StubGeocoder", () => {
   const geocoder = new StubGeocoder();
 
-  it("is deterministic — same address twice produces identical result", async () => {
+  it("is deterministic, same address twice produces identical result", async () => {
     const addr = "1600 Pennsylvania Avenue NW, Washington, DC";
     const result1 = await geocoder.geocode(addr);
     const result2 = await geocoder.geocode(addr);

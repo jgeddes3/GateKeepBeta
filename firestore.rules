@@ -6,7 +6,7 @@ service cloud.firestore {
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
     // token.get(..., false) rather than `token.admin == true`: a missing
     // claim (every non-admin caller) resolves to `false` cleanly instead of
-    // throwing an EvaluationException on the direct property access — only
+    // throwing an EvaluationException on the direct property access, only
     // absorbed into `false` by CEL's `||` short-circuiting today, which
     // silently floods the rules-evaluation logs for every non-admin read.
     // Mirrors storage.rules' isAdmin() already.
@@ -23,7 +23,7 @@ service cloud.firestore {
       allow read: if isOwner(uid) || isAdmin();
       // Created by Cloud Functions; owner may update editable fields only,
       // and only to well-typed, size-bounded values. Fields absent from the
-      // resulting document are read via .get(key, default) — direct property
+      // resulting document are read via .get(key, default), direct property
       // access on a missing map key throws during rule evaluation, which
       // would otherwise break an update that doesn't touch every field.
       allow update: if isOwner(uid)
@@ -49,7 +49,7 @@ service cloud.firestore {
       match /pushTokens/{tokenId} {
         allow read: if isOwner(uid);
         // Doc id must be a well-formed Expo push token, and the payload may
-        // only ever contain createdAt (matches push.ts's write shape) —
+        // only ever contain createdAt (matches push.ts's write shape),
         // otherwise a client could write arbitrary token ids/fields into a
         // collection a Cloud Function later fans push notifications out to.
         allow write: if isOwner(uid)
@@ -64,12 +64,12 @@ service cloud.firestore {
 
       match /members/{memberUid} {
         // self-read clause serves the collection-group "my profiles" query.
-        // Ordered read-free/cheap checks first — profileApproved() is a
-        // billed get() — so the common non-admin, non-approved-profile
+        // Ordered read-free/cheap checks first, profileApproved() is a
+        // billed get(), so the common non-admin, non-approved-profile
         // paths short-circuit before paying for it.
         allow get: if isAdmin() || isMember(profileId)
           || (signedIn() && request.auth.uid == resource.data.uid) || profileApproved(profileId);
-        // Listing the whole roster is narrower than a single get — an
+        // Listing the whole roster is narrower than a single get, an
         // unauthenticated/non-member caller could otherwise page through
         // every member of even an approved profile via a collection list.
         allow list: if isMember(profileId) || isAdmin();
@@ -80,7 +80,7 @@ service cloud.firestore {
         // Public track reads require BOTH the profile and the track approved.
         // List queries must filter status == 'approved' (unfiltered lists fail),
         // which keeps pending/rejected titles out of public reach.
-        // Read-free checks first — profileApproved() is a billed get() — so
+        // Read-free checks first, profileApproved() is a billed get(), so
         // member/admin reads short-circuit before paying for it.
         allow read: if isAdmin() || isMember(profileId)
           || (profileApproved(profileId) && resource.data.status == 'approved');
@@ -88,8 +88,8 @@ service cloud.firestore {
       }
 
       match /private/booking {
-        // Rates/preferences: never public, and — TIGHTEN (spec §6 / M-13
-        // resolution) — no longer curator-shopping-readable either. Sub-3's
+        // Rates/preferences: never public, and, TIGHTEN (spec §6 / M-13
+        // resolution), no longer curator-shopping-readable either. Sub-3's
         // isApprovedCuratorMember() disjunct is removed: this is the raw
         // source doc now, member/admin only. Curators shopping for acts read
         // the server-built curatorBooking projection below instead.
@@ -106,20 +106,20 @@ service cloud.firestore {
 
       match /private/curatorBooking {
         // SP4: server-built projection (bookingVisibility.ts's
-        // rebuildBookingProjections) — rates with "private"-visibility
+        // rebuildBookingProjections), rates with "private"-visibility
         // structures nulled out, full preferences, and a reliability
         // summary. This is now the curator-shopping surface the old
         // isApprovedCuratorMember() disjunct granted on private/booking
         // above: any signed-in member of >=1 approved curator profile,
         // via the curatorAccess/{uid} presence-only marker (maintained by
         // Cloud Functions on curator approval/unpublish and membership
-        // changes — a custom claim can't stay in sync without a token
+        // changes, a custom claim can't stay in sync without a token
         // refresh, while a lookup doc updates instantly), may read ANY
         // profile's projection. isAdmin() ordered before the exists() check
-        // per the file's cost idiom (SP3 Task 14) — free for admins.
+        // per the file's cost idiom (SP3 Task 14), free for admins.
         // signedIn() guard: request.auth.uid on an anon caller resolves to
         // null, which throws an EvaluationException inside the exists()
-        // path-building rather than absorbing into `false` — the same
+        // path-building rather than absorbing into `false`, the same
         // anon-eval-error flood isAdmin() (line ~13) was deliberately
         // engineered out of; guard it here too.
         allow read: if isAdmin() || isMember(profileId)
@@ -129,7 +129,7 @@ service cloud.firestore {
 
       match /private/reliability {
         // No-show marks + completedCount: member (own record) + admin only,
-        // never curator-shopping-readable — curatorBooking's summary above
+        // never curator-shopping-readable, curatorBooking's summary above
         // is the curator-facing surface.
         allow read: if isMember(profileId) || isAdmin();
         allow write: if false; // Cloud Functions only
@@ -140,26 +140,26 @@ service cloud.firestore {
     match /gigs/{gigId} {
       // Only callables write, and only approved curator profiles can post;
       // profile unpublish cascades close open gigs (review.ts), so a bare
-      // status check is sufficient — no per-read profile get().
-      // List queries MUST pin status to one provable value — 'open',
+      // status check is sufficient, no per-read profile get().
+      // List queries MUST pin status to one provable value, 'open',
       // 'filled', or 'closed' with bookedMusicianProfileId also constrained
-      // (see the SP4 note below) — an unfiltered or status-unconstrained
+      // (see the SP4 note below), an unfiltered or status-unconstrained
       // list fails.
       // Member/admin disjuncts are also list-provable as written: a curator
       // dashboard query filtered by where('curatorProfileId','==',X) pins
       // that field to a query-wide constant, so isMember(X) evaluates once
-      // (not per document) — if true, that disjunct alone proves the whole
+      // (not per document), if true, that disjunct alone proves the whole
       // OR for every possible result, regardless of each doc's actual
       // (unconstrained) status. isAdmin() never depends on resource.data,
       // so it's provable for any query, filtered or not.
       // SP4: 'filled' also reads publicly (a booking landed but the gig's
       // still upcoming), and so does 'closed' once bookedMusicianProfileId
-      // is set (the gig happened, booked) — both feed the Shows section
+      // is set (the gig happened, booked), both feed the Shows section
       // (gigs where('bookedMusicianProfileId','==',profileId), status in
       // ["filled","closed"]). status=='filled' alone is list-provable the
       // same way status=='open' is; the closed+booked disjunct ANDs in a
       // second resource.data field, so it's only provable for a query that
-      // also constrains bookedMusicianProfileId — a bare status=='closed'
+      // also constrains bookedMusicianProfileId, a bare status=='closed'
       // filter (bookedMusicianProfileId unconstrained) still can't prove it,
       // and a single closed-but-unbooked gig get() still denies.
       allow read: if resource.data.status == 'open' || resource.data.status == 'filled'
@@ -182,7 +182,7 @@ service cloud.firestore {
     match /gigSeries/{seriesId} {
       // Same list-provability shape as gigs above; series has no public
       // disjunct (never publicly listed), so an unfiltered or stranger list
-      // always fails — only a curatorProfileId-filtered member query or an
+      // always fails, only a curatorProfileId-filtered member query or an
       // admin's (filtered or not) query is provable.
       allow read: if isAdmin() || isMember(resource.data.curatorProfileId);
       allow write: if false;
@@ -190,14 +190,14 @@ service cloud.firestore {
 
     // ---------- Sub-project 4: booking flow ----------
     match /bookings/{bookingId} {
-      // Top-level (not nested under either profile) — a booking belongs to
+      // Top-level (not nested under either profile), a booking belongs to
       // BOTH a curator and a musician profile, so read access is either
       // side's membership. All mutation goes through callables (bookings.ts
       // / bookingLifecycle.ts), never a direct client write.
       // NOT list-provable on a bare where('gigId','==',X): curatorProfileId
       // is unconstrained by that filter alone, so isMember(resource.data.
       // curatorProfileId) can't be evaluated as a single query-wide constant
-      // per doc — the (gigId,status) index below serves callables/Admin SDK
+      // per doc, the (gigId,status) index below serves callables/Admin SDK
       // only. A client "applicants for this gig" list must also pin
       // curatorProfileId == <own profile> for the member disjunct to prove.
       allow read: if isMember(resource.data.curatorProfileId)
@@ -211,7 +211,7 @@ service cloud.firestore {
       // The parent get()s pin to the bookingId path segment, so a list query
       // scoped under one booking is provable for members of either side.
       // signedIn() guard (branch audit): short-circuits BEFORE the billed parent
-      // get()s so an anonymous caller does not pay a document read to be denied —
+      // get()s so an anonymous caller does not pay a document read to be denied,
       // matches the private/curatorBooking read rule's `signedIn() && exists()`
       // idiom above. isMember() already re-checks signedIn(), so this only moves
       // the cost, never the outcome.
@@ -221,14 +221,14 @@ service cloud.firestore {
           || isMember(get(/databases/$(database)/documents/bookings/$(bookingId)).data.musicianProfileId)));
       allow write: if false; // Cloud Functions only
     }
-    // Webhook idempotency + append-only money audit — server/admin surfaces.
+    // Webhook idempotency + append-only money audit, server/admin surfaces.
     match /stripeEvents/{eventId} { allow read: if isAdmin(); allow write: if false; }
     match /ledger/{entryId}       { allow read: if isAdmin(); allow write: if false; }
     // FakeStripe state (emulator only; the collection simply never exists in
-    // production) — never client-visible either way.
+    // production), never client-visible either way.
     match /stripeFake/{doc=**}    { allow read, write: if false; }
 
-    // SP5 Task 9: the payments sweep's durable escalation queue — the money
+    // SP5 Task 9: the payments sweep's durable escalation queue, the money
     // states it deliberately refuses to act on and can only hand to a human
     // (see AdminAlertDoc). Admin-read, server-write, exactly like ledger and
     // stripeEvents above; releaseStuckSaga is the callable that resolves a row.
@@ -237,12 +237,12 @@ service cloud.firestore {
     match /adminNotes/{uid} { allow read: if isAdmin(); allow write: if false; }
     match /curatorAccess/{uid} { allow read: if isOwner(uid) || isAdmin(); allow write: if false; }
     // S2: per-uid daily geocode call counter (functions/src/geocode.ts's
-    // consumeGeocodeBudget) — internal rate-limit bookkeeping only, never
+    // consumeGeocodeBudget), internal rate-limit bookkeeping only, never
     // read by any client (not even the owner) and never client-written.
     match /geocodeBudgets/{uid} { allow read, write: if false; }
     // S4: uids whose curatorAccess recompute failed at its original
     // touchpoint (review.ts's reject-from-approved cascade), queued for the
-    // daily sweep's retry step (functions/src/scheduled.ts) to retry —
+    // daily sweep's retry step (functions/src/scheduled.ts) to retry,
     // internal bookkeeping only, same as geocodeBudgets above.
     match /curatorAccessRetries/{uid} { allow read, write: if false; }
 
@@ -326,7 +326,7 @@ service cloud.firestore {
       allow write: if false; // Cloud Functions only
     }
 
-    // Recursive-wildcard match needed for collectionGroup('members') queries —
+    // Recursive-wildcard match needed for collectionGroup('members') queries,
     // the nested /profiles/{profileId}/members/{memberUid} rule above does NOT
     // apply to collection-group queries. Mirrors the self-read clause so the
     // app's "my profiles" query (collectionGroup('members').where('uid','==',uid))

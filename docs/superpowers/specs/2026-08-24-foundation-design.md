@@ -1,4 +1,4 @@
-# GateKeep — Sub-project 1: Foundation — Design Spec
+# GateKeep, Sub-project 1: Foundation, Design Spec
 
 **Date:** 2026-08-24
 **Status:** Approved design, pending user review of this document
@@ -22,13 +22,13 @@ Matching runs both directions: curators post gigs musicians apply to, and curato
 
 ### Sub-project build order
 
-1. **Foundation** (this spec) — auth, accounts/profiles, app shell, admin v1, notification plumbing
-2. Musician portfolio — profiles, audio upload/hosting/streaming, preferences, payment structures
+1. **Foundation** (this spec), auth, accounts/profiles, app shell, admin v1, notification plumbing
+2. Musician portfolio, profiles, audio upload/hosting/streaming, preferences, payment structures
 3. Curator profiles & gig postings
 4. Matching & booking (including musician ↔ curator messaging)
-5. Payments — Stripe Connect (booking payouts + platform cut; reused by ticketing)
-6. Events & ticketing — public event pages, ticket sales, QR tickets
-7. Fan discovery — search, follow artists, performance notifications
+5. Payments, Stripe Connect (booking payouts + platform cut; reused by ticketing)
+6. Events & ticketing, public event pages, ticket sales, QR tickets
+7. Fan discovery, search, follow artists, performance notifications
 
 Later phases (no v1 spec): advertising, subscriptions, two-step verification, sign-in method linking.
 
@@ -41,10 +41,10 @@ Later phases (no v1 spec): advertising, subscriptions, two-step verification, si
 ```
 GateKeepBeta/
 ├── apps/
-│   ├── mobile/     # Expo — iOS + Android
-│   └── web/        # Next.js — public pages, fan web, curator dashboard, /admin
+│   ├── mobile/     # Expo, iOS + Android
+│   └── web/        # Next.js, public pages, fan web, curator dashboard, /admin
 ├── packages/
-│   └── shared/     # TypeScript types, data models, validation — used by both apps + functions
+│   └── shared/     # TypeScript types, data models, validation, used by both apps + functions
 ├── functions/      # Firebase Cloud Functions
 └── firebase config + Firestore security rules at root
 ```
@@ -59,7 +59,7 @@ GateKeepBeta/
 ## 3. Data model (Firestore)
 
 ### `users/{uid}`
-One document per signed-in person, created at signup. Display name, photo, email, home city, createdAt. Every user is a fan by default; tickets attach here in sub-project 6. No role field — roles derive from profile membership. Email is never publicly readable.
+One document per signed-in person, created at signup. Display name, photo, email, home city, createdAt. Every user is a fan by default; tickets attach here in sub-project 6. No role field, roles derive from profile membership. Email is never publicly readable.
 
 ### `profiles/{profileId}`
 One document per musician act or curator organization.
@@ -86,7 +86,7 @@ Firebase Auth custom claim `admin: true`, set server-side only. First admins see
 
 ## 4. Auth & onboarding
 
-- **Sign-in methods:** email/password, Google, or Apple — user picks exactly one; no linking of multiple methods to one account in v1. If they attempt another method later, the app tells them which method they signed up with.
+- **Sign-in methods:** email/password, Google, or Apple, user picks exactly one; no linking of multiple methods to one account in v1. If they attempt another method later, the app tells them which method they signed up with.
 - Email signups require verification email; standard password reset included.
 - **After signup:** `users/{uid}` doc auto-created; user lands directly in the fan experience. Buying tickets never requires approval.
 - **Becoming a musician/curator:** account menu → "Join as a musician/curator" → creates `draft` profile → guided required-info flow (full wizards are sub-projects 2–3; foundation builds draft → submit mechanics) → submit sets `pending_review` → team approves (notify, go live) or rejects (show reason, allow revise + resubmit).
@@ -115,7 +115,7 @@ Messages tabs are confirmed scope (musician ↔ curator, built in sub-project 4)
 - `/dashboard`: musician/curator workspace with the same context switcher
 - `/admin`: team-only (admin claim required); invisible otherwise
 
-**Foundation deliverable:** running app on iOS, Android, and web — sign-in, profile creation → pending → approval loop, context switching, notifications inbox — with placeholder content in feature tabs.
+**Foundation deliverable:** running app on iOS, Android, and web, sign-in, profile creation → pending → approval loop, context switching, notifications inbox, with placeholder content in feature tabs.
 
 ---
 
@@ -133,7 +133,7 @@ Web-only at `/admin`, gated by admin claim.
 
 ## 7. Notifications (plumbing)
 
-- Push permission prompts, device token registration (tokens stored per-user, writable only by owner), and an in-app notifications inbox — built in foundation.
+- Push permission prompts, device token registration (tokens stored per-user, writable only by owner), and an in-app notifications inbox, built in foundation.
 - Delivery: Expo push (mobile) + web push/FCM (web).
 - Triggers ship with their features: approval results (this sub-project), booking requests (4), ticket confirmations (6), artist announcements (7).
 
@@ -160,7 +160,7 @@ Web-only at `/admin`, gated by admin claim.
 
 ## 9. Error handling & testing
 
-- **Errors:** Firestore offline caching on mobile; human-friendly auth errors; global crash reporting (Sentry or Crashlytics — pick at implementation).
+- **Errors:** Firestore offline caching on mobile; human-friendly auth errors; global crash reporting (Sentry or Crashlytics, pick at implementation).
 - **Testing:** security rules tested against the Firebase emulator; `packages/shared` validation unit-tested once, reused everywhere; auth + profile-lifecycle integration tests on the emulator.
 
 ---

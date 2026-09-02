@@ -20,12 +20,12 @@ import {
   DEPOSIT_RECONCILING_MESSAGE, BOOKING_LOCKED_BY_DEPOSIT_MESSAGE,
   // Task 8's post-commit executor, exercised DIRECTLY below (same rationale
   // as commitAcceptAfterCharge above): Task 9's sweep is its other caller,
-  // and its idempotency contract — a re-run against an already-terminal doc
-  // must move no money — is only testable by calling it twice.
+  // and its idempotency contract, a re-run against an already-terminal doc
+  // must move no money, is only testable by calling it twice.
   resolveDepositPending,
 } from "../src/paymentsCore.js";
 // Transaction B of the accept saga, exercised DIRECTLY (not through the
-// callable) below — it is an exported helper precisely because Task 9's sweep
+// callable) below, it is an exported helper precisely because Task 9's sweep
 // and the webhook call it out of band, and those callers' contract (null vs
 // throw, what it does and doesn't write) needs its own coverage.
 import { commitAcceptAfterCharge, abortAcceptAfterFailedCommit } from "../src/bookings.js";
@@ -35,11 +35,11 @@ const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gate
 const adb = adminFirestore(admin);
 const WEBHOOK_URL = "http://localhost:5001/gatekeep-dev-jg/us-central1/stripeWebhook";
 
-// 30s — was 20s (bookings.test.ts's precedent for booking-adjacent suites
+// 30s, was 20s (bookings.test.ts's precedent for booking-adjacent suites
 // that chain several callables before reaching an assertion). Task 6's accept
 // saga tests chain the longest sequences in this file: two approved profiles,
 // makeMoneyReady, up to three createGig/publishGig pairs, applyToGig, and an
-// acceptBooking that now runs two transactions plus a Stripe round trip —
+// acceptBooking that now runs two transactions plus a Stripe round trip,
 // matching bookings.test.ts's own 30s for the same reason.
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -57,7 +57,7 @@ async function makeApprovedCuratorProfile(emailPrefix: string) {
 }
 
 // Admin-SDK shortcut for the musician submission gate (bio+genre+avatar+
-// track) — mirrors bookings.test.ts's identical fixture; this suite's
+// track), mirrors bookings.test.ts's identical fixture; this suite's
 // subject is payment identity, not portfolio gate mechanics.
 async function makeApprovedMusicianProfile(emailPrefix: string) {
   const owner = await signUpTestUser(`${emailPrefix}-${Date.now()}@test.com`);
@@ -150,7 +150,7 @@ describe("createOnboardingLink", () => {
 
     await expect(callFn("createOnboardingLink", { profileId }, member.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
-    // Onboarding sets the payout DESTINATION, so it is admin-gated — the owner
+    // Onboarding sets the payout DESTINATION, so it is admin-gated, the owner
     // (an admin) is allowed.
     const ok = await callFn<{ profileId: string }, { url: string }>(
       "createOnboardingLink", { profileId }, owner.user);
@@ -166,7 +166,7 @@ describe("createSetupIntent idempotent customer creation", () => {
     const second = await callFn<{ profileId: string }, { clientSecret: string; customerId: string }>(
       "createSetupIntent", { profileId }, owner.user);
     expect(second.customerId).toBe(first.customerId);
-    // A fresh SetupIntent per call, though — only the customer is reused.
+    // A fresh SetupIntent per call, though, only the customer is reused.
     expect(second.clientSecret).not.toBe(first.clientSecret);
     const sp = await getStripeDoc(profileId);
     expect(sp?.customerId).toBe(first.customerId);
@@ -211,7 +211,7 @@ describe("getStripeStatus", () => {
     await callFn("getStripeStatus", { profileId }, owner.user);
     expect((await getStripeDoc(profileId))?.transfersEnabled).toBe(true);
 
-    // Now delete the fake account object entirely — the fake models this as
+    // Now delete the fake account object entirely, the fake models this as
     // getAccountState throwing StripeAccountMissingError.
     await adb.doc(`stripeFake/state/objects/${accountId}`).delete();
 
@@ -239,7 +239,7 @@ describe("account.updated webhook", () => {
       { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
 
     // M1 (branch audit): a real account.updated is a connected-account event, so
-    // Stripe stamps the top-level `account` with the connected account id — the
+    // Stripe stamps the top-level `account` with the connected account id, the
     // handler now requires it to pin to the cached account.
     const evt = { ...fakeEvent("account.updated", { id: accountId, metadata: { profileId } }), account: accountId };
     const res = await postWebhook(evt);
@@ -253,7 +253,7 @@ describe("account.updated webhook", () => {
 
     // A second profile whose CACHED accountId does NOT match this event's
     // account id. Flip that OTHER profile's own fake account flags to true
-    // FIRST — a handler that skipped (or got wrong) the mismatch check would
+    // FIRST, a handler that skipped (or got wrong) the mismatch check would
     // still sync against the other profile's OWN cached accountId (the
     // handler never trusts the event's accountId for the Stripe read) and
     // pick these up; only a CORRECT mismatch bail leaves them false.
@@ -273,13 +273,13 @@ describe("account.updated webhook", () => {
     expect(otherAfter?.instantEligible).toBe(false);
   });
 
-  it("M1 (branch audit): a matching accountId whose TOP-LEVEL event.account is a foreign account is ignored — flags are NOT synced", async () => {
+  it("M1 (branch audit): a matching accountId whose TOP-LEVEL event.account is a foreign account is ignored, flags are NOT synced", async () => {
     const { owner, profileId } = await makeApprovedMusicianProfile("whforgn");
     await callFn("createOnboardingLink", { profileId }, owner.user);
     const sp = await getStripeDoc(profileId);
     const accountId = sp!.accountId!;
     // The account's own fake flags are true, so ONLY a correct account-pin bail
-    // leaves the cached flags false — syncStripeAccountFlags reads the account by
+    // leaves the cached flags false, syncStripeAccountFlags reads the account by
     // the profile's OWN cached id, so a handler that skipped the event.account
     // check would still pick these up.
     await adb.doc(`stripeFake/state/objects/${accountId}`).set(
@@ -287,7 +287,7 @@ describe("account.updated webhook", () => {
 
     // object.id pins to the cached account (so the older accountId check passes),
     // but the top-level event.account is a DIFFERENT, attacker-controlled
-    // connected account — the confused/forged connected-account event M1 closes.
+    // connected account, the confused/forged connected-account event M1 closes.
     const evt = { ...fakeEvent("account.updated", { id: accountId, metadata: { profileId } }), account: "acct_evil_forged" };
     expect((await postWebhook(evt)).status).toBe(200);
 
@@ -362,7 +362,7 @@ describe("refreshPaymentMethod", () => {
     expect(after?.cardLast4).toBe(before?.cardLast4);
   });
 
-  it("a non-string setupIntentId is rejected with invalid-argument — RegExp.test would otherwise coerce it (review round 2, #3)", async () => {
+  it("a non-string setupIntentId is rejected with invalid-argument, RegExp.test would otherwise coerce it (review round 2, #3)", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("rpmsitype");
     await expect(callFn<{ profileId: string; setupIntentId: number }, unknown>(
       "refreshPaymentMethod", { profileId, setupIntentId: 123 }, owner.user))
@@ -372,7 +372,7 @@ describe("refreshPaymentMethod", () => {
 
 // ---------- Task 5: booking money gates ----------
 // Mirrors bookings.test.ts's own gig/offer fixtures (this suite's subject is
-// the money gates, not booking negotiation mechanics — a minimal single-gig
+// the money gates, not booking negotiation mechanics, a minimal single-gig
 // perHour setup is enough to exercise applyToGig/offerGig/acceptBooking).
 function gigContent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -454,11 +454,11 @@ describe("Task 5 money gates", () => {
   });
 
   // Review round 1, item 3: the musician gate is RE-CHECKED at accept (not
-  // just at applyToGig) — a musician who was payout-ready when they applied
+  // just at applyToGig), a musician who was payout-ready when they applied
   // but lost transfersEnabled before the curator accepted must still block
   // the accept. The curator is the caller here, so the specific message
   // (not the audience-remapped one below) is expected.
-  it("acceptBooking re-checks musician payout-readiness — lost transfersEnabled after applying blocks a curator-side accept with the specific message", async () => {
+  it("acceptBooking re-checks musician payout-readiness, lost transfersEnabled after applying blocks a curator-side accept with the specific message", async () => {
     const curator = await makeApprovedCuratorProfile("g5ab5c");
     const musician = await makeApprovedMusicianProfile("g5ab5m");
     await makeMoneyReady(curator, musician);
@@ -467,7 +467,7 @@ describe("Task 5 money gates", () => {
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
 
-    // applyToGig itself would have refused this — the only way to reach a
+    // applyToGig itself would have refused this, the only way to reach a
     // staged application against a now-not-payout-ready musician is for the
     // flag to flip AFTER applying (e.g. Stripe disabled the account).
     await adb.doc(`profiles/${musician.profileId}/private/stripe`).set({ transfersEnabled: false }, { merge: true });
@@ -480,7 +480,7 @@ describe("Task 5 money gates", () => {
   // musician-side caller who trips the CURATOR gate (accepting a curator's
   // earlier offer, whose curator has since gone delinquent) must get the
   // neutral BOOKING_NOT_CONFIRMABLE_MESSAGE, never the curator-authored
-  // CURATOR_DELINQUENT_MESSAGE — the musician can't act on curator-specific
+  // CURATOR_DELINQUENT_MESSAGE, the musician can't act on curator-specific
   // copy. offerGig itself would have refused a delinquent curator, so the
   // curator must go delinquent AFTER making the offer.
   it("musician accepts a delinquent curator's earlier offer: gets the neutral BOOKING_NOT_CONFIRMABLE_MESSAGE, not the curator-authored text", async () => {
@@ -501,7 +501,7 @@ describe("Task 5 money gates", () => {
 
 // ---------- Task 6: accept saga (staged payment docs + batch deposit charge) ----------
 
-// Mirrors bookings.test.ts's identical fixture — including its "never leave
+// Mirrors bookings.test.ts's identical fixture, including its "never leave
 // an active series behind in the shared emulator" contract (every caller
 // below flips it to "ended" in a finally).
 function seedSeries(curatorProfileId: string) {
@@ -535,14 +535,14 @@ async function getPaymentDocs(bookingId: string): Promise<PaymentDoc[]> {
   return snap.docs.map((d) => d.data() as PaymentDoc);
 }
 
-// FakeStripe's created PaymentIntent object — the server-side amount actually
+// FakeStripe's created PaymentIntent object, the server-side amount actually
 // charged, which no callable input can influence.
 async function getFakeIntent(intentId: string): Promise<Record<string, unknown> | undefined> {
   return (await adb.doc(`stripeFake/state/objects/${intentId}`).get()).data();
 }
 
 // Scoped charge knobs (as-built contract #6): ALWAYS list this test's OWN
-// customerId rather than flipping the global declineCharges flag — the
+// customerId rather than flipping the global declineCharges flag, the
 // emulator's stripeFake/config doc is shared with every other suite running
 // against it, and a global knob would decline their charges too.
 async function setChargeKnob(
@@ -560,7 +560,7 @@ async function curatorCustomerId(profileId: string): Promise<string> {
 }
 
 describe("Task 6 accept saga", () => {
-  // Drives a real accept to the PENDING state — the only way to obtain a
+  // Drives a real accept to the PENDING state, the only way to obtain a
   // genuinely staged booking (transaction A's payment docs + the saga marker
   // + a real intent) without it going on to commit. Returns the intent id the
   // booking is now waiting on.
@@ -649,7 +649,7 @@ describe("Task 6 accept saga", () => {
     await makeMoneyReady(curator, musician);
     const series = await seedSeries(curator.profileId);
     try {
-      // Deliberately three DIFFERENT durations — a whole-run deposit must be
+      // Deliberately three DIFFERENT durations, a whole-run deposit must be
       // priced per occurrence, never by multiplying the initiating gig's.
       const gig60 = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 60 });
       const gig90 = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
@@ -685,7 +685,7 @@ describe("Task 6 accept saga", () => {
       expect(booking.status).toBe("confirmed");
       expect(booking.paymentSummary?.heldCents).toBe(5250 + 7875 + 10500);
       // The run-level deposit still summarizes ONE occurrence (the initiating
-      // gig's) — the per-occurrence docs above are the money truth.
+      // gig's), the per-occurrence docs above are the money truth.
       expect(booking.deposit?.amountCents).toBe(7875);
     } finally {
       await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
@@ -750,7 +750,7 @@ describe("Task 6 accept saga", () => {
       await setChargeKnob("pendingCustomerIds", customerId, false);
     }
 
-    // Unlike a decline, a pending intent leaves the saga STAGED — the money
+    // Unlike a decline, a pending intent leaves the saga STAGED, the money
     // may still land, so nothing is unwound and nothing may be re-charged.
     const pending = await getBooking(bookingId);
     expect(pending.status).toBe("open");
@@ -762,7 +762,7 @@ describe("Task 6 accept saga", () => {
     expect(stagedDoc.deposit.intentId).toBeNull();
 
     // A second accept while that intent is outstanding must NOT charge again
-    // (the pending intent can still succeed — that would be a double charge).
+    // (the pending intent can still succeed, that would be a double charge).
     await expect(callFn("acceptBooking", { bookingId }, curator.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: DEPOSIT_PROCESSING_MESSAGE });
 
@@ -786,7 +786,7 @@ describe("Task 6 accept saga", () => {
 
     // Same event id: the webhook's claim machine dedupes it outright.
     expect((await postWebhook(evt)).text).toBe("duplicate");
-    // A FRESH event id carrying the same intent still reaches the handler —
+    // A FRESH event id carrying the same intent still reaches the handler,
     // which must no-op, because the booking is no longer open-and-pending.
     const replay = fakeEvent("payment_intent.succeeded",
       { id: intentId, amount: 8742, amount_received: 8742, metadata: { bookingId, purpose: "deposit" } });
@@ -800,14 +800,14 @@ describe("Task 6 accept saga", () => {
   // Task 10 carry-forward: an occurrence whose start time has already passed
   // is still staged and charged. The daily sweep that closes past gigs runs
   // at most once a day, so an already-started gig can legitimately reach
-  // accept — its show still happens, and a filled occurrence with no payment
+  // accept, its show still happens, and a filled occurrence with no payment
   // doc would never settle, so the musician would never be paid for it.
   it("an already-started occurrence is still staged and charged", async () => {
     const curator = await makeApprovedCuratorProfile("t6pstc");
     const musician = await makeApprovedMusicianProfile("t6pstm");
     await makeMoneyReady(curator, musician);
     // publishGig refuses a past startsAt outright, so publish it in the
-    // future and push it into the past via the admin SDK — BEFORE the offer,
+    // future and push it into the past via the admin SDK, BEFORE the offer,
     // so the thread's only entry postdates the edit and the F2 gig-edit guard
     // has nothing to trip on. (Mirrors bookingLifecycle.test.ts's
     // setGigStartsAt, whose whole-run fixture seeds a past occurrence the
@@ -880,11 +880,11 @@ describe("Task 6 accept saga", () => {
 
     const after = await getBooking(bookingId);
     expect(after.status).toBe("open");
-    expect(after.depositChargeAttempt).toBe(1);   // untouched — no new attempt was minted
+    expect(after.depositChargeAttempt).toBe(1);   // untouched, no new attempt was minted
   });
 
   // SP5 Task 9 (review round 1, item 4): while a charge is staged, every other
-  // mutation of the booking is refused. This is money safety, not politeness —
+  // mutation of the booking is refused. This is money safety, not politeness,
   // a countered/declined/withdrawn booking still carrying the saga marker can
   // never be committed OR safely refunded by the sweep, and any such write
   // bumps `updatedAt`, which is exactly the sweep's ">24h staged" expired-key
@@ -899,7 +899,7 @@ describe("Task 6 accept saga", () => {
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     await stageViaPendingCharge(curator, bookingId);
 
-    // The musician applied, so it IS the curator's turn — this is refused for
+    // The musician applied, so it IS the curator's turn, this is refused for
     // the money reason, not the turn check that precedes it.
     await expect(callFn(
       "counterBooking", { bookingId, offer: offerPayload({ amountCents: 16000 }) }, curator.owner.user))
@@ -907,8 +907,8 @@ describe("Task 6 accept saga", () => {
         code: "functions/failed-precondition", message: BOOKING_LOCKED_BY_DEPOSIT_MESSAGE,
       });
 
-    // The staged saga is intact: its marker, its thread, and — the point of
-    // the guard — its `updatedAt`, unbumped.
+    // The staged saga is intact: its marker, its thread, and, the point of
+    // the guard, its `updatedAt`, unbumped.
     const after = await getBooking(bookingId);
     expect(after.status).toBe("open");
     expect(after.depositChargePending).toBe(true);
@@ -937,7 +937,7 @@ describe("Task 6 accept saga", () => {
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     await adb.doc(`gigs/${gigId}`).update({ status: "closed" });
 
-    // Contract point 2 — "did not commit": no saga is in flight on this
+    // Contract point 2, "did not commit": no saga is in flight on this
     // booking, so there is nothing to complete. Null, and not one write.
     await expect(commitAcceptAfterCharge({
       bookingId, intentId: "pi_never", chargeId: null, now: Date.now(),
@@ -951,7 +951,7 @@ describe("Task 6 accept saga", () => {
     expect(await getPaymentDocs(bookingId)).toHaveLength(0);
     expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("closed");
 
-    // Contract point 1 — it CAN throw: with a saga genuinely in flight,
+    // Contract point 1, it CAN throw: with a saga genuinely in flight,
     // validation runs and the closed gig surfaces as an HttpsError rather
     // than a silent null, so callers can tell "nothing to do" apart from
     // "this accept can never complete".
@@ -992,7 +992,7 @@ describe("Task 6 accept saga", () => {
     expect((await getBooking(bookingId)).status).toBe("open");
     expect((await adb.doc(`bookings/${bookingId}/payments/${gigId}`).get()).data()?.deposit.status).toBe("unpaid");
 
-    // The honest amount commits — the in-set doc is marked held, the stray is
+    // The honest amount commits, the in-set doc is marked held, the stray is
     // logged and left exactly as it was.
     const commit = await commitAcceptAfterCharge({
       bookingId, intentId, chargeId: "ch_direct_test", now: Date.now(),
@@ -1014,7 +1014,7 @@ describe("Task 6 accept saga", () => {
     expect(confirmed.status).toBe("confirmed");
     expect(confirmed.depositChargePending).toBe(false);
     expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
-    // Contract point 3: B commits, and does nothing else — no summary
+    // Contract point 3: B commits, and does nothing else, no summary
     // recompute, no ledger row, no fan-out. Those are the caller's.
     expect(confirmed.paymentSummary).toBeUndefined();
   });
@@ -1029,7 +1029,7 @@ describe("Task 6 accept saga", () => {
     const intentId = await stageViaPendingCharge(curator, bookingId);
 
     // Exactly what acceptBooking runs when transaction B refuses to commit
-    // after the money moved — the routine is exported so this path (and Task
+    // after the money moved, the routine is exported so this path (and Task
     // 9's reconciliation) can drive it directly rather than re-implementing it.
     // `occurrences` carries gig ids ONLY: nothing downstream reads a staged
     // occurrence's startsAt/duration (Task 9 narrowed the parameter to say so,
@@ -1042,13 +1042,13 @@ describe("Task 6 accept saga", () => {
     });
     expect(refunded).toBe(true);
 
-    // The money is back — the full charge, not a slice of it.
+    // The money is back, the full charge, not a slice of it.
     expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(8742);
     const ledger = await adb.collection("ledger").where("bookingId", "==", bookingId).get();
     const refundRow = ledger.docs.map((d) => d.data()).find((r) => r.kind === "refund");
     expect(refundRow?.amountCents).toBe(8742);
     expect(refundRow?.profileId).toBe(curator.profileId);
-    expect(refundRow?.detail).toBe("accept abort — booking no longer confirmable");
+    expect(refundRow?.detail).toBe("accept abort, booking no longer confirmable");
 
     // ...and the staging is gone, so the booking is a clean `open` again.
     expect(await getPaymentDocs(bookingId)).toHaveLength(0);
@@ -1056,7 +1056,7 @@ describe("Task 6 accept saga", () => {
     expect(after.status).toBe("open");
     expect(after.depositChargePending).toBe(false);
     expect(after.depositChargeIntentId).toBeNull();
-    expect(after.depositChargeAttempt).toBe(1);   // never reset — a retry must mint a NEW key
+    expect(after.depositChargeAttempt).toBe(1);   // never reset, a retry must mint a NEW key
   });
 
   it("webhook abort: a staged accept whose gig closed underneath it is left pending, unrefunded, for reconciliation", async () => {
@@ -1068,7 +1068,7 @@ describe("Task 6 accept saga", () => {
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     const intentId = await stageViaPendingCharge(curator, bookingId);
 
-    // The gig goes away while the intent is still settling — transaction B's
+    // The gig goes away while the intent is still settling, transaction B's
     // validation now permanently rejects this accept.
     await adb.doc(`gigs/${gigId}`).update({ status: "closed" });
 
@@ -1080,7 +1080,7 @@ describe("Task 6 accept saga", () => {
     expect((await adb.doc(`stripeEvents/${evt.id}`).get()).data()?.processed).toBe(true);
 
     // A webhook deliberately does NOT refund (a racer may have committed this
-    // very accept). The booking stays staged — that marker IS the handle
+    // very accept). The booking stays staged, that marker IS the handle
     // Task 9's reconciliation finds it by.
     const after = await getBooking(bookingId);
     expect(after.status).toBe("open");
@@ -1090,7 +1090,7 @@ describe("Task 6 accept saga", () => {
     const stillStaged = await getPaymentDocs(bookingId);
     expect(stillStaged).toHaveLength(1);
     expect(stillStaged[0].deposit.status).toBe("unpaid");
-    // The charge itself is still recorded — the ledger tracks money, not outcomes.
+    // The charge itself is still recorded, the ledger tracks money, not outcomes.
     expect((await adb.doc(`ledger/deposit_charged:${intentId}`).get()).exists).toBe(true);
   });
 
@@ -1111,7 +1111,7 @@ describe("Task 6 accept saga", () => {
 
       // The materializer births a THIRD date on this run while the intent is
       // still settling. Nothing was charged for it, so the commit must not
-      // fill it — a confirmed date with no deposit would never settle.
+      // fill it, a confirmed date with no deposit would never settle.
       const gigLate = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
       await adb.doc(`gigs/${gigLate}`).update({ seriesId: series.id });
 
@@ -1163,12 +1163,12 @@ describe("Task 6 accept saga", () => {
 
     expect((await getBooking(winnerBookingId)).status).toBe("confirmed");
     expect((await getBooking(rivalBookingId)).status).toBe("superseded");
-    // The loser is superseded, never charged — no payment docs of its own.
+    // The loser is superseded, never charged, no payment docs of its own.
     expect(await getPaymentDocs(rivalBookingId)).toHaveLength(0);
   });
 
   // SP5 Task 9 (review round 2): the operator escape hatch for the one thing
-  // the hourly sweep deliberately refuses to do — a saga staged past Stripe's
+  // the hourly sweep deliberately refuses to do, a saga staged past Stripe's
   // 24h idempotency window, whose charge key can no longer be replayed, so
   // nothing automatic can determine whether the curator was charged. The
   // operator settles that in the Stripe dashboard and then calls this.
@@ -1191,7 +1191,7 @@ describe("Task 6 accept saga", () => {
     expect((await getBooking(bookingId)).depositChargePending).toBe(true);
 
     const operator = await makeAdminUser("t6relop");
-    // REFUSAL 1 — the intent is still settling, so payment_intent.succeeded
+    // REFUSAL 1, the intent is still settling, so payment_intent.succeeded
     // owns this saga and will complete it against the very docs a release
     // would delete.
     await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
@@ -1200,10 +1200,10 @@ describe("Task 6 accept saga", () => {
       });
 
     // The operator cancels the intent in Stripe; the crash-window shape is
-    // what's left — staged, no recorded intent, nothing in flight.
+    // what's left, staged, no recorded intent, nothing in flight.
     await adb.doc(`bookings/${bookingId}`).update({ depositChargeIntentId: null });
 
-    // REFUSAL 2 — but the sweep hasn't given up on it: inside the idempotency
+    // REFUSAL 2, but the sweep hasn't given up on it: inside the idempotency
     // window it will replay the persisted key on its next hourly run, and that
     // replay can still succeed. Releasing now would strand that charge.
     await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
@@ -1224,14 +1224,14 @@ describe("Task 6 accept saga", () => {
     expect(after.status).toBe("open");
     expect(after.depositChargePending).toBe(false);
     expect(after.depositChargeIntentId).toBeNull();
-    // NEVER reset — the next accept must mint a key that has never been used.
+    // NEVER reset, the next accept must mint a key that has never been used.
     expect(after.depositChargeAttempt).toBe(1);
     expect(await getPaymentDocs(bookingId)).toHaveLength(0);
 
     const audit = await adb.collection("auditLogs").where("targetId", "==", bookingId).get();
     expect(audit.docs.some((d) => d.data().action === "booking_saga_released")).toBe(true);
 
-    // Fails closed on a booking that isn't actually stuck — a no-op write an
+    // Fails closed on a booking that isn't actually stuck, a no-op write an
     // operator could mistake for a fix is worse than an error.
     await expect(callFn("releaseStuckSaga", { bookingId }, operator.user))
       .rejects.toMatchObject({
@@ -1241,7 +1241,7 @@ describe("Task 6 accept saga", () => {
 
   // The OTHER "the sweep gave up" signal. A booking stranded by something that
   // bumped its updatedAt (an expiry cascade landing on a staged saga) can be
-  // freshly-timestamped and still be one the sweep has definitively refused —
+  // freshly-timestamped and still be one the sweep has definitively refused,
   // its alert row says so, and that row is what an operator is working from.
   it("releaseStuckSaga: an unresolved adminAlerts row authorises a release the 24h clock alone would refuse", async () => {
     const curator = await makeApprovedCuratorProfile("t6relac");
@@ -1258,7 +1258,7 @@ describe("Task 6 accept saga", () => {
       .rejects.toMatchObject({ message: SAGA_NOT_ABANDONED_MESSAGE });
 
     // Exactly what the sweep writes when it refuses a booking (deterministic
-    // id — that id IS the naming contract this callable looks up).
+    // id, that id IS the naming contract this callable looks up).
     const now = Date.now();
     await adb.doc(`adminAlerts/stuck-saga:${bookingId}`).set({
       kind: "stuck_saga_marker", detail: "seeded by test",
@@ -1292,7 +1292,7 @@ async function musicianAccountId(profileId: string): Promise<string> {
   return sp.accountId;
 }
 
-// FakeStripe's running per-account balance — the only honest way to assert
+// FakeStripe's running per-account balance, the only honest way to assert
 // "money actually reached the musician" (the transfer object alone would
 // still exist if the balance write had been lost).
 async function accountBalanceCents(accountId: string): Promise<number> {
@@ -1315,7 +1315,7 @@ function byGigId(docs: PaymentDoc[]): Map<string, PaymentDoc> {
 
 // A real, fully confirmed single-gig booking (genuine applyToGig ->
 // acceptBooking chain, so the deposit is genuinely charged and `held`).
-// `pastStartHours` pushes the gig into the past BEFORE the accept — the only
+// `pastStartHours` pushes the gig into the past BEFORE the accept, the only
 // way to get a payment doc whose own `occurrenceStartsAt` is past, since that
 // field is stamped at accept time and never follows a later gig edit (and
 // publishGig refuses a past startsAt outright, hence the post-publish push).
@@ -1334,7 +1334,7 @@ async function makeConfirmedSingleBooking(prefix: string, opts: { pastStartHours
 // A confirmed WHOLE-RUN booking with one occurrence per entry in
 // `offsetsHours` (negative = already started). The accept stages and charges
 // one payment doc per occurrence off a single batch intent. Callers MUST
-// flip the series to "ended" in a finally — the shared emulator's dailySweep
+// flip the series to "ended" in a finally, the shared emulator's dailySweep
 // scans active series (same contract as every other series fixture here).
 async function makeConfirmedRun(prefix: string, offsetsHours: number[]) {
   const curator = await makeApprovedCuratorProfile(`${prefix}c`);
@@ -1380,7 +1380,7 @@ describe("Task 8 cancellation money", () => {
     expect(p.settlement.status).toBe("waived");   // a cancelled occurrence never settles
 
     // A PARTIAL refund of exactly slice + fee share against the accept
-    // batch's intent — the fee share ALWAYS comes back on a refund.
+    // batch's intent, the fee share ALWAYS comes back on a refund.
     expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
     const refundRow = (await ledgerRows(bookingId)).find((r) => r.kind === "refund");
     expect(refundRow?.amountCents).toBe(CHARGE_CENTS);
@@ -1421,7 +1421,7 @@ describe("Task 8 cancellation money", () => {
     expect(typeof p.deposit.resolvedAt).toBe("number");
     expect(p.settlement.status).toBe("waived");
 
-    // 100% of the deposit BASE, no commission — and the platform keeps the
+    // 100% of the deposit BASE, no commission, and the platform keeps the
     // fee share by simply never refunding it.
     expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
     expect(await fakeObject(p.deposit.forfeitTransferId!)).toMatchObject({
@@ -1454,7 +1454,7 @@ describe("Task 8 cancellation money", () => {
     const accountId = await musicianAccountId(musician.profileId);
     const balanceBefore = await accountBalanceCents(accountId);
 
-    // 2h out — deep inside the 72h forfeit window — but only 10 minutes after
+    // 2h out, deep inside the 72h forfeit window, but only 10 minutes after
     // the accept, so the 1h grace (Task 7) governs the outcome, and the money
     // follows the OUTCOME with no grace-specific money code of its own.
     await setGigStartsAt(gigId, 2);
@@ -1487,7 +1487,7 @@ describe("Task 8 cancellation money", () => {
     expect(p.deposit.status).toBe("refunded");
     expect(p.settlement.status).toBe("waived");
     expect(await getFakeIntent(before.deposit.intentId!).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS);
-    // The musician side never forfeits the curator's deposit — the penalty is
+    // The musician side never forfeits the curator's deposit, the penalty is
     // the reliability mark (SP4), not the money.
     expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
 
@@ -1514,13 +1514,13 @@ describe("Task 8 cancellation money", () => {
       await callFn("cancelBooking", { bookingId, reason: "Venue closing." }, curator.owner.user);
 
       const after = byGigId(await getPaymentDocs(bookingId));
-      // The window was measured against `next` — only THAT date's deposit is
+      // The window was measured against `next`, only THAT date's deposit is
       // forfeited; the curator was never late on the run's other dates.
       expect(after.get(next)?.deposit.status).toBe("forfeited");
       expect(after.get(next)?.deposit.forfeitTransferId).toBeTruthy();
       expect(after.get(mid)?.deposit.status).toBe("refunded");
       expect(after.get(later)?.deposit.status).toBe("refunded");
-      // A refunded doc never carries a forfeit transfer — proves the run's
+      // A refunded doc never carries a forfeit transfer, proves the run's
       // other dates took the refund branch outright, not a partial forfeit.
       expect(after.get(mid)?.deposit.forfeitTransferId).toBeNull();
       expect(after.get(later)?.deposit.forfeitTransferId).toBeNull();
@@ -1530,12 +1530,12 @@ describe("Task 8 cancellation money", () => {
       }
 
       expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
-      // Two partial refunds off the shared intent — the forfeited slice stays put.
+      // Two partial refunds off the shared intent, the forfeited slice stays put.
       expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(CHARGE_CENTS * 2);
       const rows = await ledgerRows(bookingId);
       const refundRows = rows.filter((r) => r.kind === "refund");
       expect(refundRows).toHaveLength(2);
-      // The two refunds are DISTINCT Stripe objects, one per occurrence —
+      // The two refunds are DISTINCT Stripe objects, one per occurrence,
       // the deterministic ledger id is `refund:{stripeId}`, so a shared id
       // would silently collapse them into a single audit row (and would mean
       // one date's money was never actually sent back).
@@ -1571,7 +1571,7 @@ describe("Task 8 cancellation money", () => {
       const after = byGigId(await getPaymentDocs(bookingId));
       expect(after.get(target)?.deposit.status).toBe("forfeited");
       expect(after.get(target)?.settlement.status).toBe("waived");
-      // Untouched — the run continues, and its remaining date's deposit is
+      // Untouched, the run continues, and its remaining date's deposit is
       // still in escrow for a show that is still on.
       expect(after.get(keep)?.deposit.status).toBe("held");
       expect(after.get(keep)?.settlement.status).toBe("not_due");
@@ -1608,7 +1608,7 @@ describe("Task 8 cancellation money", () => {
     const refundRow = (await ledgerRows(bookingId)).find((r) => r.kind === "refund");
     expect(refundRow?.amountCents).toBe(CHARGE_CENTS);
     expect(refundRow?.profileId).toBe(curator.profileId);
-    // A no-show is the musician's fault — nothing is forfeited TO them.
+    // A no-show is the musician's fault, nothing is forfeited TO them.
     expect(await accountBalanceCents(accountId)).toBe(balanceBefore);
 
     const booking = await getBooking(bookingId);
@@ -1620,7 +1620,7 @@ describe("Task 8 cancellation money", () => {
   // Review round 1: the settlement waive must NOT depend on what the deposit
   // did. The reported occurrence's gig stays filled+linked (only FUTURE dates
   // are reopened), so a settlement left `not_due` here is one Task 9 will
-  // schedule and Task 10 will act on — charging the curator the remaining
+  // schedule and Task 10 will act on, charging the curator the remaining
   // base + fee and paying the musician who never showed up.
   it("reportNoShow on a never-charged deposit: settlement still waived, deposit resolves terminal, no Stripe call", async () => {
     const { curator, gigId, bookingId } = await makeConfirmedSingleBooking("t8unp", { pastStartHours: 1 });
@@ -1672,7 +1672,7 @@ describe("Task 8 cancellation money", () => {
     const refundRowsBefore = (await ledgerRows(bookingId)).filter((r) => r.kind === "refund").length;
 
     // Exactly what Task 9's sweep does when it can't tell a finished doc from
-    // a crashed one. The doc CAS must make this a pure no-op — a second
+    // a crashed one. The doc CAS must make this a pure no-op, a second
     // refund of the same slice would over-refund the shared batch intent.
     await resolveDepositPending(bookingId, gigId);
 
@@ -1689,14 +1689,14 @@ describe("Task 8 cancellation money", () => {
     const accountId = await musicianAccountId(musician.profileId);
     const balanceBefore = await accountBalanceCents(accountId);
     // Unreachable in normal flow (accept is gated on a payout-ready
-    // musician) — the realistic route is Stripe disabling the account after
+    // musician), the realistic route is Stripe disabling the account after
     // the accept. The executor must NOT flip the doc terminal: that would
     // silently swallow money the musician is owed.
     await adb.doc(`profiles/${musician.profileId}/private/stripe`).set({ accountId: null }, { merge: true });
 
     await setGigStartsAt(gigId, 10);
     await ageConfirmedAt(bookingId);
-    // The cancellation itself still succeeds — a failed money move must never
+    // The cancellation itself still succeeds, a failed money move must never
     // surface as an error on an already-committed cancellation.
     await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
 
@@ -1733,7 +1733,7 @@ describe("Task 8 cancellation money", () => {
     expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
     const forfeitRowsBefore = (await ledgerRows(bookingId)).filter((r) => r.kind === "forfeit_transfer").length;
 
-    // A second transfer would be real money out the door, twice — the doc
+    // A second transfer would be real money out the door, twice, the doc
     // CAS has to stop this before any Stripe call is made.
     await resolveDepositPending(bookingId, gigId);
 
@@ -1751,7 +1751,7 @@ describe("Task 8 cancellation money", () => {
     const { curator, musician, gigId, bookingId } = await makeConfirmedSingleBooking("t8nch");
     // A deposit finalized out-of-band by the payment_intent.succeeded webhook
     // need not know its charge id (DepositState.chargeId is nullable for
-    // exactly this reason) — the forfeit transfer then passes no
+    // exactly this reason), the forfeit transfer then passes no
     // sourceChargeId and simply draws on the platform balance.
     await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({ "deposit.chargeId": null });
     const accountId = await musicianAccountId(musician.profileId);
@@ -1801,7 +1801,7 @@ describe("Task 8 cancellation money", () => {
       expect((await accountBalanceCents(accountId)) - balanceBefore).toBe(SLICE_CENTS);
       expect(await getFakeIntent(intentId).then((i) => i?.refundedCents)).toBe(0);
       const booking = await getBooking(bookingId);
-      // The past date's deposit is still held — the only money that moved was
+      // The past date's deposit is still held, the only money that moved was
       // the forfeited slice.
       expect(booking.paymentSummary?.heldCents).toBe(SLICE_CENTS);
       expect(booking.paymentSummary?.transferredCents).toBe(SLICE_CENTS);

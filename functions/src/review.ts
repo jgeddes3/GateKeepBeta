@@ -23,7 +23,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
   { region: "us-central1" }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, decision, reason } = req.data;
-    // P2: enum-guard `decision` and shape-guard `profileId` — untrusted
+    // P2: enum-guard `decision` and shape-guard `profileId`, untrusted
     // onCall payload, same defensive-runtime rationale used throughout this
     // codebase (an admin caller's client bug, not necessarily malice, could
     // otherwise send an arbitrary string through to the status field below).
@@ -47,7 +47,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     if (decision === "approved" && priorStatus !== "pending_review") {
       throw new HttpsError("failed-precondition", "Profile is not pending review.");
     }
-    // Reject also accepts "approved" — spec §6's "admins can retroactively
+    // Reject also accepts "approved", spec §6's "admins can retroactively
     // unpublish anything", which reviewTrack already supports for tracks but
     // profiles didn't. Flipping an approved profile to rejected is enough:
     // firestore.rules' profileApproved()-gated reads then hide the profile
@@ -63,7 +63,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     // deliberate two-step reject → deleteProfile, whose cascade scrubs the
     // public/review objects (unblocked now that the profile is rejected).
     // Residual: a direct getDownloadURL obtained while live keeps working
-    // between the two steps — accepted; the admin performs both promptly.
+    // between the two steps, accepted; the admin performs both promptly.
     if (decision === "rejected" && priorStatus !== "pending_review" && priorStatus !== "approved") {
       throw new HttpsError("failed-precondition", "Profile is not pending review or approved.");
     }
@@ -79,7 +79,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       // Anti-spam (Task 4): submitProfileForReview reads this to enforce a
       // 24h resubmit cooldown after a rejection. Only stamped on reject.
       // P2: on approve, DELETE both fields rather than leaving them in
-      // place — profiles/{id} becomes world-readable once approved
+      // place, profiles/{id} becomes world-readable once approved
       // (firestore.rules), so a lingering lastRejectedAt/resubmitCount from
       // an earlier reject cycle was a moderation-history leak (anyone could
       // see how many times, and how recently, this profile got rejected
@@ -92,7 +92,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
         : { lastRejectedAt: FieldValue.delete(), resubmitCount: FieldValue.delete() }),
     });
 
-    // curatorAccess/{uid} + takedown cascade (Task 6) — curator profiles
+    // curatorAccess/{uid} + takedown cascade (Task 6), curator profiles
     // only; musicians have no gigs/series and no curatorAccess implication.
     let memberUids: string[] = [];
     let closedGigs = 0;
@@ -102,13 +102,13 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       memberUids = membersSnap.docs.map((d) => d.id);
 
       if (decision === "approved") {
-        // Fast path: approval can only GAIN a member access, never lose it —
+        // Fast path: approval can only GAIN a member access, never lose it,
         // a direct set is correct without the full recompute (contrast the
         // reject-from-approved branch below, which must NOT blindly delete:
         // a member may hold access via another approved curator profile).
         for (const memberUid of memberUids) batch.set(db.doc(`curatorAccess/${memberUid}`), {});
       } else if (decision === "rejected" && wasApproved) {
-        // Cascade: this approved curator profile is going dark — close its
+        // Cascade: this approved curator profile is going dark, close its
         // open gigs, pause its active series (same series-pause precedent
         // as gigs.ts's takedownGig), batched with the status flip, before
         // the notification below (SP2 retroactive-unpublish ordering: the
@@ -122,10 +122,10 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
         // SP4 (Task 7 amendment): a FILLED gig is not reached by the
         // "open"-only query above. Its confirmed booking is expired by the
         // unwindBookingsForModeration call below, but left alone the GIG
-        // doc itself would still read status:"filled" — which is publicly
+        // doc itself would still read status:"filled", which is publicly
         // readable unconditionally (the gigs read rule's status=='filled'
         // disjunct is not gated on the curator profile's own approval
-        // status) — and a FUTURE-dated one would keep rendering as a
+        // status), and a FUTURE-dated one would keep rendering as a
         // phantom "upcoming show" on the booked musician's own public Shows
         // section (Task 11 queries filled+closed gigs by linkage). Close it
         // and clear its booking linkage here: a closed gig with
@@ -133,7 +133,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
         // (status=='filled' no longer applies, and the status=='closed'
         // disjunct requires a non-null bookedMusicianProfileId), so it stops
         // being publicly readable at all. A PAST-dated filled gig is left
-        // COMPLETELY untouched instead — the show really happened, the
+        // COMPLETELY untouched instead, the show really happened, the
         // musician's Shows HISTORY legitimately retains it, and a full
         // scrub (deleting the gig outright) remains the deliberate two-step
         // reject -> deleteProfile, exactly like SP2's content-takedown
@@ -142,13 +142,13 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
         // regardless of whether it runs before or after this gig-side
         // write, since it re-reads the series fresh and only acts if the
         // series still names the just-expired booking.)
-        // Minor fix (Task 7 quality review): unbounded (no .limit()) —
+        // Minor fix (Task 7 quality review): unbounded (no .limit()),
         // accepted at v1 scale, same as the openGigsSnap query just above;
         // a single profile's live "filled" occurrence count is bounded by
         // its own MAX_OPEN_GIGS_PER_PROFILE-shaped usage in practice, and
         // this batch (openGigsSnap + filledGigsSnap + activeSeriesSnap
         // combined) must stay under Firestore's 500-write-per-batch ceiling
-        // regardless — a curator with enough simultaneously-live content to
+        // regardless, a curator with enough simultaneously-live content to
         // approach that ceiling is itself a v2 pagination problem, not a
         // v1 one.
         const filledGigsSnap = await db.collection("gigs")
@@ -161,7 +161,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
             });
             closedGigs++;
           }
-          // past-dated: left entirely alone — see comment above.
+          // past-dated: left entirely alone, see comment above.
         }
         const activeSeriesSnap = await db.collection("gigSeries")
           .where("curatorProfileId", "==", profileId).where("status", "==", "active").get();
@@ -175,7 +175,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     await batch.commit();
 
     // SP4 (Task 7): unwind every booking naming this profile as EITHER side
-    // — added regardless of isCurator (a musician profile's own confirmed
+    //, added regardless of isCurator (a musician profile's own confirmed
     // bookings need this exactly as much as a curator's do; the isCurator
     // branch above only ever touched gigs/series, never bookings).
     if (decision === "rejected" && wasApproved) {
@@ -187,12 +187,12 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
     // needs this profile's just-flipped "rejected" status to be visible so
     // a member who belongs to no OTHER approved curator profile correctly
     // loses the marker (a member who does belong to another keeps it).
-    // Best-effort per member (allSettled, not all) — matches deleteProfile's
+    // Best-effort per member (allSettled, not all), matches deleteProfile's
     // cascade-cleanup style: one member's recompute failing (e.g. a
     // transient Firestore error) must not fail the whole review decision,
     // which has already committed. S4 CORRECTION: this used to claim a
     // failed recompute "self-heals" via the next membership/approval-status
-    // touchpoint for that uid — false whenever this rejected profile was
+    // touchpoint for that uid, false whenever this rejected profile was
     // that uid's ONLY curator membership, since no such touchpoint will
     // ever fire again for them (no more invites/removals/reviews touch a
     // uid with zero remaining curator profiles). A failed recompute is
@@ -221,7 +221,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       // the prior status distinguishes a takedown of a live profile from a
       // routine first-time reject from pending_review. The cascade counts
       // are appended only when the cascade above actually affected
-      // something — a curator profile with no live gigs/series at reject
+      // something, a curator profile with no live gigs/series at reject
       // time (the common case for a same-day approve-then-reject, e.g. the
       // pre-Task-6 "retroactive unpublish" contract) gets the plain
       // pre-Task-6 detail string, not noisy "(closed 0 gigs, paused 0
@@ -240,7 +240,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       title: decision === "approved" ? `${profileName} is approved!` : `${profileName} needs changes`,
       body: decision === "approved"
         ? "Your profile is live on GateKeep."
-        : `Reviewer note: ${reason!.trim()} — update and resubmit anytime.`,
+        : `Reviewer note: ${reason!.trim()}. Update and resubmit anytime.`,
     });
     return { ok: true };
   });
@@ -260,7 +260,7 @@ export const grantAdmin = onCall<{ uid: string }>({ region: "us-central1" }, asy
   if (!isGoogleLinked) {
     throw new HttpsError("failed-precondition", "Admin accounts must use Google sign-in.");
   }
-  // Merge rather than replace — a bare setCustomUserClaims(uid, { admin: true })
+  // Merge rather than replace, a bare setCustomUserClaims(uid, { admin: true })
   // would silently drop any other custom claims already set on the account.
   await getAuth().setCustomUserClaims(uid, { ...target.customClaims, admin: true });
   await writeAudit({ actorUid, action: "admin_granted", targetId: uid, detail: "" });

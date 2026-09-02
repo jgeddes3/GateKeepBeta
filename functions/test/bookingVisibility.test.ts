@@ -45,7 +45,7 @@ describe("updateBookingInfo -> rebuildBookingProjections", () => {
     expect(source?.visibility).toEqual({ perHour: "private", perSong: "curators", perSet: "curators", preferences: "public" });
 
     const projection = (await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).data();
-    expect(projection?.rates.perHour).toBeNull(); // nulled — visibility "private"
+    expect(projection?.rates.perHour).toBeNull(); // nulled, visibility "private"
     expect(projection?.rates.perSong).toEqual(fullRates().perSong);
     expect(projection?.rates.perSet).toEqual(fullRates().perSet);
     expect(projection?.preferences).toEqual(fullPreferences());
@@ -55,7 +55,7 @@ describe("updateBookingInfo -> rebuildBookingProjections", () => {
     const profile = (await adb.doc(`profiles/${profileId}`).get()).data();
     expect(profile?.publicBooking).toEqual(fullPreferences());
 
-    // Flip preferences visibility to curators-only — publicBooking clears.
+    // Flip preferences visibility to curators-only, publicBooking clears.
     await callFn("updateBookingInfo", {
       profileId, rates: fullRates(), preferences: fullPreferences(),
       visibility: { perHour: "private", perSong: "curators", perSet: "curators", preferences: "curators" },
@@ -125,7 +125,7 @@ describe("rebuildBookingProjections (direct)", () => {
   it("a legacy source doc with no `visibility` key projects as fully curator-visible (never MORE exposed than post-backfill)", async () => {
     const { profileId } = await makeMusicianProfile("rbp5");
     // Bypasses updateBookingInfo (which always writes a complete
-    // `visibility` now) — the pre-Task-3 shape backfillBookingVisibility
+    // `visibility` now), the pre-Task-3 shape backfillBookingVisibility
     // exists to converge, and the fallback rebuildBookingProjections must
     // apply on every direct/administrative call in the meantime.
     await adb.doc(`profiles/${profileId}/private/booking`).set({
@@ -135,7 +135,7 @@ describe("rebuildBookingProjections (direct)", () => {
     await rebuildBookingProjections(profileId);
 
     const projection = (await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).data();
-    expect(projection?.rates).toEqual(fullRates()); // nothing nulled — default is all-"curators"
+    expect(projection?.rates).toEqual(fullRates()); // nothing nulled, default is all-"curators"
     expect(projection?.preferences).toEqual(fullPreferences());
     const profile = (await adb.doc(`profiles/${profileId}`).get()).data();
     expect(profile?.publicBooking).toBeNull(); // default preferences visibility is "curators", never public
@@ -146,12 +146,12 @@ describe("backfillBookingVisibility", () => {
   it("converges legacy musician profiles missing visibility to the all-curators default, rebuilds projections, skips already-set/no-doc/non-musician profiles, is idempotent, admin-gated", async () => {
     // Short and hyphen-free: this becomes part of createProfileDraft handles
     // below (via makeMusicianProfile, which already appends its own
-    // Date.now()+random suffix for uniqueness) — handles are capped at 30
+    // Date.now()+random suffix for uniqueness), handles are capped at 30
     // chars and may only contain lowercase letters, digits, underscores.
     const tag = "bfv1";
     const adminUser = await makeAdminUser(`${tag}admin`);
     // Baseline sweep: converge away any legacy docs that might already exist
-    // from earlier in the suite (order-independence — mirrors
+    // from earlier in the suite (order-independence, mirrors
     // backfillDisplayNameLower's race-tolerant test design, but here it's a
     // one-time deterministic sweep rather than an ongoing race, since
     // nothing else in this suite writes a booking doc without `visibility`).
@@ -163,7 +163,7 @@ describe("backfillBookingVisibility", () => {
     const alreadySet = await makeMusicianProfile(`${tag}c`);
     const noBookingDoc = await makeMusicianProfile(`${tag}d`);
 
-    // Legacy shape: no `visibility` key at all — bypasses updateBookingInfo,
+    // Legacy shape: no `visibility` key at all, bypasses updateBookingInfo,
     // which always writes a complete one now.
     await adb.doc(`profiles/${legacyA.profileId}/private/booking`).set({
       rates: fullRates(), preferences: fullPreferences(), updatedAt: Date.now(),
@@ -176,9 +176,9 @@ describe("backfillBookingVisibility", () => {
       rates: fullRates(), preferences: fullPreferences(), updatedAt: Date.now(),
       visibility: { perHour: "private", perSong: "private", perSet: "private", preferences: "public" },
     });
-    // noBookingDoc: no private/booking doc at all — must be skipped without error.
+    // noBookingDoc: no private/booking doc at all, must be skipped without error.
 
-    // A curator profile carrying a booking-shaped doc missing visibility —
+    // A curator profile carrying a booking-shaped doc missing visibility,
     // must NOT be touched (only musician profiles are paged).
     const { user: curOwner } = await signUpTestUser(`${tag}cur-${Date.now()}@test.com`);
     const { profileId: curatorProfileId } = await callFn<ProfileDraftInput, { profileId: string }>(
@@ -189,14 +189,14 @@ describe("backfillBookingVisibility", () => {
 
     const { converged } = await callFn<Record<string, never>, { converged: number }>(
       "backfillBookingVisibility", {}, adminUser.user);
-    expect(converged).toBe(2); // only legacyA and legacyB — the baseline sweep zeroed everything else out first
+    expect(converged).toBe(2); // only legacyA and legacyB, the baseline sweep zeroed everything else out first
 
     const sourceA = (await adb.doc(`profiles/${legacyA.profileId}/private/booking`).get()).data();
     expect(sourceA?.visibility).toEqual(allCurators);
     const sourceB = (await adb.doc(`profiles/${legacyB.profileId}/private/booking`).get()).data();
     expect(sourceB?.visibility).toEqual(allCurators);
 
-    // Projections rebuilt with the default — nothing nulled (all "curators").
+    // Projections rebuilt with the default, nothing nulled (all "curators").
     const projectionA = (await adb.doc(`profiles/${legacyA.profileId}/private/curatorBooking`).get()).data();
     expect(projectionA?.rates).toEqual(fullRates());
     const profileA = (await adb.doc(`profiles/${legacyA.profileId}`).get()).data();
@@ -214,7 +214,7 @@ describe("backfillBookingVisibility", () => {
       .where("actorUid", "==", adminUser.uid).get();
     expect(logs.docs.some((d) => d.data().detail === "2 converged, 0 failed")).toBe(true);
 
-    // Idempotent — nothing left to converge.
+    // Idempotent, nothing left to converge.
     const { converged: converged2 } = await callFn<Record<string, never>, { converged: number }>(
       "backfillBookingVisibility", {}, adminUser.user);
     expect(converged2).toBe(0);

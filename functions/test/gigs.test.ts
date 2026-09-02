@@ -9,7 +9,7 @@ process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
 const stub = new StubGeocoder();
-// 20s (not this file's prior 15s) — the SP4 (Task 7) cancelGig/takedownGig
+// 20s (not this file's prior 15s), the SP4 (Task 7) cancelGig/takedownGig
 // booking-collision tests below chain 8+ callables (createProfileDraft x2,
 // submitProfileForReview x2, reviewProfile x2, createGig, publishGig,
 // applyToGig, acceptBooking, then the callable under test) before their
@@ -58,7 +58,7 @@ async function createDraftGig(
   return gigId;
 }
 
-// SP4 (Task 7) fixtures — an approved musician profile + a real booking
+// SP4 (Task 7) fixtures, an approved musician profile + a real booking
 // chain, mirroring bookings.test.ts/bookingLifecycle.test.ts's identical
 // helpers. This file's own subject is gig/series lifecycle collisions, not
 // booking negotiation mechanics, so these stay minimal (single-offer accept
@@ -314,12 +314,12 @@ describe("updateGig", () => {
     const before = (await adb.doc(`gigs/${gigId}`).get()).data() as GigDoc;
     expect(before.location.addressVisibility).toBe("neighborhood");
 
-    // Force the exact corrupted-data shape this guard defends against — an
+    // Force the exact corrupted-data shape this guard defends against, an
     // admin-SDK-only deletion of the private/location subdoc, unreachable
     // via any legitimate callable path.
     await adb.doc(`gigs/${gigId}/private/location`).delete();
 
-    // Message asserted too (not just the code) — pins THIS guard's own
+    // Message asserted too (not just the code), pins THIS guard's own
     // "missing coordinates" HttpsError specifically, distinguishing it from
     // any other internal-error path that could otherwise satisfy a
     // code-only assertion (e.g. a generic uncaught-exception wrap, which
@@ -366,7 +366,7 @@ describe("updateGig", () => {
   });
 
   // F2 (security audit wave): a FILLED gig has a confirmed booking behind
-  // it — its schedule/terms are what the two sides actually negotiated and
+  // it, its schedule/terms are what the two sides actually negotiated and
   // accepted; editing it out from under the booking (silently changing the
   // perHour basis, the date, etc.) must be refused with a distinct,
   // actionable message, exactly like cancelGig already refuses a filled
@@ -401,7 +401,7 @@ describe("updateGig", () => {
   it("rejects editing a still-open gig once the profile has been rejected/unpublished", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("ug9", "venue");
     const gigId = await createDraftGig(profileId, owner.user);
-    await callFn("publishGig", { gigId }, owner.user); // now "open" — world-readable
+    await callFn("publishGig", { gigId }, owner.user); // now "open", world-readable
     const admin = await makeAdminUser("ug9a");
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Policy violation." }, admin.user);
     await expect(callFn("updateGig", { gigId, ...gigContent({ title: "Should not land" }) }, owner.user))
@@ -418,7 +418,7 @@ describe("updateGig", () => {
 
     await callFn("updateGig", { gigId, ...gigContent(), location: { address } }, owner.user);
     const afterUpdate = (await adb.doc(`geocodeBudgets/${owner.uid}`).get()).data();
-    expect(afterUpdate?.count).toBe(1); // unchanged — the re-submitted address was skipped
+    expect(afterUpdate?.count).toBe(1); // unchanged, the re-submitted address was skipped
   });
 });
 
@@ -466,7 +466,7 @@ describe("cancelGig", () => {
   });
 
   // SP4 (Task 7)
-  it("rejects cancelling a FILLED gig with a distinct 'cancel the booking instead' message — cancelGig never touches a real booking", async () => {
+  it("rejects cancelling a FILLED gig with a distinct 'cancel the booking instead' message, cancelGig never touches a real booking", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("cn5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("cn5m");
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
@@ -482,7 +482,7 @@ describe("cancelGig", () => {
       message: expect.stringMatching(/cancel the booking instead/i),
     });
 
-    // Untouched — the refusal must not have flipped either doc.
+    // Untouched, the refusal must not have flipped either doc.
     expect((await adb.doc(`gigs/${gigId}`).get()).data()?.status).toBe("filled");
     expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
   });
@@ -503,7 +503,7 @@ describe("cancelGig", () => {
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.status).toBe("expired");
     expect(typeof after.resolvedAt).toBe("number");
-    // Moderation/system unwind — no cancellation record, no forfeiture, no mark.
+    // Moderation/system unwind, no cancellation record, no forfeiture, no mark.
     expect(after.cancellation).toBeNull();
 
     const musicianNotes = await pollNotifications(musician.uid);
@@ -512,7 +512,7 @@ describe("cancelGig", () => {
   });
 });
 
-// SP4 (Task 7 quality-review fixes) — shared whole_run series fixture for
+// SP4 (Task 7 quality-review fixes), shared whole_run series fixture for
 // the booked-run collision tests below (mirrors gigSeries.test.ts/
 // bookingLifecycle.test.ts's own seedSeries helpers).
 function seedWholeRunSeries(curatorProfileId: string) {
@@ -653,8 +653,8 @@ describe("takedownGig", () => {
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.status).toBe("expired");
     expect(typeof after.resolvedAt).toBe("number");
-    expect(after.cancellation).toBeNull(); // moderation — nobody's fault, no forfeit/mark record
-    expect(after.deposit).toEqual(depositBefore); // untouched — sub-5 reads expired+deposit as refund
+    expect(after.cancellation).toBeNull(); // moderation, nobody's fault, no forfeit/mark record
+    expect(after.deposit).toEqual(depositBefore); // untouched, sub-5 reads expired+deposit as refund
 
     const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
     expect(reliability).toBeUndefined(); // no mark ever applied
@@ -711,7 +711,7 @@ describe("takedownGig", () => {
     } finally {
       // Never leave an active series behind for the shared emulator's
       // dailySweep scan (mirrors gigSeries.test.ts/bookings.test.ts's
-      // identical rationale) — takedownGig's own series-scope cascade
+      // identical rationale), takedownGig's own series-scope cascade
       // already pauses it, but guard defensively in case an assertion
       // above throws first.
       await seriesRef.update({ status: "ended" });
@@ -719,7 +719,7 @@ describe("takedownGig", () => {
   });
 
   // SP4 (Task 7 quality review, CRITICAL #1)
-  it("series scope also sweeps FILLED siblings, not just open ones — a booked run's other occurrences all get taken down too", async () => {
+  it("series scope also sweeps FILLED siblings, not just open ones, a booked run's other occurrences all get taken down too", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("td10", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("td10m");
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
@@ -745,10 +745,10 @@ describe("takedownGig", () => {
       const [rootAfter, siblingAfter] = await Promise.all(
         [rootId, siblingId].map((id) => adb.doc(`gigs/${id}`).get()));
       expect(rootAfter.data()?.status).toBe("taken_down");
-      // Was FILLED, not "open" — the P11 gap this fix closes.
+      // Was FILLED, not "open", the P11 gap this fix closes.
       expect(siblingAfter.data()?.status).toBe("taken_down");
       // "taken_down" satisfies none of the gigs read rule's public-visibility
-      // disjuncts (open / filled / closed-with-linkage) — neither occurrence
+      // disjuncts (open / filled / closed-with-linkage), neither occurrence
       // remains publicly readable.
 
       const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
@@ -781,11 +781,11 @@ describe("takedownGig", () => {
         { gigId: rootId, scope: "occurrence", reason: "Complaint about this specific date." }, admin.user);
 
       expect((await adb.doc(`gigs/${rootId}`).get()).data()?.status).toBe("taken_down");
-      // The run's OTHER date is untouched — occurrence scope, not series.
+      // The run's OTHER date is untouched, occurrence scope, not series.
       expect((await adb.doc(`gigs/${siblingId}`).get()).data()?.status).toBe("filled");
 
       const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
-      expect(after.status).toBe("confirmed"); // the run survives — unwind skipped it
+      expect(after.status).toBe("confirmed"); // the run survives, unwind skipped it
       expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(bookingId);
 
       const musicianNotes = await pollNotifications(musician.uid);
@@ -821,7 +821,7 @@ describe("takedownGig", () => {
 
       const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       // An open (never-confirmed) run application is genuinely dead once its
-      // only gig is taken down — it expires normally, unlike a CONFIRMED
+      // only gig is taken down, it expires normally, unlike a CONFIRMED
       // run booking (the test above).
       expect(after.status).toBe("expired");
     } finally {

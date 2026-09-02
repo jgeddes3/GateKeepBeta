@@ -11,7 +11,7 @@ process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
 const stub = new StubGeocoder();
-// 20s (not this file's prior 15s) — the SP4 (Task 7) pauseSeries/endSeries
+// 20s (not this file's prior 15s), the SP4 (Task 7) pauseSeries/endSeries
 // active-run-booking tests below chain a real applyToGig -> acceptBooking
 // pair on top of the profile setup, matching bookingLifecycle.test.ts's own
 // precedent for this same family of chain-heavy booking tests.
@@ -34,7 +34,7 @@ async function makeApprovedCuratorProfile(
   return { owner, profileId };
 }
 
-// SP4 (Task 7) fixture — an approved musician profile, mirroring
+// SP4 (Task 7) fixture, an approved musician profile, mirroring
 // bookings.test.ts/bookingLifecycle.test.ts's identical helper. This file's
 // own subject is series lifecycle, not booking negotiation mechanics, so
 // this stays minimal (single-offer accept only).
@@ -86,7 +86,7 @@ async function createSeries(
 }
 
 // Admin-SDK shortcut for seeding a materialized occurrence gig doc attached
-// to a series — Task 7's materializer doesn't exist yet, so tests exercising
+// to a series, Task 7's materializer doesn't exist yet, so tests exercising
 // updateSeries'/endSeries' occurrence-sweep behavior seed the occurrences
 // directly, matching gigs.test.ts's takedownGig series-scope fixture style.
 async function seedOccurrence(
@@ -242,7 +242,7 @@ describe("updateSeries", () => {
     const seriesId = await createSeries(profileId, owner.user);
     const occId = await seedOccurrence(seriesId, profileId);
     // Simulate Task 7's materializer having already written this
-    // occurrence's private location subdoc (mirrors createGig's own write) —
+    // occurrence's private location subdoc (mirrors createGig's own write),
     // the propagation sweep must overwrite it, not merely leave it stale.
     await adb.doc(`gigs/${occId}/private/location`).set({
       address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 },
@@ -259,7 +259,7 @@ describe("updateSeries", () => {
   });
 
   // F2 (security audit wave): a FILLED occurrence is a booked, contract-
-  // locked date — the template propagation sweep must skip it exactly like
+  // locked date, the template propagation sweep must skip it exactly like
   // a detached occurrence, while an ordinary open sibling still updates.
   it("F2: propagation SKIPS a FILLED occurrence (booked dates are contract-locked); an open sibling still updates", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("usfilled", "venue");
@@ -268,7 +268,7 @@ describe("updateSeries", () => {
     const openOccId = await seedOccurrence(seriesId, profileId, { title: "Open original" });
     await callFn("updateSeries", { seriesId, ...seriesContent({ title: "Propagated Title" }) }, owner.user);
     const filledOcc = (await adb.doc(`gigs/${filledOccId}`).get()).data();
-    expect(filledOcc?.title).toBe("Filled original"); // locked — untouched
+    expect(filledOcc?.title).toBe("Filled original"); // locked, untouched
     const openOcc = (await adb.doc(`gigs/${openOccId}`).get()).data();
     expect(openOcc?.title).toBe("Propagated Title"); // still updates
   });
@@ -314,7 +314,7 @@ describe("updateSeries", () => {
     const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
     expect(series.recurrence).toEqual({ weekday: 2, hour: 10, minute: 30, cadence: "monthly", endDate: null });
     const occ = (await adb.doc(`gigs/${occId}`).get()).data();
-    // recurrence math never re-touches an already-materialized occurrence —
+    // recurrence math never re-touches an already-materialized occurrence,
     // only its content fields propagate (covered by the tests above).
     expect(occ?.startsAt).toBe(originalStartsAt);
   });
@@ -393,7 +393,7 @@ describe("pauseSeries", () => {
       expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
       // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h) so this
       // test exercises the SP4 71h-forfeit window, not the post-accept grace
-      // — a real pauseSeries call minutes after accept would otherwise land
+      //, a real pauseSeries call minutes after accept would otherwise land
       // penalty-free.
       await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
 
@@ -412,7 +412,7 @@ describe("pauseSeries", () => {
       expect(seriesAfter?.bookedMusicianProfileId).toBeNull();
 
       // executeCancellation reopens the run's occurrences (filled -> open);
-      // pause leaves them exactly there — no separate cancel sweep for pause.
+      // pause leaves them exactly there, no separate cancel sweep for pause.
       const [gig1After, gig2After] = await Promise.all(
         [gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).get()));
       expect(gig1After.data()?.status).toBe("open");
@@ -420,7 +420,7 @@ describe("pauseSeries", () => {
       expect(gig2After.data()?.status).toBe("open");
       expect(gig2After.data()?.bookingId).toBeNull();
     } finally {
-      // Never leave an active series behind — already "paused" (non-active)
+      // Never leave an active series behind, already "paused" (non-active)
       // on the success path, but guard defensively in case an assertion
       // above throws before that write ever lands.
       await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
@@ -428,7 +428,7 @@ describe("pauseSeries", () => {
   });
 
   // SP4 (Task 7 quality review, IMPORTANT #3)
-  it("zombie tolerance: once every future date was cancelled per-occurrence (no cancellable date left), pauseSeries still succeeds — the booking + linkage are left untouched for Task 8's sweep", async () => {
+  it("zombie tolerance: once every future date was cancelled per-occurrence (no cancellable date left), pauseSeries still succeeds, the booking + linkage are left untouched for Task 8's sweep", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ps5", "venue");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ps5m");
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
@@ -441,7 +441,7 @@ describe("pauseSeries", () => {
       await callFn("acceptBooking", { bookingId }, curator.user);
       expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.activeBookingId).toBe(bookingId);
 
-      // Cancel the run's only date PER-OCCURRENCE — the run survives
+      // Cancel the run's only date PER-OCCURRENCE, the run survives
       // (booking stays "confirmed"), but no date remains future+filled
       // under this booking, and cancelOccurrence never touches the
       // series' own activeBookingId linkage.
@@ -453,7 +453,7 @@ describe("pauseSeries", () => {
 
       const seriesAfter = (await adb.doc(`gigSeries/${seriesId}`).get()).data();
       expect(seriesAfter?.status).toBe("paused");
-      // Left untouched — executeCancellation's no-cancellable-dates failure
+      // Left untouched, executeCancellation's no-cancellable-dates failure
       // was tolerated, not a successful cancellation.
       expect(seriesAfter?.activeBookingId).toBe(bookingId);
 
@@ -481,7 +481,7 @@ describe("endSeries", () => {
     expect((await adb.doc(`gigs/${futureOpenId}`).get()).data()?.status).toBe("cancelled");
     expect((await adb.doc(`gigs/${futureDraftId}`).get()).data()?.status).toBe("cancelled");
     expect((await adb.doc(`gigs/${futureCancelledId}`).get()).data()?.status).toBe("cancelled"); // already was
-    expect((await adb.doc(`gigs/${pastOpenId}`).get()).data()?.status).toBe("open"); // untouched — already elapsed
+    expect((await adb.doc(`gigs/${pastOpenId}`).get()).data()?.status).toBe("open"); // untouched, already elapsed
   });
 
   it("rejects a non-member with permission-denied", async () => {
@@ -521,7 +521,7 @@ describe("endSeries", () => {
       const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
         "applyToGig", { gigId: gigId1, musicianProfileId, offer: { amountCents: 15000, note: "x" } }, musician.user);
       await callFn("acceptBooking", { bookingId }, curator.user);
-      // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h) — without
+      // SP5 Task 7: push confirmedAt outside CANCEL_GRACE_MS (1h), without
       // this, a fresh accept -> immediate endSeries would refund via grace
       // regardless of the window, silently defeating the assertion below.
       await adb.doc(`bookings/${bookingId}`).update({ confirmedAt: Date.now() - 2 * 3_600_000 });
@@ -531,7 +531,7 @@ describe("endSeries", () => {
       const bookingAfter = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(bookingAfter.status).toBe("cancelled_by_curator");
       expect(bookingAfter.cancellation?.reason).toBe("Series ended by curator");
-      // 100h out is well outside the 72h forfeit window — refunded on the
+      // 100h out is well outside the 72h forfeit window, refunded on the
       // window itself, not merely because grace (aged above) also would.
       expect(bookingAfter.cancellation?.outcome).toBe("deposit_refunded");
 

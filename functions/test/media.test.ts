@@ -70,7 +70,7 @@ describe("processUpload: audio", () => {
     const { user, uid, profileId } = await makeMusician("tx4");
     const stagingPath = `staging/audio/${uid}/${profileId}/forged-track-id`;
     await uploadTestAudio(stagingPath, makeWav(2), "audio/wav", user);
-    // No doc to flip — just assert nothing lands in review for that id.
+    // No doc to flip, just assert nothing lands in review for that id.
     await new Promise((r) => setTimeout(r, 4000));
     const [exists] = await abucket.file(`review/tracks/${profileId}/forged-track-id.m4a`).exists();
     expect(exists).toBe(false);
@@ -80,7 +80,7 @@ describe("processUpload: audio", () => {
   it("ignores an upload whose object-path uid doesn't match the track doc's uploaderUid, even from a fellow member", async () => {
     const { user: userA, profileId } = await makeMusician("tx5a");
     const { user: userB, uid: uidB } = await signUpTestUser(`tx5b-${Date.now()}@test.com`);
-    // B is a genuine member of the same profile — this isn't the
+    // B is a genuine member of the same profile, this isn't the
     // "non-member" rejection path, it's specifically the uploaderUid guard:
     // a fellow member still can't hijack another member's track slot by
     // uploading under their own uid segment into someone else's trackId.
@@ -105,10 +105,10 @@ describe("processUpload: audio", () => {
     const { trackId, uploadPath } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
       "createTrack", { profileId, title: "Race", startSec: 2, sizeBytes: wav.byteLength, contentType: "audio/wav" }, user);
     await uploadTestAudio(uploadPath, wav, "audio/wav", user);
-    // Delete the track doc immediately — this races the trigger under
+    // Delete the track doc immediately, this races the trigger under
     // either interleaving (before it even reads the doc, mid-transcode, or
     // after the review upload but before the status write). The invariant
-    // under test — no review object AND no staging object ever survive —
+    // under test, no review object AND no staging object ever survive,
     // must hold no matter which interleaving actually happens.
     await adb.doc(`profiles/${profileId}/tracks/${trackId}`).delete();
     const reviewPath = `review/tracks/${profileId}/${trackId}.m4a`;
@@ -155,7 +155,7 @@ describe("processUpload: photos", () => {
     "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
     "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
     "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
-  // Same 1x1 image, 3 bytes longer — decodes fine but trips libjpeg's
+  // Same 1x1 image, 3 bytes longer, decodes fine but trips libjpeg's
   // "extraneous bytes" warning, as many real phone encoders do; pins
   // failOn:"error" tolerance (media.ts must not reject on this).
   const warnJpeg = () => Uint8Array.from(atob(
@@ -180,7 +180,7 @@ describe("processUpload: photos", () => {
   it("processes an avatar into public/photos, updates the profile doc, and upscales a tiny source to exactly 512x512", async () => {
     const { user, uid, profileId } = await makeMusician("ph1");
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
-    // tinyJpeg is a 1x1 source — this doubles as the small-source case:
+    // tinyJpeg is a 1x1 source, this doubles as the small-source case:
     // avatars deliberately upscale (no withoutEnlargement) because 512x512
     // is a fixed-size contract the rest of the app relies on.
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user); // same uploader helper works for any bytes
@@ -252,10 +252,10 @@ describe("processUpload: photos", () => {
     const [firstStillExists] = await abucket.file(firstPath).exists();
     expect(firstStillExists).toBe(false); // superseded photo cleaned up
   });
-  it("rejects a disallowed image format (GIF) — nothing is written to public/, staging is still cleaned up, portfolio untouched", async () => {
+  it("rejects a disallowed image format (GIF), nothing is written to public/, staging is still cleaned up, portfolio untouched", async () => {
     const { user, uid, profileId } = await makeMusician("ph7");
     // storage.rules only checks the client-DECLARED contentType metadata
-    // ('image/(jpeg|png|webp)') — it never inspects the actual bytes, so
+    // ('image/(jpeg|png|webp)'), it never inspects the actual bytes, so
     // "image/gif" bytes alone would be rejected at the rules layer before
     // ever reaching this trigger. The real attack (and what media.ts's
     // format allowlist must catch) is a spoofed declared type: real GIF
@@ -277,15 +277,15 @@ describe("processUpload: photos", () => {
     const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
     expect(files).toHaveLength(0); // nothing written to public/
   });
-  it("handles a corrupt/undecodable photo upload without throwing — staging still cleaned up, nothing written to public/, portfolio untouched", async () => {
+  it("handles a corrupt/undecodable photo upload without throwing, staging still cleaned up, nothing written to public/, portfolio untouched", async () => {
     const { user, uid, profileId } = await makeMusician("ph7b");
     // Unlike the disallowed-format GIF above (which sharp decodes just
-    // fine — the rejection is this app's OWN allowlist), this buffer isn't a
+    // fine, the rejection is this app's OWN allowlist), this buffer isn't a
     // real image at all: sharp's .metadata() throws trying to read it. Task
     // 14 hardening for a pre-existing SP2 bug (found live in Task 9's
     // walkthrough) where that throw used to escape processPhoto unhandled
     // instead of being discarded like every other rejection path here.
-    const garbage = Buffer.from("not an image — just garbage bytes".repeat(20));
+    const garbage = Buffer.from("not an image, just garbage bytes".repeat(20));
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
     await uploadTestAudio(path, garbage, "image/jpeg", user);
     const deadline = Date.now() + 30_000;
@@ -294,7 +294,7 @@ describe("processUpload: photos", () => {
       stagingGone = !(await abucket.file(path).exists())[0];
       if (!stagingGone) await new Promise((r) => setTimeout(r, 500));
     }
-    expect(stagingGone).toBe(true); // finally still cleans up staging — trigger never throws
+    expect(stagingGone).toBe(true); // finally still cleans up staging, trigger never throws
     const p = await adb.doc(`profiles/${profileId}`).get();
     expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull(); // profile doc untouched
     const [files] = await abucket.getFiles({ prefix: `public/photos/${profileId}/` });
@@ -320,18 +320,18 @@ describe("processUpload: photos", () => {
   it("holds the delete-during-photo-processing invariant: no public photo survives a profile doc deleted before the upload lands", async () => {
     const { user, uid, profileId } = await makeMusician("ph6");
     // Delete only the top-level profile doc (not a full recursiveDelete) so
-    // the members subcollection survives — the trigger's membership check
+    // the members subcollection survives, the trigger's membership check
     // still passes. Deleting BEFORE the upload (rather than racing it
     // afterward) makes profileRef.update() deterministically hit a missing
     // doc every run, instead of depending on upload/trigger timing: an
     // earlier version of this test deleted after uploading and asserted
-    // public/photos/{profileId}/ was empty via a poll — that's vacuously
+    // public/photos/{profileId}/ was empty via a poll, that's vacuously
     // true at iteration 0 (nothing has been written yet) and would have
     // gone undetected as a false pass if the trigger ever won the race.
     await adb.doc(`profiles/${profileId}`).delete();
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
-    // Poll until staging is gone — that's the trigger's finally block
+    // Poll until staging is gone, that's the trigger's finally block
     // running, proof the whole pipeline (including the post-write cleanup)
     // has actually completed, not just that nothing has happened yet.
     const deadline = Date.now() + 30_000;
@@ -376,7 +376,7 @@ describe("processUpload: curator gallery photos", () => {
     expect(exists).toBe(true);
   });
 
-  it("a second gallery upload appends alongside the first — additive, not overwrite", async () => {
+  it("a second gallery upload appends alongside the first, additive, not overwrite", async () => {
     const { user, uid, profileId } = await makeCurator("g2");
     await uploadTestAudio(`staging/photos/${uid}/${profileId}/gallery-${Date.now()}-a`, tinyJpeg(), "image/jpeg", user);
     await waitForGalleryLength(profileId, 1);
@@ -390,7 +390,7 @@ describe("processUpload: curator gallery photos", () => {
     }
   });
 
-  it("rejects a gallery upload aimed at a musician profile — no destination field for it", async () => {
+  it("rejects a gallery upload aimed at a musician profile, no destination field for it", async () => {
     const { user, uid, profileId } = await makeMusician("g3");
     const path = `staging/photos/${uid}/${profileId}/gallery-${Date.now()}`;
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
@@ -408,7 +408,7 @@ describe("processUpload: curator gallery photos", () => {
     expect(files).toHaveLength(0); // nothing written to public/
   });
 
-  it("rejects an avatar upload aimed at a curator profile — curators have no single-slot photo fields", async () => {
+  it("rejects an avatar upload aimed at a curator profile, curators have no single-slot photo fields", async () => {
     const { user, uid, profileId } = await makeCurator("g4");
     const path = `staging/photos/${uid}/${profileId}/avatar-${Date.now()}`;
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
@@ -425,7 +425,7 @@ describe("processUpload: curator gallery photos", () => {
     expect(files).toHaveLength(0);
   });
 
-  it("caps the gallery at MAX_CURATOR_PHOTOS entries — an upload past the cap is discarded, not appended", async () => {
+  it("caps the gallery at MAX_CURATOR_PHOTOS entries, an upload past the cap is discarded, not appended", async () => {
     const { user, uid, profileId } = await makeCurator("g5");
     expect(MAX_CURATOR_PHOTOS).toBe(12);
     const seeded = Array.from({ length: MAX_CURATOR_PHOTOS }, (_, i) => `public/photos/${profileId}/gallery-seed-${i}`);
@@ -440,7 +440,7 @@ describe("processUpload: curator gallery photos", () => {
     }
     expect(stagingGone).toBe(true); // finally still cleans up staging
     const p = await adb.doc(`profiles/${profileId}`).get();
-    expect(p.data()?.curator?.photoPaths).toEqual(seeded); // unchanged — still exactly the 12 seeded entries
+    expect(p.data()?.curator?.photoPaths).toEqual(seeded); // unchanged, still exactly the 12 seeded entries
     // The rejected upload's own processed object (a real GCS write, unlike
     // the fake seeded Firestore-only entries above) must have been cleaned
     // up rather than left as an orphan.

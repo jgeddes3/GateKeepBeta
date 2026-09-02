@@ -17,14 +17,14 @@ import { getGeocoder, coarsen, geocoderApiKey, consumeGeocodeBudget } from "./ge
 import { executeCancellation, ALREADY_STARTED_MESSAGE, NO_UPCOMING_DATES_MESSAGE } from "./bookingLifecycle.js";
 // H1 (branch audit): pauseSeries / endSeries cancel the series' active run
 // booking via executeCancellation, which reaches getStripe() (the deposit
-// refund/forfeit executor) — so both MUST declare this secret or getStripe()
+// refund/forfeit executor), so both MUST declare this secret or getStripe()
 // fails CLOSED in production. See the regression guard in stripeSecrets.test.ts.
 import { stripeSecretKey } from "./stripeClient.js";
 
 type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
 
-// Shared content shape for both createSeries and updateSeries — the same
+// Shared content shape for both createSeries and updateSeries, the same
 // GigContentInput/budget/location fields a one-off gig takes, plus the
 // series-only recurrence + fillMode.
 interface SeriesContentInput extends GigContentInput {
@@ -37,7 +37,7 @@ interface SeriesContentInput extends GigContentInput {
 export interface CreateSeriesInput extends SeriesContentInput { profileId: string; }
 export interface UpdateSeriesInput extends SeriesContentInput { seriesId: string; }
 
-// Field-shape validation for the content shared by create/update — Task 1's
+// Field-shape validation for the content shared by create/update, Task 1's
 // validators (content/budget/recurrence) plus the local fillMode/location
 // checks gigs.ts already exports. Runs before any authz guard, matching the
 // ordering convention.
@@ -84,7 +84,7 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1", s
   const v = validateSeriesInput(input, now);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
 
-  // sequential is deliberate — mirrors createGig's identical rationale:
+  // sequential is deliberate, mirrors createGig's identical rationale:
   // parallelizing makes rejection order nondeterministic and would leak
   // profile existence/type/approval status to non-members.
   await requireProfileMember(input.profileId, uid);
@@ -104,7 +104,7 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1", s
       `A profile may have at most ${MAX_ACTIVE_SERIES_PER_PROFILE} active series.`);
   }
 
-  // Same resolution createGig runs — the template stores the resolved
+  // Same resolution createGig runs, the template stores the resolved
   // public/private split so Task 7's materializer never has to re-geocode.
   const { location, privateLocation } = await resolveGigLocation(
     uid, isVenue, profile.name as string, curatorLocation, input.location);
@@ -117,9 +117,9 @@ export const createSeries = onCall<CreateSeriesInput>({ region: "us-central1", s
     template: buildTemplateContent(input, location),
     templatePrivateLocation: privateLocation,
     // Task 7's daily sweep materializes the first batch of occurrences on
-    // its next run — createSeries deliberately writes no occurrence docs.
+    // its next run, createSeries deliberately writes no occurrence docs.
     status: "active", materializedThrough: 0, createdAt: now, updatedAt: now,
-    // SP4 whole-run booking (Task 5) is the sole writer of these — no run is
+    // SP4 whole-run booking (Task 5) is the sole writer of these, no run is
     // booked yet at series creation.
     activeBookingId: null, bookedMusicianProfileId: null,
   };
@@ -143,7 +143,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   if (!seriesSnap.exists) throw new HttpsError("not-found", "Series not found.");
   const series = seriesSnap.data() as GigSeriesDoc;
   await requireProfileMember(series.curatorProfileId, uid);
-  // P3: matches createSeries/publishGig/updateGig's approval gate — without
+  // P3: matches createSeries/publishGig/updateGig's approval gate, without
   // it, a member of a since-rejected/unpublished curator profile could keep
   // editing (and, via the propagation sweep below, keep rewriting) a
   // possibly still world-readable series' future occurrences.
@@ -153,7 +153,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   }
 
   // Location: entirely omitted leaves the template's existing location
-  // untouched (mirrors updateGig); provided triggers a resolve — an address
+  // untouched (mirrors updateGig); provided triggers a resolve, an address
   // override re-geocodes, a visibility-only change reuses the template's
   // already-exact private address/geo rather than re-geocoding. Can't reuse
   // resolveGigLocation here (it only knows the create-time "no override ->
@@ -170,7 +170,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
 
     if (overrideAddress.length > 0) {
       if (privateLocation.geocodedFrom === overrideAddress) {
-        // S2: unchanged address input — reuse the already-resolved geocode
+        // S2: unchanged address input, reuse the already-resolved geocode
         // rather than re-querying (and re-charging the daily budget for)
         // the exact same address a member just re-submitted.
         if (!privateLocation.geo) {
@@ -198,7 +198,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
         privateLocation = { address: overrideAddress, geo: { lat: result.lat, lng: result.lng }, geocodedFrom: overrideAddress };
       }
     } else {
-      // Visibility-only change (or a no-op location object) — reuse the
+      // Visibility-only change (or a no-op location object), reuse the
       // already-exact private geo/address rather than re-geocoding.
       // P7: explicit guard instead of a `.geo!` non-null assertion.
       if (!privateLocation.geo) {
@@ -227,7 +227,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
     updatedAt: now,
   });
 
-  // Template edits propagate to FUTURE, still-attached occurrences only —
+  // Template edits propagate to FUTURE, still-attached occurrences only,
   // an occurrence a member directly edited (updateGig) has detached and
   // must not be silently overwritten by a later template edit. Recurrence
   // edits (weekday/hour/cadence/endDate) intentionally do NOT retroactively
@@ -237,12 +237,12 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   //
   // Queries seriesId==this && startsAt>now (served by the existing
   // (seriesId,startsAt) composite index) then filters detachedFromTemplate
-  // in application code — a second equality filter combined with the range
+  // in application code, a second equality filter combined with the range
   // filter would need its own composite index, and per-series occurrence
   // counts are small (materialization caps at SERIES_MATERIALIZE_WEEKS).
   // Did THIS call change the location (an address override or a
   // visibility-only flip)? If so, every swept occurrence's private location
-  // needs to move too — its public `location` field is always kept in sync
+  // needs to move too, its public `location` field is always kept in sync
   // with the template above, but the exact address+geo lives in a separate
   // `gigs/{id}/private/location` subdoc that the loop below wouldn't
   // otherwise touch.
@@ -253,10 +253,10 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   for (const doc of futureSnap.docs) {
     if (doc.data().detachedFromTemplate === true) continue;
     // F2 (security audit wave): a FILLED (or CLOSED) occurrence is a
-    // booked, contract-locked date — the two sides negotiated and accepted
+    // booked, contract-locked date, the two sides negotiated and accepted
     // its specific terms via acceptBooking, exactly like updateGig now
     // refuses to edit a filled/closed gig directly (gigs.ts). A template
-    // propagation sweep is a SILENT, no-confirmation write path — it must
+    // propagation sweep is a SILENT, no-confirmation write path, it must
     // never retroactively rewrite a booked date's schedule/terms out from
     // under an already-confirmed booking just because the curator edited
     // some OTHER future occurrence's template.
@@ -270,7 +270,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
     if (locationChanged) {
       // A plain set, not update: pre-Task-7 there's no materializer yet, so
       // an admin-SDK-seeded test occurrence may not have this subdoc at
-      // all — set() is the correct "make it match the template" semantics
+      // all, set() is the correct "make it match the template" semantics
       // either way (create or overwrite), mirroring createGig's own
       // private/location write.
       batch.set(db.doc(`gigs/${doc.id}/private/location`), privateLocation);
@@ -281,17 +281,17 @@ export const updateSeries = onCall<UpdateSeriesInput>(
   return { ok: true };
 });
 
-// Task 7 fix: shared by pauseSeries/endSeries below — attempts a
+// Task 7 fix: shared by pauseSeries/endSeries below, attempts a
 // curator-side cancellation of the series' active run booking (if any, and
 // still "confirmed") via executeCancellation, but TOLERATES exactly the
 // "no cancellable dates left" family of failures it can throw
-// (ALREADY_STARTED_MESSAGE / NO_UPCOMING_DATES_MESSAGE — a zombie run: every
+// (ALREADY_STARTED_MESSAGE / NO_UPCOMING_DATES_MESSAGE, a zombie run: every
 // future date was already cancelled per-occurrence, or the run's last date
 // already started). Matched via the exact exported message constants, never
 // an ad-hoc substring check, so this can never accidentally swallow some
 // OTHER failed-precondition it doesn't actually understand.
 //
-// The pause/end action itself must never be blocked by this zombie state —
+// The pause/end action itself must never be blocked by this zombie state,
 // the curator's intent (pause/end the series) has nothing to do with
 // whether this particular booking still has a cancellable date. Leaving the
 // booking "confirmed" with a now-stale series.activeBookingId is safe
@@ -300,7 +300,7 @@ export const updateSeries = onCall<UpdateSeriesInput>(
 // rebooking-door guard in acceptBooking still correctly refuses a fresh
 // accept against this series' activeBookingId, and Task 8's daily sweep
 // resolves the booking (to "completed") within a day regardless. Any OTHER
-// error (not-found, a genuine transient failure, ...) still propagates —
+// error (not-found, a genuine transient failure, ...) still propagates,
 // this must never silently swallow a failure it doesn't recognize.
 async function cancelActiveRunBookingTolerant(
   db: FirebaseFirestore.Firestore, activeBookingId: string, reason: string, now: number,
@@ -336,7 +336,7 @@ export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1",
 
   // F3 (security audit wave, TOCTOU hardening): the series' status flip
   // below carries a REAL optimistic precondition (`lastUpdateTime`,
-  // mirroring supersedeSiblingBooking's idiom in bookings.ts) — closing the
+  // mirroring supersedeSiblingBooking's idiom in bookings.ts), closing the
   // race where an accept (acceptBooking's own transaction stamps
   // activeBookingId/bookedMusicianProfileId onto this SAME series doc)
   // lands between this callable's outer read above and its status-flip
@@ -344,13 +344,13 @@ export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1",
   // callable never saw, pausing a series whose freshly-booked run
   // `cancelActiveRunBookingTolerant` above never even looked at.
   //
-  // This precondition ALSO — expectedly — trips on attempt 0 whenever
+  // This precondition ALSO, expectedly, trips on attempt 0 whenever
   // `cancelActiveRunBookingTolerant` just above actually cancelled a run:
   // that call's own executeCancellation transaction writes
   // activeBookingId:null onto this SAME series doc, which is exactly a
   // "concurrent" write from this function's own point of view (`seriesSnap`
   // was captured before it happened). That is not a real conflict this
-  // function needs to give up on — it re-reads the series ONCE (as it would
+  // function needs to give up on, it re-reads the series ONCE (as it would
   // for a genuine race too), finds activeBookingId now cleared (or, on a
   // genuine race, a DIFFERENT confirmed booking that just landed) and
   // retries with the fresh precondition. A SECOND conflict at that point is
@@ -377,7 +377,7 @@ export const pauseSeries = onCall<{ seriesId: string }>({ region: "us-central1",
 
 // Runs endSeries' own occurrence sweep (future open|draft -> cancelled)
 // against a FRESH `now`/gig snapshot, as one batch alongside the series'
-// own status flip — extracted so pauseSeries/endSeries' shared F3 retry
+// own status flip, extracted so pauseSeries/endSeries' shared F3 retry
 // loop shape (attempt the whole flow, retry once on a precondition
 // conflict, propagate a second) can re-run this WHOLE step, not just the
 // series doc's own write, on a retry (see endSeries' own comment for why a
@@ -390,7 +390,7 @@ async function attemptEndSeries(
   const batch = db.batch();
   batch.update(seriesRef, { status: "ended", updatedAt: now }, { lastUpdateTime: seriesSnap.updateTime });
 
-  // Same query shape as updateSeries's propagation query — reuses the
+  // Same query shape as updateSeries's propagation query, reuses the
   // (seriesId,startsAt) composite index, filters status in application code.
   const futureSnap = await db.collection("gigs")
     .where("seriesId", "==", seriesRef.id).where("startsAt", ">", now).get();
@@ -420,19 +420,19 @@ export const endSeries = onCall<{ seriesId: string }>({ region: "us-central1", s
     throw new HttpsError("failed-precondition", "Series has already ended.");
   }
 
-  // F3 (security audit wave, TOCTOU hardening) — same race/precondition/
+  // F3 (security audit wave, TOCTOU hardening), same race/precondition/
   // retry rationale as pauseSeries above: the series' status flip (inside
   // attemptEndSeries, alongside the future-occurrence cancel sweep in the
   // SAME batch) carries a real `lastUpdateTime` precondition, and the WHOLE
-  // attempt (not just the write) is retried once on a conflict — a stale
+  // attempt (not just the write) is retried once on a conflict, a stale
   // retry that only re-ran the series doc's own write while keeping an
   // occurrence sweep computed against a now-stale `now`/gig snapshot would
   // be a subtler bug of its own (e.g. missing an occurrence that became
   // "open" in the interim). SP4 (Task 7): same curator-side run
-  // cancellation as pauseSeries — run FIRST, so the occurrences it reopens
+  // cancellation as pauseSeries, run FIRST, so the occurrences it reopens
   // (filled -> open) fall straight into the ordinary future open|draft
   // sweep inside attemptEndSeries, exactly like any other open date does
-  // when a series ends. Tolerates a zombie (no-cancellable-dates) booking —
+  // when a series ends. Tolerates a zombie (no-cancellable-dates) booking,
   // see cancelActiveRunBookingTolerant's own comment.
   for (let attempt = 0; ; attempt++) {
     if (series.activeBookingId) {

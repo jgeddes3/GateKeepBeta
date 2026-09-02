@@ -1,4 +1,4 @@
-# GateKeep Sub-project 2 (Musician Portfolio) — Rulings & Handoff
+# GateKeep Sub-project 2 (Musician Portfolio), Rulings & Handoff
 
 Durable record from sub-project 2, executed subagent-driven with two-stage reviews and merged to
 `main` on 2026-08-26 (merge `8a4b0d3`). Travels with the repo so any device/session can plan
@@ -10,7 +10,7 @@ Foundation record: `docs/superpowers/foundation-rulings.md`
 
 ## Rulings made during execution
 
-1. **Track gate semantics are two distinct sets** — `ACTIVE_TRACK_STATUSES` (processing/pending/approved)
+1. **Track gate semantics are two distinct sets**, `ACTIVE_TRACK_STATUSES` (processing/pending/approved)
    is slot-occupancy for the 10-track cap; `LISTENABLE_TRACK_STATUSES` (pending/approved) is the
    submit-gate's "actually uploaded" set. A `processing` doc can be an abandoned upload and never
    satisfies the gate. Both are commented at their definition sites.
@@ -22,19 +22,19 @@ Foundation record: `docs/superpowers/foundation-rulings.md`
    tracks); it deliberately does NOT scrub `public/` objects because the same path is the routine
    revise-and-resubmit flow. Full scrub for abuse = follow with `deleteProfile` (unblocked once
    rejected). Documented in README + `functions/src/review.ts`.
-4. **`deleteProfile` is server-gated to draft/rejected** — closes the co-admin
+4. **`deleteProfile` is server-gated to draft/rejected**, closes the co-admin
    delete-live-profile + instant handle-takeover hole found in the security audit. README's
    earlier "conscious ruling" wording now reflects reality.
 5. **Title edits on approved tracks stay instant** (spec §6 "edits live instantly"), balanced by
    `reviewTrack` supporting retroactive reject of approved tracks (which DOES delete the public
-   object — unlike profile unpublish, a track takedown is always a takedown).
-6. **Mobile-only 25 MB audio cap** (`MOBILE_MAX_AUDIO_BYTES`) — `fetch().blob()` materializes the
+   object, unlike profile unpublish, a track takedown is always a takedown).
+6. **Mobile-only 25 MB audio cap** (`MOBILE_MAX_AUDIO_BYTES`), `fetch().blob()` materializes the
    file in memory; server cap stays 50 MB. Follow-up recorded: expo-file-system `uploadAsync`
    native streaming, then lift.
-7. **`uploaderUid` is world-readable on approved tracks** — accepted, consistent with member-doc
+7. **`uploaderUid` is world-readable on approved tracks**, accepted, consistent with member-doc
    visibility on approved profiles. Any field the pipeline writes to an approved track becomes
    public (no field projection in rules).
-8. **`processing`-track slots + `staging/` cleanup rely on two not-yet-built backstops** — the
+8. **`processing`-track slots + `staging/` cleanup rely on two not-yet-built backstops**, the
    24h GCS lifecycle rule on `staging/` (LAUNCH BLOCKER, emulator can't test it) and a scheduled
    reaper for abandoned `processing` tracks. Both in README's manual follow-ups.
 9. **Emulator quirk on Windows dev machines**: `FUNCTIONS_DISCOVERY_TIMEOUT=60` is required or
@@ -49,12 +49,12 @@ Foundation record: `docs/superpowers/foundation-rulings.md`
 - **Explicitly review the deferred admin/internal list** (user directive, recorded in SP2 spec §1
   "Out"): admin name search, orphaned-invite cleanup, `deleteProfile` status-restriction product
   confirmation, mobile account-screen dedup, `requireAuth`/`requireVerifiedEmail` consolidation
-  (three local copies exist — see `functions/src/guards.ts`'s comment). Plus the EAS production
+  (three local copies exist, see `functions/src/guards.ts`'s comment). Plus the EAS production
   build + native App Check launch-prep track (blocked on external accounts).
 - **Widen `profiles/{id}/private/booking` read access** to members of approved curator profiles
-  (spec §4/§5 — the rules comment in `firestore.rules` marks the spot). Until then only profile
+  (spec §4/§5, the rules comment in `firestore.rules` marks the spot). Until then only profile
   members + admins can read rates.
-- **Curator profiles get the wizard/portfolio treatment** — reuse the SP2 component/guard
+- **Curator profiles get the wizard/portfolio treatment**, reuse the SP2 component/guard
   patterns; the mobile DO-NOT-COPY checklists in plan Tasks 13/14 apply to any new screens.
 - **If profile suspension (as distinct from reject) is ever added**: it must sweep the `public/`
   prefixes the way `deleteProfile` does, or approved objects survive world-readable by path
@@ -62,12 +62,12 @@ Foundation record: `docs/superpowers/foundation-rulings.md`
 
 ## Binding contracts for later sub-projects
 
-- **Sub-4 (booking)**: musicians declare up to three rate structures — per-hour / per-song /
+- **Sub-4 (booking)**: musicians declare up to three rate structures, per-hour / per-song /
   per-set, any combination (`BookingRates` in `@gatekeep/shared`); the booking flow picks one.
 - **Sub-5 (payments)**: settlement math per structure (overtime for hourly, song-count for
   per-song).
 - **Sub-4/6 (events)**: the public portfolio's Shows section renders ONLY platform
-  events/bookings (never manual entries) — the section is shipped hidden-while-empty on both
+  events/bookings (never manual entries), the section is shipped hidden-while-empty on both
   public pages; wire real data to it.
 - **Web launch checklist additions from SP2**: set `NEXT_PUBLIC_SITE_URL` (canonical/OG base),
   swap `PUBLIC_PROFILE_HOST` in mobile portfolio.tsx, plus everything under README's "Manual

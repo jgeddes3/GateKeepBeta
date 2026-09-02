@@ -55,7 +55,7 @@ describe("onUserCreated", () => {
 // both onUserDocWritten (below) and backfillDisplayNameLower
 // (adminTools.ts). Unit-tested directly (no emulator round trip) because
 // onUserDocWritten reacts to EVERY write to users/{uid} within single-digit
-// milliseconds — a live-emulator integration test that seeds an
+// milliseconds, a live-emulator integration test that seeds an
 // "inconsistent" doc almost always finds it already corrected by the time
 // it can look again, especially against backfillDisplayNameLower's own
 // collection-wide scan, which takes far longer than the trigger's reaction.
@@ -69,7 +69,7 @@ describe("computeDisplayNameLowerFix", () => {
     expect(computeDisplayNameLowerFix({ displayName: "Legacy Stale Lower", displayNameLower: "an old stale value" }))
       .toBe("legacy stale lower");
   });
-  it("returns null when already consistent — the no-op / no-self-retrigger case", () => {
+  it("returns null when already consistent, the no-op / no-self-retrigger case", () => {
     expect(computeDisplayNameLowerFix({ displayName: "Already Consistent", displayNameLower: "already consistent" }))
       .toBeNull();
   });
@@ -81,7 +81,7 @@ describe("computeDisplayNameLowerFix", () => {
 });
 
 // Task 8: onUserDocWritten (v2 onDocumentWritten("users/{uid}")) keeps
-// displayNameLower in sync with displayName after creation — e.g. a client
+// displayNameLower in sync with displayName after creation, e.g. a client
 // update via the users update rule (owner may write displayName directly).
 describe("onUserDocWritten", () => {
   it(
@@ -106,7 +106,7 @@ describe("onUserDocWritten", () => {
   );
 
   it(
-    "is a no-op once displayNameLower is already consistent — no self-retrigger churn",
+    "is a no-op once displayNameLower is already consistent, no self-retrigger churn",
     async () => {
       const { uid } = await signUpTestUser(`dave-${Date.now()}@test.com`);
       await waitForUserDoc(uid);
@@ -125,8 +125,8 @@ describe("onUserDocWritten", () => {
       // If the trigger's own sync write re-triggered itself (a missing or
       // broken consistency guard), the document's updateTime would keep
       // advancing indefinitely. Wait past one more plausible trigger round
-      // trip and confirm Firestore's own updateTime — not an app-level
-      // field — genuinely stopped changing.
+      // trip and confirm Firestore's own updateTime, not an app-level
+      // field, genuinely stopped changing.
       await wait(3_000);
       const settledSnap = await adminFirestore(admin).doc(`users/${uid}`).get();
       expect(settledSnap.updateTime?.isEqual(updateTimeAfterSync!)).toBe(true);

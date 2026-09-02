@@ -7,14 +7,14 @@ import {
   collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collectionGroup, query, where, orderBy,
 } from "firebase/firestore";
 
-// Sub-project 5 (payments) rules matrix — the money collections
+// Sub-project 5 (payments) rules matrix, the money collections
 // firestore.rules gained in its "Sub-project 5: payments" section:
 // bookings/{id}/payments/{gigId}, profiles/{id}/private/stripe, stripeEvents,
 // ledger, adminAlerts, and stripeFake/**.
 //
 // Its own file rather than more describes in rules.test.ts: that file is
 // already 700+ lines covering sub-projects 1-4, and money data has ZERO
-// public tier (spec §2) — the whole point of this matrix is that it is
+// public tier (spec §2), the whole point of this matrix is that it is
 // read-together-able. Same harness, same seeding idiom, same projectId; the
 // suite runs with `--no-file-parallelism` (tests-rules/package.json), so the
 // two files never share an emulator state.
@@ -37,12 +37,12 @@ const seed = async (path: string, data: object) => {
 };
 
 // The cast of characters used by every test below:
-//   alice — member of prof1, the CURATOR side of bk1
-//   bob   — member of prof2, the MUSICIAN side of bk1
-//   carol — member of prof3, a profile with no part in bk1 (and, where it
+//   alice, member of prof1, the CURATOR side of bk1
+//   bob, member of prof2, the MUSICIAN side of bk1
+//   carol, member of prof3, a profile with no part in bk1 (and, where it
 //           matters, a curatorAccess marker holder)
-//   dave  — signed in, member of nothing
-//   root  — platform admin (admin custom claim)
+//   dave, signed in, member of nothing
+//   root, platform admin (admin custom claim)
 const seedCast = async () => {
   await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
   await seed("profiles/prof2/members/bob", { uid: "bob", role: "admin" });
@@ -50,7 +50,7 @@ const seedCast = async () => {
 };
 
 // SP4's BookingRequestDoc, defaulted to a confirmed prof1(curator) <-> prof2
-// (musician) booking — the only state that ever HAS payment docs, since
+// (musician) booking, the only state that ever HAS payment docs, since
 // acceptBooking's saga is what stages the subcollection.
 const seedBooking = async (id: string, overrides: Record<string, unknown> = {}) => {
   await seed(`bookings/${id}`, {
@@ -64,7 +64,7 @@ const seedBooking = async (id: string, overrides: Record<string, unknown> = {}) 
   });
 };
 
-// SP5's PaymentDoc (packages/shared/src/types.ts) — one doc per occurrence,
+// SP5's PaymentDoc (packages/shared/src/types.ts), one doc per occurrence,
 // server-written only. Defaulted to a deposit-held, settlement-not-due date
 // so a test only overrides what it's actually exercising.
 const seedPayment = async (bookingId: string, gigId: string, overrides: Record<string, unknown> = {}) => {
@@ -92,7 +92,7 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
     await seedCast();
     await seedBooking("bk1");
     await seedPayment("bk1", "g1");
-    // An ORPHAN payment doc whose parent booking does not exist — the read
+    // An ORPHAN payment doc whose parent booking does not exist, the read
     // rule's get()s resolve to null there, so every membership disjunct
     // errors out and the whole rule denies. Pins that the audience is
     // derived from the LIVE parent booking, never from the payment doc's own
@@ -141,7 +141,7 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
     await assertFails(getDocs(collection(anon, "bookings/bk1/payments")));
   });
 
-  it("L8: a side member (not a platform admin) cannot run collectionGroup('payments') — the cross-booking read is admin-only", async () => {
+  it("L8: a side member (not a platform admin) cannot run collectionGroup('payments'), the cross-booking read is admin-only", async () => {
     await seedCast();
     await seedBooking("bk1");
     await seedPayment("bk1", "g1");
@@ -152,7 +152,7 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
 
     // The per-booking list is provable (the parent get() pins to the {bookingId}
     // path segment), but a collectionGroup query spans EVERY booking's payments
-    // at once — there is no single path to pin the parent get() to, so the
+    // at once, there is no single path to pin the parent get() to, so the
     // membership disjuncts can never be proven query-wide and the rule denies for
     // any non-admin. Mirrors rules.test.ts's "cannot run collectionGroup('tracks')".
     // The platform's own cross-booking payment reads go through the Admin SDK,
@@ -162,7 +162,7 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
     await assertFails(getDocs(collectionGroup(anon, "payments")));
   });
 
-  it("no client writes payment docs — not either side, not an admin, not create/update/delete", async () => {
+  it("no client writes payment docs, not either side, not an admin, not create/update/delete", async () => {
     await seedCast();
     await seedBooking("bk1");
     await seedPayment("bk1", "g1");
@@ -171,7 +171,7 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
     const bob = env.authenticatedContext("bob").firestore();
     const root = env.authenticatedContext("root", { admin: true }).firestore();
 
-    // update: the shapes that would actually be worth forging — marking a
+    // update: the shapes that would actually be worth forging, marking a
     // settlement paid, or a deposit refunded, without any money moving.
     await assertFails(updateDoc(doc(alice, "bookings/bk1/payments/g1"), { "settlement.status": "paid" }));
     await assertFails(updateDoc(doc(bob, "bookings/bk1/payments/g1"), { "deposit.status": "forfeited" }));
@@ -187,7 +187,7 @@ describe("payments subcollection (bookings/{id}/payments/{gigId})", () => {
 
 // The two SP5 CLIENT list queries over the top-level bookings collection (the
 // bookings read rule lives in firestore.rules' SP4 section, but these queries
-// are SP5's — a musician's booking inbox and the curator's delinquent-booking
+// are SP5's, a musician's booking inbox and the curator's delinquent-booking
 // lookup GatePrompt ships). Both are provable ONLY because they pin a
 // profileId the rule can evaluate isMember() against as a query-wide constant.
 describe("bookings list queries (SP5 client)", () => {
@@ -221,7 +221,7 @@ describe("bookings list queries (SP5 client)", () => {
     });
 
     const alice = env.authenticatedContext("alice").firestore(); // member of prof1 (curator side)
-    const bob = env.authenticatedContext("bob").firestore();     // musician side — not the curator
+    const bob = env.authenticatedContext("bob").firestore();     // musician side, not the curator
     const anon = env.unauthenticatedContext().firestore();
 
     // The exact query GatePrompt's fetchDelinquentBookingIds ships: pinning
@@ -247,7 +247,7 @@ describe("private/stripe subdoc", () => {
       customerId: "cus_x", defaultPaymentMethodId: "pm_x", cardBrand: "visa", cardLast4: "4242",
       accountId: "acct_x", payoutsEnabled: true, transfersEnabled: true, delinquent: false, updatedAt: 1,
     });
-    // carol holds the curatorAccess marker — the thing that DOES grant a
+    // carol holds the curatorAccess marker, the thing that DOES grant a
     // read of profiles/{id}/private/curatorBooking (the curator-shopping
     // projection). private/stripe is deliberately NOT a shopping surface:
     // payment identity, card fingerprints and gate flags are member/admin
@@ -314,7 +314,7 @@ describe("ledger (append-only money audit)", () => {
 
     await assertSucceeds(getDoc(doc(root, "ledger/entry1")));
     await assertSucceeds(getDocs(collection(root, "ledger")));
-    // Both SIDES of the booking this entry describes are denied — the ledger
+    // Both SIDES of the booking this entry describes are denied, the ledger
     // is the platform's own audit trail, not a customer-facing receipt.
     await assertFails(getDoc(doc(alice, "ledger/entry1")));
     await assertFails(getDoc(doc(bob, "ledger/entry1")));
@@ -346,7 +346,7 @@ describe("adminAlerts (the sweep's escalation queue)", () => {
     await assertFails(getDocs(collection(dave, "adminAlerts")));
     await assertFails(getDoc(doc(anon, "adminAlerts/alert1")));
     // Resolution goes through the releaseStuckSaga callable, never a direct
-    // client write — a forged resolvedAt would retire a money alert nobody
+    // client write, a forged resolvedAt would retire a money alert nobody
     // actually looked at.
     await assertFails(updateDoc(doc(root, "adminAlerts/alert1"), { resolvedAt: 2 }));
     await assertFails(setDoc(doc(alice, "adminAlerts/alert2"), { kind: "x" }));
@@ -355,7 +355,7 @@ describe("adminAlerts (the sweep's escalation queue)", () => {
 });
 
 describe("stripeFake (emulator-only fake Stripe state)", () => {
-  it("is unreachable for every caller at every depth — including admins", async () => {
+  it("is unreachable for every caller at every depth, including admins", async () => {
     await seedCast();
     await seed("stripeFake/config", { declineAll: false, declineCustomerIds: [] });
     // Nested: the recursive {doc=**} wildcard must deny below the top level

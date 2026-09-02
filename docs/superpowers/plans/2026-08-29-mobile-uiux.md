@@ -8,14 +8,14 @@
 
 **Tech Stack:** Expo SDK 57, React Native 0.86, expo-router, expo-font (installed), @react-native-async-storage/async-storage (installed), phosphor-react-native + react-native-svg (added task 1), TypeScript.
 
-**Spec:** `docs/superpowers/specs/2026-08-29-mobile-uiux-design.md` — binding. Brand contract: repo-root `DESIGN.md` (fixed input, not re-decided). Web reference primitives: `apps/web/src/ui/*`.
+**Spec:** `docs/superpowers/specs/2026-08-29-mobile-uiux-design.md`, binding. Brand contract: repo-root `DESIGN.md` (fixed input, not re-decided). Web reference primitives: `apps/web/src/ui/*`.
 
 ---
 
 ## Binding rules (every task respects these)
 
 1. **Behavior UNTOUCHED.** Retint/retype/restyle only. Never change when a state fires, what data drives it, which callable runs, navigation structure, or query shape. The backend gate counts must hold: `emu:test 578`, `emu:rules 77`, `shared 153`. 9B must not edit `functions/` or `packages/shared/` (a money-sentence already shared is already colonized; do not touch shared).
-2. **No em dash (`—`) anywhere** in 9B code, comments, or copy (DESIGN.md). Use comma/period/colon/parentheses.
+2. **No em dash (`, `) anywhere** in 9B code, comments, or copy (DESIGN.md). Use comma/period/colon/parentheses.
 3. **No hardcoded hex in components.** After task 2, every color comes from `useTokens()`. A literal `#...` in a screen file is a defect (except inside `tokens.ts` itself and the font/asset config).
 4. **No Phosphor import outside `src/ui/icons.tsx`.** No Lucide, ever. No font family named outside `Text.tsx`/`tokens.ts`.
 5. **This machine cannot run the dev client.** Verify with `npx expo export --platform ios` (bundles + links native deps) + `corepack pnpm --filter @gatekeep/mobile lint` + `corepack pnpm typecheck`. Never claim a visual result; the owner verifies live on the next EAS build.
@@ -23,7 +23,7 @@
 
 ## Environment
 
-Windows. `corepack pnpm`. PowerShell tool cwd is the MAIN repo — `Set-Location` into the worktree every call. `expo export` is long; run it as ONE blocking foreground call, never background. Edit docs byte-safe (Edit tool / bash+sed), never PS 5.1 string pipelines. `hermesc.exe` is App-Control-blocked here (sp5b ruling 11) — irrelevant to `expo export`, which does not invoke it.
+Windows. `corepack pnpm`. PowerShell tool cwd is the MAIN repo, `Set-Location` into the worktree every call. `expo export` is long; run it as ONE blocking foreground call, never background. Edit docs byte-safe (Edit tool / bash+sed), never PS 5.1 string pipelines. `hermesc.exe` is App-Control-blocked here (sp5b ruling 11), irrelevant to `expo export`, which does not invoke it.
 
 ## Exact token values (from `apps/web/app/globals.css`, transcribed in task 1)
 
@@ -35,8 +35,8 @@ Radius: pill `999`, card `10`, sm `6`. Scrim gradient (both themes): top→botto
 
 ## File structure
 
-**New — `apps/mobile/src/theme/`:** `tokens.ts` (typed token object + scales), `ThemeProvider.tsx` (context, `useTokens`, `useThemeChoice`), `fonts.ts` (`useAppFonts`).
-**New — `apps/mobile/src/ui/`:** `Text.tsx`, `Button.tsx`, `Card.tsx`, `Chip.tsx`, `Badge.tsx`, `StatusBadge.tsx`, `Input.tsx`, `TextArea.tsx`, `Sheet.tsx`, `Skeleton.tsx`, `ThemeToggle.tsx`, `Background.tsx` (page/scrim gradient via svg), `icons.tsx`.
+**New, `apps/mobile/src/theme/`:** `tokens.ts` (typed token object + scales), `ThemeProvider.tsx` (context, `useTokens`, `useThemeChoice`), `fonts.ts` (`useAppFonts`).
+**New, `apps/mobile/src/ui/`:** `Text.tsx`, `Button.tsx`, `Card.tsx`, `Chip.tsx`, `Badge.tsx`, `StatusBadge.tsx`, `Input.tsx`, `TextArea.tsx`, `Sheet.tsx`, `Skeleton.tsx`, `ThemeToggle.tsx`, `Background.tsx` (page/scrim gradient via svg), `icons.tsx`.
 **New assets:** `apps/mobile/assets/fonts/` (Syne + Sora TTFs).
 **Modified:** `app/_layout.tsx` (providers + fonts), every `app/(group)/_layout.tsx` (tab bars), every screen under `app/` and `src/` (token sweep), `package.json` (+ 2 native deps).
 **Untouched:** `functions/`, `packages/shared/`.
@@ -65,7 +65,7 @@ Then add the font files. Download the TTFs into `apps/mobile/assets/fonts/`:
 `next/font` cached under `apps/web/.next` or fetch from the fonts.google.com download; the file
 names above are what `fonts.ts` references.)
 
-- [ ] **Step 2: Write the failing token test** — `apps/mobile/src/theme/tokens.test.ts`
+- [ ] **Step 2: Write the failing token test**, `apps/mobile/src/theme/tokens.test.ts`
 
 ```ts
 import { tokens } from "./tokens";
@@ -92,7 +92,7 @@ test("radius tiers match DESIGN.md", () => {
 
 Run: `corepack pnpm --filter @gatekeep/mobile exec vitest run src/theme/tokens.test.ts` (if mobile
 has no vitest, run the assertion via `corepack pnpm typecheck` failing on the missing module first,
-then treat the test as a typecheck-backed spec — see note). Expected: FAIL, `tokens` not found.
+then treat the test as a typecheck-backed spec, see note). Expected: FAIL, `tokens` not found.
 
 > Note: `apps/mobile` may not have a unit test runner wired. If `vitest`/`jest` is absent, DO NOT add
 > one (out of scope). Instead make `tokens.test.ts` a `.ts` type-level assertion file compiled by
@@ -144,7 +144,7 @@ export const tokens = {
   space: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 },
 } as const;
 
-// Scrim: always the dark night gradient in BOTH themes (DESIGN.md — it keeps
+// Scrim: always the dark night gradient in BOTH themes (DESIGN.md, it keeps
 // photo captions legible, not page chrome). Stops for react-native-svg.
 export const SCRIM_STOPS = [
   { offset: "0%", color: "#0E0B13", opacity: 1 },
@@ -153,7 +153,7 @@ export const SCRIM_STOPS = [
   { offset: "100%", color: "#0E0B13", opacity: 0 },
 ] as const;
 
-// Page gradient stops — dark theme only; light page is flat bg0.
+// Page gradient stops, dark theme only; light page is flat bg0.
 export const PAGE_DARK_STOPS = [
   { offset: "0%", color: "#0E0B13" },
   { offset: "55%", color: "#150F20" },
@@ -237,7 +237,7 @@ export function useAppFonts(): boolean {
 }
 ```
 
-- [ ] **Step 7: Wire `_layout.tsx`** — wrap the tree with `ThemeProvider` (outermost, so every provider
+- [ ] **Step 7: Wire `_layout.tsx`**, wrap the tree with `ThemeProvider` (outermost, so every provider
 below can theme) and hold the splash until fonts load. Add near the top of `RootLayout`:
 
 ```tsx
@@ -267,7 +267,7 @@ Run (blocking foreground, worktree): `corepack pnpm typecheck` (5/5) · `corepac
 
 ```
 git add apps/mobile/src/theme apps/mobile/assets/fonts apps/mobile/app/_layout.tsx apps/mobile/package.json pnpm-lock.yaml
-git commit -m "feat(mobile): theme layer — tokens, ThemeProvider, runtime fonts, native icon deps"
+git commit -m "feat(mobile): theme layer, tokens, ThemeProvider, runtime fonts, native icon deps"
 ```
 
 ---
@@ -276,7 +276,7 @@ git commit -m "feat(mobile): theme layer — tokens, ThemeProvider, runtime font
 **Files:** Create each file below. Test: `apps/mobile/src/ui/icons.tsx` compiles + `expo export` links.
 Mirror the web contract at `apps/web/src/ui/<name>.tsx` for each, RN-native.
 
-- [ ] **Step 1: `icons.tsx`** — Phosphor duotone, weight locked, curated `Icon`-prefixed set. No other
+- [ ] **Step 1: `icons.tsx`**, Phosphor duotone, weight locked, curated `Icon`-prefixed set. No other
 file imports `phosphor-react-native`.
 
 ```tsx
@@ -316,7 +316,7 @@ export const IconMoon = wrap(Ph.Moon);
 ```
 (If a screen needs an icon not exported here, add it to this file in that task, wrapped the same way.)
 
-- [ ] **Step 2: `Text.tsx`** — the only place font families are applied.
+- [ ] **Step 2: `Text.tsx`**, the only place font families are applied.
 
 ```tsx
 import { Text as RNText, type TextProps } from "react-native";
@@ -341,7 +341,7 @@ export function Text({ variant = "body", muted, color, style, ...rest }:
 }
 ```
 
-- [ ] **Step 3: `Button.tsx`** — four variants only (`default`/`secondary`/`destructive`/`ghost`).
+- [ ] **Step 3: `Button.tsx`**, four variants only (`default`/`secondary`/`destructive`/`ghost`).
 
 ```tsx
 import { Pressable, type PressableProps } from "react-native";
@@ -440,7 +440,7 @@ export function Sheet({ visible, onClose, children }:
 }
 ```
 
-- [ ] **Step 5: `Badge.tsx` + `StatusBadge.tsx`** — 6px radius; status pairs the saturated color with
+- [ ] **Step 5: `Badge.tsx` + `StatusBadge.tsx`**, 6px radius; status pairs the saturated color with
 its 14%-opacity background. Move the gig/booking status maps here as token-based.
 
 ```tsx
@@ -467,7 +467,7 @@ export function StatusBadge({ label, status }: { label: string; status: Status }
 delete `STATUS_BG`/`STATUS_FG` raw-hex maps from `GigForms.tsx` and re-express via `StatusBadge`'s
 `status`. `Badge.tsx` is the same without the status coloring, `t.surface`/`t.border`.)
 
-- [ ] **Step 6: `Skeleton.tsx`** — MOTION 1 shimmer, pauses under reduced motion.
+- [ ] **Step 6: `Skeleton.tsx`**, MOTION 1 shimmer, pauses under reduced motion.
 
 ```tsx
 import { useEffect, useRef } from "react";
@@ -504,7 +504,7 @@ export function SkeletonCard() {
 (`useReducedMotion` is exported by react-native 0.86; if unavailable, fall back to
 `AccessibilityInfo.isReduceMotionEnabled()` in an effect.)
 
-- [ ] **Step 7: `Background.tsx`** — page + scrim gradients via `react-native-svg` (no expo-linear-gradient).
+- [ ] **Step 7: `Background.tsx`**, page + scrim gradients via `react-native-svg` (no expo-linear-gradient).
 
 ```tsx
 import { View } from "react-native";
@@ -537,7 +537,7 @@ export function PhotoScrim() {
 }
 ```
 
-- [ ] **Step 8: `ThemeToggle.tsx`** — Light / Dark / System segmented control.
+- [ ] **Step 8: `ThemeToggle.tsx`**, Light / Dark / System segmented control.
 
 ```tsx
 import { View } from "react-native";
@@ -560,7 +560,7 @@ export function ThemeToggle() {
 `corepack pnpm typecheck` · mobile lint · `npx expo export --platform ios` (bundles).
 ```
 git add apps/mobile/src/ui
-git commit -m "feat(mobile): owned ui primitives — text/button/card/chip/badge/input/sheet/skeleton/icons/background/theme-toggle"
+git commit -m "feat(mobile): owned ui primitives, text/button/card/chip/badge/input/sheet/skeleton/icons/background/theme-toggle"
 ```
 
 ---
@@ -570,7 +570,7 @@ git commit -m "feat(mobile): owned ui primitives — text/button/card/chip/badge
 **Files:** Modify `apps/mobile/app/(curator)/_layout.tsx`, `app/(musician)/_layout.tsx`,
 `app/(fan)/_layout.tsx`, `app/_layout.tsx` (Stack header styling + status bar).
 
-- [ ] **Step 1** — Read each `_layout.tsx`. Each defines a `Tabs` with per-screen icons/labels. Replace
+- [ ] **Step 1**, Read each `_layout.tsx`. Each defines a `Tabs` with per-screen icons/labels. Replace
 the tab-bar styling with tokens and Phosphor duotone icons. Pattern for one tab group:
 
 ```tsx
@@ -601,7 +601,7 @@ export default function CuratorLayout() {
 Keep the EXACT set of `Tabs.Screen` entries each layout already has (same names, same order, same
 hidden screens). Only styling + icons change.
 
-- [ ] **Step 2** — In `app/_layout.tsx`'s `Gate`, theme the two Stack headers (`join`, `artist/[handle]`):
+- [ ] **Step 2**, In `app/_layout.tsx`'s `Gate`, theme the two Stack headers (`join`, `artist/[handle]`):
 
 ```tsx
 <Stack screenOptions={{
@@ -615,7 +615,7 @@ hidden screens). Only styling + icons change.
 from `expo-status-bar` at the top of the returned tree, reading `active` from `useThemeChoice()`.
 `booking/[bookingId]`'s custom back control: retint its colors to tokens, no logic change.
 
-- [ ] **Step 3: AA check note** — on light theme, `tabBarActiveTintColor: t.accent` (ember) on the
+- [ ] **Step 3: AA check note**, on light theme, `tabBarActiveTintColor: t.accent` (ember) on the
 `surface` (#FFFFFF) tab bar is an icon+label pairing. If the label alone reads under AA at 11px,
 switch the active tint to `t.focus` (#BF5038) in light only (branch on `active`), matching the
 web-wordmark rule. Document the choice in a comment; the owner verifies at build.
@@ -646,7 +646,7 @@ each task can just name its files:**
 5. Icons come from `src/ui/icons` (add any missing glyph to `icons.tsx`, wrapped).
 6. **Do not change** any handler body, `useEffect` dependency array, callable invocation, Firestore
    query, `onSnapshot`, navigation call, or `===`-compared string. If a change seems to require it,
-   STOP and report — it is out of scope.
+   STOP and report, it is out of scope.
 
 Each task's gate: `corepack pnpm typecheck` · mobile lint · `npx expo export --platform ios`, plus a
 self-check `grep -nE '#[0-9a-fA-F]{3,8}' <the task's files>` returns nothing (no hex left).
@@ -701,7 +701,7 @@ Apply the standard transform. The hero follows DESIGN.md's locked anatomy: cover
 `<PhotoScrim />`, name in Syne on the scrim, ember only on the one key action. Shows section uses
 `Card`. The MiniPlayer is the ONE candidate for mobile's single glass use: implement it solid
 (`surface` + top `border` + the overlay shadow) by default; a blur (`expo-blur`) is optional and only
-if the owner later wants it (do NOT add `expo-blur` now — it is a native module needing a rebuild and
+if the owner later wants it (do NOT add `expo-blur` now, it is a native module needing a rebuild and
 the spec caps mobile glass at "at most one", defaulting to solid). Transport icons from `src/ui/icons`
 (`IconPlay`/`IconPause`). Track playback behavior untouched.
 - [ ] Transform the artist page + MiniPlayer (solid).
@@ -717,7 +717,7 @@ Apply the standard transform, PLUS the money-surface discipline:
 - `CancelDialog` uses `src/ui/Sheet` for its modal.
 - The Stripe **PaymentSheet appearance** (in `SaveCardSheet`/`PayPastDueButton`) gets a token-based
   appearance config: `appearance: { colors: { primary: t.accent, background: t.surface, componentBackground: t.surface, primaryText: t.text, secondaryText: t.muted } }` passed to `initPaymentSheet`.
-  The native sheet's font support is limited (no custom family guaranteed) — document, do not hack.
+  The native sheet's font support is limited (no custom family guaranteed), document, do not hack.
 - **Mechanical no-drift proof** (this is the task's real gate). After the transform, run:
   `git diff <base>..HEAD -- <each money file>` and confirm every changed line is presentation
   (JSX/style/import), and produce a short table asserting: handlers unchanged, callable names
@@ -732,23 +732,23 @@ Apply the standard transform, PLUS the money-surface discipline:
 **Files:** the money files from task 9 (copy audit) + `app/(fan)/index.tsx`, `app/(fan)/search.tsx`,
 `app/(fan)/tickets.tsx`.
 - [ ] **Money-sentence colon parity (9A ruling 8).** Find mobile-local money sentences that still use
-  an em dash (`grep -n "—" apps/mobile/src apps/mobile/app`). For each, apply web's exact colon
-  treatment — open `apps/web`'s twin surface, copy the wording verbatim so the two read byte-identical.
+  an em dash (`grep -n ", " apps/mobile/src apps/mobile/app`). For each, apply web's exact colon
+  treatment, open `apps/web`'s twin surface, copy the wording verbatim so the two read byte-identical.
   Strings imported from `@gatekeep/shared/messages.ts` are already colonized; leave them. Do NOT change
   any `===`-compared string (those are shared constants, already correct).
 - [ ] **Styled fan coming-soon states (9A ruling 9).** `(fan)/index`, `search`, `tickets` are
   placeholders. Give each a branded coming-soon empty state: `PageBackground`, a Syne `Text
   variant="heading"` title, a `muted` one-line explainer, a relevant `src/ui/icons` glyph
   (`IconTicket`/`IconMusicNotes`/`IconMagnifyingGlass`). No new behavior, no fetch.
-- [ ] Gates + a final `grep -n "—" apps/mobile` returning nothing.
+- [ ] Gates + a final `grep -n ", " apps/mobile` returning nothing.
 - [ ] Commit: `feat(mobile): money-sentence colon parity and styled fan coming-soon states`.
 
 ### Task 11: Voice pass + final gates + smoke checklist
 **Files:** any 9B-touched file needing a copy tightening; `README.md` (smoke checklist);
-`docs/superpowers/sp9b-rulings.md` is the controller's post-merge job — do NOT create it here.
+`docs/superpowers/sp9b-rulings.md` is the controller's post-merge job, do NOT create it here.
 - [ ] **Voice/copy pass**: read every screen's copy with the antislop-copywriting lens
   (`~/.claude/skills/antislop-copywriting/SKILL.md`); tighten obviously-AI phrasing; enforce the
-  no-em-dash rule one final time across all touched files (`grep -n "—"` clean, including code
+  no-em-dash rule one final time across all touched files (`grep -n ", "` clean, including code
   comments and strings).
 - [ ] **README**: add a short "Sub-project 9B (mobile UI/UX)" note + the owner smoke checklist from
   the spec §7 (shell + toggle both themes at phone width; auth/join; dashboards; editors incl. photo
@@ -756,10 +756,10 @@ Apply the standard transform, PLUS the money-surface discipline:
   PaymentSheet + SaveCard + earnings/payout/delinquency/gate-prompts both themes; skeleton/empty/error;
   fan coming-soon; all dark + light). Byte-safe edits.
 - [ ] **Final gates (each ONE blocking foreground call, exact numbers)**: `corepack pnpm typecheck`
-  (5/5) · `corepack pnpm --filter @gatekeep/shared test` (153, unchanged — proves shared untouched) ·
+  (5/5) · `corepack pnpm --filter @gatekeep/shared test` (153, unchanged, proves shared untouched) ·
   `corepack pnpm emu:test` (578, unchanged) · `corepack pnpm emu:rules` (77, unchanged) ·
   `corepack pnpm --filter @gatekeep/mobile lint` (0) · `corepack pnpm --filter web lint` + web build
-  (unchanged — proves web untouched) · `npx expo export --platform ios` (bundles).
+  (unchanged, proves web untouched) · `npx expo export --platform ios` (bundles).
 - [ ] Commit: `feat(mobile): voice pass, README smoke checklist, final gates`.
 
 ---
@@ -767,7 +767,7 @@ Apply the standard transform, PLUS the money-surface discipline:
 ## Execution notes for the controller
 
 - Sequential tasks, subagent-driven, two-stage review (spec-compliance then code-quality) per task,
-  whole-branch final review before merge — the SP5/9A cadence.
+  whole-branch final review before merge, the SP5/9A cadence.
 - Task 9 (money surfaces) runs on a stronger model with the mechanical no-drift proof as its gate.
 - The parity gates (`emu:test 578`, `emu:rules 77`, `shared 153`, web lint+build) are the proof that
   9B is pure presentation; any drift in those counts is a blocking finding to justify or revert.

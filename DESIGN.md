@@ -11,7 +11,7 @@ file first.
 This file gives the design its identity (palette, type, mood); the antislop skills are the filter
 that keeps the result from reading as generic AI output. Neither replaces the other.
 
-**Hard rule, no exceptions: no em dash (`—`) anywhere.** Not in copy, not in code comments, not in
+**Hard rule, no exceptions: no em dash (`, `) anywhere.** Not in copy, not in code comments, not in
 code strings, not in documentation. Use a comma, period, colon, or parentheses instead.
 
 **Hard rule: no Lucide icons, ever.** Icons are Phosphor (`@phosphor-icons/react`) only, one weight

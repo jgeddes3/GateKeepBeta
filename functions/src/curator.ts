@@ -33,7 +33,7 @@ const INDOOR_OUTDOOR_VALUES = ["indoor", "outdoor", "both"] as const;
 // Field-shape/type/range validation only. The venue-vs-non-venue address
 // rule needs the profile's subtype, which is only known once
 // requireCuratorProfile has read the doc (after membership is established
-// below) — checking it here would mean reading the profile before we know
+// below), checking it here would mean reading the profile before we know
 // the caller is even a member, the same existence/type-leak concern
 // portfolio.ts's updatePortfolio documents for its own guard ordering.
 function validateCuratorUpdate(input: CuratorProfileUpdateInput): Result {
@@ -91,7 +91,7 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>(
   const input = req.data;
   const v = validateCuratorUpdate(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
-  // sequential is deliberate — parallelizing makes rejection order
+  // sequential is deliberate, parallelizing makes rejection order
   // nondeterministic and would leak profile existence/type to non-members
   // (mirrors updatePortfolio's identical rationale in portfolio.ts).
   await requireProfileMember(input.profileId, uid);
@@ -101,7 +101,7 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>(
 
   // Venues geocode their full street address (public); planners/hosts only
   // ever geocode the city string, and always store a null address and
-  // neighborhood — a city-level pin, not a precise one.
+  // neighborhood, a city-level pin, not a precise one.
   let locationUpdate: CuratorDetails["location"] | undefined;
   if (input.location !== undefined) {
     const { address, city } = input.location;
@@ -113,10 +113,10 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>(
     const query = isVenue && hasAddress ? trimmedAddress : city.trim();
     const currentLocation = snap.data()?.curator?.location as CuratorDetails["location"] | undefined;
     if (currentLocation?.geocodedFrom === query) {
-      // S2: unchanged input — the caller re-submitted the exact same
+      // S2: unchanged input, the caller re-submitted the exact same
       // address/city that already produced the stored geo. Reuse it as-is
       // rather than paying for a geocode call (and its daily budget charge)
-      // that would just re-derive the same result — a curator re-saving
+      // that would just re-derive the same result, a curator re-saving
       // other fields (about/amenities/etc.) alongside an untouched location
       // must not cost a geocode every time.
       locationUpdate = currentLocation;
@@ -124,7 +124,7 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>(
       await consumeGeocodeBudget(uid);
       const result = await getGeocoder().geocode(query);
       if (!result) {
-        throw new HttpsError("invalid-argument", "Could not locate that — check spelling and try again.");
+        throw new HttpsError("invalid-argument", "Could not locate that. Check spelling and try again.");
       }
       locationUpdate = isVenue && hasAddress
         ? { address: trimmedAddress, city: result.city, neighborhood: result.neighborhood,
@@ -135,7 +135,7 @@ export const updateCuratorProfile = onCall<CuratorProfileUpdateInput>(
   }
 
   // Dotted-string-keys form (mirrors updatePortfolio): merges into the
-  // curator map without clobbering fields this update didn't touch —
+  // curator map without clobbering fields this update didn't touch,
   // notably curator.photoPaths, which the photo pipeline owns.
   const updates: Record<string, unknown> = { updatedAt: Date.now() };
   if (input.about !== undefined) updates["curator.about"] = input.about.trim();
@@ -173,14 +173,14 @@ export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
     }
     // Defense-in-depth path-prefix assertion: storage.rules already confines
     // uploads under this exact prefix, so this is currently unreachable via
-    // any legitimate write path — but validating shape before authz (the
+    // any legitimate write path, but validating shape before authz (the
     // ordering convention) means a malformed/foreign path is rejected before
     // ever touching the membership check below, rather than relying solely
     // on the array-membership lookup to no-op on it.
     if (!path.startsWith(`public/photos/${profileId}/gallery-`)) {
       throw new HttpsError("invalid-argument", "Invalid photo path.");
     }
-    // sequential is deliberate — parallelizing makes rejection order
+    // sequential is deliberate, parallelizing makes rejection order
     // nondeterministic and would leak profile existence/type to non-members
     // (mirrors updateCuratorProfile's identical rationale above).
     await requireProfileMember(profileId, uid);
@@ -191,21 +191,21 @@ export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
     }
     // arrayRemove (not a read-filter-write of the array snapshot above) so a
     // concurrent processPhoto append landing between the read and this write
-    // isn't clobbered — it removes every occurrence of `path` and no-ops if
+    // isn't clobbered, it removes every occurrence of `path` and no-ops if
     // it's already gone, rather than overwriting the whole array with a
     // possibly-stale copy.
     await getFirestore().doc(`profiles/${profileId}`).update({
       "curator.photoPaths": FieldValue.arrayRemove(path),
       updatedAt: Date.now(),
     });
-    // Best-effort storage delete — log and continue if the object is
+    // Best-effort storage delete, log and continue if the object is
     // already gone (matches deleteProfile's cascade cleanup style).
     await bucket().file(path).delete().catch(logDeleteFailure("removeCuratorPhoto", "gallery photo", path));
     return { ok: true };
   });
 
 // curatorAccess/{uid} maintenance (Task 6). The marker answers one question
-// — "does this uid currently belong to >=1 APPROVED curator profile?" — for
+//, "does this uid currently belong to >=1 APPROVED curator profile?", for
 // firestore.rules' isApprovedCuratorMember() (see its comment there for why
 // this can't live on a custom claim: profile-approval status changes can't
 // force a token refresh). This is the RECOMPUTE path: a collection-group
@@ -214,24 +214,24 @@ export const removeCuratorPhoto = onCall<{ profileId: string; path: string }>(
 // more than one curator profile (losing access to one must not clear a
 // marker still earned via another). Call sites that KNOW the answer can
 // only go one direction (e.g. reviewProfile's approve, respondToInvite's
-// accept — membership/approval can only be newly GAINING access at that
+// accept, membership/approval can only be newly GAINING access at that
 // instant) use a direct `.set({})` fast path instead; every call site where
 // access could have been LOST (reviewProfile's reject-from-approved,
 // removeMember) must use this recompute.
 // SP4 (Task 13 item 7): pages the memberships collection-group scan
-// (100/page, cursor loop) instead of one unbounded `.get()` — a uid that
+// (100/page, cursor loop) instead of one unbounded `.get()`, a uid that
 // belongs to many profiles across the app's lifetime (many bands, many
 // curator profiles) is unbounded, same defensive-pagination rationale as
 // scheduled.ts's own `paginate()` helper. Behavior-preserving: still visits
 // EVERY membership doc for this uid before deciding hasApprovedCurator, just
 // PAGE_SIZE at a time. Not reused from scheduled.ts directly (that module
-// imports THIS one — syncCuratorAccess is a step-5 call site — so importing
+// imports THIS one, syncCuratorAccess is a step-5 call site, so importing
 // back would cycle); the loop is small enough to duplicate locally.
 const MEMBERSHIP_SCAN_PAGE_SIZE = 100;
 
 export async function syncCuratorAccess(uid: string): Promise<void> {
   // SP4 (Task 13 item 1): a malformed uid reaching this far (currently only
-  // reachable via the daily sweep's curatorAccessRetries retry queue — see
+  // reachable via the daily sweep's curatorAccessRetries retry queue, see
   // scheduled.ts step 5, itself only admin-SDK-writable, never client-
   // writable) must fail loudly and distinctly rather than silently
   // misbehaving against `curatorAccess/{uid}` / the membership query below.
@@ -261,8 +261,8 @@ export async function syncCuratorAccess(uid: string): Promise<void> {
     if (data?.type === "curator" && data?.status === "approved") { hasApprovedCurator = true; break; }
   }
   const ref = db.doc(`curatorAccess/${uid}`);
-  // Presence-only marker — contents never read (firestore.rules'
-  // isApprovedCuratorMember() only checks exists()) — so an empty object is
+  // Presence-only marker, contents never read (firestore.rules'
+  // isApprovedCuratorMember() only checks exists()), so an empty object is
   // the whole payload.
   if (hasApprovedCurator) await ref.set({});
   else await ref.delete();

@@ -42,13 +42,13 @@ export function emptyStripeProfile(now: number): StripeProfileDoc {
   };
 }
 
-// Stripe object ids (customer/setupIntent/account/...) — never contain "/",
+// Stripe object ids (customer/setupIntent/account/...), never contain "/",
 // but CAN exceed Firestore's 1500-byte doc-id ceiling in principle, and
 // isValidDocId's charset is broader than Stripe's. Review round 1 (I1): a
 // dedicated, tighter check for ids a client hands back to us verbatim.
 const STRIPE_ID_RE = /^[A-Za-z0-9_]{1,255}$/;
 
-// profiles/{profileId}/private/stripe — the doc every callable below reads
+// profiles/{profileId}/private/stripe, the doc every callable below reads
 // via getStripeProfileDoc and writes at this same path.
 function stripeProfileRef(profileId: string) {
   return getFirestore().doc(`profiles/${profileId}/private/stripe`);
@@ -57,7 +57,7 @@ function stripeProfileRef(profileId: string) {
 // Review round 1 (M1/M2): create-then-claim. The Stripe object is created
 // OUTSIDE any transaction (invariant #2: Stripe calls never run inside
 // Firestore transactions), then a transaction re-reads current state and
-// keeps whichever id got there first — two concurrent callers can each
+// keeps whichever id got there first, two concurrent callers can each
 // create a Stripe object, but only ONE id is ever persisted, and neither
 // path spreads a possibly-stale pre-transaction snapshot over a write that
 // may have landed in between. Returns the WINNING id (ours, or the racer's).
@@ -79,7 +79,7 @@ async function claimStripeId(
 // Curator half: ensures a Customer exists and returns a SetupIntent client
 // secret for the web Elements save-card modal. On the FAKE, the card is
 // marked saved immediately (there is no browser Elements flow against a fake
-// — the emulator contract is "createSetupIntent called ⇒ card on file").
+//, the emulator contract is "createSetupIntent called ⇒ card on file").
 export const createSetupIntent = onCall<{ profileId: string }>(
   { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
     const uid = requireAuthUid(req);
@@ -111,7 +111,7 @@ export const createSetupIntent = onCall<{ profileId: string }>(
 
 // Called by the web save-card modal AFTER Elements confirms a SetupIntent.
 // Review round 1 (I1): passing that SetupIntent's id is now how the caller
-// tells us WHICH card just got confirmed — reading the customer's "default"
+// tells us WHICH card just got confirmed, reading the customer's "default"
 // payment method here (the old behavior) just re-resolves whatever was
 // already default, since nothing has repointed the default at the NEW card
 // yet. Without setupIntentId, this falls back to the old read-default
@@ -125,7 +125,7 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
     const { profileId, setupIntentId } = req.data ?? ({} as RefreshPaymentMethodInput);
     if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
     // Review round 2, #3: RegExp.test coerces a non-string to a string first
-    // (e.g. `123` -> "123" would otherwise sail through) — check the type
+    // (e.g. `123` -> "123" would otherwise sail through), check the type
     // explicitly rather than leaning on the coercion.
     if (setupIntentId !== undefined && (typeof setupIntentId !== "string" || !STRIPE_ID_RE.test(setupIntentId))) {
       throw new HttpsError("invalid-argument", "Invalid setup intent id.");
@@ -133,7 +133,7 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
     await requireProfileMember(profileId, uid);
     const db = getFirestore();
     const sp = await getStripeProfileDoc(profileId);
-    if (!sp?.customerId) throw new HttpsError("failed-precondition", "No payment account yet — save a card first.");
+    if (!sp?.customerId) throw new HttpsError("failed-precondition", "No payment account yet. Save a card first.");
     const stripe = getStripe();
 
     if (setupIntentId) {
@@ -147,19 +147,19 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
         throw e;
       }
       // Review round 2, #2: a null resolution here is NOT authoritative "no
-      // card on file" — it only means THIS SetupIntent didn't pan out
+      // card on file", it only means THIS SetupIntent didn't pan out
       // (unknown id, nothing attached). Wiping the cache would erase a
       // perfectly good card that was already on file. Refuse instead and
-      // leave the cached fields untouched — only the unconditional write on
+      // leave the cached fields untouched, only the unconditional write on
       // the no-setupIntentId branch below is authoritative.
-      if (!pm) throw new HttpsError("failed-precondition", "We couldn't find that card — try saving it again.");
+      if (!pm) throw new HttpsError("failed-precondition", "We couldn't find that card. Try saving it again.");
       await stripe.setDefaultPaymentMethod(sp.customerId, pm.id);
       await db.doc(`profiles/${profileId}/private/stripe`).set(
         { defaultPaymentMethodId: pm.id, cardBrand: pm.brand, cardLast4: pm.last4, updatedAt: Date.now() }, { merge: true });
       return { hasCard: true, cardBrand: pm.brand, cardLast4: pm.last4 };
     }
 
-    // Authoritative branch: reads the customer's actual current default —
+    // Authoritative branch: reads the customer's actual current default,
     // null here IS truthful "no card on file", so it's fine (and correct)
     // for this write to clear the cache.
     const pm = await stripe.getDefaultPaymentMethod(sp.customerId);
@@ -171,10 +171,10 @@ export const refreshPaymentMethod = onCall<RefreshPaymentMethodInput>(
   });
 
 // Musician half: ensures an Express account exists, returns a fresh Stripe-
-// hosted onboarding URL. returnPath/refreshPath are RELATIVE app paths —
+// hosted onboarding URL. returnPath/refreshPath are RELATIVE app paths,
 // the callable prefixes the app origin (env APP_ORIGIN) so a client can
 // never direct Stripe's redirect at a foreign origin. Review round 1 (M5):
-// mirrors getStripe()'s fail-CLOSED posture — outside the emulator, a
+// mirrors getStripe()'s fail-CLOSED posture, outside the emulator, a
 // missing APP_ORIGIN is a deploy-config bug, not something to silently
 // paper over with a localhost fallback that would send real Stripe
 // onboarding redirects nowhere useful.
@@ -186,7 +186,7 @@ export const createOnboardingLink = onCall<{ profileId: string }>(
     if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
     // Owner ruling (H2): ADMIN-only. Onboarding sets the profile's payout
     // DESTINATION (which connected account the money lands in), so it is a
-    // payout-authority action gated like removeMember/transferAdmin — not the
+    // payout-authority action gated like removeMember/transferAdmin, not the
     // any-member content permission. Reading payout status/balance stays a
     // member permission (getStripeStatus below keeps requireProfileMember).
     await requireProfileAdmin(profileId, uid);
@@ -202,7 +202,7 @@ export const createOnboardingLink = onCall<{ profileId: string }>(
     const inEmulator = process.env.FUNCTIONS_EMULATOR === "true" || process.env.FIRESTORE_EMULATOR_HOST != null;
     const origin = process.env.APP_ORIGIN ?? (inEmulator ? "http://localhost:3000" : null);
     if (!origin) {
-      throw new Error("APP_ORIGIN is not configured — refusing to build a Stripe onboarding redirect without a known origin.");
+      throw new Error("APP_ORIGIN is not configured, refusing to build a Stripe onboarding redirect without a known origin.");
     }
     const link = await stripe.createOnboardingLink(
       accountId, `${origin}/dashboard/earnings/onboarding/return`, `${origin}/dashboard/earnings/onboarding/refresh`);
@@ -210,7 +210,7 @@ export const createOnboardingLink = onCall<{ profileId: string }>(
   });
 
 // Writes the gate flags only when they actually differ from the cached doc
-// (review round 1, M6) — avoids a Firestore write (and an updatedAt churn)
+// (review round 1, M6), avoids a Firestore write (and an updatedAt churn)
 // on every poll of an already-converged account.
 async function writeGateFlagsIfChanged(
   profileId: string, sp: StripeProfileDoc,
@@ -228,19 +228,19 @@ async function writeGateFlagsIfChanged(
 }
 
 // Re-reads the account state from Stripe and refreshes the cached gate flags
-// — the onboarding return page calls this so the gates open without waiting
+//, the onboarding return page calls this so the gates open without waiting
 // for the account.updated webhook. Shared by that webhook handler. No-ops
 // (returns the cached doc as-is) when there's no accountId yet.
 //
-// Review round 1 (I2): getAccountState can fail two distinct ways —
+// Review round 1 (I2): getAccountState can fail two distinct ways,
 //   - StripeAccountMissingError: the Connect account was deleted (or never
-//     existed) on Stripe's side. This is TRUTHFUL fail-closed information —
+//     existed) on Stripe's side. This is TRUTHFUL fail-closed information,
 //     zero the three flags (a deleted account can't transfer/payout/instant
 //     -cashout) and persist it, so nothing downstream trusts stale "enabled"
 //     flags for an account that's gone.
 //   - anything else (network blip, Stripe outage, ...): we don't actually
 //     know the account's state right now. Log and return the CACHED doc
-//     unchanged — getStripeStatus still renders (possibly-stale) flags
+//     unchanged, getStripeStatus still renders (possibly-stale) flags
 //     instead of 500ing the whole status surface over a transient read
 //     failure.
 export async function syncStripeAccountFlags(profileId: string, now: number): Promise<StripeProfileDoc | null> {
@@ -252,7 +252,7 @@ export async function syncStripeAccountFlags(profileId: string, now: number): Pr
   } catch (e) {
     if (e instanceof StripeAccountMissingError) {
       console.error(
-        `syncStripeAccountFlags: Stripe account ${sp.accountId} missing for profile ${profileId} — zeroing gate flags`, e);
+        `syncStripeAccountFlags: Stripe account ${sp.accountId} missing for profile ${profileId}, zeroing gate flags`, e);
       return writeGateFlagsIfChanged(profileId, sp,
         { transfersEnabled: false, payoutsEnabled: false, instantEligible: false, onboardedAt: sp.onboardedAt }, now);
     }
@@ -267,7 +267,7 @@ export async function syncStripeAccountFlags(profileId: string, now: number): Pr
   }, now);
 }
 
-// One status surface for both halves — card state, onboarding/gate flags,
+// One status surface for both halves, card state, onboarding/gate flags,
 // delinquency, and (Task 13) the two payout balances.
 //
 // THE BALANCES ARE DEGRADABLE, in exactly the sense syncStripeAccountFlags's
@@ -275,7 +275,7 @@ export async function syncStripeAccountFlags(profileId: string, now: number): Pr
 // logs when Stripe can't be read, rather than throwing. This whole callable is
 // what the Earnings page and the curator delinquency banner load from, and a
 // Stripe blip must not blank either of them. 0 (not null) means "we asked and
-// there's nothing" — including the no-account/payouts-off case, where there is
+// there's nothing", including the no-account/payouts-off case, where there is
 // no balance to have.
 export const getStripeStatus = onCall<{ profileId: string }>(
   { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
@@ -310,13 +310,13 @@ webhookHandlers["account.updated"] = async (object, eventId, account) => {
   const profileId = (object.metadata as Record<string, string> | undefined)?.profileId;
   if (!accountId || !profileId) return;
   // Review round 1 (M4): validate BEFORE building a doc path from
-  // attacker/Stripe-controlled metadata — event payloads are only signature-
+  // attacker/Stripe-controlled metadata, event payloads are only signature-
   // verified, not shape-validated, so metadata.profileId is untrusted input.
   if (!isValidDocId(profileId)) {
     // Review round 2 (log nit): this is corrupt metadata on an account
-    // Stripe itself sent us — more log-worthy than the ordinary accountId
+    // Stripe itself sent us, more log-worthy than the ordinary accountId
     // mismatch case below (that one's often just a stale/replayed event).
-    console.warn(`account.updated webhook: metadata.profileId is not a valid doc id — accountId=${accountId}, profileId=${JSON.stringify(profileId)} (event ${eventId})`);
+    console.warn(`account.updated webhook: metadata.profileId is not a valid doc id, accountId=${accountId}, profileId=${JSON.stringify(profileId)} (event ${eventId})`);
     return;
   }
   const sp = await getStripeProfileDoc(profileId);
@@ -324,21 +324,21 @@ webhookHandlers["account.updated"] = async (object, eventId, account) => {
     // Review round 1 (M3): a mismatch here means either a stale/replayed
     // event for an account this profile no longer owns, or (more
     // concerning) an event whose metadata.profileId doesn't match the
-    // account it claims to describe — worth a log line either way.
+    // account it claims to describe, worth a log line either way.
     console.warn(
-      `account.updated webhook: accountId mismatch for profile ${profileId} — event accountId=${accountId}, cached accountId=${sp?.accountId ?? "none"} (event ${eventId})`);
+      `account.updated webhook: accountId mismatch for profile ${profileId}, event accountId=${accountId}, cached accountId=${sp?.accountId ?? "none"} (event ${eventId})`);
     return;
   }
   // M1 (branch audit): account.updated is delivered to the platform endpoint FOR
   // a connected account, so Stripe stamps the event's TOP-LEVEL `account` with
-  // that account id — pin it to the cached account too. object.id already pins
+  // that account id, pin it to the cached account too. object.id already pins
   // the account here (and is checked above), but requiring event.account makes
   // the platform/connected boundary explicit and identical to the payout
   // handlers, and forecloses a future Standard/metadata-bearing connected
   // account driving a flag sync on a profile it does not own.
   if (account !== accountId) {
     console.warn(
-      `account.updated webhook: event.account ${account ?? "none"} does not match the event's account ${accountId} for profile ${profileId} — ignored (event ${eventId})`);
+      `account.updated webhook: event.account ${account ?? "none"} does not match the event's account ${accountId} for profile ${profileId}, ignored (event ${eventId})`);
     return;
   }
   await syncStripeAccountFlags(profileId, Date.now());
@@ -355,14 +355,14 @@ webhookHandlers["account.updated"] = async (object, eventId, account) => {
 // `stale_accept_saga` / `stuck_saga_marker` / `expired_booking_saga_marker`):
 // a booking staged for more than Stripe's 24h idempotency window, whose charge
 // key can no longer be replayed, so nothing automatic can tell whether the
-// curator was charged. The operator answers that in the Stripe dashboard —
-// refunding the intent, or letting the charge stand and settling it manually —
+// curator was charged. The operator answers that in the Stripe dashboard,
+// refunding the intent, or letting the charge stand and settling it manually,
 // and THEN calls this to unstick the booking.
 //
 // What it does: clears `depositChargePending`/`depositChargeIntentId`, deletes
 // the staged docs that are still `unpaid`, writes an audit row, and resolves
 // the alert. What it deliberately does NOT do: touch a `held`/`*_pending`/
-// terminal payment doc (those are real money records — a delete would erase
+// terminal payment doc (those are real money records, a delete would erase
 // escrow), issue any refund, or clear a delinquency.
 //
 // `depositChargeAttempt` is left in place on purpose, exactly as every unstage
@@ -370,22 +370,22 @@ webhookHandlers["account.updated"] = async (object, eventId, account) => {
 // mints a key that has never been used.
 //
 // It also deliberately does NOT lift a delinquency, and that is safe for a
-// structural reason rather than a judgement call (shared with unstageAccept —
+// structural reason rather than a judgement call (shared with unstageAccept,
 // see its note): a STAGED doc never carries `deposit.depositAttempts`, which is
 // written only by the sweep's birth-deposit charge and never against a staged
 // set (rule 3). Firestore indexes only documents that HAVE a field, so such a
-// doc is invisible to clearDelinquencyIfSettled's exhausted-deposit query — it
+// doc is invisible to clearDelinquencyIfSettled's exhausted-deposit query, it
 // was never counted as debt, and deleting it extinguishes nothing.
 //
 // The three refusals below are what keep this from becoming a foot-gun: an
 // operator reaching for it on a saga that is still moving would undo work in
 // flight. Exported so the test asserts WHICH refusal fired, not merely that
-// one did — they are three different situations with three different fixes.
+// one did, they are three different situations with three different fixes.
 export const SAGA_NOT_STAGED_MESSAGE = "This booking has no staged deposit charge to release.";
 export const SAGA_WEBHOOK_OWNED_MESSAGE =
-  "This booking's payment is still settling — cancel or refund the intent in Stripe first, then release it.";
+  "This booking's payment is still settling. Cancel or refund the intent in Stripe first, then release it.";
 export const SAGA_NOT_ABANDONED_MESSAGE =
-  "The sweep is still reconciling this booking — release is only for a saga it has given up on.";
+  "The sweep is still reconciling this booking: release is only for a saga it has given up on.";
 
 export const releaseStuckSaga = onCall<{ bookingId: string }>(
   { region: "us-central1" }, async (req) => {
@@ -407,7 +407,7 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
     // A recorded pending intent means the charge is still SETTLING and the
     // payment_intent.succeeded webhook owns this saga: it will complete the
     // accept out-of-band, against exactly the staged docs this callable would
-    // delete. Releasing here races a charge that can still succeed — the
+    // delete. Releasing here races a charge that can still succeed, the
     // curator ends up paid for a booking that is no longer confirmed. The
     // operator's move for a genuinely stalled intent is to cancel or refund it
     // in Stripe first; that stops the webhook, and the saga then ages into the
@@ -417,8 +417,8 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
     }
     // ...and the sweep must have GIVEN UP on it. Inside the idempotency
     // window the sweep reconciles this booking automatically on its next
-    // hourly run — replaying the persisted key, which returns the original
-    // intent rather than charging again — so releasing here would delete the
+    // hourly run, replaying the persisted key, which returns the original
+    // intent rather than charging again, so releasing here would delete the
     // staged set out from under a charge that is about to be replayed and
     // could still succeed. That is precisely the hazard rule 3 exists for.
     //
@@ -429,7 +429,7 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
     //    durable record that it already refused this booking. Looked up by
     //    deterministic id (no query, no index) because that id IS the sweep's
     //    naming contract for this exact problem. It covers the cases the clock
-    //    alone misses — a `stuck_saga_marker` on a booking whose `updatedAt`
+    //    alone misses, a `stuck_saga_marker` on a booking whose `updatedAt`
     //    was recently bumped by the write that stranded it (e.g. an expiry
     //    cascade), which the sweep has still definitively given up on.
     const alert = (await db.doc(`adminAlerts/${stuckSagaAlertId(bookingId)}`).get()).data() as AdminAlertDoc | undefined;
@@ -439,14 +439,14 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
       throw new HttpsError("failed-precondition", SAGA_NOT_ABANDONED_MESSAGE);
     }
 
-    // Only `unpaid` docs — the staging. A doc that reached `held` (or any
+    // Only `unpaid` docs, the staging. A doc that reached `held` (or any
     // pending/terminal state) is money that exists and is not this callable's
     // to erase.
     const paymentsSnap = await db.collection(`bookings/${bookingId}/payments`).get();
     const removed: string[] = [];
     const kept: string[] = [];
     // ONE batch for the deletes AND the marker clear: a partial release is the
-    // worst outcome available here — staged docs gone but the marker still set
+    // worst outcome available here, staged docs gone but the marker still set
     // leaves a booking the sweep will now "release" as empty, while a cleared
     // marker with docs still present leaves an acceptable-looking booking
     // carrying a previous attempt's staging. Bounded by occurrences-per-booking
@@ -473,11 +473,11 @@ export const releaseStuckSaga = onCall<{ bookingId: string }>(
         + `deleted ${removed.length} unpaid staged doc(s)${kept.length ? `; kept ${kept.join(", ")}` : ""}`,
     });
 
-    // Best-effort: the alert doc is a queue entry, not a money record — a
+    // Best-effort: the alert doc is a queue entry, not a money record, a
     // failure to close it must not fail a release that already committed.
     await db.doc(`adminAlerts/${stuckSagaAlertId(bookingId)}`)
       .update({ resolvedAt: Date.now() })
-      .catch(() => { /* no alert row (released before a sweep ever saw it) — nothing to resolve */ });
+      .catch(() => { /* no alert row (released before a sweep ever saw it), nothing to resolve */ });
 
     return { ok: true, deletedStagedDocs: removed.length };
   });
@@ -488,7 +488,7 @@ export interface ConfirmOccurrenceActualsInput {
   bookingId: string; gigId: string; extraMinutes?: number; extraSongs?: number;
 }
 
-// Caller-facing refusals — DIFFERENT situations with DIFFERENT fixes, and a
+// Caller-facing refusals, DIFFERENT situations with DIFFERENT fixes, and a
 // test that only asserts "failed-precondition" cannot tell them apart. Moved
 // to @gatekeep/shared/messages.ts (review round 1, the fix round before Task
 // 15) so TrueUpForm's client-side validation hint can mirror this exact
@@ -504,16 +504,16 @@ export {
 // date, reported during the T+3 settlement window.
 //
 // Three properties make this safe to expose to a client at all:
-//  1. It writes EXTRAS ONLY — never an amount. The money is still computed
+//  1. It writes EXTRAS ONLY, never an amount. The money is still computed
 //     server-side from the booking's frozen `acceptedTerms` and the gig's own
 //     duration (see chargeSettlement); this call can only move the quantity
 //     the frozen rate is applied to.
 //  2. It only ever moves that quantity UP (validated against the previous
 //     report), so a curator can never talk their own bill down after the fact,
-//     and a repeated call REPLACES rather than accumulates — the payload is
+//     and a repeated call REPLACES rather than accumulates, the payload is
 //     the cumulative total, so a retried/duplicated request is idempotent.
 //  3. It is refused once the settlement leaves `pending`, once a charge has
-//     been initiated at all (`settlement.intentId` — a still-`processing`
+//     been initiated at all (`settlement.intentId`, a still-`processing`
 //     PaymentIntent leaves the status `pending`), AND for as long as a charge
 //     is IN FLIGHT (`settlement.chargingSince`, written immediately before the
 //     Stripe call). Without that last one there is a one-write-wide window in
@@ -522,7 +522,7 @@ export {
 //     charged.
 //
 // Structure-aware: perHour bookings true-up minutes, perSong bookings true-up
-// songs, and perSet bookings are flat — there is nothing to report.
+// songs, and perSet bookings are flat, there is nothing to report.
 export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
@@ -534,11 +534,11 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
     }
     // Untrusted onCall payload: the declared param types only bind trusted
     // callers, so both extras are re-checked as non-negative whole numbers
-    // inside their caps (which also bound the settlement base — spec §4).
+    // inside their caps (which also bound the settlement base, spec §4).
     const extraMinutes = rawMinutes ?? 0;
     const extraSongs = rawSongs ?? 0;
     // SHAPE first (a non-integer/negative/empty report is malformed), then the
-    // CAPS, which are a different complaint with a different fix — see the
+    // CAPS, which are a different complaint with a different fix, see the
     // message constants above.
     if (!Number.isInteger(extraMinutes) || extraMinutes < 0
       || !Number.isInteger(extraSongs) || extraSongs < 0
@@ -564,13 +564,13 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
     const side = await resolveBookingSideStrict(booking, uid);
     if (side !== "curator") throw new HttpsError("permission-denied", "Only the curator side can report actuals.");
     if (booking.structure === "perSet") {
-      throw new HttpsError("failed-precondition", "Per-set bookings settle flat — nothing to report.");
+      throw new HttpsError("failed-precondition", "Per-set bookings settle flat: nothing to report.");
     }
     if (booking.structure === "perHour" && extraSongs > 0) {
-      throw new HttpsError("invalid-argument", "This booking bills per hour — report extra minutes.");
+      throw new HttpsError("invalid-argument", "This booking bills per hour. Report extra minutes.");
     }
     if (booking.structure === "perSong" && extraMinutes > 0) {
-      throw new HttpsError("invalid-argument", "This booking bills per song — report extra songs.");
+      throw new HttpsError("invalid-argument", "This booking bills per song. Report extra songs.");
     }
 
     const now = Date.now();
@@ -586,7 +586,7 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
       // settlement write, but an instance that dies mid-charge leaves it set
       // with nothing to clear it. Bounding it by Stripe's idempotency window
       // means such a marker stops blocking exactly when the charge behind it
-      // stops being replayable — the same clock every other SP5 recovery
+      // stops being replayable, the same clock every other SP5 recovery
       // guard measures against.
       const charging = p.settlement.chargingSince != null
         && now - p.settlement.chargingSince < IDEMPOTENCY_WINDOW_MS;
@@ -617,7 +617,7 @@ export const confirmOccurrenceActuals = onCall<ConfirmOccurrenceActualsInput>(
 
 export interface PayPastDueInput { bookingId: string; gigId: string; }
 
-// Caller-facing refusals — five different situations with five different
+// Caller-facing refusals, five different situations with five different
 // fixes. Moved to @gatekeep/shared/messages.ts (review round 1, the fix
 // round before Task 15) so PayPastDueButton can key UI off the specific one
 // that fired; re-exported here so every existing in-repo import (this
@@ -630,19 +630,19 @@ export {
 
 // ON-SESSION recovery from a `past_due` (usually delinquent) settlement: the
 // server prices the debt, mints a PaymentIntent the curator confirms in the
-// browser with Elements — a FRESH card is fine, which is rather the point,
-// since the card on file is the one that kept declining — and the
+// browser with Elements, a FRESH card is fine, which is rather the point,
+// since the card on file is the one that kept declining, and the
 // `payment_intent.succeeded` webhook finalizes it through exactly the same
 // tail as an ordinary settlement (transfer, terminal write, ledger, aggregate,
 // delinquency lift, notification).
 //
 // DELIBERATELY NOT GATED ON requireCuratorChargeable. That gate refuses a
 // delinquent curator, and a delinquent curator is precisely who this callable
-// is for — gating it would make delinquency inescapable.
+// is for, gating it would make delinquency inescapable.
 //
 // THE AMOUNT IS SERVER-COMPUTED, always: `settlementMath` over the booking's
 // frozen terms, the gig's own duration, the curator's own true-up and the
-// booking's fee-policy snapshot — the very function the off-session charge
+// booking's fee-policy snapshot, the very function the off-session charge
 // prices from, so the two can never disagree (spec §4: no client input reaches
 // a settlement amount). It includes the late fee, whose musician share rides
 // back out on the earnings transfer.
@@ -653,10 +653,10 @@ export {
 //    park stops the sweep from charging the card off-session while the curator
 //    is confirming in the browser; parking rather than NULLING is what keeps an
 //    abandoned attempt from silently ending dunning forever (review round 1,
-//    defect 3b) — the sweep re-selects the doc an hour later, finds the
+//    defect 3b), the sweep re-selects the doc an hour later, finds the
 //    outstanding intent, and escalates it;
 //  - it refuses while a charge is IN FLIGHT (`settlement.chargingSince` inside
-//    Stripe's key window — defect 3a), so a sweep run that has already computed
+//    Stripe's key window, defect 3a), so a sweep run that has already computed
 //    an amount and is mid-`chargeOffSession` cannot be joined by an on-session
 //    intent for the same debt;
 //  - it mirrors the id into `settlement.payDueIntentId`, which is how a LATER
@@ -665,11 +665,11 @@ export {
 //    so Stripe replays the SAME intent (never a rival second one) and the
 //    curator gets its clientSecret back;
 //  - an intent that is NOT ours (an off-session settlement charge) is refused
-//    outright — see PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE.
+//    outright, see PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE.
 //
 // IT ALSO PAYS AN EXHAUSTED BIRTH DEPOSIT. A deposit that ran out its own
 // retry schedule (sweep step 3) declares the same delinquency a failed
-// settlement does, but leaves no `past_due` settlement behind — so without this
+// settlement does, but leaves no `past_due` settlement behind, so without this
 // second mode a curator whose only debt is a deposit had NO way to clear the
 // gate at all. That mode charges `sliceCents + feeShareCents` (both frozen at
 // staging) for a FUTURE occurrence and finalizes into held escrow.
@@ -686,7 +686,7 @@ export type PayPastDueResult =
   | { done: false; amountCents: number; clientSecret?: string };
 
 // Everything both branches resolved before the fork. Passed as one object so
-// neither branch re-reads a doc the dispatcher already has — every field here
+// neither branch re-reads a doc the dispatcher already has, every field here
 // is the read the decision was made from, and the CAS preconditions below are
 // held to `pSnap.updateTime` for exactly that reason.
 interface PayDueContext {
@@ -705,7 +705,7 @@ interface PayDueContext {
 async function payDueDeposit(ctx: PayDueContext): Promise<PayPastDueResult> {
   const { bookingId, gigId, booking, p, pSnap, ref, stripe, now } = ctx;
   // RULE 3 (paymentsSweep.ts's header): an `unpaid` doc under a booking
-  // carrying the accept-saga marker belongs to step 1 alone — a charge is in
+  // carrying the accept-saga marker belongs to step 1 alone, a charge is in
   // flight against exactly that staged set, and charging one of its docs here,
   // on a key that saga knows nothing about, is how one accept becomes two
   // charges.
@@ -719,7 +719,7 @@ async function payDueDeposit(ctx: PayDueContext): Promise<PayPastDueResult> {
     throw new HttpsError("failed-precondition", PAY_PAST_DUE_PAYMENT_IN_FLIGHT_MESSAGE);
   }
   // Both figures were frozen when the doc was staged (buildPaymentDoc) and no
-  // path rewrites them, so this amount is as stable as the settlement side's —
+  // path rewrites them, so this amount is as stable as the settlement side's,
   // the same property that makes the deterministic key safe.
   const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
   if (amountCents <= 0) {
@@ -732,7 +732,7 @@ async function payDueDeposit(ctx: PayDueContext): Promise<PayPastDueResult> {
   const intent = await stripe.createOnSessionIntent({
     customerId: curatorStripe.customerId, amountCents,
     // Scoped to the ATTEMPT counter, exactly like the sweep's own
-    // `deposit:{depositAttempts}` key — and distinct from it, so a pay-now
+    // `deposit:{depositAttempts}` key, and distinct from it, so a pay-now
     // intent can never collide with (or replay) an off-session attempt.
     idempotencyKey: `${bookingId}:${gigId}:paydue_deposit:${p.deposit.depositAttempts ?? 0}`,
     meta: { bookingId, gigId, purpose: "paydue_deposit" },
@@ -740,7 +740,7 @@ async function payDueDeposit(ctx: PayDueContext): Promise<PayPastDueResult> {
   try {
     // Records the intent WITHOUT moving the doc off `unpaid`: the money has not
     // been captured yet. Note that an `unpaid` doc carrying an intent is
-    // already meaningful elsewhere — both waive branches route such a doc
+    // already meaningful elsewhere, both waive branches route such a doc
     // through `refund_pending` rather than straight to `refunded`, which is
     // exactly the handling an in-flight on-session intent needs.
     await ref.update({
@@ -772,16 +772,16 @@ async function payDueDeposit(ctx: PayDueContext): Promise<PayPastDueResult> {
 }
 
 // ===================== THE SETTLEMENT DEBT ========================
-// A performed date whose charge failed — the only debt that can carry a late
+// A performed date whose charge failed, the only debt that can carry a late
 // fee, and the only one the dunning ladder produces.
 async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
   const { bookingId, gigId, booking, gig, p, pSnap, ref, stripe, now } = ctx;
   // Both are needed to PRICE the date; without them there is no honest
   // amount to charge, and inventing one is not an option for money.
   if (!gig || !booking.acceptedTerms) {
-    throw new HttpsError("failed-precondition", "This date can no longer be priced — contact support.");
+    throw new HttpsError("failed-precondition", "This date can no longer be priced. Contact support.");
   }
-  // DEFECT 3a — A CHARGE IS IN FLIGHT RIGHT NOW. `chargingSince` is
+  // DEFECT 3a, A CHARGE IS IN FLIGHT RIGHT NOW. `chargingSince` is
   // chargeSettlement's pre-charge claim: a sweep run has computed an amount
   // and is inside its `chargeOffSession` call. Minting an on-session intent
   // beside it would let the curator confirm one charge while the card is
@@ -790,7 +790,7 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
   // WINDOW-BOUNDED DELIBERATELY, and the bound is the whole point: past
   // IDEMPOTENCY_WINDOW_MS a stale claim is chargeSettlement's PERMANENT
   // refusal (its stale-claim terminator), so treating it as permanent here
-  // too would leave the curator with no way to pay at all — gated by a debt
+  // too would leave the curator with no way to pay at all, gated by a debt
   // the system has also stopped trying to collect. Inside the window the
   // sweep is still the owner; past it, the operator route is the alert
   // chargeSettlement raises, and the curator may still pay.
@@ -816,28 +816,28 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
     throw new HttpsError("failed-precondition", PAY_PAST_DUE_NO_CUSTOMER_MESSAGE);
   }
 
-    // ATTEMPT-SCOPED, like every other SP5 key (as-built contract #2) — and
+    // ATTEMPT-SCOPED, like every other SP5 key (as-built contract #2), and
     // here the replay is a FEATURE: a repeat call for the same attempt hands
     // back the same intent instead of minting a rival one.
     //
     // THE INVARIANT THAT MAKES THAT SAFE: on a `past_due` doc the amount cannot
     // drift, so a replayed intent can never be for the wrong money. All five
-    // inputs settlementMath reads are frozen by this point —
-    //  1. `booking.acceptedTerms.amountCents` — stamped at accept, never
+    // inputs settlementMath reads are frozen by this point,
+    //  1. `booking.acceptedTerms.amountCents`, stamped at accept, never
     //     rewritten by any path;
-    //  2. `booking.acceptedTerms.expectedQuantity` — likewise;
-    //  3. `gig.durationMinutes` — updateGig REFUSES a `filled`/`closed` gig
+    //  2. `booking.acceptedTerms.expectedQuantity`, likewise;
+    //  3. `gig.durationMinutes`, updateGig REFUSES a `filled`/`closed` gig
     //     outright ("its schedule and terms are locked"), and a gig that left
     //     `filled` fails chargeSettlement's linkage check into a waive instead;
-    //  4. `settlement.trueUp` — confirmOccurrenceActuals refuses unless the
+    //  4. `settlement.trueUp`, confirmOccurrenceActuals refuses unless the
     //     settlement is `pending`, and this one is `past_due`;
     //  5. `deposit.sliceCents` (with `deposit.status` deciding whether it is
-    //     credited) — frozen at staging, and a `past_due` settlement's deposit
+    //     credited), frozen at staging, and a `past_due` settlement's deposit
     //     is `held`, which is one of the two crediting states.
     // Plus `booking.feePolicy`, a snapshot taken at accept, and
     // `settlement.lateFeeCents`, written once at delinquency behind
     // recordSettlementFailure's re-entry guard. `attempts` itself only moves on
-    // a decline, and the ladder that produces declines is over — so if the
+    // a decline, and the ladder that produces declines is over, so if the
     // amount ever COULD change, the key would change with it.
   const intent = await stripe.createOnSessionIntent({
     customerId: curatorStripe.customerId, amountCents: math.chargeTotal,
@@ -847,7 +847,7 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
 
   // CAS on the read this whole decision came from: an intent must never be
   // stamped onto a doc a racer has just waived or settled. Creating the
-  // intent BEFORE this write is safe — an on-session intent captures nothing
+  // intent BEFORE this write is safe, an on-session intent captures nothing
   // until the client confirms it, so a lost race leaves an unconfirmed,
   // unreferenced intent and no money anywhere.
   let baseline: FirebaseFirestore.Timestamp;
@@ -857,7 +857,7 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
       "settlement.payDueIntentId": intent.id,
       // PARKED, never nulled (defect 3b). One confirmation window of quiet
       // is all the browser needs, and it is what stops the sweep from also
-      // charging the card off-session in the meantime — but the doc STAYS in
+      // charging the card off-session in the meantime, but the doc STAYS in
       // step 6's query, so an attempt the curator abandons comes back to
       // chargeSettlement an hour from now and is escalated as an abandoned
       // pay-now intent instead of vanishing from the dunning system. Written
@@ -876,7 +876,7 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
     // EMULATOR CONTRACT, mirroring createSetupIntent's: there is no Elements
     // flow against a fake, so "payPastDue called" means "the curator paid".
     // The real path's equivalent step is the payment_intent.succeeded webhook
-    // for this same intent — which, on the fake, also fires and finds the doc
+    // for this same intent, which, on the fake, also fires and finds the doc
     // already `paid` (a clean no-op, logged at info).
     //
     // `baseline` is the write above, per finalizeSettlementSuccess's own
@@ -887,7 +887,7 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
     });
     // Defensive re-run of the lift: finalizeSettlementSuccess already clears
     // the delinquency on its success path, but not on an exceptional exit
-    // (a racer). Calling again is a no-op in every case — the query still
+    // (a racer). Calling again is a no-op in every case, the query still
     // sees this doc as `past_due` when the settlement did not actually land.
     await clearDelinquencyIfSettled(p.curatorProfileId, now)
       .catch((e) => console.error(`payPastDue: delinquency clear failed for ${p.curatorProfileId}`, e));
@@ -899,7 +899,7 @@ async function payDueSettlement(ctx: PayDueContext): Promise<PayPastDueResult> {
 }
 
 // THE DISPATCHER. Auth, ids, side, the reads both branches share, and the one
-// decision that picks a branch — deliberately nothing else (review round 3,
+// decision that picks a branch, deliberately nothing else (review round 3,
 // M6): the two debts have almost disjoint guards, amounts, keys and finalizers,
 // and interleaving them in one body made it hard to see which rule applied to
 // which kind of money.
@@ -931,12 +931,12 @@ export const payPastDue = onCall<PayPastDueInput>(
 
     // WHICH DEBT? Settlement first: it is a date that was actually performed,
     // and it is the only one that can carry a late fee. A deposit debt is
-    // second, and only once its own retry schedule has run out — before that
+    // second, and only once its own retry schedule has run out, before that
     // the sweep is still trying, and a manual charge would race it.
     const settlementDue = p.settlement.status === "past_due";
     const depositDue = isDepositScheduleExhausted(p.deposit.depositAttempts)
       && p.deposit.status === "unpaid"
-      // ...for a date that has NOT been settled yet — which is what the deposit
+      // ...for a date that has NOT been settled yet, which is what the deposit
       // branch's own "future occurrence" framing already assumes, made explicit
       // (review round 2, D1). A settlement that charged with no slice credit
       // took the FULL base, deposit included, and finalizeSettlementSuccess

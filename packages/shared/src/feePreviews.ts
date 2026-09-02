@@ -5,15 +5,15 @@ import {
   type BudgetStructure, type FeePolicy,
 } from "./index.js";
 
-// Client-side copy/preview helpers — pure math mirroring the server's own
+// Client-side copy/preview helpers, pure math mirroring the server's own
 // (money.ts / validation.ts), used ONLY to preview a number before the user
 // commits to an action. The server independently recomputes every cent from
-// its own frozen state (invariant #1: no client-supplied amounts) — these
+// its own frozen state (invariant #1: no client-supplied amounts), these
 // previews can never be the source of truth for what actually gets charged.
 //
 // Shared by web and mobile (moved from apps/web/src/payments/fees.ts in SP5b
 // so both platforms preview off the SAME math instead of two hand-rolled
-// copies) — packages/shared/src/feePreviews.ts.
+// copies), packages/shared/src/feePreviews.ts.
 
 // Task 15's accept-preview: "Due now: {total} ({slice} deposit + {fee}
 // service fee)".
@@ -23,9 +23,9 @@ export function depositChargePreviewCents(expectedTotalCents: number): { sliceCe
   return { sliceCents, feeCents, totalCents: sliceCents + feeCents };
 }
 
-// The Earnings page's instant cash-out fee preview — same constants
+// The Earnings page's instant cash-out fee preview, same constants
 // requestPayout prices the ACTUAL fee from (live product price of the
-// convenience, not a booking-scoped snapshot — see paymentsPayouts.ts).
+// convenience, not a booking-scoped snapshot, see paymentsPayouts.ts).
 export function instantFeePreviewCents(amountCents: number): number {
   return computeInstantFeeCents(amountCents, INSTANT_FEE_PCT, INSTANT_FEE_MIN_CENTS);
 }
@@ -36,11 +36,11 @@ export function instantFeePreviewCents(amountCents: number): number {
 // confirmOccurrenceActuals/chargeSettlement do server-side) rather than a
 // full recompute of the whole settlement, so the preview stays correct
 // whether or not the curator has reported actuals before. Never
-// authoritative (see this file's header) — confirmOccurrenceActuals writes
+// authoritative (see this file's header), confirmOccurrenceActuals writes
 // only the extras, and the real charge is computed fresh at settlement time
 // from the booking's frozen terms. Returns null rather than throwing on a
 // malformed/out-of-range input (e.g. an occurrence whose durationMinutes
-// hasn't loaded yet) — a preview that can't be computed just doesn't render,
+// hasn't loaded yet), a preview that can't be computed just doesn't render,
 // it never crashes the form.
 export function trueUpDeltaPreviewCents(
   structure: BudgetStructure, amountCents: number, feePolicy: FeePolicy,

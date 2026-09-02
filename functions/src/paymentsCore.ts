@@ -1,11 +1,11 @@
 /**
- * SP5 money PRIMITIVES — the layer every other payments file builds on:
+ * SP5 money PRIMITIVES, the layer every other payments file builds on:
  *  - the booking money gates and their caller-facing copy;
  *  - the payment-doc factory and the fee-policy snapshot;
  *  - the append-only ledger and the booking-level `paymentSummary` aggregate;
  *  - the DEPOSIT executor (`resolveDepositPending`) and the transactional
  *    intent-to-move-money marker that pairs with it;
- *  - the profile-level delinquency pair — `declareCuratorDelinquent` and
+ *  - the profile-level delinquency pair, `declareCuratorDelinquent` and
  *    `clearDelinquencyIfSettled`, which is the one place that knows what
  *    "this curator owes nothing" means;
  *  - the adminAlerts escalation queue, INCLUDING the id vocabulary every
@@ -18,7 +18,7 @@
  * Deliberately does NOT own the settlement state machine (the T+3 charge, the
  * dunning ladder, delinquency declaration, payPastDue's finalizers): that
  * lives in `paymentsSettlement.ts`, which imports THIS file. Keep the arrow
- * pointing that way — bookings.ts, bookingLifecycle.ts and scheduled.ts all
+ * pointing that way, bookings.ts, bookingLifecycle.ts and scheduled.ts all
  * import this module, and none of them has any business pulling in the
  * settlement machine.
  */
@@ -38,7 +38,7 @@ import type {
 } from "@gatekeep/shared";
 import { getStripe } from "./stripeClient.js";
 
-// profiles/{profileId}/private/stripe — the payment-identity doc. Shared
+// profiles/{profileId}/private/stripe, the payment-identity doc. Shared
 // helper so every SP5 callable/handler that needs the cached Stripe identity
 // (payments.ts's callables + the account.updated webhook handler) reads it
 // the same way, rather than each re-deriving the doc path.
@@ -48,7 +48,7 @@ export async function getStripeProfileDoc(profileId: string): Promise<StripeProf
 }
 
 // Owner ruling (M3): stamp the INSTANT-payout hold on a musician profile when
-// self-deal-funded money lands in its balance — a `selfDeal` forfeit transfer
+// self-deal-funded money lands in its balance, a `selfDeal` forfeit transfer
 // (resolveDepositPending's forfeit branch) or a `selfDeal` earnings transfer
 // (finalizeSettlementSuccess). Self-deal is a card->cash conversion path with
 // the same person on both sides; the hold removes the FAST rail, leaving a
@@ -57,7 +57,7 @@ export async function getStripeProfileDoc(profileId: string): Promise<StripeProf
 // Extends to the LATER of any existing hold and now+SELF_DEAL_HOLD_MS, so a
 // second self-deal credit can lengthen but never shorten the window. Best-effort
 // and merge-only: the money has ALREADY moved by the time this runs, so a
-// failure here must never fail the transfer — it only means this one event's
+// failure here must never fail the transfer, it only means this one event's
 // block wasn't recorded (a subsequent self-deal transfer re-stamps it, and
 // standard payout is unaffected regardless).
 export async function setSelfDealInstantHold(musicianProfileId: string, now: number): Promise<void> {
@@ -72,7 +72,7 @@ export async function setSelfDealInstantHold(musicianProfileId: string, now: num
 }
 
 // Task 5 booking gates, Task 6 accept-saga outcomes, and the Task 6
-// accept-abort message — moved to @gatekeep/shared/messages.ts (review round
+// accept-abort message, moved to @gatekeep/shared/messages.ts (review round
 // 1, the fix round before Task 15) so apps/web can import these exact
 // strings instead of hand-copying them. Re-exported here so every existing
 // in-repo import (this file's own gates below, bookings.ts, gigSeries.ts,
@@ -85,20 +85,20 @@ export {
 
 // Every OTHER mutation of an `open` booking (counter / decline / withdraw)
 // while an accept saga is staged on it. Distinct from the two accept-path
-// messages above because the caller here isn't accepting anything — they're
+// messages above because the caller here isn't accepting anything, they're
 // being told the booking is briefly frozen, not that their own payment is.
 //
 // This guard is money-safety, not politeness (SP5 Task 9 review, item 4):
 //  - a resolved booking (declined/withdrawn) still carrying the saga marker
-//    can never be committed OR safely refunded by the sweep — it lands in the
+//    can never be committed OR safely refunded by the sweep, it lands in the
 //    stuck-marker branch and needs a human;
 //  - and any such write bumps `updatedAt`, which is precisely the sweep's
-//    ">24h staged" proxy — resetting it would keep the expired-key guard from
+//    ">24h staged" proxy, resetting it would keep the expired-key guard from
 //    ever firing on a genuinely stranded charge.
 export const BOOKING_LOCKED_BY_DEPOSIT_MESSAGE =
-  "A deposit payment is processing for this booking — try again in a few minutes.";
-// (ACCEPT_ABORTED_REFUNDED_MESSAGE — the charge landed but the accept could
-// not be committed and the refund SUCCEEDED — now lives in
+  "A deposit payment is processing for this booking. Try again in a few minutes.";
+// (ACCEPT_ABORTED_REFUNDED_MESSAGE, the charge landed but the accept could
+// not be committed and the refund SUCCEEDED, now lives in
 // @gatekeep/shared/messages.ts and is re-exported above.)
 
 // Curator-side money gate: saved card + not delinquent. Required before
@@ -111,9 +111,9 @@ export async function requireCuratorChargeable(curatorProfileId: string): Promis
     throw new HttpsError("failed-precondition", CURATOR_CARD_REQUIRED_MESSAGE);
   }
   // === true, never truthiness alone on the PERMISSIVE side: these docs are
-  // cast unchecked from Firestore — a partial doc must fail CLOSED (Task 4
+  // cast unchecked from Firestore, a partial doc must fail CLOSED (Task 4
   // review M8). COPY HAZARD: this line is fail-closed only as a COMPOSITE
-  // with the card check above it, not on its own — a doc with `delinquent`
+  // with the card check above it, not on its own, a doc with `delinquent`
   // absent entirely (undefined !== true) sails straight through THIS check;
   // it's caught only because the card-fields check already threw for any
   // doc that isn't fully populated. Don't lift this line out to somewhere
@@ -137,7 +137,7 @@ export async function requireMusicianPayoutReady(musicianProfileId: string): Pro
 // over the five fee constants (which is what the plan sketched): money.ts
 // already warns that a second hand-rolled copy of the default is exactly how
 // the accept-time snapshot and resolveFeePolicy's fallback drift apart. The
-// spread also hands back a MUTABLE copy — DEFAULT_FEE_POLICY is frozen, and
+// spread also hands back a MUTABLE copy, DEFAULT_FEE_POLICY is frozen, and
 // returning it by reference would let a caller's `{...}`-free write blow up
 // (or, worse, corrupt every later fallback on a warm instance).
 export function currentFeePolicy(): FeePolicy {
@@ -146,15 +146,15 @@ export function currentFeePolicy(): FeePolicy {
 
 // One occurrence of a booking, as staged by the accept saga. `durationMinutes`
 // is THAT occurrence's own (an occurrence detached from its series template
-// with an edited duration settles on its own duration — sp4-rulings), never
+// with an edited duration settles on its own duration, sp4-rulings), never
 // the initiating gig's.
 export interface StagedOccurrence { gigId: string; startsAt: number; durationMinutes: number; }
 
 // Builds one payment doc (bookings/{bookingId}/payments/{gigId}) for one
-// occurrence — the money truth for that date. baseCents comes from the
+// occurrence, the money truth for that date. baseCents comes from the
 // occurrence's OWN duration (perHour) / the frozen songCount (perSong) /
 // the flat amount (perSet); every other field starts at its "nothing has
-// happened yet" value. Pure: no Date.now(), no Firestore — the caller stages
+// happened yet" value. Pure: no Date.now(), no Firestore, the caller stages
 // the returned doc inside its own transaction.
 export function buildPaymentDoc(params: {
   booking: BookingRequestDoc; bookingId: string; occ: StagedOccurrence;
@@ -195,24 +195,24 @@ function isAlreadyExists(e: unknown): boolean {
 
 // Append-only audit row for every money event. Best-effort at call sites that
 // run post-commit (a failed ledger write must never fail a committed money
-// move — callers wrap in try/catch); the sweep's reconciliation re-derives
+// move, callers wrap in try/catch); the sweep's reconciliation re-derives
 // nothing from the ledger, so a lost row is an audit gap, not a money bug.
 //
 // Doc id is DETERMINISTIC (`{kind}:{stripeId}`) whenever the entry carries a
 // stripeId: a re-processed webhook delivery or a saga retry that calls
 // writeLedger again for the SAME underlying Stripe object must not duplicate
 // the audit row. .create() (not .set()) so a second writer's ALREADY_EXISTS
-// is detectable — it's swallowed (logged, not thrown; matches the
+// is detectable, it's swallowed (logged, not thrown; matches the
 // best-effort contract above) rather than silently overwriting the first
 // row. Only entries with no stripeId fall back to a random id via .add().
 //
 // LOAD-BEARING INVARIANT: stripeId must identify the specific Stripe object
-// this ROW is about, and be unique per INTENDED row — `kind` is part of the
+// this ROW is about, and be unique per INTENDED row, `kind` is part of the
 // doc id too, so two DIFFERENT kinds can safely share a stripeId (e.g. a
 // deposit_charged and a later refund both keyed off the same PaymentIntent
 // id), but a caller that legitimately needs two DISTINCT rows of the SAME
 // kind for the same underlying object must invent its own more specific
-// deterministic id — passing the same (kind, stripeId) pair for two
+// deterministic id, passing the same (kind, stripeId) pair for two
 // intentionally-separate rows silently collapses them into one. NO CALL SITE
 // THROUGH TASK 11 needs that, and each one is safe for a specific reason:
 //  - `deposit_charged` / `settlement_charged` key off the PaymentIntent, which
@@ -224,21 +224,21 @@ function isAlreadyExists(e: unknown): boolean {
 //    its own refund object;
 //  - `late_fee` (Task 11) has NO Stripe object at all and would otherwise fall
 //    back to a random id on every re-entry of the declaring path, so it invents
-//    the deterministic `latefee:{bookingId}:{gigId}` — exactly the "more
+//    the deterministic `latefee:{bookingId}:{gigId}`, exactly the "more
 //    specific id" this note prescribes, and the one example of it so far.
 // A future caller that would reuse a (kind, stripeId) pair across two intended
 // rows must not pass stripeId bare.
 // An empty string is treated the same as null (falls back to
-// a random id) — Stripe never issues empty-string ids, so an empty string
+// a random id), Stripe never issues empty-string ids, so an empty string
 // here only ever means "the caller doesn't have one yet."
 // L1 (branch audit): a stripeId is about to become a Firestore doc-id segment
 // (`ledger/{kind}:{stripeId}`). Reject the two shapes that would make that path
 // ILLEGAL rather than merely ugly: a "/" (which Firestore reads as extra path
-// segments — an odd-depth path it throws on) and its reserved `__…__` form.
+// segments, an odd-depth path it throws on) and its reserved `__…__` form.
 // Deliberately NOT isValidDocId / `^[A-Za-z0-9_]+$`: SP5's own synthetic ledger
 // ids carry colons (e.g. `latefee:{bookingId}:{gigId}`), which are a LEGAL
 // doc-id character and must keep their deterministic-dedup id. The length cap is
-// generous — real Stripe ids are ~30 chars and the longest synthetic id is a
+// generous, real Stripe ids are ~30 chars and the longest synthetic id is a
 // pair of doc-id-bounded ids.
 function isSafeLedgerStripeId(s: string): boolean {
   return s.length > 0 && s.length <= 256 && !s.includes("/") && !/^__.*__$/.test(s);
@@ -263,19 +263,19 @@ export async function writeLedger(entry: Omit<LedgerEntry, "at"> & { at?: number
   // L1 (branch audit): a PRESENT-but-unsafe stripeId falls back to a random
   // .add() id (and logs) rather than throwing `INVALID_ARGUMENT` out of what is
   // a best-effort, post-commit audit write at almost every call site. Losing the
-  // deterministic dedup for that one malformed row is an audit gap at worst — a
-  // duplicated or missing audit ROW is never a money bug — whereas an uncaught
+  // deterministic dedup for that one malformed row is an audit gap at worst, a
+  // duplicated or missing audit ROW is never a money bug, whereas an uncaught
   // throw from a money tail could be. An empty stripeId ("the caller has none
   // yet") takes the same random-id path, silently, exactly as before.
   if (full.stripeId) {
     console.warn(
-      `writeLedger: stripeId ${JSON.stringify(full.stripeId)} is not a safe doc-id segment for a "${full.kind}" row — using a random ledger id (dedup not guaranteed for this row)`);
+      `writeLedger: stripeId ${JSON.stringify(full.stripeId)} is not a safe doc-id segment for a "${full.kind}" row, using a random ledger id (dedup not guaranteed for this row)`);
   }
   await db.collection("ledger").add(full);
 }
 
 // Deposit statuses under which the curator's money is still out (charged and
-// not yet refunded) — the per-status table on recomputePaymentSummary below
+// not yet refunded), the per-status table on recomputePaymentSummary below
 // remains the authoritative statement of WHY each one counts.
 //
 // Defined in @gatekeep/shared (paymentDisplay.ts) and re-exported here, same
@@ -286,19 +286,19 @@ export { PAID_DEPOSIT_STATUSES };
 
 // Recomputes bookings/{id}.paymentSummary from the payments subcollection.
 // Non-transactional, self-healing aggregate (recompute-from-truth, like
-// recomputeReliability) — call after any payment-doc transition; a
+// recomputeReliability), call after any payment-doc transition; a
 // concurrent write racing this read just means the NEXT transition's
 // recompute converges again, same as any other self-healing aggregate in
 // this codebase. The read is bounded by occurrences-per-booking (how many
 // gig dates one booking has), never the whole payments collection.
 //
 // Per-status contribution (DepositStatus / SettlementStatus / TransferStatus
-// — see types.ts):
+//, see types.ts):
 //   deposit.status:
 //     unpaid          -> nothing (not charged yet)
 //     held            -> heldCents += sliceCents; paidCents += sliceCents+feeShareCents
 //     applied         -> paidCents += sliceCents+feeShareCents (escrow released into
-//                        the occurrence's settlement — no longer "held", still curator-paid)
+//                        the occurrence's settlement, no longer "held", still curator-paid)
 //     refund_pending  -> paidCents += sliceCents+feeShareCents (refund not yet completed)
 //     refunded        -> nothing (curator got it back)
 //     forfeit_pending -> paidCents += sliceCents+feeShareCents (forfeiture not yet completed)
@@ -335,7 +335,7 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
     state: anyDelinquent ? "delinquent" : anyPastDue ? "past_due" : "current",
     heldCents, paidCents, transferredCents,
   };
-  // paymentSummary ONLY — deliberately not updatedAt. Bumping updatedAt here
+  // paymentSummary ONLY, deliberately not updatedAt. Bumping updatedAt here
   // would reorder every BookingInbox listing (orderBy(updatedAt)) on every
   // payment tick, even though nothing the inbox actually displays changed.
   await db.doc(`bookings/${bookingId}`).update({ paymentSummary: summary });
@@ -349,7 +349,7 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
 // intent-to-move-money; this is the effect), so it must be safe to run zero,
 // one, or many times:
 //   - the doc CAS below (act only on `refund_pending`/`forfeit_pending`)
-//     makes a second runner a no-op — Task 9's sweep re-runs exactly the
+//     makes a second runner a no-op, Task 9's sweep re-runs exactly the
 //     docs still stuck pending after a crash between commit and executor;
 //   - the Stripe idempotency keys are per-(booking,gig,purpose), so a
 //     double-execute that happens INSIDE Stripe's key window (executor and
@@ -357,26 +357,26 @@ export async function recomputePaymentSummary(bookingId: string): Promise<void> 
 //     than moving money twice.
 //
 // LIMIT OF THAT SECOND GUARANTEE (do not overstate it): real Stripe expires
-// idempotency keys after 24h (as-built contract #5 — FakeStripe's never
+// idempotency keys after 24h (as-built contract #5, FakeStripe's never
 // expire, so the emulator cannot surface this). A doc still `*_pending` more
 // than 24h after its first attempt is therefore NOT safe to re-run blindly:
 // the same key would be treated as brand new and mint a SECOND refund or a
 // SECOND transfer. Task 9's sweep must, for such a doc, first look up the
 // existing object by the `{bookingId, gigId, purpose}` metadata stamped on
 // every call below (that metadata is the recovery handle, and is why it is
-// written) and adopt it if found — or else refuse and log for admin
+// written) and adopt it if found, or else refuse and log for admin
 // attention, exactly as the sweep's >24h `depositChargePending`
 // reconciliation guard already does. This function itself is only ever safe
 // to call freely within that window.
 //
-// Never throws for a missing/already-terminal doc — callers log and continue.
+// Never throws for a missing/already-terminal doc, callers log and continue.
 //
-// `skipRecompute` suppresses the trailing paymentSummary recompute — and, with
-// it, the trailing delinquency lift — for a caller that is resolving SEVERAL
+// `skipRecompute` suppresses the trailing paymentSummary recompute, and, with
+// it, the trailing delinquency lift, for a caller that is resolving SEVERAL
 // docs of the SAME booking in a loop and will run both itself afterwards. The recompute reads the whole payments
 // subcollection and rewrites one aggregate field, so doing it per-doc in a
 // loop is N reads to produce N-1 intermediate values nobody observes. Only
-// pass it if you actually run the recompute after the loop — the aggregate is
+// pass it if you actually run the recompute after the loop, the aggregate is
 // self-healing, but leaving it stale until the next unrelated payment tick is
 // a real (if temporary) reporting error on the booking.
 export async function resolveDepositPending(
@@ -387,18 +387,18 @@ export async function resolveDepositPending(
   const snap = await ref.get();
   const p = snap.data() as PaymentDoc | undefined;
   if (!p) return;
-  // The CAS. Anything else — already `refunded`/`forfeited` (a racer got
+  // The CAS. Anything else, already `refunded`/`forfeited` (a racer got
   // here first), still `held`/`unpaid` (nothing asked for a resolution), or
-  // `applied` (Task 12's clawback territory) — is deliberately untouched.
+  // `applied` (Task 12's clawback territory), is deliberately untouched.
   if (p.deposit.status !== "refund_pending" && p.deposit.status !== "forfeit_pending") return;
   const now = Date.now();
 
   if (p.deposit.status === "refund_pending") {
     // The fee share ALWAYS comes back with the deposit slice on a refund
-    // (spec §1) — the platform only ever keeps it on a FORFEIT, and there by
+    // (spec §1), the platform only ever keeps it on a FORFEIT, and there by
     // simply not refunding it.
     const amountCents = p.deposit.sliceCents + p.deposit.feeShareCents;
-    // AN UNCONFIRMED PAY-NOW INTENT IS NOT A CHARGE (review round 2, D2) —
+    // AN UNCONFIRMED PAY-NOW INTENT IS NOT A CHARGE (review round 2, D2),
     // see isUnconfirmedPayDueDeposit for what makes `chargedAt` the sound
     // discriminator. Refunding one would be a refund of nothing: FakeStripe
     // throws "refund of unknown intent"/"refund exceeds charge", and real
@@ -414,11 +414,11 @@ export async function resolveDepositPending(
     // THE RESIDUAL RISK, stated honestly: that intent CAN still be confirmed
     // by a browser holding its clientSecret, minting a charge for a deposit
     // that has just been refunded away. The webhook finalizer refusing a
-    // no-longer-`unpaid` doc is the HAZARD, not the mitigation — a refusal
+    // no-longer-`unpaid` doc is the HAZARD, not the mitigation, a refusal
     // alone would leave captured money with nothing recording it. What makes
     // it safe is that the refusal is not silent: finalizeDepositPayDue reports
     // `not_unpaid`, and the handler treats attested money on that path as a
-    // race — ledger row plus a `deposit_raced` alert — so an operator sees the
+    // race, ledger row plus a `deposit_raced` alert, so an operator sees the
     // charge and refunds it.
     if (p.deposit.intentId && !isUnconfirmedPayDueDeposit(p.deposit)) {
       // PARTIAL refund against the accept batch's shared intent: a whole-run
@@ -438,7 +438,7 @@ export async function resolveDepositPending(
     } else {
       // Never charged: a doc still `unpaid` when the cancellation landed (a
       // webhook-recovery accept whose intent never succeeded, a birth deposit
-      // the sweep hadn't charged yet) — or one carrying only an UNCONFIRMED
+      // the sweep hadn't charged yet), or one carrying only an UNCONFIRMED
       // pay-now intent, per the note above. There is no money to send back, so
       // this resolves straight to the terminal state; no Stripe call, and no
       // ledger row for money that never moved.
@@ -448,20 +448,20 @@ export async function resolveDepositPending(
       });
     }
   } else {
-    // 100% of the deposit BASE to the musician — no commission is taken on a
+    // 100% of the deposit BASE to the musician, no commission is taken on a
     // forfeit; the platform keeps the curator's fee share by simply not
     // refunding it (see the refund branch above).
     const musicianStripe = await getStripeProfileDoc(p.musicianProfileId);
     if (!musicianStripe?.accountId) {
       // Unreachable in normal flow (accept is gated on a payout-ready
-      // musician), so this is a genuine anomaly worth an error log — the doc
+      // musician), so this is a genuine anomaly worth an error log, the doc
       // is LEFT `forfeit_pending` on purpose: Task 9's sweep retries it once
       // the account exists again, and the musician's money is never silently
       // dropped by flipping to a terminal state here.
-      console.error(`resolveDepositPending: no Stripe account for forfeit ${bookingId}/${gigId} — left pending for the sweep`);
+      console.error(`resolveDepositPending: no Stripe account for forfeit ${bookingId}/${gigId}, left pending for the sweep`);
       // Recompute anyway before bailing: the CALLER'S transaction already
       // moved this doc to `forfeit_pending`, so the booking aggregate is
-      // stale whether or not the transfer happened — and the summary counts
+      // stale whether or not the transfer happened, and the summary counts
       // the `*_pending` states explicitly (see recomputePaymentSummary's
       // per-status table). Skipping it here would leave the deposit
       // reading as still-held escrow for as long as the doc stays stuck.
@@ -479,8 +479,8 @@ export async function resolveDepositPending(
       // charge id so it draws on THAT charge's funds instead of the
       // platform's aggregate available balance (a not-yet-settled charge
       // would otherwise fail `balance_insufficient` in live mode). Can
-      // legitimately be null — a deposit finalized out-of-band by the
-      // payment_intent.succeeded webhook need not know its charge id — in
+      // legitimately be null, a deposit finalized out-of-band by the
+      // payment_intent.succeeded webhook need not know its charge id, in
       // which case the transfer simply draws on the platform balance.
       ...(p.deposit.chargeId ? { sourceChargeId: p.deposit.chargeId } : {}),
     });
@@ -492,7 +492,7 @@ export async function resolveDepositPending(
       kind: "forfeit_transfer", amountCents: p.deposit.sliceCents, bookingId, gigId,
       profileId: p.musicianProfileId, stripeId: t.id, detail: "deposit forfeited to musician (100%)",
     }).catch((e) => console.error(`resolveDepositPending: ledger write failed for forfeit ${bookingId}/${gigId}`, e));
-    // Owner ruling (M3): a self-deal forfeit is card->cash to the same person —
+    // Owner ruling (M3): a self-deal forfeit is card->cash to the same person,
     // hold INSTANT payout of these funds (standard-after-settle is unaffected).
     if (p.selfDeal) await setSelfDealInstantHold(p.musicianProfileId, now);
   }
@@ -502,14 +502,14 @@ export async function resolveDepositPending(
   // (self-healing), never a wrong terminal state on the doc above.
   //
   // THE DELINQUENCY LIFT LIVES HERE, once, for BOTH terminal paths. Reaching
-  // this line means the deposit is now `refunded` or `forfeited` — either way
+  // this line means the deposit is now `refunded` or `forfeited`, either way
   // that obligation is extinguished, and if it was an exhausted birth deposit
   // it was the very thing gating the curator. Doing it in the executor rather
   // than at each caller is what makes it exhaustive: the cancellation paths,
   // the no-show path, the two waive branches and the sweep's steps 2 and 7 all
   // funnel through here.
   //
-  // `skipRecompute` defers BOTH per-booking/per-profile tails — the batching
+  // `skipRecompute` defers BOTH per-booking/per-profile tails, the batching
   // caller (step 7) runs the recompute AND the lift itself, once, after its
   // loop, instead of N times inside it.
   if (!opts.skipRecompute) {
@@ -520,21 +520,21 @@ export async function resolveDepositPending(
   }
 }
 
-// Marks the given payment docs `*_pending` inside the CALLER'S transaction —
+// Marks the given payment docs `*_pending` inside the CALLER'S transaction,
 // the atomic "this money is going to move" record that pairs with the
 // cancellation write itself, so a crash before the executor above runs leaves
 // a doc the sweep can find and finish (rather than a cancelled booking whose
 // deposit nobody ever resolves).
 //
 // `forfeitGigId` names the ONE doc that forfeits (a run-level curator late
-// cancel forfeits only the occurrence the window was measured against — plan
+// cancel forfeits only the occurrence the window was measured against, plan
 // refinement, binding); null ⇒ everything refunds. Only `held`/`unpaid` docs
 // are touched: an already-resolved doc, or one whose deposit was `applied`
 // into a settlement, is none of a cancellation's business (Task 12 owns the
 // clawback of an applied deposit).
 //
-// Takes DocumentSnapshot (not QueryDocumentSnapshot) so a single-doc caller —
-// cancelOccurrence, which reads one payment doc by path — can pass its own
+// Takes DocumentSnapshot (not QueryDocumentSnapshot) so a single-doc caller,
+// cancelOccurrence, which reads one payment doc by path, can pass its own
 // read straight through; a snapshot for a doc that doesn't exist is skipped,
 // which is exactly the pre-SP5-booking no-op both callers want.
 //
@@ -543,24 +543,24 @@ export async function resolveDepositPending(
 //
 // CALLER OBLIGATIONS (all three are load-bearing):
 //  1. WRITE PHASE ONLY. This issues tx.update()s, so every read the caller's
-//     transaction needs — including the `paymentDocs` snapshots themselves —
+//     transaction needs, including the `paymentDocs` snapshots themselves,
 //     must already have happened. Calling it before a later tx.get() makes
 //     Firestore reject the whole transaction.
 //  2. SAME BOOKING ONLY. The returned ids are bare gig ids, and the caller
 //     pairs them back with ITS OWN bookingId to build the
 //     `bookings/{bookingId}/payments/{gigId}` path. Passing docs from two
 //     different bookings would hand back ids the caller then resolves under
-//     the wrong booking — every caller reads its docs from one booking's
+//     the wrong booking, every caller reads its docs from one booking's
 //     subcollection, and that is a requirement, not a coincidence.
 //  3. A SKIPPED DOC GETS NO SETTLEMENT WAIVE EITHER. The deposit guard gates
-//     BOTH writes — a doc whose deposit isn't `held`/`unpaid` keeps its
+//     BOTH writes, a doc whose deposit isn't `held`/`unpaid` keeps its
 //     settlement untouched. That coupling is safe here because: a
 //     future-dated doc can't be `applied` (a deposit is only applied by
 //     settlement, which never runs before the occurrence happens); an
 //     already-`*_pending`/terminal doc had its settlement waived by whichever
 //     call set it pending; and `paid`/`past_due` settlements must never be
 //     erased regardless. A caller that needs the waive DECOUPLED from the
-//     deposit decision must do it itself — reportNoShow deliberately does,
+//     deposit decision must do it itself, reportNoShow deliberately does,
 //     for the REPORTED (past-dated, possibly already-`applied`) doc, whose
 //     show is known not to have happened.
 export function markDepositsPendingInTx(
@@ -578,7 +578,7 @@ export function markDepositsPendingInTx(
     const next = doc.id === forfeitGigId ? "forfeit_pending" : "refund_pending";
     const update: { [key: string]: unknown } = { "deposit.status": next, updatedAt: now };
     // A cancelled occurrence never settles. Guarded to the two "hasn't
-    // happened yet" settlement states — a `paid`/`past_due` settlement is a
+    // happened yet" settlement states, a `paid`/`past_due` settlement is a
     // real money record and must never be erased by waiving it here.
     if (p.settlement.status === "not_due" || p.settlement.status === "pending") {
       update["settlement.status"] = "waived";
@@ -593,7 +593,7 @@ export function markDepositsPendingInTx(
 
 // How long a Stripe idempotency key stays a REPLAY handle (as-built contract
 // #5). Inside this window, re-issuing a call with the same key replays the
-// original object — which is what makes every recovery path in SP5 safe to
+// original object, which is what makes every recovery path in SP5 safe to
 // re-run. Past it, Stripe treats the key as brand new and the "recovery" would
 // mint a SECOND charge/refund/transfer.
 //
@@ -605,18 +605,18 @@ export function markDepositsPendingInTx(
 export const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // The first `deposit.depositAttempts` value that means "this birth deposit's
-// retry schedule is over" — now DEFINED IN @gatekeep/shared
+// retry schedule is over", now DEFINED IN @gatekeep/shared
 // (paymentDisplay.ts), beside the SETTLEMENT_RETRY_OFFSETS_MS schedule it is
 // derived from, because both clients' row classifier needs the same
 // terminator and a second derivation is exactly the drift this constant
 // exists to prevent (Task 16 review round 1). Re-exported from here so every
-// server-side import keeps working unchanged — the same treatment messages.ts
+// server-side import keeps working unchanged, the same treatment messages.ts
 // gave the SP5 copy constants.
 //
 // Named because FOUR server places need the same terminator and were each
 // spelling it out (review round 3, M5): the sweep's step-3 gate, its dunning
 // writer, payPastDue's deposit-mode predicate, and clearDelinquencyIfSettled's
-// debt query — which needs the CONSTANT rather than the predicate, because it
+// debt query, which needs the CONSTANT rather than the predicate, because it
 // asks Firestore the question as a range filter.
 export { DEPOSIT_EXHAUSTED_ATTEMPTS };
 
@@ -632,12 +632,12 @@ export function isDepositScheduleExhausted(depositAttempts: number | null | unde
 // it in the browser, so an `unpaid` doc can reference an intent that nothing
 // was ever captured against. `chargedAt` is the discriminator, and it is a
 // sound one because it is written ONLY by paths that know money moved (the
-// sweep's birth charge, finalizeDepositPayDue) — never by the callable that
+// sweep's birth charge, finalizeDepositPayDue), never by the callable that
 // merely creates the intent.
 //
 // Two callers depend on this being the SAME test (review round 3, I1):
 // resolveDepositPending must not issue a refund against it (there is no charge
-// to refund — real Stripe 400s), and finalizeSettlementSuccess must be able to
+// to refund, real Stripe 400s), and finalizeSettlementSuccess must be able to
 // retire such a deposit when a settlement absorbs it, exactly as it retires one
 // with no intent at all. A second, hand-rolled copy of the condition that drifts
 // from this one turns either of those into a money bug.
@@ -647,7 +647,7 @@ export function isUnconfirmedPayDueDeposit(deposit: DepositState): boolean {
     && deposit.chargedAt == null;
 }
 
-// Flags a curator profile delinquent — the one place that stamps
+// Flags a curator profile delinquent, the one place that stamps
 // `private/stripe.delinquent`, so every declaring path (Task 9's birth-deposit
 // dunning, Task 11's settlement dunning) writes the identical shape.
 //
@@ -658,12 +658,12 @@ export function isUnconfirmedPayDueDeposit(deposit: DepositState): boolean {
 // what declared it, so the caller only counts/notifies on the transition.
 //
 // `{ merge: true }` (not update): a curator that has never had a
-// private/stripe doc written can still be flagged — the doc is created with
+// private/stripe doc written can still be flagged, the doc is created with
 // just these fields, and every reader of it fails CLOSED on partial docs
 // (see requireCuratorChargeable's copy-hazard note), so a partial doc here
 // gates MORE, never less.
 //
-// The lifting half is `clearDelinquencyIfSettled` directly below — kept apart
+// The lifting half is `clearDelinquencyIfSettled` directly below, kept apart
 // because declaring is a single-doc fact while lifting is a question about the
 // profile's WHOLE obligation set.
 export async function declareCuratorDelinquent(profileId: string, now: number): Promise<boolean> {
@@ -674,18 +674,18 @@ export async function declareCuratorDelinquent(profileId: string, now: number): 
   return true;
 }
 
-// Lifts the profile-level `delinquent` flag once the curator owes NOTHING —
+// Lifts the profile-level `delinquent` flag once the curator owes NOTHING,
 // the inverse of declareCuratorDelinquent above, and deliberately its
 // neighbour: the two paths that DECLARE delinquency are the settlement dunning
 // ladder and the birth-deposit dunning ladder, so the one that LIFTS it has to
 // ask about both kinds of debt or the gate becomes one-way.
 //
-// TWO QUESTIONS, both `limit(1)` — "does ANY debt remain?", never "list it":
+// TWO QUESTIONS, both `limit(1)`, "does ANY debt remain?", never "list it":
 //  1. SETTLEMENT debt: any payment doc of any booking of this profile still
-//     `past_due` (rungs 1-3 of the ladder count, not just delinquency itself —
+//     `past_due` (rungs 1-3 of the ladder count, not just delinquency itself,
 //     an unpaid debt is an unpaid debt).
 //  2. DEPOSIT debt: any doc whose birth deposit is still `unpaid` after its
-//     retry schedule ran out — DEPOSIT_EXHAUSTED_ATTEMPTS, the same terminator
+//     retry schedule ran out, DEPOSIT_EXHAUSTED_ATTEMPTS, the same terminator
 //     every other site uses, asked of Firestore as a range filter rather than
 //     through isDepositScheduleExhausted (a query cannot call a predicate).
 //
@@ -697,7 +697,7 @@ export async function declareCuratorDelinquent(profileId: string, now: number): 
 // query structurally rather than by a second condition someone could later
 // drop. A never-dunned birth deposit is excluded the same way.
 //
-// CALLED WHEREVER AN OBLIGATION IS EXTINGUISHED, not merely paid — a debt that
+// CALLED WHEREVER AN OBLIGATION IS EXTINGUISHED, not merely paid, a debt that
 // is waived, refunded or forfeited is just as gone as one that was settled, and
 // a curator left gated over a date nobody owes any more cannot book at all. The
 // call sites are: this file's resolveDepositPending tail (every terminal
@@ -751,7 +751,7 @@ const ALERT_LOG_THROTTLE_MS = 24 * 60 * 60 * 1000;
 // live here rather than beside their raisers (review round 3, I3). Three
 // reasons, and the third is the one that bites:
 //  - the ids are DETERMINISTIC per underlying problem, so an hourly sweep
-//    updates one row instead of minting 24 a day — which only holds if every
+//    updates one row instead of minting 24 a day, which only holds if every
 //    raiser of a given problem agrees on the string;
 //  - READERS need them too. releaseStuckSaga looks up `stuck-saga:{bookingId}`
 //    by id to decide whether the sweep has given up on a booking, and then
@@ -779,7 +779,7 @@ export function depositPendingAlertId(bookingId: string, gigId: string): string 
   return `deposit-pending:${bookingId}:${gigId}`;
 }
 // A pay-now deposit whose money was captured against a doc a racer had already
-// claimed — escrow that does not exist for a charge that does.
+// claimed, escrow that does not exist for a charge that does.
 export function depositRacedAlertId(bookingId: string, gigId: string): string {
   return `deposit-raced:${bookingId}:${gigId}`;
 }
@@ -790,7 +790,7 @@ export function depositRacedAlertId(bookingId: string, gigId: string): string {
 export function settlementRacedAlertId(bookingId: string, gigId: string): string {
   return `settlement-raced:${bookingId}:${gigId}`;
 }
-// A settlement charge whose fate is unknown — an intent left `processing`, an
+// A settlement charge whose fate is unknown, an intent left `processing`, an
 // abandoned pay-now intent, or a pre-charge claim stale past the key window.
 export function settlementPendingAlertId(bookingId: string, gigId: string): string {
   return `settlement-pending:${bookingId}:${gigId}`;
@@ -804,14 +804,14 @@ export function settlementPayoutAlertId(bookingId: string, gigId: string): strin
 // Task 12: this occurrence's money could not be moved back where it belongs.
 // FOUR raisers, and deliberately one id, because they are all "the money for
 // this date is in the wrong place and a human must finish moving it":
-//   1-3. clawbackSettledOccurrence's three failure routes — a Stripe refusal
+//   1-3. clawbackSettledOccurrence's three failure routes, a Stripe refusal
 //        part way through the sequence, a terminal write that lost its race
 //        after the money came back, and a `paid` occurrence with no transfer to
 //        reverse at all;
 //   4.   restoreFalselyReportedBooking's money leg, the mirror image: the
 //        booking was restored but its settlement could not be re-opened, so the
-//        date will never re-charge. There is no re-drive for that one — see its
-//        own comment — which is exactly why it needs a durable row.
+//        date will never re-charge. There is no re-drive for that one, see its
+//        own comment, which is exactly why it needs a durable row.
 // reportNoShow's defensive catch around the clawback raises nothing: the
 // clawback never throws, so that catch only ever logs.
 export function clawbackAlertId(bookingId: string, gigId: string): string {
@@ -820,7 +820,7 @@ export function clawbackAlertId(bookingId: string, gigId: string): string {
 // Task 13: an instant payout whose 4% fee could not be debited back off the
 // connected account. THE ONLY PROFILE-SCOPED id in this vocabulary (payouts are
 // not booking-scoped at all), and scoped to the REQUEST rather than the profile
-// so two different uncollected fees are two tickets — the operator recovers each
+// so two different uncollected fees are two tickets, the operator recovers each
 // one separately, and a replayed request (same requestId) updates the one row it
 // already has instead of minting a second.
 export function payoutFeeAlertId(profileId: string, requestId: string): string {
@@ -828,8 +828,8 @@ export function payoutFeeAlertId(profileId: string, requestId: string): string {
 }
 
 // The durable "a human has to look at this" queue (adminAlerts/{alertId}).
-// Every SP5 path that deliberately REFUSES to move money — because moving it
-// would risk moving it twice — upserts a row here keyed on the underlying
+// Every SP5 path that deliberately REFUSES to move money, because moving it
+// would risk moving it twice, upserts a row here keyed on the underlying
 // PROBLEM (not the run), and throttles its console.error to once per UTC day.
 // The row is the signal; the log is a convenience.
 //
@@ -841,7 +841,7 @@ export function payoutFeeAlertId(profileId: string, requestId: string): string {
 // Returns whether the caller should log this observation.
 export async function recordAdminAlert(a: {
   alertId: string; kind: AdminAlertKind; detail: string;
-  // Null only for the one profile-scoped kind (`payout_fee_uncollected` —
+  // Null only for the one profile-scoped kind (`payout_fee_uncollected`,
   // payouts belong to no booking); every other raiser names an occurrence.
   bookingId: string | null; gigId: string | null; now: number;
 }): Promise<boolean> {
@@ -857,14 +857,14 @@ export async function recordAdminAlert(a: {
       return true;
     }
     // `resolvedAt: null` on every recurrence: an operator marking this
-    // resolved while the condition still exists must not silence it forever —
+    // resolved while the condition still exists must not silence it forever,
     // the next observation reopens the row. `firstSeenAt` is deliberately NOT
     // re-stamped (see AdminAlertDoc): it measures the episode, not the ticket.
     await ref.update({
       kind: a.kind, detail: a.detail, lastSeenAt: a.now,
       runCount: FieldValue.increment(1), resolvedAt: null,
     });
-    // Log once per UTC day — OR whenever the KIND changes, however recently we
+    // Log once per UTC day, OR whenever the KIND changes, however recently we
     // logged. A booking moving from `stuck_saga_marker` to
     // `expired_booking_saga_marker` (or a staged saga aging into
     // `stale_accept_saga`) is the condition genuinely changing shape, which is
@@ -873,7 +873,7 @@ export async function recordAdminAlert(a: {
     return existing.kind !== a.kind
       || Math.floor(existing.lastSeenAt / ALERT_LOG_THROTTLE_MS) !== Math.floor(a.now / ALERT_LOG_THROTTLE_MS);
   } catch (e) {
-    // The escalation itself failed. Log UNTHROTTLED — losing the durable row
+    // The escalation itself failed. Log UNTHROTTLED, losing the durable row
     // is exactly when the noisy log is worth having.
     console.error(`recordAdminAlert: failed to record admin alert ${a.alertId}`, e);
     return true;

@@ -53,7 +53,7 @@ describe("createTrack", () => {
   it("rejects an unverified-email member with failed-precondition", async () => {
     // An unverified account cannot create its own profile (createProfileDraft
     // gates on it), so a verified owner creates the profile and the admin SDK
-    // seeds the membership directly — mirrors portfolio.test.ts's pattern.
+    // seeds the membership directly, mirrors portfolio.test.ts's pattern.
     const { profileId } = await makeMusician("ct4");
     const { uid: memberUid, user: memberUser } = await signUpUnverifiedTestUser(`ct4m-${Date.now()}@test.com`);
     await adb.doc(`profiles/${profileId}/members/${memberUid}`).set({
@@ -159,7 +159,7 @@ describe("reorderTracks", () => {
       ids.push(trackId);
     }
     const tracksCol = adb.collection(`profiles/${profileId}/tracks`);
-    // Reject the highest-order (last-created) track — it drops out of the
+    // Reject the highest-order (last-created) track, it drops out of the
     // "active" set used to compute the next order, but its own order field
     // is left untouched, so the next create can reuse that order number.
     await tracksCol.doc(ids[2]).update({ status: "rejected" });
@@ -274,7 +274,7 @@ describe("reviewTrack", () => {
     expect(audit.docs[0].data().detail).toMatch(/^\[was approved\]/);
     // Pins that a takedown's notification fires at claim time (right after
     // the transaction, alongside the audit) rather than after storage
-    // cleanup — see reviewTrack's comment on that ordering: it exists so a
+    // cleanup, see reviewTrack's comment on that ordering: it exists so a
     // storage-cleanup failure (HttpsError "unavailable") can't swallow the
     // notification the way it could when notification lived at the very
     // end. Reproducing that exact storage failure isn't practical against
@@ -289,7 +289,7 @@ describe("reviewTrack", () => {
     const { profileId, trackId } = await makePendingTrack("rv5");
     const { user: adminUser } = await makeAdminUser("rv5a");
     // Simulates storage/doc drift (e.g. a prior partial failure, or a
-    // hand-edited emulator state) — the doc says pending_review but the
+    // hand-edited emulator state), the doc says pending_review but the
     // review object backing it is gone.
     await abucket.file(`review/tracks/${profileId}/${trackId}.m4a`).delete();
     let err: unknown;
@@ -321,7 +321,7 @@ describe("reviewTrack", () => {
     await callFn("reviewTrack", { profileId, trackId, decision: "rejected", reason: "First reason." }, adminUser);
 
     // Simulates storage drift after the first reject (e.g. a stray copy that
-    // landed here despite the doc already saying "rejected") — the retry
+    // landed here despite the doc already saying "rejected"), the retry
     // must still find and remove it, proving the retry re-attempts storage
     // work rather than short-circuiting on "already rejected".
     await abucket.file(`public/tracks/${profileId}/${trackId}.m4a`).save(Buffer.from([9]), { contentType: "audio/mp4" });

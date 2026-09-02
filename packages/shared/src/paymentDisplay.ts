@@ -1,6 +1,6 @@
 import { SETTLEMENT_RETRY_OFFSETS_MS, type DepositStatus, type PaymentDoc } from "./types.js";
 
-// SP5 payments — the shared payment-DISPLAY vocabulary: how a PaymentDoc is
+// SP5 payments, the shared payment-DISPLAY vocabulary: how a PaymentDoc is
 // classified into the state a client renders, and which deposit statuses
 // count toward the money totals a client shows. Everything here is pure (no
 // Date.now(), no I/O), which is why it can live in shared at all.
@@ -15,32 +15,32 @@ import { SETTLEMENT_RETRY_OFFSETS_MS, type DepositStatus, type PaymentDoc } from
 // ladder and the membership set, kept in step by comment alone.
 //
 // What stays per-platform: the LABELS. Web's copy is action-bearing ("Past
-// due — pay now" sits beside the button that does it); mobile is read-only
+// due, pay now" sits beside the button that does it); mobile is read-only
 // and says where the button lives instead. That difference is deliberate, so
-// the strings are NOT shared — only the classification and the accounting,
+// the strings are NOT shared, only the classification and the accounting,
 // which are the parts that must never drift.
 
 // The first `deposit.depositAttempts` value that means "this birth deposit's
 // retry schedule is over". SETTLEMENT_RETRY_OFFSETS_MS is the schedule (+1d,
-// +2d, +2d — three retries after the initial attempt), so the count runs 1..3
+// +2d, +2d, three retries after the initial attempt), so the count runs 1..3
 // while retries remain and hits this on the failure that exhausts it.
 //
 // Defined here, at the same level as the schedule it is derived from, and
 // re-exported by functions/src/paymentsCore.ts so every server-side import
 // keeps working unchanged (the same treatment messages.ts gave the SP5 copy
-// constants). Server callers need it as a CONSTANT, not just a predicate —
+// constants). Server callers need it as a CONSTANT, not just a predicate,
 // clearDelinquencyIfSettled asks Firestore the question as a range filter.
 export const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1;
 
 // Every deposit status meaning "the curator's card was charged for this and
-// the money has not come back to them" — the `paidCents` membership test.
+// the money has not come back to them", the `paidCents` membership test.
 // Held/applied are escrow, then escrow released into a settlement;
 // forfeit_pending/forfeited still count because the curator paid either way
 // and only the DESTINATION changed; refund_pending counts because the refund
 // has not completed yet. `unpaid` and `refunded` are the two that do not.
 //
 // The AUTHORITATIVE definition of this table is the per-status contribution
-// list on functions/src/paymentsCore.ts's recomputePaymentSummary — the
+// list on functions/src/paymentsCore.ts's recomputePaymentSummary, the
 // server aggregate every client total must agree with. This set was
 // previously written out three times (that function, web's PaymentsPanel,
 // mobile's PaymentStatus) and kept in step by comment; it now has one
@@ -48,7 +48,7 @@ export const DEPOSIT_EXHAUSTED_ATTEMPTS = SETTLEMENT_RETRY_OFFSETS_MS.length + 1
 // unchanged (Task 16 review round 1).
 //
 // Typed ReadonlySet so a consumer cannot .add()/.delete() its way into a
-// different accounting rule for everyone else on a warm module instance —
+// different accounting rule for everyone else on a warm module instance,
 // the same concern DEFAULT_FEE_POLICY's Object.freeze addresses, expressed
 // the way a Set allows (Object.freeze does not close a Set's mutators).
 export const PAID_DEPOSIT_STATUSES: ReadonlySet<DepositStatus> = new Set<DepositStatus>([
@@ -74,7 +74,7 @@ export function paymentRowKind(row: Pick<PaymentDoc, "deposit" | "settlement">):
   if (row.deposit.status === "refunded" || row.deposit.status === "refund_pending") return "refunded";
   if (row.settlement.status === "waived") return "waived";
   if (row.settlement.status === "past_due") return "settlementPastDue";
-  // An exhausted BIRTH deposit — payPastDue's OTHER debt shape: no settlement
+  // An exhausted BIRTH deposit, payPastDue's OTHER debt shape: no settlement
   // is past_due yet, but the deposit's own retry schedule ran out and the
   // curator is (or is about to be) delinquent over it. Without a state of its
   // own, a curator whose ONLY debt is a deposit would see nothing anywhere
@@ -88,7 +88,7 @@ export function paymentRowKind(row: Pick<PaymentDoc, "deposit" | "settlement">):
   return "depositUnpaid";
 }
 
-// Response shape of the getStripeStatus callable — client-shared so web and
+// Response shape of the getStripeStatus callable, client-shared so web and
 // mobile render the SAME contract (moved from apps/web/src/payments/types.ts
 // in SP5b; the null-balance rule in the comment below is binding on both).
 export interface StripeStatusResult {
@@ -96,7 +96,7 @@ export interface StripeStatusResult {
   hasAccount: boolean; transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
   delinquent: boolean;
   // 0 means "asked, nothing there"; null means "Stripe couldn't be read just
-  // now" — MUST render as "balance unavailable", never $0.00.
+  // now", MUST render as "balance unavailable", never $0.00.
   availableBalanceCents: number | null;
   instantAvailableBalanceCents: number | null;
 }

@@ -66,7 +66,7 @@ describe("storage: staging/photos", () => {
     const alice = env.authenticatedContext("alice").storage();
     await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/gallery-abc123"), bytes, meta("image/jpeg")));
     await assertSucceeds(uploadBytes(ref(alice, "staging/photos/alice/p1/gallery-xyz"), bytes, meta("image/png")));
-    // Junk kind (not avatar/cover/gallery) is still rejected — the pattern
+    // Junk kind (not avatar/cover/gallery) is still rejected, the pattern
     // widened by one literal alternative, not loosened to accept anything.
     await assertFails(uploadBytes(ref(alice, "staging/photos/alice/p1/banner-abc"), bytes, meta("image/jpeg")));
   });
@@ -124,13 +124,13 @@ describe("storage: public and review", () => {
       await uploadBytes(ref(ctx.storage(), "public/tracks/p1/t2.m4a"), bytes, meta("audio/mp4"));
     });
     const anon = env.unauthenticatedContext().storage();
-    // The app's real read path — must survive any future tightening of the get/list split.
+    // The app's real read path, must survive any future tightening of the get/list split.
     await assertSucceeds(getDownloadURL(ref(anon, "public/tracks/p1/t2.m4a")));
   });
   it("a public/../review/... traversal-shaped object name is denied, even though it starts with public/", async () => {
     await env.withSecurityRulesDisabled(async (ctx) => {
-      // GCS object names are flat strings — ".." here is a literal segment,
-      // not filesystem traversal — but a fully-permissive
+      // GCS object names are flat strings, ".." here is a literal segment,
+      // not filesystem traversal, but a fully-permissive
       // `public/{allPaths=**}` + `get:if true` rule would still match this
       // name since it starts with "public/". The segment-constrained rule
       // must reject it: "kind" resolves to "..", which fails the
