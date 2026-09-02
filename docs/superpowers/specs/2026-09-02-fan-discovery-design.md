@@ -146,8 +146,10 @@ id so a retried fan-out overwrites rather than duplicates. Push still goes out o
 
 ### Users
 
-`UserDoc` gains `genrePickerSeenAt?: number`, stamped by `markGenrePickerSeen` (a callable, or
-a flag on `followTarget`). The device location is never written anywhere.
+`UserDoc` gains `genrePickerSeenAt?: number`, stamped by a dedicated callable
+`markGenrePickerSeen()` (no input, idempotent) that both Done and Skip call, so a fan who skips
+without following anything is still not nagged again. The device location is never written
+anywhere.
 
 ### Indexes (new composites)
 
