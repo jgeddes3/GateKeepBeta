@@ -7,6 +7,7 @@ import { StatusBar } from "expo-status-bar";
 import { setAudioModeAsync } from "expo-audio";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
 import { ProfileProvider } from "../src/shell/ProfileContext";
+import { FollowsProvider } from "../src/discover/useFollows";
 import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
 import { ThemeProvider, useTokens, useThemeChoice } from "../src/theme/ThemeProvider";
 import { tokens } from "../src/theme/tokens";
@@ -124,7 +125,16 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider>
-      <AuthProvider><ProfileProvider><MaybeStripeProvider><Gate /></MaybeStripeProvider></ProfileProvider></AuthProvider>
+      {/* SP7 Task 11 fix round 1 (review, Important): FollowsProvider owns
+          the ONE follows/{uid} listener the whole app needs, mounted here
+          (inside ProfileProvider, so it can read useAuth) rather than per
+          screen. Before this, ArtistsList's up to 60 FollowButton rows each
+          opened an independent onSnapshot on the identical query. Every
+          screen that can render a FollowButton or read follow state
+          (Discover, Following, the event screen, the artist page, the venue
+          screen) sits inside this provider now, reading the shared
+          subscription via useFollowsContext instead. */}
+      <AuthProvider><ProfileProvider><FollowsProvider><MaybeStripeProvider><Gate /></MaybeStripeProvider></FollowsProvider></ProfileProvider></AuthProvider>
     </ThemeProvider>
   );
 }

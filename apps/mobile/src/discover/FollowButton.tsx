@@ -2,7 +2,7 @@ import { useState } from "react";
 import { View } from "react-native";
 import { FOLLOW_LIMIT_MESSAGE, type FollowTargetType } from "@gatekeep/shared";
 import { useAuth } from "../auth/AuthProvider";
-import { useFollows, follow, unfollow } from "./useFollows";
+import { useFollowsContext, follow, unfollow } from "./useFollows";
 import { Button, ErrorBanner } from "../ui";
 import { tokens } from "../theme/tokens";
 
@@ -13,11 +13,17 @@ import { tokens } from "../theme/tokens";
 // before it can mount (app/_layout.tsx's Gate redirects a signed-out user to
 // (auth)/sign-in first), so unlike the web twin this never needs its own
 // "sign in to follow" redirect branch.
+//
+// Fix round 1 (review, Important): ArtistsList can mount up to 60 of these
+// in one screen. Reading follow state via useFollowsContext (the app-wide
+// FollowsProvider mounted in app/_layout.tsx) instead of calling
+// useFollows(uid) directly means all 60 share ONE onSnapshot listener
+// instead of each opening its own.
 export function FollowButton({ targetId, targetType, label, compact }: {
   targetId: string; targetType: FollowTargetType; label?: string; compact?: boolean;
 }) {
   const { user } = useAuth();
-  const { targets } = useFollows(user?.uid ?? null);
+  const { targets } = useFollowsContext();
   const isFollowing = targets.has(targetId);
 
   // Optimistic toggle: shows the clicked-toward state immediately, then

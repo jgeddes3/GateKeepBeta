@@ -111,12 +111,25 @@ interface CreateEventPayload {
 // twin's own GenresFields (apps/web/src/events/EventEditor.tsx), reusing the
 // same Chip primitive BioGenresForm's own genre picker already uses. ----------
 function GenresFields({ selected, onChange }: { selected: string[]; onChange: (v: string[]) => void }) {
+  const atCap = selected.length >= 3;
   const toggle = (g: string) =>
     onChange(selected.includes(g) ? selected.filter((x) => x !== g) : selected.length < 3 ? [...selected, g] : selected);
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-        {GENRES.map((g) => <Chip key={g} label={formatChipLabel(g)} active={selected.includes(g)} onPress={() => toggle(g)} />)}
+        {GENRES.map((g) => {
+          const active = selected.includes(g);
+          // Fix round 1 (review, Minor): once 3 are selected, an unselected
+          // chip disables rather than accepting a silent no-op tap (toggle's
+          // own `selected.length < 3` guard already refused the fourth
+          // pick; this just makes that refusal visible on the chip itself).
+          // An already-selected chip stays enabled so it can still be
+          // deselected at the cap.
+          return (
+            <Chip key={g} label={formatChipLabel(g)} active={active} onPress={() => toggle(g)}
+              disabled={atCap && !active} />
+          );
+        })}
       </View>
       <Text variant="meta" muted>Used when your acts have no GateKeep profile. Up to three.</Text>
     </View>

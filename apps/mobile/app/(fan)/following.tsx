@@ -4,8 +4,7 @@ import { useRouter } from "expo-router";
 import { doc, getDoc } from "firebase/firestore";
 import { genreTargetId, parseGenreTarget, type ProfileDoc } from "@gatekeep/shared";
 import { getFirebase } from "../../src/lib/firebase";
-import { useAuth } from "../../src/auth/AuthProvider";
-import { useFollows, unfollow } from "../../src/discover/useFollows";
+import { useFollowsContext, unfollow } from "../../src/discover/useFollows";
 import { formatChipLabel } from "../../src/discover/discoverQueries";
 import { GenrePickerSheet } from "../../src/discover/GenrePickerSheet";
 import {
@@ -135,9 +134,10 @@ function SectionEmpty({ text }: { text: string }) {
 export default function Following() {
   const router = useRouter();
   const t = useTokens();
-  const { user } = useAuth();
-  const uid = user?.uid ?? null;
-  const { targets, genres, loading } = useFollows(uid);
+  // useAuth() no longer needed directly here: useFollowsContext reads the
+  // shared FollowsProvider subscription (app/_layout.tsx) rather than this
+  // screen resolving its own uid and opening a second listener.
+  const { targets, genres, loading } = useFollowsContext();
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const profileTargetIds = [...targets].filter((id) => parseGenreTarget(id) === null);

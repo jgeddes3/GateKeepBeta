@@ -5,7 +5,7 @@ import { httpsCallable } from "firebase/functions";
 import { GENRES, genreTargetId, type UserDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
-import { follow, useFollows } from "./useFollows";
+import { follow, useFollowsContext } from "./useFollows";
 import { formatChipLabel } from "./discoverQueries";
 import { Text, Button, Chip, Sheet, ErrorBanner } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -25,10 +25,15 @@ async function callMarkGenrePickerSeen(): Promise<void> {
 // already follow any genre. genrePickerSeenAt is read once (getDoc, not a
 // live subscription: it only ever needs to reflect "has this been shown",
 // which this hook's own markSeen already updates optimistically for
-// same-session callers), while the genre-follow check reuses useFollows'
-// live subscription. Byte-for-byte the web twin's own useGenrePickerGate.
+// same-session callers), while the genre-follow check reuses the shared
+// FollowsProvider subscription via useFollowsContext (fix round 1, review),
+// rather than opening a second listener of its own. Byte-for-byte the web
+// twin's own useGenrePickerGate. `uid` is still taken as a param (used below
+// for the users/{uid} getDoc, which useFollowsContext doesn't cover) and
+// stays in sync with useFollowsContext's own internal useAuth() read, since
+// every caller derives both from the same useAuth() call.
 export function useGenrePickerGate(uid: string | null): { shouldShow: boolean; markSeen: () => Promise<void> } {
-  const { genres, loading: followsLoading } = useFollows(uid);
+  const { genres, loading: followsLoading } = useFollowsContext();
   const [seenAt, setSeenAt] = useState<number | null>(null);
   const [seenLoaded, setSeenLoaded] = useState(false);
   const [trackedUid, setTrackedUid] = useState(uid);
