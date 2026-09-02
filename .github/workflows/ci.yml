@@ -20,7 +20,7 @@ jobs:
     env:
       FUNCTIONS_DISCOVERY_TIMEOUT: "60"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: No em dashes (U+2014) anywhere in the repo
         run: |
