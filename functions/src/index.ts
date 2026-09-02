@@ -30,3 +30,4 @@ export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } fr
 export {
   createTicketOrder, finalizeTicketOrder, refundTicket, checkInTicket, offerTransfer, respondToTransfer,
 } from "./ticketing.js";
+export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js";
