@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { View, Pressable, Image } from "react-native";
 import { useRouter } from "expo-router";
 import { distanceLabel, type DeckCard, type DeckNextShow, type DeckPreview } from "@gatekeep/shared";
@@ -34,7 +34,11 @@ import { tokens } from "../theme/tokens";
 // page is about 20 cards and each getDownloadURL is a network round trip
 // for an object storage.rules already serves unauthenticated.
 
-const PHOTO_MIN_HEIGHT = 140;
+// The photo's floor, not its size: it takes every point the text block does
+// not want and gives space back before the text does. On a short screen at a
+// large accessibility text size it can go all the way down to this, and the
+// text block clips a line rather than pushing the action row off the card.
+const PHOTO_MIN_HEIGHT = 88;
 
 function PreviewLine({ preview }: { preview: DeckPreview }) {
   // Always on the scrim, so both themes use the dark-theme foreground here
@@ -50,8 +54,9 @@ function PreviewLine({ preview }: { preview: DeckPreview }) {
   }
   return (
     <View
-      style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+      accessible
       accessibilityLabel={`Preview track by ${preview.artistName}`}
+      style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
     >
       <IconMusicNotes size={16} color={color} />
       <Text variant="meta" color={color} numberOfLines={1} style={{ flex: 1 }}>{preview.artistName}</Text>
@@ -59,10 +64,20 @@ function PreviewLine({ preview }: { preview: DeckPreview }) {
   );
 }
 
-function DeckPhoto({ path, fallback, preview }: { path: string | null; fallback: ReactNode; preview: DeckPreview }) {
+// One node carries the photo's flex, its floor, and its clipping, so a
+// squeezed card can never paint the image over the text block underneath.
+// It is also the card's large tap target onto the subject's own screen.
+function DeckPhoto({ path, fallback, preview, onPress, label }: {
+  path: string | null; fallback: ReactNode; preview: DeckPreview; onPress: () => void; label: string;
+}) {
   const url = path ? publicStorageUrl(path) : null;
   return (
-    <View style={{ flex: 1, minHeight: PHOTO_MIN_HEIGHT }}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={{ flex: 1, minHeight: PHOTO_MIN_HEIGHT, overflow: "hidden" }}
+    >
       {url
         ? <Image source={{ uri: url }} resizeMode="cover" style={{ position: "absolute", inset: 0 }} />
         : <PhotoPlaceholder icon={fallback} />}
@@ -70,7 +85,7 @@ function DeckPhoto({ path, fallback, preview }: { path: string | null; fallback:
       <View style={{ position: "absolute", left: tokens.space.lg, right: tokens.space.lg, bottom: tokens.space.md }}>
         <PreviewLine preview={preview} />
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -82,25 +97,35 @@ function CardFrame({ height, children }: { height: number; children: ReactNode }
   );
 }
 
-function TextBlock({ children }: { children: ReactNode }) {
-  return <View style={{ padding: tokens.space.lg, gap: tokens.space.sm }}>{children}</View>;
+// The text block splits in two on purpose. The lines shrink (and clip, they
+// are all numberOfLines-capped) when the card runs out of room; the action
+// row underneath never shrinks, so Tickets and Follow stay on the card at
+// every screen size and text size. Every card ends the same way: the ticket,
+// the one ember element, beside Follow. A card whose subject has no upcoming
+// show has no ticket to offer and renders Follow alone.
+function TextBlock({ children, actions }: { children: ReactNode; actions: ReactNode }) {
+  return (
+    <>
+      <View style={{
+        flexShrink: 1, minHeight: 0, overflow: "hidden",
+        paddingHorizontal: tokens.space.lg, paddingTop: tokens.space.lg, gap: tokens.space.sm,
+      }}>
+        {children}
+      </View>
+      <View style={{
+        flexShrink: 0, flexDirection: "row", alignItems: "flex-start", gap: tokens.space.sm,
+        paddingHorizontal: tokens.space.lg, paddingTop: tokens.space.sm, paddingBottom: tokens.space.lg,
+      }}>
+        {actions}
+      </View>
+    </>
+  );
 }
 
 function MetaRow({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
       {icon}
-      {children}
-    </View>
-  );
-}
-
-// Every card ends the same way: the ticket (the one ember element) beside
-// Follow. Cards whose subject has no upcoming show simply have no ticket to
-// offer and render Follow alone.
-function ActionRow({ children }: { children: ReactNode }) {
-  return (
-    <View style={{ flexDirection: "row", alignItems: "flex-start", gap: tokens.space.sm }}>
       {children}
     </View>
   );
@@ -139,14 +164,17 @@ export function ShowCard({ card, height }: { card: Extract<DeckCard, { kind: "sh
 
   return (
     <CardFrame height={height}>
-      <Pressable onPress={openEvent} accessibilityRole="button" accessibilityLabel={card.title || "Untitled event"} style={{ flex: 1 }}>
-        <DeckPhoto
-          path={card.posterPath}
-          fallback={<IconTicket size={40} color={t.muted} />}
-          preview={card.preview}
-        />
-      </Pressable>
-      <TextBlock>
+      <DeckPhoto
+        path={card.posterPath}
+        fallback={<IconTicket size={40} color={t.muted} />}
+        preview={card.preview}
+        onPress={openEvent}
+        label={card.title || "Untitled event"}
+      />
+      <TextBlock actions={<>
+        <TicketsButton eventId={card.eventId} />
+        <FollowButton targetId={card.curatorProfileId} targetType="curator" label="Follow venue" compact />
+      </>}>
         <Pressable onPress={openEvent} accessibilityRole="button" accessibilityLabel={card.title || "Untitled event"}>
           <Text variant="display" numberOfLines={2}>{card.title || "Untitled event"}</Text>
         </Pressable>
@@ -168,10 +196,6 @@ export function ShowCard({ card, height }: { card: Extract<DeckCard, { kind: "sh
           </View>
         )}
         {price && <Badge label={price} />}
-        <ActionRow>
-          <TicketsButton eventId={card.eventId} />
-          <FollowButton targetId={card.curatorProfileId} targetType="curator" label="Follow venue" compact />
-        </ActionRow>
       </TextBlock>
     </CardFrame>
   );
@@ -188,14 +212,17 @@ export function ArtistCard({ card, height }: { card: Extract<DeckCard, { kind: "
 
   return (
     <CardFrame height={height}>
-      <Pressable onPress={openArtist} accessibilityRole="button" accessibilityLabel={card.name} style={{ flex: 1 }}>
-        <DeckPhoto
-          path={card.coverPhotoPath ?? card.avatarPhotoPath}
-          fallback={<IconUserCircle size={44} color={t.muted} />}
-          preview={card.preview}
-        />
-      </Pressable>
-      <TextBlock>
+      <DeckPhoto
+        path={card.coverPhotoPath ?? card.avatarPhotoPath}
+        fallback={<IconUserCircle size={44} color={t.muted} />}
+        preview={card.preview}
+        onPress={openArtist}
+        label={card.name}
+      />
+      <TextBlock actions={<>
+        {next && <TicketsButton eventId={next.eventId} />}
+        <FollowButton targetId={card.profileId} targetType="musician" compact />
+      </>}>
         <Pressable onPress={openArtist} accessibilityRole="button" accessibilityLabel={card.name}>
           <Text variant="display" numberOfLines={2}>{card.name}</Text>
         </Pressable>
@@ -210,10 +237,6 @@ export function ArtistCard({ card, height }: { card: Extract<DeckCard, { kind: "
             </Text>
           </MetaRow>
         )}
-        <ActionRow>
-          {next && <TicketsButton eventId={next.eventId} />}
-          <FollowButton targetId={card.profileId} targetType="musician" compact />
-        </ActionRow>
       </TextBlock>
     </CardFrame>
   );
@@ -229,14 +252,17 @@ export function VenueCard({ card, height }: { card: Extract<DeckCard, { kind: "v
 
   return (
     <CardFrame height={height}>
-      <Pressable onPress={openVenue} accessibilityRole="button" accessibilityLabel={card.name} style={{ flex: 1 }}>
-        <DeckPhoto
-          path={card.photoPath}
-          fallback={<IconImages size={40} color={t.muted} />}
-          preview={card.preview}
-        />
-      </Pressable>
-      <TextBlock>
+      <DeckPhoto
+        path={card.photoPath}
+        fallback={<IconImages size={40} color={t.muted} />}
+        preview={card.preview}
+        onPress={openVenue}
+        label={card.name}
+      />
+      <TextBlock actions={<>
+        {next && <TicketsButton eventId={next.eventId} />}
+        <FollowButton targetId={card.profileId} targetType="curator" label="Follow venue" compact />
+      </>}>
         <Pressable onPress={openVenue} accessibilityRole="button" accessibilityLabel={card.name}>
           <Text variant="display" numberOfLines={2}>{card.name}</Text>
         </Pressable>
@@ -255,17 +281,16 @@ export function VenueCard({ card, height }: { card: Extract<DeckCard, { kind: "v
             </Text>
           </MetaRow>
         )}
-        <ActionRow>
-          {next && <TicketsButton eventId={next.eventId} />}
-          <FollowButton targetId={card.profileId} targetType="curator" label="Follow venue" compact />
-        </ActionRow>
       </TextBlock>
     </CardFrame>
   );
 }
 
-export function DeckCardView({ card, height }: { card: DeckCard; height: number }) {
+// memo, because FlatList re-renders every mounted row whenever the deck's own
+// state changes (a fetch, a mute toggle) and a deck row is a full-screen card
+// with an image in it.
+export const DeckCardView = memo(function DeckCardView({ card, height }: { card: DeckCard; height: number }) {
   if (card.kind === "show") return <ShowCard card={card} height={height} />;
   if (card.kind === "artist") return <ArtistCard card={card} height={height} />;
   return <VenueCard card={card} height={height} />;
-}
+});

@@ -182,54 +182,84 @@ export function DeckScreen() {
 
   const seed = useRef<number | null>(null);
   const shownIds = useRef<string[]>([]);
+  const knownIds = useRef<Set<string>>(new Set());
   const inFlight = useRef(false);
   const exhausted = useRef(false);
   const started = useRef(false);
   const visibleCard = useRef<DeckCard | null>(null);
+  // One slot, consumed by the in-flight fetch's `finally`. A refresh (or the
+  // re-rank when a position arrives) that lands mid-fetch used to be dropped
+  // on the floor with the spinner still turning.
+  const pendingReset = useRef(false);
+  // Declared before loadPage because loadPage's own `finally` reaches for it
+  // to run a queued reset; kept fresh, along with the audio handle and the
+  // card count, by the effect below, for the viewability callback that is
+  // registered once and can never see a later render's values.
+  const loadPageRef = useRef<((reset: boolean) => Promise<void>) | null>(null);
 
   const loadPage = useCallback(async (reset: boolean) => {
-    if (inFlight.current) return;
+    if (inFlight.current) {
+      if (reset) pendingReset.current = true;
+      return;
+    }
     if (!reset && exhausted.current) return;
     inFlight.current = true;
-    if (reset) {
-      seed.current = null;
-      shownIds.current = [];
-      exhausted.current = false;
-      visibleCard.current = null;
-    }
     setLoading(true);
     try {
       // `location: null` is rejected by the callable's own validation, so the
-      // key is omitted entirely when there is no position.
+      // key is omitted entirely when there is no position. A reset asks for a
+      // fresh deck: no exclusions, no seed, so the server picks a new one.
       const input: GetDiscoverDeckInput = {};
       if (location.location) input.location = location.location;
-      if (shownIds.current.length > 0) input.excludeIds = shownIds.current;
-      if (seed.current != null) input.seed = seed.current;
+      if (!reset) {
+        if (shownIds.current.length > 0) input.excludeIds = shownIds.current;
+        if (seed.current != null) input.seed = seed.current;
+      }
       const { data } = await httpsCallable<GetDiscoverDeckInput, GetDiscoverDeckResult>(
         getFirebase().functions, "getDiscoverDeck",
       )(input);
+      // Nothing above is cleared before the await: a refresh that fails
+      // leaves the deck the fan was already swiping exactly as it was.
       seed.current = data.seed;
-      if (data.cards.length === 0) exhausted.current = true;
-      setCards((prev) => {
-        if (reset) return data.cards;
+      if (reset) {
+        shownIds.current = [];
+        exhausted.current = false;
+        visibleCard.current = null;
+        knownIds.current = new Set(data.cards.map((c) => c.id));
+        setCards(data.cards);
+        if (data.cards.length === 0) exhausted.current = true;
+      } else {
         // The server only excludes ids the fan has actually seen, so a card
         // still sitting unseen in the list can come back in the next page.
-        // Dropping the repeat here also keeps FlatList keys unique.
-        const have = new Set(prev.map((c) => c.id));
-        return [...prev, ...data.cards.filter((c) => !have.has(c.id))];
-      });
+        // Dropping the repeat here also keeps FlatList keys unique, and a
+        // page that adds nothing new means the deck has run out.
+        const fresh = data.cards.filter((c) => !knownIds.current.has(c.id));
+        if (fresh.length === 0) exhausted.current = true;
+        else {
+          for (const c of fresh) knownIds.current.add(c.id);
+          setCards((prev) => [...prev, ...fresh]);
+        }
+      }
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the deck.");
+      // Never the raw callable message: it is a server string, and the fan
+      // can do nothing with "internal".
+      console.warn("deck: getDiscoverDeck failed", e);
+      setError(reset ? "Could not load the deck. Try again." : "Could not load more shows. Try again.");
     } finally {
       inFlight.current = false;
       setLoading(false);
-      setRefreshing(false);
+      if (pendingReset.current) {
+        pendingReset.current = false;
+        // The spinner keeps turning through the queued reset, hence no
+        // setRefreshing(false) on this branch.
+        void loadPageRef.current?.(true);
+      } else {
+        setRefreshing(false);
+      }
     }
   }, [location.location]);
 
-  // Kept fresh for the viewability callback, which is registered once.
-  const loadPageRef = useRef(loadPage);
   const audioRef = useRef(audio);
   const cardCount = useRef(0);
   useEffect(() => {
@@ -264,13 +294,24 @@ export function DeckScreen() {
         shownIds.current = shownIds.current.slice(-DECK_MAX_EXCLUDE_IDS);
       }
     }
-    if ((first.index ?? 0) >= cardCount.current - NEAR_END_CARDS) void loadPageRef.current(false);
+    if ((first.index ?? 0) >= cardCount.current - NEAR_END_CARDS) void loadPageRef.current?.(false);
   }, []);
 
-  const onRefresh = () => {
+  const onRefresh = useCallback(() => {
     setRefreshing(true);
     void loadPage(true);
-  };
+  }, [loadPage]);
+
+  // One element for both scrollers below (only ever one of them is mounted),
+  // and a memoized row so a deck-level state change does not rebuild every
+  // full-screen card.
+  const refreshControl = (
+    <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.muted} colors={[t.accent]} />
+  );
+  const renderItem = useCallback(
+    ({ item }: { item: DeckCard }) => <DeckCardView card={item} height={cardHeight} />,
+    [cardHeight],
+  );
 
   const openList = () => {
     audio.stop();
@@ -301,7 +342,7 @@ export function DeckScreen() {
           <FlatList
             data={cards}
             keyExtractor={(card) => card.id}
-            renderItem={({ item }) => <DeckCardView card={item} height={cardHeight} />}
+            renderItem={renderItem}
             getItemLayout={(_, index) => ({ length: cardHeight, offset: cardHeight * index, index })}
             pagingEnabled
             snapToInterval={cardHeight}
@@ -312,28 +353,26 @@ export function DeckScreen() {
             initialNumToRender={2}
             maxToRenderPerBatch={3}
             windowSize={3}
-            refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.muted} colors={[t.accent]} />
-            }
+            refreshControl={refreshControl}
           />
         )}
 
         {cards.length === 0 && (
           <ScrollView
             contentContainerStyle={{ flexGrow: 1, padding: tokens.space.lg, justifyContent: "center", gap: tokens.space.lg }}
-            refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.muted} colors={[t.accent]} />
-            }
+            refreshControl={refreshControl}
           >
             {loading && !error && (
               <View style={{ gap: tokens.space.md }}>
                 <SkeletonCard />
-                <Text variant="meta" muted style={{ textAlign: "center" }}>Finding shows near you</Text>
+                <Text variant="meta" muted style={{ textAlign: "center" }}>
+                  {location.location ? "Finding shows near you" : "Finding shows"}
+                </Text>
               </View>
             )}
             {error && (
               <View style={{ gap: tokens.space.md }}>
-                <ErrorBanner message={`Could not load the deck: ${error}`} />
+                <ErrorBanner message={error} />
                 <Button title="Retry" variant="secondary" onPress={() => void loadPage(true)} style={{ alignSelf: "flex-start" }} />
               </View>
             )}
@@ -358,7 +397,7 @@ export function DeckScreen() {
             swipeable and puts the banner over the bottom of the card. */}
         {error && cards.length > 0 && (
           <View style={{ position: "absolute", left: tokens.space.lg, right: tokens.space.lg, bottom: tokens.space.lg, gap: tokens.space.sm }}>
-            <ErrorBanner message={`Could not load more: ${error}`} />
+            <ErrorBanner message={error} />
             <Button title="Retry" variant="secondary" onPress={() => void loadPage(false)} style={{ alignSelf: "flex-start" }} />
           </View>
         )}

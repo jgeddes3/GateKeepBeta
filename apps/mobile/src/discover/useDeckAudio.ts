@@ -12,9 +12,25 @@ import { readDeckMute, writeDeckMute } from "./deckPrefs";
 // past, exactly the way app/artist/[handle].tsx's track list swaps sources
 // on its own single player.
 //
-// Playback gate, in one place (`play` below): sound comes out only while
-// the Discover tab is focused AND the app is foregrounded. That covers all
-// three of the spec's stop conditions:
+// Loading is status-driven, not fire-and-forget. `replace()` returns
+// nothing and does not throw on a URL that will 404, and `seekTo()` against
+// a source that has not loaded yet rejects, so the sequence is:
+//
+//   bind -> replace(uri) -> wait for playbackStatusUpdate -> seekTo -> play
+//
+// The listener is the only place that starts playback, and every start
+// re-checks `bound.current` identity first, so a fast swipe cannot apply an
+// older card's seek or play over the newer card's.
+//
+// The same listener is what marks a card silent: a source that fails to
+// load reports `status.error` rather than throwing anywhere this hook could
+// catch it. Errors arriving in the first few hundred ms after a swap are
+// ignored, since a queued error from the source just replaced would
+// otherwise be blamed on the card that replaced it.
+//
+// Playback gate, in one place (`canPlay`): sound comes out only while the
+// Discover tab is focused AND the app is foregrounded. That covers all three
+// of the spec's stop conditions:
 //   - tab blur: useFocusEffect's cleanup pauses and drops the gate
 //   - app background: the AppState listener pauses and the gate re-checks
 //     AppState.currentState on the way back
@@ -24,11 +40,30 @@ import { readDeckMute, writeDeckMute } from "./deckPrefs";
 // would leave the mute toggle as the only way to hear anything again.
 //
 // Every player call is wrapped: a dev client built before expo-audio was
-// linked throws on the first call rather than returning a dead object, and
-// a card whose track will not load is marked silent in `silentIds` so the
-// deck never retries it on the way back up the list.
+// linked throws on the first call rather than returning a dead object.
 
-type BoundTrack = { id: string; uri: string; startSec: number };
+type BoundTrack = {
+  id: string;
+  uri: string;
+  startSec: number;
+  // Set once the status listener has taken this track through seek + play,
+  // so a status tick every half second does not restart it.
+  started: boolean;
+  // When replace() was called for this track, for the stale-error window.
+  replacedAt: number;
+};
+
+// A playback error reported within this many ms of a source swap is treated
+// as belonging to the source that was just replaced, not to the new one. A
+// real failure on a remote track cannot come back faster than a round trip.
+const STALE_ERROR_MS = 300;
+
+export interface DeckAudio {
+  bind: (card: DeckCard | null) => void;
+  muted: boolean;
+  toggleMute: () => void;
+  stop: () => void;
+}
 
 // expo-audio exposes mute as a property setter, and the React Compiler's
 // immutability rule refuses a property assignment onto a hook's return value
@@ -37,13 +72,6 @@ type BoundTrack = { id: string; uri: string; startSec: number };
 // not React state.
 function applyMute(target: { muted: boolean }, muted: boolean): void {
   target.muted = muted;
-}
-
-export interface DeckAudio {
-  bind: (card: DeckCard | null) => void;
-  muted: boolean;
-  toggleMute: () => void;
-  stop: () => void;
 }
 
 export function useDeckAudio(): DeckAudio {
@@ -81,19 +109,68 @@ export function useDeckAudio(): DeckAudio {
     }
   }, [player]);
 
-  const play = useCallback((track: BoundTrack) => {
-    if (!focused.current || AppState.currentState !== "active") return;
+  const markSilent = useCallback((track: BoundTrack, reason: unknown) => {
+    console.warn("deck audio: preview unavailable", track.id, reason);
+    silentIds.current.add(track.id);
+    if (bound.current === track) bound.current = null;
+    pause();
+  }, [pause]);
+
+  const canPlay = useCallback(() => focused.current && AppState.currentState === "active", []);
+
+  // Second half of the load sequence, run from the status listener once the
+  // source reports itself loaded. Every step re-checks that this track is
+  // still the bound one (last swipe wins).
+  const start = useCallback((track: BoundTrack) => {
+    track.started = true;
+    const playNow = () => {
+      if (bound.current !== track || !canPlay()) return;
+      try {
+        player.play();
+      } catch (e) {
+        markSilent(track, e);
+      }
+    };
+    if (track.startSec <= 0) {
+      playNow();
+      return;
+    }
+    try {
+      player.seekTo(track.startSec).then(playNow).catch((e) => {
+        // A refused seek is not a dead track: play the preview from the top
+        // rather than dropping the card into silence.
+        console.warn("deck audio: seek failed, playing from the start", track.id, e);
+        playNow();
+      });
+    } catch (e) {
+      markSilent(track, e);
+    }
+  }, [player, canPlay, markSilent]);
+
+  const load = useCallback((track: BoundTrack) => {
+    if (!canPlay()) return;
+    track.started = false;
+    track.replacedAt = Date.now();
     try {
       player.replace({ uri: track.uri });
-      if (track.startSec > 0) void player.seekTo(track.startSec);
-      player.play();
     } catch (e) {
-      console.warn("deck audio: could not play preview", track.id, e);
-      silentIds.current.add(track.id);
-      if (bound.current?.id === track.id) bound.current = null;
-      pause();
+      markSilent(track, e);
     }
-  }, [player, pause]);
+  }, [player, canPlay, markSilent]);
+
+  useEffect(() => {
+    const sub = player.addListener("playbackStatusUpdate", (status) => {
+      const track = bound.current;
+      if (!track) return;
+      if (status.error) {
+        if (Date.now() - track.replacedAt < STALE_ERROR_MS) return;
+        markSilent(track, status.error);
+        return;
+      }
+      if (status.isLoaded && !track.started) start(track);
+    });
+    return () => sub.remove();
+  }, [player, start, markSilent]);
 
   const bind = useCallback((card: DeckCard | null) => {
     const preview = card?.preview ?? null;
@@ -107,10 +184,28 @@ export function useDeckAudio(): DeckAudio {
       id: card.id,
       uri: publicStorageUrl(preview.trackPath),
       startSec: preview.startSec,
+      started: false,
+      replacedAt: 0,
     };
     bound.current = track;
-    play(track);
-  }, [play, pause]);
+    load(track);
+  }, [load, pause]);
+
+  // Back from a blur or from the background. A track that already reached
+  // `started` only needs play(); one that never got that far is reloaded.
+  const resume = useCallback(() => {
+    const track = bound.current;
+    if (!track || !canPlay()) return;
+    if (!track.started) {
+      load(track);
+      return;
+    }
+    try {
+      player.play();
+    } catch (e) {
+      markSilent(track, e);
+    }
+  }, [player, canPlay, load, markSilent]);
 
   // Public stop, for flipping to the List view: forgets the bound card too,
   // so coming back to the deck starts the visible card from its own
@@ -131,23 +226,20 @@ export function useDeckAudio(): DeckAudio {
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
-    if (bound.current) play(bound.current);
+    resume();
     return () => {
       focused.current = false;
       pause();
     };
-  }, [play, pause]));
+  }, [resume, pause]));
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") {
-        if (bound.current) play(bound.current);
-      } else {
-        pause();
-      }
+      if (state === "active") resume();
+      else pause();
     });
     return () => sub.remove();
-  }, [play, pause]);
+  }, [resume, pause]);
 
   return { bind, muted, toggleMute, stop };
 }
