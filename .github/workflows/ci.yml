@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FUNCTIONS_DISCOVERY_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No em dashes (U+2014) anywhere in the repo
+        run: |
+          if git grep -I -n $'\xe2\x80\x94' -- . ':!pnpm-lock.yaml'; then
+            echo "Em dash found. The project rule forbids U+2014 in code, comments, copy, and docs."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pnpm via corepack
+        run: corepack enable
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Next typegen
+        run: pnpm --filter @gatekeep/web exec next typegen
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Shared tests
+        run: pnpm --filter @gatekeep/shared test
+
+      - name: Firestore and Storage rules tests
+        run: pnpm emu:rules
+
+      - name: Functions emulator tests
+        run: pnpm emu:test
+
+      - name: Web lint
+        run: pnpm --filter @gatekeep/web lint
+
+      - name: Web build
+        run: pnpm --filter @gatekeep/web build
+
+      - name: Mobile lint
+        run: pnpm --filter @gatekeep/mobile lint
