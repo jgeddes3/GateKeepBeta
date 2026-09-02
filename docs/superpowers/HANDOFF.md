@@ -36,7 +36,17 @@ Done and merged (each has a rulings doc that is the authority for its area):
    dev build and is this sub-project's single highest on-device priority since it's entirely
    unverified off a real camera.
 
-NEXT: **7 Fan discovery**, then 8 Search. Deferred: 5c band payout splits.
+10A. Hardening branch A (merged 2026-09-02 at `ee433d4`, plan
+   `plans/2026-09-02-hardening-sweep.md`): every em dash removed repo-wide, Cloud Functions on
+   Node 22 (`.nvmrc`), the `tickets.orderId` and `members.uid` index overrides repaired, `.claude/`
+   local files ignored, and GitHub Actions CI (`.github/workflows/ci.yml`) running every gate plus
+   an em-dash check on every push. Any branch that forked before this merge (SP7's
+   `sp7-fan-discovery`) rebases onto main at its next clean commit and re-runs its gates under
+   Node 22.
+
+NEXT: **7 Fan discovery** (in flight on `sp7-fan-discovery`), then **10B Hardening branch B**
+(spec `specs/2026-09-02-hardening-design.md`, plan `plans/2026-09-02-hardening.md`, branches from
+main after 7 or in parallel on its own worktree), then 8 Search. Deferred: 5c band payout splits.
 
 **Read before the SP7 brainstorm:** `docs/superpowers/audit-2026-09-01.md`, the whole-project
 audit run after the 6 merge (19 blockers and near-blockers, per-area verdicts, the SP7 brief with
