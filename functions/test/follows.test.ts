@@ -45,6 +45,18 @@ describe("followTarget / unfollowTarget", () => {
     await expect(callFn("followTarget", { targetId: "genre:jazz", targetType: "genre" }, fan.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: FOLLOW_LIMIT_MESSAGE });
   });
+  it("re-following an already-followed target at the cap is still a no-op success", async () => {
+    const fan = await makeFan("fo6f");
+    const m = await makeApprovedMusicianProfile("fo6m");
+    // Seed 500 follow docs directly, one of them a real follow of the approved musician.
+    const batch = adb.batch();
+    for (let i = 0; i < 499; i++) batch.set(adb.doc(`follows/${fan.uid}_seed${i}`), { uid: fan.uid, targetId: `seed${i}`, targetType: "musician", createdAt: 1 });
+    batch.set(adb.doc(`follows/${fan.uid}_${m.profileId}`), { uid: fan.uid, targetId: m.profileId, targetType: "musician", createdAt: 1 });
+    await batch.commit();
+    await expect(callFn("followTarget", { targetId: m.profileId, targetType: "musician" }, fan.user)).resolves.toMatchObject({ ok: true });
+    await expect(callFn("followTarget", { targetId: "genre:jazz", targetType: "genre" }, fan.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: FOLLOW_LIMIT_MESSAGE });
+  });
   it("markGenrePickerSeen stamps the user doc", async () => {
     const fan = await makeFan("fo5f");
     await callFn("markGenrePickerSeen", {}, fan.user);

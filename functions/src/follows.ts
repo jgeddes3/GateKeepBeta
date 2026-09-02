@@ -37,10 +37,14 @@ export const followTarget = onCall<{ targetId: string; targetType: FollowTargetT
     // squeak past MAX_FOLLOWS_PER_USER by a follow or two) rather than
     // exact, which is acceptable for this limit.
     const countSnap = await db.collection("follows").where("uid", "==", uid).count().get();
-    if (countSnap.data().count >= MAX_FOLLOWS_PER_USER) throw new HttpsError("failed-precondition", FOLLOW_LIMIT_MESSAGE);
+    const atCap = countSnap.data().count >= MAX_FOLLOWS_PER_USER;
     await db.runTransaction(async (tx) => {
       const existing = await tx.get(followRef);
-      if (existing.exists) return; // idempotent
+      if (existing.exists) return; // idempotent: already-following bypasses the cap
+      // The cap check runs only after confirming this is a NEW follow, so a
+      // user already at the cap can still re-follow (no-op) a target they
+      // already follow without hitting FOLLOW_LIMIT_MESSAGE.
+      if (atCap) throw new HttpsError("failed-precondition", FOLLOW_LIMIT_MESSAGE);
       if (profileRef) {
         const p = await tx.get(profileRef);
         const data = p.data() as ProfileDoc | undefined;
