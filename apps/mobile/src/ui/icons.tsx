@@ -66,4 +66,10 @@ export const IconCheckCircle = wrap(Ph.CheckCircleIcon);
 // photo-collage empty state.
 export const IconHeart = wrap(Ph.HeartIcon);
 export const IconImages = wrap(Ph.ImagesIcon);
+// SP7 Task 12: the swipe deck's own overlay controls (List / Deck and the
+// mute toggle) and the silent-card marker on a deck card with no preview.
+export const IconListBullets = wrap(Ph.ListBulletsIcon);
+export const IconCompass = wrap(Ph.CompassIcon);
+export const IconSpeakerHigh = wrap(Ph.SpeakerHighIcon);
+export const IconSpeakerSlash = wrap(Ph.SpeakerSlashIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.

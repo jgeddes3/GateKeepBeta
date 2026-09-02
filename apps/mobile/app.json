@@ -13,7 +13,8 @@
       "supportsTablet": false,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSCameraUsageDescription": "GateKeep scans ticket QR codes at the door."
+        "NSCameraUsageDescription": "GateKeep scans ticket QR codes at the door.",
+        "NSLocationWhenInUseUsageDescription": "GateKeep shows venues and shows close to you."
       }
     },
     "android": {
@@ -50,6 +51,12 @@
       "@react-native-google-signin/google-signin",
       "expo-notifications",
       "expo-audio",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "GateKeep shows venues and shows close to you."
+        }
+      ],
       [
         "@stripe/stripe-react-native",
         {

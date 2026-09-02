@@ -113,6 +113,20 @@ export function formatEventFullDate(startsAtMs: number): string {
   }
 }
 
+// The compact form of the date above ("Sat, Sep 5"), for one-line contexts
+// where the full weekday-month-day-year string would push everything else
+// off the row: the swipe deck's "Next up" lines (SP7 Task 12). Same
+// defensive try/catch as its sibling, same LAUNCH_TIMEZONE pin.
+export function formatEventShortDate(startsAtMs: number): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      weekday: "short", month: "short", day: "numeric", timeZone: LAUNCH_TIMEZONE,
+    }).format(new Date(startsAtMs));
+  } catch {
+    return new Date(startsAtMs).toDateString();
+  }
+}
+
 // Status -> StatusBadge tone maps (mobile's StatusTone has no "outline"/
 // "secondary" the web Badge variant set carries; "neutral" stands in for
 // both here, same collapsing GIG_STATUS_TONE already does for this app's
