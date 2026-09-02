@@ -18,6 +18,19 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
+// 32-bit FNV-1a, used to derive a per-candidate PRNG seed from its id so each candidate's
+// random term depends only on (seed, id), never on its position in the array or which other
+// candidates are present. That keeps a candidate's score stable across excludeIds paging under
+// one seed, and makes the ranking independent of input array order.
+function fnv1a32(str: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 const DISTANCE_FULL_METERS = 20_000;
 
@@ -36,11 +49,11 @@ export function scoreCandidate(
 export function rankDeck(
   candidates: DeckCandidate[], ctx: { followedGenres: Set<string>; now: number; hasLocation: boolean; seed: number }, pageSize: number,
 ): DeckCandidate[] {
-  const rand = mulberry32(ctx.seed);
-  // Score in id order so the PRNG draw per candidate is deterministic regardless of input order.
-  const scored = [...candidates].sort((a, b) => a.id.localeCompare(b.id))
-    .map((c) => ({ c, s: scoreCandidate(c, { ...ctx, rand }) }))
-    .sort((a, b) => b.s - a.s || a.c.id.localeCompare(b.c.id))
+  // Each candidate gets its own PRNG seeded from (seed, id), so its score is independent of
+  // array order and of which other candidates are present in this call.
+  const scored = candidates
+    .map((c) => ({ c, s: scoreCandidate(c, { ...ctx, rand: mulberry32(ctx.seed ^ fnv1a32(c.id)) }) }))
+    .sort((a, b) => b.s - a.s || (a.c.id < b.c.id ? -1 : a.c.id > b.c.id ? 1 : 0))
     .map((x) => x.c);
   return interleaveByKind(scored).slice(0, pageSize);
 }

@@ -34,9 +34,10 @@ describe("rankDeck", () => {
     const a = rankDeck(pool, ctx, 20).map((x) => x.id);
     const b = rankDeck([...pool].reverse(), ctx, 20).map((x) => x.id);
     expect(a).toEqual(b);
-    // Ruling: assert at least one of seeds 1..20 differs from seed 7, rather than a single
-    // other seed, to remove a small flake chance from picking one seed that happens to collide.
-    const seeds = Array.from({ length: 20 }, (_, i) => i + 1);
+    // Ruling: assert at least one of seeds 1..20 (excluding the seed under test, 7) differs
+    // from seed 7, rather than a single other seed, to remove a small flake chance from
+    // picking one seed that happens to collide.
+    const seeds = Array.from({ length: 20 }, (_, i) => i + 1).filter((s) => s !== 7);
     const differs = seeds.some((s) => !rankDeck(pool, { ...ctx, seed: s }, 20).map((x) => x.id).every((id, i) => id === a[i]));
     expect(differs).toBe(true);
   });

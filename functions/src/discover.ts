@@ -15,6 +15,9 @@ function validateInput(data: unknown): { location: Geo | null; excludeIds: Set<s
   const d = (data ?? {}) as GetDiscoverDeckInput;
   let location: Geo | null = null;
   if (d.location !== undefined) {
+    if (d.location === null || typeof d.location !== "object") {
+      throw new HttpsError("invalid-argument", "Invalid location.");
+    }
     const { lat, lng } = d.location as Geo;
     if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)
         || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
@@ -41,10 +44,13 @@ async function firstApprovedTrack(db: Firestore, profileId: string): Promise<{ t
   return { track: snap.docs[0].data() as TrackDoc };
 }
 async function previewFor(db: Firestore, profileIds: string[], nameOf: (id: string) => string): Promise<DeckPreview> {
-  for (const id of profileIds) {
-    const hit = await firstApprovedTrack(db, id);
+  // Resolve every candidate's first approved track in parallel (one round trip for the whole
+  // lineup, not one per act), then pick the first hit by lineup order.
+  const hits = await Promise.all(profileIds.map((id) => firstApprovedTrack(db, id)));
+  for (let i = 0; i < profileIds.length; i++) {
+    const hit = hits[i];
     if (hit && hit.track.storagePath) {
-      return { trackPath: hit.track.storagePath, startSec: hit.track.startSec, durationSec: hit.track.durationSec ?? 0, artistName: nameOf(id) };
+      return { trackPath: hit.track.storagePath, startSec: hit.track.startSec, durationSec: hit.track.durationSec ?? 0, artistName: nameOf(profileIds[i]) };
     }
   }
   return null;
@@ -70,7 +76,7 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
     db.collection("profiles").where("type", "==", "musician").where("status", "==", "approved")
       .orderBy("updatedAt", "desc").limit(ARTIST_LIMIT).get(),
     db.collection("profiles").where("type", "==", "curator").where("subtype", "==", "venue")
-      .where("status", "==", "approved").limit(VENUE_LIMIT).get(),
+      .where("status", "==", "approved").orderBy("updatedAt", "desc").limit(VENUE_LIMIT).get(),
   ]);
   const events = eventsSnap.docs.map((d) => ({ id: d.id, ev: d.data() as EventDoc }));
   const artists = artistsSnap.docs.map((d) => ({ id: d.id, p: d.data() as ProfileDoc }));
@@ -138,7 +144,9 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
     if (c.kind === "artist") {
       const p = artistById.get(c.id)!;
       const next = nextByArtist.get(c.id);
-      const nextShow: DeckNextShow = next ? { eventId: next.id, title: next.ev.title, venueName: next.ev.location.venueName ?? "", startsAt: next.ev.startsAt } : null;
+      const nextShow: DeckNextShow = next
+        ? { eventId: next.id, title: next.ev.title, venueName: next.ev.location.venueName ?? (await profileName(next.ev.curatorProfileId)).name, startsAt: next.ev.startsAt }
+        : null;
       return { kind: "artist", id: c.id, profileId: c.id, handle: p.handle, name: p.name, subtype: p.subtype as MusicianSubtype,
         genres: p.portfolio?.genres ?? [], coverPhotoPath: p.portfolio?.coverPhotoPath ?? null, avatarPhotoPath: p.portfolio?.avatarPhotoPath ?? null,
         nextShow, preview: await previewFor(db, [c.id], () => p.name) };

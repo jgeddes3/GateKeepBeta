@@ -256,6 +256,13 @@
       { "fieldPath": "subtype", "order": "ASCENDING" },
       { "fieldPath": "status", "order": "ASCENDING" }
     ] },
+  { "collectionGroup": "profiles", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" },
+      { "fieldPath": "subtype", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "updatedAt", "order": "DESCENDING" }
+    ] },
   { "collectionGroup": "follows", "queryScope": "COLLECTION",
     "fields": [
       { "fieldPath": "uid", "order": "ASCENDING" },

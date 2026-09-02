@@ -15,6 +15,7 @@ describe("getDiscoverDeck", () => {
     await expect(deck(undefined as never)).rejects.toMatchObject({ code: "functions/unauthenticated" });
     const fan = await makeFan("dk0");
     await expect(deck(fan.user, { location: { lat: 200, lng: 0 } })).rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(deck(fan.user, { location: null })).rejects.toMatchObject({ code: "functions/invalid-argument" });
     await expect(deck(fan.user, { excludeIds: new Array(201).fill("x") })).rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
 
@@ -87,19 +88,22 @@ describe("getDiscoverDeck", () => {
   });
 
   it("orders nearer venues first when a location is given and reports distances", async () => {
-    // discover.ts's venue query (exactly per the brief) has no orderBy, so Firestore falls
-    // back to its composite index's implicit ascending-document-id tiebreak. Across the full
-    // suite's shared, never-cleared database, well over a hundred other "venue" curator
-    // fixtures exist by the time this test runs (every makeApprovedCuratorProfile call in
-    // every other file defaults to subtype "venue"), so relying on our two venues' random
-    // auto-ids to land inside the VENUE_LIMIT=100 window this query returns is a coin flip
-    // that failed in practice at full-suite scale. Re-home each profile under a document id
-    // that starts with a long run of "0", which sorts before any Firestore auto-id, so the
-    // query is guaranteed to include both. Also tag both with a genre ("worship") no other
-    // fixture in this suite uses and have the fan follow it, so the ranker (page one of 20,
-    // also crowded by the same shared database) reliably keeps both on page one too. This
-    // test then verifies the ranker's distance math rather than winning either lottery.
-    // Ledgered per this task's controller ruling.
+    // discover.ts's venue query has no orderBy of its own signal (it now orders by
+    // updatedAt desc, matching the artist query, so a fresh write always sorts first, but the
+    // page-one RANKING still competes against the full suite's shared, never-cleared corpus).
+    // Re-home each profile under a document id that starts with a long run of "0" (sorts
+    // before any Firestore auto-id) so the query is guaranteed to include both, and tag both
+    // with a genre ("worship") no other fixture in this suite uses, with the fan following it,
+    // to steer the ranking too.
+    //
+    // Score ceilings differ between the two, though: near scores genre(3) + soon(0.5, no next
+    // show) + dist(1.5, distance ~0) + rand[0,1) = [5, 6), which no ambient candidate near the
+    // fan's location can reach (an unmatched show can score at most soon(2) + dist(1.5) +
+    // rand[0,1), under 4.5), so near is deterministically on page one. far scores genre(3) +
+    // soon(0.5) + dist(0, beyond the ranker's 20 km falloff) + rand[0,1) = [3.5, 4.5), which
+    // DOES overlap an unmatched-but-soon-and-nearby show's range, so far is not guaranteed to
+    // land on page one; if it does not, look for it on page two (excludeIds = page one's ids,
+    // same seed) instead of requiring both on the same page.
     const near = await makeApprovedCuratorProfile("dk2n", "venue");
     const far = await makeApprovedCuratorProfile("dk2f", "venue");
     const nearId = `00000000000-dk2n-${Date.now()}`;
@@ -119,15 +123,22 @@ describe("getDiscoverDeck", () => {
     });
     const fan = await makeFan("dk2fan");
     await callFn("followTarget", { targetId: "genre:worship", targetType: "genre" }, fan.user);
-    const res = await deck(fan.user, { seed: 1, location: { lat: 30.27, lng: -97.74 } });
-    const venues = res.cards.filter((c) => c.kind === "venue" && (c.id === nearId || c.id === farId));
-    expect(venues.length).toBe(2);
-    const nearCard = venues.find((c) => c.id === nearId)!; const farCard = venues.find((c) => c.id === farId)!;
-    if (nearCard.kind === "venue" && farCard.kind === "venue") {
-      expect(nearCard.distanceMeters).toBeLessThan(100);
-      expect(farCard.distanceMeters).toBeGreaterThan(20_000);
+    const loc = { lat: 30.27, lng: -97.74 };
+    const page1 = await deck(fan.user, { seed: 1, location: loc });
+    const nearCard = page1.cards.find((c) => c.kind === "venue" && c.id === nearId);
+    expect(nearCard).toBeDefined();
+    let farCard = page1.cards.find((c) => c.kind === "venue" && c.id === farId);
+    const farOnPageOne = farCard !== undefined;
+    if (!farCard) {
+      const page2 = await deck(fan.user, { seed: 1, location: loc, excludeIds: page1.cards.map((c) => c.id) });
+      farCard = page2.cards.find((c) => c.kind === "venue" && c.id === farId);
     }
-    expect(res.cards.indexOf(nearCard)).toBeLessThan(res.cards.indexOf(farCard));
+    expect(farCard).toBeDefined();
+    if (nearCard?.kind === "venue") expect(nearCard.distanceMeters).toBeLessThan(100);
+    if (farCard?.kind === "venue") expect(farCard.distanceMeters).toBeGreaterThan(20_000);
+    if (farOnPageOne && nearCard && farCard) {
+      expect(page1.cards.indexOf(nearCard)).toBeLessThan(page1.cards.indexOf(farCard));
+    }
   });
 
   it("interleaves kinds and caps at the page size", async () => {
