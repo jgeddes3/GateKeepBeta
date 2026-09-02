@@ -21,11 +21,12 @@ import { cn } from "@/src/lib/utils";
 // files themselves (next/image requires width/height for a non-fill
 // image), not hardcoded to a round number.
 function AudienceSection({
-  heading, paragraphs, ctaLabel, reverse, imageSrc, imageAlt, imageWidth, imageHeight,
+  heading, paragraphs, ctaLabel, ctaHref = "/sign-in", reverse, imageSrc, imageAlt, imageWidth, imageHeight,
 }: {
   heading: string;
   paragraphs: string[];
   ctaLabel: string;
+  ctaHref?: string;
   reverse?: boolean;
   imageSrc: string;
   imageAlt: string;
@@ -42,7 +43,7 @@ function AudienceSection({
           ))}
         </div>
         <Button asChild variant="secondary" className="mt-6">
-          <Link href="/sign-in">{ctaLabel}</Link>
+          <Link href={ctaHref}>{ctaLabel}</Link>
         </Button>
       </div>
       <div className={cn("overflow-hidden rounded-gk border border-gk-border bg-gk-surface", reverse && "lg:order-1")}>
@@ -90,6 +91,32 @@ export function CuratorStorySection() {
       imageWidth={1568}
       imageHeight={380}
       reverse
+    />
+  );
+}
+
+// Task 10: the fan path, spec section 5's third audience alongside the
+// musician and curator stories above. Only two marketing captures exist
+// today (public/marketing/*.jpg); this reuses artist-page.jpg rather than
+// fabricating a discover-page screenshot, with alt text describing what the
+// image actually shows (a musician's artist page with hosted tracks), not
+// what a Discover page would show. reverse is left off (false) so this
+// section alternates back to the musician story's left-image layout after
+// the curator story's reverse.
+export function FanStorySection() {
+  return (
+    <AudienceSection
+      heading="Hear the room before you buy the ticket."
+      paragraphs={[
+        "Every artist on GateKeep has real recordings hosted here, so a show listing plays you the band, not a poster. Swipe through who is playing near you, follow the ones you like, and get told when they book a night.",
+        "Tickets live in the app. No printouts, no third-party resale, no surprise fees at the door.",
+      ]}
+      ctaLabel="Find a show"
+      ctaHref="/discover"
+      imageSrc="/marketing/artist-page.jpg"
+      imageAlt="A musician's artist page on GateKeep with hosted tracks a fan can listen to before deciding to go to the show."
+      imageWidth={1568}
+      imageHeight={340}
     />
   );
 }

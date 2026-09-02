@@ -64,6 +64,9 @@ function HeroCopy() {
           >
             <Link href="/sign-in">I book talent</Link>
           </Button>
+          <Button asChild variant="link" size="lg" className="text-gk-text">
+            <Link href="/discover">Find a show</Link>
+          </Button>
         </div>
       </div>
     </div>
@@ -72,10 +75,11 @@ function HeroCopy() {
 
 // The landing page's hero: HeroCarousel's photos/scrim/dots, with the glass
 // nav and bottom-left copy block (spec section 5.1, mock option A) laid on
-// top as children. Both CTAs point at /sign-in: there is no separate
-// sign-up route today (the toggle on that page itself is "New here? Create
-// an account"), so this is the real, working destination for both the
-// musician and curator paths.
+// top as children. The musician and curator buttons point at /sign-in:
+// there is no separate sign-up route today (the toggle on that page itself
+// is "New here? Create an account"), so this is the real, working
+// destination for both paths. Task 10 adds a third, lower-emphasis path for
+// fans: a link-style button to /discover, the real browse destination.
 export function LandingHero() {
   return (
     <HeroCarousel>

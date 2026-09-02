@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { LandingHero } from "../src/marketing/LandingHero";
 import {
-  MusicianStorySection, CuratorStorySection, HowItWorksSection, MoneySection,
+  MusicianStorySection, CuratorStorySection, FanStorySection, HowItWorksSection, MoneySection,
   CityStorySection, ClosingCtaSection,
 } from "../src/marketing/LandingSections";
 import { SignedInRedirect } from "../src/marketing/SignedInRedirect";
@@ -23,6 +23,7 @@ export default function Home() {
       <main>
         <MusicianStorySection />
         <CuratorStorySection />
+        <FanStorySection />
         <HowItWorksSection />
         <MoneySection />
         <CityStorySection />
