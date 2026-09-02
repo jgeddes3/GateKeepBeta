@@ -24,7 +24,7 @@ import {
   GIG_STATUSES,
   type ProfileDoc, type ProfileStatus, type AuditLogDoc, type UserDoc, type TrackDoc, type GigDoc, type GigStatus,
   type CuratorSubtype, type AdminNoteDoc, type ReliabilityMark, type ReliabilityDoc, type BookingRequestDoc,
-  type AdminAlertDoc, type AdminAlertKind,
+  type AdminAlertDoc, type AdminAlertKind, type EventDoc, type ShowPostDoc,
 } from "@gatekeep/shared";
 
 // Task 12: full-polish restyle of the admin dashboard, per antislop-ui's App
@@ -1278,6 +1278,124 @@ function TakedownsPanel() {
   );
 }
 
+type ShowPostRow = { id: string; eventTitle: string; artistName: string } & ShowPostDoc;
+
+// Task 9 (SP7): admin moderation surface for show posts. collectionGroup
+// queries over "posts" would need their own rules clause (firestore.rules'
+// per-subcollection match on events/{eventId}/posts/{postId} doesn't extend
+// to a collection-group read the way the "members" collection group gets an
+// explicit recursive-wildcard rule for), so this reads the ordinary way
+// instead: the same (status, startsAt) events index every public shows list
+// already uses gets the 50 soonest published events, then one live-posts
+// query per event (the same (status, createdAt desc) posts index
+// ShowPostsForAct itself relies on), fetched in parallel and flattened.
+// Artist names are a second batched lookup (n+1-avoidance, same idiom
+// resolveLineup in app/e/[eventId]/page.tsx uses for its own handle lookup)
+// over the unique musicianProfileIds the fetched posts actually carry.
+function ShowPostsPanel() {
+  const [rows, setRows] = useState<ShowPostRow[] | "loading">("loading");
+  const [error, setError] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  // Inline async IIFE, not a named function called via `void load()`: the
+  // same shape UserProfiles' own effect above already uses (and the only
+  // shape eslint-config-next's React Compiler rules trace through cleanly),
+  // with the single setRows/setError call at the very end, guarded by
+  // `!cancelled`, rather than a synchronous reset up front.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { db } = getFirebase();
+        const eventsSnap = await getDocs(query(
+          collection(db, "events"), where("status", "==", "published"), orderBy("startsAt"), limit(50)));
+        const perEvent = await Promise.all(eventsSnap.docs.map(async (ev) => {
+          const event = ev.data() as EventDoc;
+          const postsSnap = await getDocs(query(
+            collection(db, `events/${ev.id}/posts`), where("status", "==", "live"), orderBy("createdAt", "desc")));
+          return postsSnap.docs.map((p) => ({ id: p.id, eventTitle: event.title, ...(p.data() as ShowPostDoc) }));
+        }));
+        const flat = perEvent.flat().sort((a, b) => b.createdAt - a.createdAt).slice(0, 50);
+
+        const uniqueProfileIds = [...new Set(flat.map((p) => p.musicianProfileId))];
+        const names = new Map<string, string>();
+        await Promise.all(uniqueProfileIds.map(async (id) => {
+          try {
+            const snap = await getDoc(doc(db, "profiles", id));
+            names.set(id, snap.exists() ? (snap.data() as ProfileDoc).name : "Unknown artist");
+          } catch {
+            names.set(id, "Unknown artist");
+          }
+        }));
+
+        if (!cancelled) setRows(flat.map((p) => ({ ...p, artistName: names.get(p.musicianProfileId) ?? "Unknown artist" })));
+      } catch (e) {
+        if (!cancelled) {
+          setRows([]);
+          setError(e instanceof Error ? e.message : "Could not load show posts.");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const remove = async (row: ShowPostRow) => {
+    setRemovingId(row.id);
+    try {
+      await httpsCallable(getFirebase().functions, "removeShowPost")({ eventId: row.eventId, postId: row.id });
+      setRows((prev) => (prev === "loading" ? prev : prev.filter((r) => r.id !== row.id)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not remove that post, try again.");
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  return (
+    <section className="grid gap-3">
+      <h2 className="font-syne text-lg font-semibold text-gk-text">Show posts</h2>
+      <p className="font-sora text-sm text-gk-muted">
+        Recent live posts across the 50 soonest published events.
+      </p>
+      {error && (
+        <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          {error}
+        </p>
+      )}
+      {rows === "loading" && <p className="font-sora text-sm text-gk-muted">Loading…</p>}
+      {rows !== "loading" && rows.length === 0 && !error && (
+        <p className="font-sora text-sm text-gk-muted">No live show posts right now.</p>
+      )}
+      {rows !== "loading" && rows.length > 0 && (
+        <div className="grid gap-2">
+          {rows.map((r) => (
+            <Card key={r.id}>
+              <CardContent className="grid gap-2 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-syne text-sm font-semibold text-gk-text">{r.artistName}</p>
+                    <p className="truncate font-sora text-xs text-gk-muted">
+                      {r.eventTitle || "Untitled event"} · {new Date(r.createdAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm" variant="secondary" className="text-gk-destructive shrink-0"
+                    disabled={removingId === r.id} onClick={() => void remove(r)}
+                  >
+                    {removingId === r.id ? "Removing…" : "Remove"}
+                  </Button>
+                </div>
+                <p className="whitespace-pre-wrap font-sora text-sm text-gk-text">{r.text}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // Loads and displays one user's profiles + statuses (spec §6: "profiles and
 // statuses"), via the same collectionGroup('members').where('uid', ...)
 // pattern the mobile/web dashboards use for "my profiles", admins can read
@@ -1676,6 +1794,7 @@ export default function AdminPage() {
           <TracksQueue />
           <GigsAdmin />
           <TakedownsPanel />
+          <ShowPostsPanel />
           <UserLookup />
           <AuditLog />
         </div>

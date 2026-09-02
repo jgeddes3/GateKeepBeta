@@ -8,6 +8,8 @@ import { DateBlockRow } from "../../../src/components/DateBlockRow";
 import { MiniPlayer } from "../../../src/components/MiniPlayer";
 import { PhotoPlaceholder } from "../../../src/components/GigCard";
 import { OfferGigButton } from "../../../src/bookings/OfferGigButton";
+import { FollowButton } from "../../../src/discover/FollowButton";
+import { LatestPostLine, ShowPostsForAct } from "../../../src/discover/ShowPosts";
 import { formatChipLabel } from "./chipLabel";
 import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
@@ -62,14 +64,38 @@ const EXTERNAL_LINK_LABEL: Record<ExternalLinkKind, string> = {
 // line, this musician IS the "other party" of their own lineup listing, so
 // the row's own subtitle (the event's public-precision location) is the
 // whole story.
-function UpcomingEventRow({ event }: { event: UpcomingEventSummary }) {
+//
+// Task 9 (SP7): below the row, LatestPostLine adds a quiet one-line preview
+// (hidden entirely while there's nothing to show), and a collapsible "Post
+// about this show" reveals the full thread plus, for a signed-in member of
+// THIS profile, a composer. Collapsed by default (a plain <details>, no
+// client state needed just to gate visibility) so a stranger's visit to this
+// page stays as quiet as before Task 9; ShowPostsForAct itself decides
+// whether the composer renders, since this file is a Server Component with
+// no signed-in identity of its own to check.
+function UpcomingEventRow({ event, musicianProfileId, artistName }: {
+  event: UpcomingEventSummary; musicianProfileId: string; artistName: string;
+}) {
   return (
-    <DateBlockRow
-      dateMs={event.startsAtMs}
-      title={event.title || "Untitled event"}
-      subtitle={gigLocationLabel(event.location)}
-      href={`/e/${event.eventId}`}
-    />
+    <div className="grid gap-1">
+      <DateBlockRow
+        dateMs={event.startsAtMs}
+        title={event.title || "Untitled event"}
+        subtitle={gigLocationLabel(event.location)}
+        href={`/e/${event.eventId}`}
+      />
+      <LatestPostLine eventId={event.eventId} musicianProfileId={musicianProfileId} />
+      <details className="ml-2 rounded-gk-sm">
+        <summary className="cursor-pointer list-none font-sora text-xs font-medium text-gk-muted outline-none [&::-webkit-details-marker]:hidden hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus">
+          Post about this show
+        </summary>
+        <div className="mt-2">
+          <ShowPostsForAct
+            eventId={event.eventId} musicianProfileId={musicianProfileId} artistName={artistName} endsAt={event.endsAtMs}
+          />
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -138,9 +164,10 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
                 {profile.name}
               </h1>
             </div>
-            <div className="mt-3 flex flex-wrap gap-1.5">
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <Badge variant="secondary">{SUBTYPE_LABEL[subtype]}</Badge>
               {genres.map((g) => <Badge key={g} variant="secondary">{formatChipLabel(g)}</Badge>)}
+              <FollowButton targetId={profileId} targetType="musician" />
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-3">
               {firstTrack && <HeroPlayButton id={firstTrack.id} title={firstTrack.title} url={firstTrack.url} />}
@@ -213,8 +240,10 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
         {upcomingEvents.length > 0 && (
           <section className="mt-8">
             <h2 className="font-syne text-lg font-semibold text-gk-text">Upcoming events</h2>
-            <div className="mt-2">
-              {upcomingEvents.map((e) => <UpcomingEventRow key={e.eventId} event={e} />)}
+            <div className="mt-2 grid gap-3">
+              {upcomingEvents.map((e) => (
+                <UpcomingEventRow key={e.eventId} event={e} musicianProfileId={profileId} artistName={profile.name} />
+              ))}
             </div>
           </section>
         )}

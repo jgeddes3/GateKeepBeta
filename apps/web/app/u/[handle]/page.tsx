@@ -56,7 +56,15 @@ export type ShowEntry = {
 // no image), so this stays cheap-to-fetch and consistent with that
 // existing pattern rather than inventing a photo treatment nothing else on
 // this page uses.
-export type UpcomingEventSummary = { eventId: string; title: string; startsAtMs: number; location: GigPublicLocation };
+// Task 9: endsAtMs added (additive) alongside startsAtMs, so
+// MusicianProfile.tsx's own ShowPostsForAct row (the show-post composer,
+// which needs a show's end time to know when posting closes) has it on
+// hand without a second per-event fetch. Curator rows carry the same field
+// for type-shape parity even though CuratorProfile.tsx never mounts a
+// composer.
+export type UpcomingEventSummary = {
+  eventId: string; title: string; startsAtMs: number; endsAtMs: number; location: GigPublicLocation;
+};
 
 export type MusicianLoaded = {
   kind: "musician";
@@ -256,7 +264,7 @@ async function loadMusicianUpcomingEvents(profileId: string): Promise<UpcomingEv
       orderBy("startsAt")));
     return snap.docs.map((d) => {
       const e = d.data() as EventDoc;
-      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, location: e.location };
+      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, endsAtMs: e.endsAt, location: e.location };
     });
   } catch (e) {
     // Same "auxiliary content shouldn't 500 the whole page" tradeoff as
@@ -284,7 +292,7 @@ async function loadCuratorUpcomingEvents(profileId: string): Promise<UpcomingEve
       orderBy("startsAt")));
     return snap.docs.map((d) => {
       const e = d.data() as EventDoc;
-      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, location: e.location };
+      return { eventId: d.id, title: e.title, startsAtMs: e.startsAt, endsAtMs: e.endsAt, location: e.location };
     });
   } catch (e) {
     console.error("loadCuratorUpcomingEvents failed", profileId, e);

@@ -16,6 +16,7 @@ import { getStripeJs } from "../payments/stripeLoader";
 import { gkStripeAppearance } from "../payments/stripeAppearance";
 import { TierPicker, MAX_QTY_PER_LINE_ITEM, type TierPickerTier } from "./TierPicker";
 import { formatCents, eventSalesClosedReason } from "./eventDisplay";
+import { PostPurchaseGenrePrompt } from "../discover/GenrePicker";
 import { Button } from "../ui/button";
 import { IconWarning } from "../ui/icons";
 
@@ -162,11 +163,16 @@ function PayConfirmForm({ onConfirmed, onCancel }: { onConfirmed: () => void; on
   );
 }
 
-export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: initialNow }: {
+export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: initialNow, eventGenres }: {
   eventId: string; eventStatus: EventStatus; startsAt: number; tiers: TierPickerTier[];
   // The instant page.tsx's own server render captured (see useLiveNow's
   // header comment for why this is a prop, not a bare client Date.now()).
   now: number;
+  // SP7 Task 9: this event's own genres (EventDoc.genres, curator-set or
+  // lineup-derived), threaded down only so the post-purchase prompt below
+  // can preselect them in the genre picker it opens. Nothing else in this
+  // flow reads it.
+  eventGenres: string[];
 }) {
   const { user } = useAuth();
   const router = useRouter();
@@ -318,6 +324,11 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
             {purchasedQty} ticket{purchasedQty === 1 ? "" : "s"} confirmed.
           </p>
           <Button asChild className="mt-3"><Link href="/tickets">View your tickets</Link></Button>
+          {/* SP7 Task 9: the ONLY place this renders on the event page (the
+              paid-done branch, never idle/confirm/pending/failed) and only
+              when useGenrePickerGate says so (a fan who's already followed a
+              genre, or already seen this prompt, gets nothing extra here). */}
+          <PostPurchaseGenrePrompt eventGenres={eventGenres} />
         </div>
       );
     }

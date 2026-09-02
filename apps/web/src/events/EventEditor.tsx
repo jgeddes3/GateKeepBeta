@@ -2,10 +2,11 @@
 import { useState } from "react";
 import { httpsCallable } from "firebase/functions";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
-import type { EventAct, EventDoc, EventStatus, TicketTierDoc } from "@gatekeep/shared";
+import { GENRES, type EventAct, type EventDoc, type EventStatus, type TicketTierDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { LocationFields, MAX_ADDRESS_LENGTH, type LocationValue } from "../gigs/GigForms";
 import { EVENT_STATUS_LABEL, EVENT_STATUS_BADGE } from "./eventDisplay";
+import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Button } from "../ui/button";
@@ -49,11 +50,13 @@ interface CreateEventPayload {
   curatorProfileId: string; source: EventSourceInput;
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
+  curatorGenres?: string[];
 }
 interface UpdateEventPayload {
   curatorProfileId: string; eventId: string;
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
+  curatorGenres?: string[];
 }
 interface SetEventTiersPayload {
   curatorProfileId: string; eventId: string;
@@ -135,6 +138,34 @@ function LineupFields({ lineup, onChange }: { lineup: EventAct[]; onChange: (v: 
         </Button>
       </div>
       <p className="font-sora text-xs text-gk-muted">At least one act is required.</p>
+    </div>
+  );
+}
+
+// ---------- Genres editor (shared by create + edit) ----------
+
+// Controller ruling (Task 3, surfaced here since Task 9 is the first UI for
+// it): a curator can override the event's discovery genres directly, for
+// when its lineup is all external acts with no GateKeep profile of their
+// own to derive genres from (EventDoc.genres' own doc comment: curatorGenres
+// wins when set, else the union of lineup booking acts' portfolio.genres).
+// Reuses PortfolioForms' own Chip (Button size="sm", aria-pressed, pill
+// radius), the same toggle-chip control BioGenresForm and GenrePicker
+// already use for the identical "pick up to 3 from GENRES" shape, so this
+// doesn't invent a fourth genre-picker treatment.
+function GenresFields({ selected, onChange }: { selected: string[]; onChange: (v: string[]) => void }) {
+  const toggle = (g: string) =>
+    onChange(selected.includes(g) ? selected.filter((x) => x !== g) : selected.length < 3 ? [...selected, g] : selected);
+  return (
+    <div className="grid gap-2">
+      <div className="flex flex-wrap gap-2">
+        {GENRES.map((g) => (
+          <Chip key={g} active={selected.includes(g)} onClick={() => toggle(g)}>
+            {formatChipLabel(g)}
+          </Chip>
+        ))}
+      </div>
+      <p className="font-sora text-xs text-gk-muted">Used when your acts have no GateKeep profile. Up to three.</p>
     </div>
   );
 }
@@ -345,6 +376,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
   const [startsAtInput, setStartsAtInput] = useState(seedStartsAt ? toLocalInput(seedStartsAt) : "");
   const [endsAtInput, setEndsAtInput] = useState(seedStartsAt ? toLocalInput(seedStartsAt + 2 * 3_600_000) : "");
   const [lineup, setLineup] = useState<EventAct[]>(seedLineup ?? []);
+  const [genres, setGenres] = useState<string[]>([]);
   const [location, setLocation] = useState<LocationValue>({ address: "", visibility: isVenue ? "public" : "neighborhood" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -372,7 +404,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
     try {
       const payload: CreateEventPayload = {
         curatorProfileId: profileId, source: resolvedSource, title: trimmedTitle, description: description.trim(),
-        startsAt, endsAt, lineup,
+        startsAt, endsAt, lineup, curatorGenres: genres.length > 0 ? genres : undefined,
       };
       const { data } = await httpsCallable<CreateEventPayload, { eventId: string }>(
         getFirebase().functions, "createEvent")(payload);
@@ -421,6 +453,11 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
         <CardContent><LineupFields lineup={lineup} onChange={setLineup} /></CardContent>
       </Card>
 
+      <Card>
+        <CardHeader><CardTitle>Genres (optional)</CardTitle></CardHeader>
+        <CardContent><GenresFields selected={genres} onChange={setGenres} /></CardContent>
+      </Card>
+
       {source.kind === "standalone" && (
         <Card>
           <CardHeader><CardTitle>Location</CardTitle></CardHeader>
@@ -451,6 +488,7 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
   const [endsAtInput, setEndsAtInput] = useState(toLocalInput(event.endsAt));
   const [maxTicketsPerBuyer, setMaxTicketsPerBuyer] = useState(String(event.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER));
   const [lineup, setLineup] = useState<EventAct[]>(event.lineup);
+  const [genres, setGenres] = useState<string[]>(event.curatorGenres ?? []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -473,6 +511,12 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
       const payload: UpdateEventPayload = {
         curatorProfileId: profileId, eventId: event.id, title: trimmedTitle, description: description.trim(),
         startsAt, endsAt, maxTicketsPerBuyer: maxTix, lineup,
+        // Always resent, never carried forward as "no change": updateEvent's
+        // own full-replace convention (this payload's posterPath field just
+        // below is the same discipline) means curatorGenres is REPLACED on
+        // every save, so an absent field here would silently clear a
+        // previously-set selection rather than leaving it alone.
+        curatorGenres: genres.length > 0 ? genres : undefined,
         // Fix round 1 (Important): updateEvent's own full-replace convention
         // treats an absent posterPath as "clear it" (resolvePosterPath in
         // functions/src/events.ts returns null for both undefined and
@@ -527,6 +571,11 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
       <Card>
         <CardHeader><CardTitle>Lineup</CardTitle></CardHeader>
         <CardContent><LineupFields lineup={lineup} onChange={setLineup} /></CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>Genres (optional)</CardTitle></CardHeader>
+        <CardContent><GenresFields selected={genres} onChange={setGenres} /></CardContent>
       </Card>
 
       {error && <ErrorBox message={error} />}

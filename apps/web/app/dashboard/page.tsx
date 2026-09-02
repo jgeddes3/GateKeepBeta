@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { collectionGroup, collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from "firebase/firestore";
@@ -14,7 +14,15 @@ import { Badge } from "../../src/ui/badge";
 import { Skeleton } from "../../src/ui/skeleton";
 import { IconBell, IconBuildings, IconEarnings, IconGigs, IconUser } from "../../src/ui/icons";
 
-type ProfileSummary = { profileId: string; type: ProfileType; name: string; status: ProfileStatus };
+// Task 9 (SP7): followerCount, read straight off the same profile doc this
+// list already fetches per membership (ProfileDoc.followerCount?: number,
+// server-maintained, absent on a profile with zero follows so `?? 0` at the
+// render site is the only place that matters). Shown only here, a private
+// dashboard row belonging to the profile's own members: firestore.rules
+// never exposes it on a public profile read, and this page never renders it
+// on /u/[handle] either, so the binding "follower counts stay private" rule
+// holds by construction, not by a rendering choice this file could get wrong.
+type ProfileSummary = { profileId: string; type: ProfileType; name: string; status: ProfileStatus; followerCount: number };
 type NotificationRow = { id: string } & NotificationDoc;
 
 // Real state, not decoration: draft has no strong tint (it isn't a review
@@ -46,7 +54,7 @@ function ProfilesList({ uid }: { uid: string }) {
         if (cancelled) return;
         if (p.exists()) {
           const d = p.data() as ProfileDoc;
-          out.push({ profileId: p.id, type: d.type, name: d.name, status: d.status });
+          out.push({ profileId: p.id, type: d.type, name: d.name, status: d.status, followerCount: d.followerCount ?? 0 });
         }
       }
       if (!cancelled) { setProfiles(out); setLoaded(true); }
@@ -109,7 +117,9 @@ function ProfilesList({ uid }: { uid: string }) {
                 </span>
                 <div className="min-w-0">
                   <p className="truncate font-syne text-base font-semibold text-gk-text">{p.name}</p>
-                  <p className="font-sora text-sm text-gk-muted">{p.type === "musician" ? "Musician" : "Curator"}</p>
+                  <p className="font-sora text-sm text-gk-muted">
+                    {p.type === "musician" ? "Musician" : "Curator"} · {p.followerCount} follower{p.followerCount === 1 ? "" : "s"}
+                  </p>
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-3">
@@ -123,6 +133,102 @@ function ProfilesList({ uid }: { uid: string }) {
         );
       })}
     </div>
+  );
+}
+
+// Task 9 (SP7): resolves one profileId to its handle for the ONE
+// notification kind that carries a profileId rather than a ready-made route
+// (new_music, refId = the artist's own profileId, see NotificationDoc's own
+// SP7 comment). A ref-backed cache (not state) so a row that re-renders for
+// an unrelated reason (e.g. its own `read` flag flipping) never re-fetches a
+// handle it already resolved; the state pair alongside it exists only to
+// trigger the ONE re-render once that single lookup actually resolves.
+function useProfileHandle(profileId: string | null): string | null {
+  const cache = useRef<Map<string, string | null>>(new Map());
+  const [handle, setHandle] = useState<string | null>(null);
+  // Every actual setHandle call below runs inside a .then()/.catch()
+  // callback, never synchronously in the effect body itself
+  // (eslint-config-next's React Compiler rules flag the latter, same
+  // tradeoff ShowsList.tsx's own identical comment documents): even the
+  // cache-hit path resolves through Promise.resolve().then(...) rather than
+  // calling setHandle directly, so a row whose profileId is already cached
+  // still only ever updates state from a callback.
+  useEffect(() => {
+    if (!profileId) return; // initial state is already null; nothing to set
+    let cancelled = false;
+    const cached = cache.current.get(profileId);
+    const lookup = cached !== undefined
+      ? Promise.resolve(cached)
+      : getDoc(doc(getFirebase().db, "profiles", profileId))
+        .then((snap) => {
+          const h = snap.exists() ? ((snap.data() as ProfileDoc).handle ?? null) : null;
+          cache.current.set(profileId, h);
+          return h;
+        })
+        .catch(() => null);
+    lookup.then((h) => { if (!cancelled) setHandle(h); });
+    return () => { cancelled = true; };
+  }, [profileId]);
+  return handle;
+}
+
+// One notification row, split out of NotificationsList's own map body so
+// useProfileHandle (a hook, rules-of-hooks bound) has a component of its own
+// to live in: only the "new_music" kind ever calls it (a null profileId for
+// every other kind is a no-op, see the hook's own early return), but the
+// hook still has to run unconditionally on every row per those rules.
+function NotificationListRow({ n, markRead }: { n: NotificationRow; markRead: (id: string) => void }) {
+  // SP4 Task 10: a "booking" notification carries refId (the bookingId, see
+  // Task 10a's NotificationDoc.refId plumbing) once it was written after
+  // that field existed; a booking-kind row written before then (or,
+  // defensively, any other kind with no route of its own) has no refId and
+  // renders as plain text, same as before.
+  // SP7 Task 9: show_announced/show_rescheduled/show_post all carry refId =
+  // the eventId, straight to the public event page; new_music carries the
+  // artist's own profileId instead, resolved to a handle above.
+  const artistHandle = useProfileHandle(n.kind === "new_music" ? (n.refId ?? null) : null);
+  const isEventKind = n.kind === "show_announced" || n.kind === "show_rescheduled" || n.kind === "show_post";
+  const href = isEventKind && n.refId ? `/e/${n.refId}`
+    : n.kind === "new_music" && artistHandle ? `/u/${artistHandle}`
+    : n.kind === "booking" && n.refId ? `/dashboard/bookings/${n.refId}`
+    : null;
+  const rowBody = (
+    <>
+      <span
+        className={cn("mt-1.5 size-2 shrink-0 rounded-full bg-gk-accent", n.read && "invisible")}
+        aria-hidden="true"
+      />
+      <span className="min-w-0 flex-1">
+        <span className={cn("block font-sora text-sm font-semibold", n.read ? "text-gk-muted" : "text-gk-text")}>
+          {n.title}
+        </span>
+        <span className="mt-0.5 block font-sora text-sm text-gk-muted">{n.body}</span>
+        <span className="mt-1 block font-sora text-xs text-gk-muted">
+          {new Date(n.createdAt).toLocaleString()}
+        </span>
+      </span>
+    </>
+  );
+  return (
+    <li>
+      {href ? (
+        // Next <Link> (client-side nav), not a plain <a>: a full-document
+        // navigation can abort the in-flight markRead() updateDoc before it
+        // lands (Task 10 review). Client-side routing lets the write
+        // complete regardless of the nav.
+        <Link href={href} onClick={() => markRead(n.id)} className="flex gap-3 p-5 hover:bg-gk-border/20">
+          {rowBody}
+        </Link>
+      ) : (
+        <button
+          type="button"
+          onClick={() => markRead(n.id)}
+          className="flex w-full gap-3 p-5 text-left hover:bg-gk-border/20"
+        >
+          {rowBody}
+        </button>
+      )}
+    </li>
   );
 }
 
@@ -185,52 +291,7 @@ function NotificationsList({ uid }: { uid: string }) {
 
   return (
     <ul className="divide-y divide-gk-border overflow-hidden rounded-gk border border-gk-border bg-gk-surface">
-      {notes.map((n) => {
-        // SP4 Task 10: a "booking" notification carries refId (the
-        // bookingId, see Task 10a's NotificationDoc.refId plumbing) once
-        // it was written after that field existed; a booking-kind row
-        // written before then (or, defensively, any other kind) has no
-        // refId and renders as plain text, same as before.
-        const href = n.kind === "booking" && n.refId ? `/dashboard/bookings/${n.refId}` : null;
-        const rowBody = (
-          <>
-            <span
-              className={cn("mt-1.5 size-2 shrink-0 rounded-full bg-gk-accent", n.read && "invisible")}
-              aria-hidden="true"
-            />
-            <span className="min-w-0 flex-1">
-              <span className={cn("block font-sora text-sm font-semibold", n.read ? "text-gk-muted" : "text-gk-text")}>
-                {n.title}
-              </span>
-              <span className="mt-0.5 block font-sora text-sm text-gk-muted">{n.body}</span>
-              <span className="mt-1 block font-sora text-xs text-gk-muted">
-                {new Date(n.createdAt).toLocaleString()}
-              </span>
-            </span>
-          </>
-        );
-        return (
-          <li key={n.id}>
-            {href ? (
-              // Next <Link> (client-side nav), not a plain <a>: a full-document
-              // navigation can abort the in-flight markRead() updateDoc before it
-              // lands (Task 10 review). Client-side routing lets the write
-              // complete regardless of the nav.
-              <Link href={href} onClick={() => markRead(n.id)} className="flex gap-3 p-5 hover:bg-gk-border/20">
-                {rowBody}
-              </Link>
-            ) : (
-              <button
-                type="button"
-                onClick={() => markRead(n.id)}
-                className="flex w-full gap-3 p-5 text-left hover:bg-gk-border/20"
-              >
-                {rowBody}
-              </button>
-            )}
-          </li>
-        );
-      })}
+      {notes.map((n) => <NotificationListRow key={n.id} n={n} markRead={markRead} />)}
     </ul>
   );
 }

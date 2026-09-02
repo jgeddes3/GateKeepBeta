@@ -77,8 +77,8 @@ async function resolveLineup(
     }
   }));
   return lineup.map((act) => act.kind === "booking"
-    ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null }
-    : { name: act.name, handle: null });
+    ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null, profileId: act.musicianProfileId }
+    : { name: act.name, handle: null, profileId: null });
 }
 
 export const loadEvent = cache(async (eventId: string): Promise<LoadedEvent | null> => {

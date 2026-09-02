@@ -4,6 +4,7 @@ import { formatGigTime, gigLocationLabel } from "./gigDisplay";
 import { GalleryLightbox } from "./GalleryLightbox";
 import { DateBlockRow } from "../../../src/components/DateBlockRow";
 import { GigCard } from "../../../src/components/GigCard";
+import { FollowButton } from "../../../src/discover/FollowButton";
 import { Badge } from "../../../src/ui/badge";
 import { Button } from "../../../src/ui/button";
 import { formatChipLabel } from "./chipLabel";
@@ -203,7 +204,7 @@ function ShowRow({ show, isVenue }: { show: ShowEntry; isVenue: boolean }) {
 }
 
 export function CuratorProfile({ data }: { data: CuratorLoaded }) {
-  const { profile, photoUrls, openGigs, upcomingShows, pastShows, upcomingEvents } = data;
+  const { profileId, profile, photoUrls, openGigs, upcomingShows, pastShows, upcomingEvents } = data;
   const c = profile.curator;
   const subtype = profile.subtype as CuratorSubtype;
   const isVenue = subtype === "venue";
@@ -236,8 +237,9 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
         {/* 2. NAME + CHIPS + CTA */}
         <div className="mt-5">
           <h1 className="font-syne text-2xl font-extrabold leading-none text-gk-text sm:text-4xl">{profile.name}</h1>
-          <div className="mt-3 flex flex-wrap gap-1.5">
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {chips.map((label) => <Badge key={label} variant="secondary">{label}</Badge>)}
+            <FollowButton targetId={profileId} targetType="curator" label={isVenue ? "Follow venue" : undefined} />
           </div>
           {openGigs.length > 0 && (
             <div className="mt-4">
