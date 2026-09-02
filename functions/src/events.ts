@@ -36,8 +36,7 @@ import { geocoderApiKey } from "./geocode.js";
 import { stripeSecretKey } from "./stripeClient.js";
 import { refundOrdersForCancelledEvent } from "./ticketing.js";
 import { notifyFollowers } from "./follows.js";
-import { notifyUser } from "./notifications.js";
-import { announceTargets, showAnnouncedNote, onTheBillNote, showRescheduledNote } from "./announce.js";
+import { announceTargets, showAnnouncedNote, onTheBillNote, showRescheduledNote, notifyLineupMembers } from "./announce.js";
 
 const MAX_TIERS_PER_EVENT = 20;
 
@@ -349,22 +348,33 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
     // profile members they're on the bill.
     const added = updated.lineupMusicianProfileIds.filter((id) => !event.lineupMusicianProfileIds.includes(id));
     if (added.length > 0) {
-      await notifyFollowers(added, showAnnouncedNote(input.eventId, updated), `announce:${input.eventId}`);
-      for (const musicianProfileId of added) {
-        const members = await db.collection(`profiles/${musicianProfileId}/members`).get();
-        await Promise.all(members.docs.map((m) => notifyUser(m.id, onTheBillNote(input.eventId, updated), `bill:${input.eventId}`)));
+      // Best-effort, post-commit notification. A failure here must never
+      // surface as an error on an already-committed lineup update.
+      try {
+        await notifyFollowers(added, showAnnouncedNote(input.eventId, updated), `announce:${input.eventId}`);
+        await notifyLineupMembers(db, added, onTheBillNote(input.eventId, updated), `bill:${input.eventId}`);
+      } catch (e) {
+        console.error(`updateEvent: lineup-addition fan-out failed for event ${input.eventId}`, e);
       }
     }
     // A date change reaches every existing follower (venue/artist/genre) AND
     // every current valid/checked-in ticket holder, keyed per new date so a
     // second reschedule to a DIFFERENT date notifies again.
     if (input.startsAt !== event.startsAt) {
-      const attendees = await db.collection(`events/${input.eventId}/attendees`)
-        .where("status", "in", ["valid", "checked_in"]).get();
-      const holders = [...new Set(attendees.docs.map((a) => (a.data() as AttendeeDoc).ownerUid))];
-      await notifyFollowers(announceTargets(updated), showRescheduledNote(input.eventId, updated, input.startsAt),
-        `resched:${input.eventId}:${input.startsAt}`, holders);
+      // Best-effort, post-commit notification. A failure here must never
+      // surface as an error on an already-committed reschedule.
+      try {
+        const attendees = await db.collection(`events/${input.eventId}/attendees`)
+          .where("status", "in", ["valid", "checked_in"]).get();
+        const holders = [...new Set(attendees.docs.map((a) => (a.data() as AttendeeDoc).ownerUid))];
+        await notifyFollowers(announceTargets(updated), showRescheduledNote(input.eventId, updated, input.startsAt),
+          `resched:${input.eventId}:${input.startsAt}`, holders);
+      } catch (e) {
+        console.error(`updateEvent: reschedule fan-out failed for event ${input.eventId}`, e);
+      }
       // Re-arm the 24h reminder when the show moved back out of its window.
+      // Not part of the try above: this is a real state change, not a
+      // notification, and must still happen even if the fan-out above failed.
       if (event.reminderSentAt !== undefined && input.startsAt - Date.now() > EVENT_REMINDER_WINDOW_MS) {
         await eventRef.update({ reminderSentAt: FieldValue.delete() });
       }
@@ -511,11 +521,14 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
   // fan-out (see updateEvent below) never re-notifies these same fans.
   // Every lineup act's own profile members separately hear "you're on the
   // bill", under their own key.
-  const published: EventDoc = { ...event, status: "published" };
-  await notifyFollowers(announceTargets(published), showAnnouncedNote(input.eventId, published), `announce:${input.eventId}`);
-  for (const musicianProfileId of published.lineupMusicianProfileIds) {
-    const members = await db.collection(`profiles/${musicianProfileId}/members`).get();
-    await Promise.all(members.docs.map((m) => notifyUser(m.id, onTheBillNote(input.eventId, published), `bill:${input.eventId}`)));
+  // Best-effort, post-commit notification. A failure here must never
+  // surface as an error on an already-committed publish.
+  try {
+    const published: EventDoc = { ...event, status: "published" };
+    await notifyFollowers(announceTargets(published), showAnnouncedNote(input.eventId, published), `announce:${input.eventId}`);
+    await notifyLineupMembers(db, published.lineupMusicianProfileIds, onTheBillNote(input.eventId, published), `bill:${input.eventId}`);
+  } catch (e) {
+    console.error(`publishEvent: fan-out failed for event ${input.eventId}`, e);
   }
 
   return { ok: true };

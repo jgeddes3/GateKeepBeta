@@ -347,10 +347,16 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
       // SP7 Task 5: fan-out to the artist's followers, distinct from the
       // profile-member notification just above (that one tells the
       // musician their own track is live; this tells fans of the profile
-      // there's new music).
-      const profileSnap = await db.doc(`profiles/${profileId}`).get();
-      const artistName = (profileSnap.data() as ProfileDoc | undefined)?.name ?? "An artist you follow";
-      await notifyFollowers([profileId], newMusicNote(profileId, artistName, prior.title ?? "New track"), `track:${trackId}`);
+      // there's new music). Best-effort, post-commit notification. A
+      // failure here must never surface as an error on an already-committed
+      // approve.
+      try {
+        const profileSnap = await db.doc(`profiles/${profileId}`).get();
+        const artistName = (profileSnap.data() as ProfileDoc | undefined)?.name ?? "An artist you follow";
+        await notifyFollowers([profileId], newMusicNote(profileId, artistName, prior.title ?? "New track"), `track:${trackId}`);
+      } catch (e) {
+        console.error(`reviewTrack: new-music fan-out failed for track ${profileId}/${trackId}`, e);
+      }
     }
     return { ok: true };
   });

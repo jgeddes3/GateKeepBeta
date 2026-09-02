@@ -64,6 +64,20 @@ describe("show announced fan-out", () => {
     expect(after).toHaveLength(1); expect(after[0].id).toBe(`announce:${ev2}`);
     // The first event's venue follower got nothing new from the second event.
     expect((await notes(venueFan.uid)).filter((x) => x.id === `announce:${ev2}`)).toHaveLength(0);
+
+    // Resending the SAME lineup (no new booking act) notifies nobody: not a
+    // duplicate show_announced doc for secondFan, and no notification of any
+    // kind for secondFan at all.
+    const ev2Doc = (await adb.doc(`events/${ev2}`).get()).data() as EventDoc;
+    const beforeCount = (await notes(secondFan.uid)).length;
+    await callFn("updateEvent", { curatorProfileId: second.curator.profileId, eventId: ev2,
+      title: ev2Doc.title, description: ev2Doc.description, startsAt: ev2Doc.startsAt, endsAt: ev2Doc.endsAt,
+      lineup: ev2Doc.lineup,
+    }, second.curator.owner.user);
+    const stillOne = (await notes(secondFan.uid)).filter((x) => x.kind === "show_announced");
+    expect(stillOne).toHaveLength(1);
+    const afterCount = (await notes(secondFan.uid)).length;
+    expect(afterCount).toBe(beforeCount);
   });
 
   it("a reschedule reaches followers and ticket holders and re-arms the reminder", async () => {

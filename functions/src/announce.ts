@@ -1,12 +1,15 @@
 /**
  * SP7 Task 5: note builders shared by the two follower fan-out hooks
- * (events.ts's publishEvent/updateEvent and tracks.ts's reviewTrack).
- * Deliberately pure: no Firestore reads/writes here, just note shaping.
- * follows.ts's notifyFollowers and notifications.ts's notifyUser own all
- * persistence.
+ * (events.ts's publishEvent/updateEvent and tracks.ts's reviewTrack), plus
+ * one small shared I/O helper (notifyLineupMembers below) the same two
+ * callables both need. The note builders themselves are deliberately pure:
+ * no Firestore reads/writes, just note shaping. follows.ts's notifyFollowers
+ * and notifications.ts's notifyUser own all persistence.
  */
 
+import type { Firestore } from "firebase-admin/firestore";
 import { genreTargetId, LAUNCH_TIMEZONE, type EventDoc, type NotificationDoc } from "@gatekeep/shared";
+import { notifyUser } from "./notifications.js";
 
 type Note = Omit<NotificationDoc, "read" | "createdAt">;
 
@@ -57,4 +60,20 @@ export function newMusicNote(profileId: string, artistName: string, trackTitle: 
     kind: "new_music", refId: profileId, title: `New from ${artistName}`,
     body: `"${trackTitle}" is up. Tap to listen.`,
   };
+}
+
+// Notifies every profile member (not just the primary owner) of each given
+// musician profile, under the same note and dedupe key. Both publishEvent's
+// whole-lineup "you're on the bill" fan-out and updateEvent's added-act-only
+// fan-out shared this exact "fetch profiles/{id}/members then notifyUser
+// each" loop before this was pulled out; kept here rather than in events.ts
+// since it's shared, tiny, and sits next to the note builders it's always
+// called alongside.
+export async function notifyLineupMembers(
+  db: Firestore, musicianProfileIds: string[], note: Note, dedupeKey: string,
+): Promise<void> {
+  for (const musicianProfileId of musicianProfileIds) {
+    const members = await db.collection(`profiles/${musicianProfileId}/members`).get();
+    await Promise.all(members.docs.map((m) => notifyUser(m.id, note, dedupeKey)));
+  }
 }
