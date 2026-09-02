@@ -26,20 +26,20 @@ const SUBPROCESS_TIMEOUT_MS = 120_000;
 // ffmpeg-static's own types/index.d.ts declares `export default: string | null`,
 // but under this package's NodeNext + "type":"module" setup TS resolves the
 // default import as the whole CJS module namespace instead (a known
-// ffmpeg-static/NodeNext interop quirk) — the runtime value is still the raw
+// ffmpeg-static/NodeNext interop quirk), the runtime value is still the raw
 // string (or null) per Node's CJS/ESM interop, so assert the real type here
 // rather than trust the inferred one.
 const ffmpegPath = ffmpegPathRaw as unknown as string | null;
 
 // Thrown only for conditions with a controlled, safe-to-display message (no
-// file paths, no ffmpeg/ffprobe stderr) — every other error in processAudio
+// file paths, no ffmpeg/ffprobe stderr), every other error in processAudio
 // collapses to a generic failureReason so raw error text (which can carry
 // local tmp paths or 100KB+ of subprocess stderr) never lands in a
 // member-readable track doc.
 class ClipValidationError extends Error {} // bad input from the musician (the clip window)
 class ServerConfigError extends Error {}   // this deployment is broken, not the musician's upload
 
-// ffmpeg-static's default export is `string | null` — null when the package
+// ffmpeg-static's default export is `string | null`, null when the package
 // has no prebuilt binary for this platform/arch. Fail loudly (and only) at
 // first use, inside processAudio's try/catch, so a missing binary surfaces
 // as a normal "failed" track rather than crashing every export in this
@@ -49,7 +49,7 @@ class ServerConfigError extends Error {}   // this deployment is broken, not the
 // instead of collapsing into the generic "file may be corrupt" reason.
 function requireFfmpegPath(): string {
   if (!ffmpegPath) {
-    throw new ServerConfigError("Audio processing is temporarily unavailable — try again later.");
+    throw new ServerConfigError("Audio processing is temporarily unavailable. Try again later.");
   }
   return ffmpegPath;
 }
@@ -65,12 +65,12 @@ async function probeDurationSec(file: string): Promise<number> {
 }
 
 // generation is typed number in firebase-functions but arrives as a string at
-// runtime (GCS serializes int64 as JSON string) — accept both, coerce at use.
+// runtime (GCS serializes int64 as JSON string), accept both, coerce at use.
 async function processAudio(objectName: string, generation: string | number): Promise<void> {
   // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
   const stagingFile = bucket().file(objectName, { generation: Number(generation) });
 
-  // staging/audio/{uid}/{profileId}/{trackId} — validated defensively (not
+  // staging/audio/{uid}/{profileId}/{trackId}, validated defensively (not
   // just trusted from storage.rules) before any of it is used to build
   // Firestore paths.
   const segments = objectName.split("/");
@@ -87,14 +87,14 @@ async function processAudio(objectName: string, generation: string | number): Pr
   // shared finally below can always see them. The try now starts BEFORE the
   // Firestore guard read: a throwing read (network blip, emulator hiccup)
   // previously skipped the finally entirely and leaked the staging object
-  // forever — now any exception from this point on still runs the cleanup.
+  // forever, now any exception from this point on still runs the cleanup.
   let tmp: string | null = null;
   let uploadedReviewPath: string | null = null;
   try {
     const snap = await trackRef.get();
     const data = snap.data();
     // Forged/mismatched uploads (no doc, wrong uploader, wrong state, or a
-    // malformed startSec): discard the object and do nothing — createTrack
+    // malformed startSec): discard the object and do nothing, createTrack
     // is the only path that arms this pipeline, and it always writes a
     // numeric startSec, so a non-number here means a corrupt/tampered doc,
     // not a real in-flight upload worth reporting back to the musician.
@@ -110,20 +110,20 @@ async function processAudio(objectName: string, generation: string | number): Pr
     try {
       await stagingFile.download({ destination: inFile });
     } catch (err) {
-      // NOTE: this is a STORAGE error — @google-cloud/storage ApiError carries
+      // NOTE: this is a STORAGE error, @google-cloud/storage ApiError carries
       // HTTP codes (404), unlike the Firestore gRPC code 5 checked elsewhere
       // in this file. Do not "fix" this back to 5.
       if ((err as { code?: number }).code === 404) {
         // Generation-pinned reads 404 only when the object no longer
-        // exists — and the only thing that ever deletes a staging/audio
+        // exists, and the only thing that ever deletes a staging/audio
         // object is this trigger itself (storage.rules makes staging
         // deletes trigger-only). A 404 here means a prior/duplicate
         // delivery of this same event already consumed and cleaned up
-        // this exact generation — Cloud Functions storage triggers are
+        // this exact generation, Cloud Functions storage triggers are
         // at-least-once, so a second delivery racing (or arriving after)
         // the first is expected, not an error. Writing "failed" here would
         // risk clobbering whatever terminal status that other invocation
-        // already reached (or is about to reach), so just log and stop —
+        // already reached (or is about to reach), so just log and stop,
         // no track-doc write at all.
         console.error("processUpload: staging object already consumed by another delivery", objectName, err);
         return;
@@ -140,7 +140,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     }
     // -ss before -i = fast seek to the clip start. -t here is an INPUT
     // option (it precedes -i, so it bounds how much of the input is read
-    // from that seek point) rather than an output duration cap — for a
+    // from that seek point) rather than an output duration cap, for a
     // straight single-stream re-encode like this the practical effect is
     // the same either way: the clip tops out at MAX_CLIP_SECONDS. -map
     // 0:a:0 pins the first audio stream explicitly (some containers carry
@@ -157,11 +157,11 @@ async function processAudio(objectName: string, generation: string | number): Pr
     await bucket().upload(outFile, { destination: destPath, metadata: { contentType: "audio/mp4" } });
     uploadedReviewPath = destPath;
 
-    // A transcode can take several seconds — long enough for deleteTrack to
+    // A transcode can take several seconds, long enough for deleteTrack to
     // race it and remove the doc mid-flight. Re-read before writing
     // pending_review; if the doc is gone or someone else already moved it
     // off "processing" (e.g. deleteTrack ran), the upload above is now
-    // orphaned — delete it and bail without writing. This narrows the race
+    // orphaned, delete it and bail without writing. This narrows the race
     // to the few milliseconds between this read and the update() below,
     // not closes it outright; any residual orphan in that window is reaped
     // by deleteTrack's/deleteProfile's own best-effort storage cleanup.
@@ -182,7 +182,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     console.error("processUpload: audio processing failed", objectName, e);
     const failureReason = (e instanceof ClipValidationError || e instanceof ServerConfigError
       ? e.message
-      : "Audio processing failed — the file may be corrupt or unsupported."
+      : "Audio processing failed: the file may be corrupt or unsupported."
     ).slice(0, 500);
     if (uploadedReviewPath) {
       await bucket().file(uploadedReviewPath).delete()
@@ -190,7 +190,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
     }
     try {
       // Same status guard as the success path above: only write "failed" if
-      // the doc is still there and still "processing" — never blindly
+      // the doc is still there and still "processing", never blindly
       // overwrite a doc that deleteTrack (or a second trigger invocation)
       // already moved on from.
       const failSnap = await trackRef.get();
@@ -199,9 +199,9 @@ async function processAudio(objectName: string, generation: string | number): Pr
       }
     } catch (err) {
       // gRPC code 5 (NOT_FOUND): the doc vanished between the guard-read
-      // above and this update — expected under the same delete race,
+      // above and this update, expected under the same delete race,
       // nothing to log. Anything else is unexpected; log it but still
-      // swallow rather than rethrow — storage-trigger retry is off, so
+      // swallow rather than rethrow, storage-trigger retry is off, so
       // rethrowing here buys nothing and would just strand the doc in
       // "processing" forever with staging already deleted.
       if ((err as { code?: number }).code !== 5) {
@@ -214,7 +214,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
   }
 }
 
-// Mirrors storage.rules' staging/photos filename pattern — validated here
+// Mirrors storage.rules' staging/photos filename pattern, validated here
 // too (not just trusted from the rules) before it's used to pick a Firestore
 // field or an output path. "gallery" is the curator equivalent of
 // avatar/cover (see storagePaths.ts's PhotoKind and the kind/type gating
@@ -243,7 +243,7 @@ async function processPhoto(objectName: string, generation: string | number): Pr
   try {
     // Membership is derived from the OBJECT PATH's {uid}/{profileId}
     // segments, never from object.metadata (client-controlled and
-    // untrusted — see storage.rules' note on staging paths). The read is
+    // untrusted, see storage.rules' note on staging paths). The read is
     // inside this try/finally (not before it) so a throwing read still
     // triggers the staging cleanup below, instead of leaking the object.
     const member = await db.doc(`profiles/${profileId}/members/${uid}`).get();
@@ -269,7 +269,7 @@ async function processPhoto(objectName: string, generation: string | number): Pr
 
     const [bytes] = await stagingFile.download();
     // Re-encode via sharp: strips EXIF (GPS!) and bounds dimensions.
-    // failOn: "error" (sharp's default is "warning", the strictest level) —
+    // failOn: "error" (sharp's default is "warning", the strictest level),
     // real-world phone/app JPEG encoders commonly emit warning-level defects
     // (e.g. libjpeg's "extraneous bytes before marker") on otherwise-valid
     // photos; the default "warning" level would reject those uploads.
@@ -278,23 +278,23 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     const sharpOpts = { failOn: "error" as const, limitInputPixels: 50_000_000 };
 
     // The whole decode/resize/encode step is wrapped in its own try/catch:
-    // genuinely corrupt/undecodable bytes (not just an allowlist mismatch —
+    // genuinely corrupt/undecodable bytes (not just an allowlist mismatch,
     // sharp can't even read metadata off them) throw from .metadata() or
     // .toBuffer() rather than returning a recognizable format string. Pre-
     // existing SP2 bug (found live in Task 9's walkthrough): that throw used
     // to propagate unhandled out of the trigger instead of being discarded
     // the same way every other rejection path in this function is (log +
-    // return, staging cleanup left to the shared `finally` below) — there's
+    // return, staging cleanup left to the shared `finally` below), there's
     // no per-photo "failed" status doc to write (unlike processAudio's
     // tracks), so silent discard-with-log IS this pipeline's existing
     // failure style.
     let jpeg: Buffer;
     try {
       // Format allowlist: sharp/libvips happily decodes SVG (an XML format
-      // with real parser/XXE-class attack surface), GIF, TIFF, and HEIF too —
+      // with real parser/XXE-class attack surface), GIF, TIFF, and HEIF too,
       // none of that is gated by the staging upload's declared contentType,
       // which storage.rules only checks against the client-set Content-Type
-      // header, not the actual bytes (trivially spoofable — upload arbitrary
+      // header, not the actual bytes (trivially spoofable, upload arbitrary
       // bytes with `contentType: "image/jpeg"`). Probe the real decoded
       // format before running attacker-controlled bytes through the full
       // resize/encode pipeline below, and refuse anything outside the three
@@ -305,11 +305,11 @@ async function processPhoto(objectName: string, generation: string | number): Pr
         return; // finally below still deletes the staging object
       }
 
-      // Avatars intentionally do NOT set withoutEnlargement — the 512x512
+      // Avatars intentionally do NOT set withoutEnlargement, the 512x512
       // output is a contract the rest of the app relies on (fixed-size crop
       // targets), so a tiny source still gets upscaled to fill it. Covers and
       // gallery photos both use withoutEnlargement since they're display-only
-      // and any size up to 1600x1600 is fine — a gallery photo is just a
+      // and any size up to 1600x1600 is fine, a gallery photo is just a
       // repeatable cover, sized identically.
       const pipeline = kind === "avatar"
         ? sharp(bytes, sharpOpts).rotate().resize(512, 512, { fit: "cover" })
@@ -325,7 +325,7 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     if (kind === "gallery") {
       // Append-with-cap, transactional: unlike avatar/cover's single-slot
       // overwrite (read-prev-then-write, an accepted narrow race elsewhere
-      // in this function), a gallery upload is ADDITIVE — concurrent
+      // in this function), a gallery upload is ADDITIVE, concurrent
       // uploads must not both read "11 photos" and both append past the
       // MAX_CURATOR_PHOTOS cap. The transaction makes the length check and
       // the append atomic.
@@ -341,14 +341,14 @@ async function processPhoto(objectName: string, generation: string | number): Pr
         return "ok";
       });
       if (outcome !== "ok") {
-        // "cap": resource-exhausted-equivalent — mirrors the disallowed-format
+        // "cap": resource-exhausted-equivalent, mirrors the disallowed-format
         // branch above (console.error + discard, no client-visible error:
         // this is an async trigger, not a callable). "gone": profile deleted
         // mid-flight (deleteProfile's recursiveDelete racing this trigger),
-        // same as the avatar/cover orphan-cleanup case below — no live doc
+        // same as the avatar/cover orphan-cleanup case below, no live doc
         // to append to any more.
         if (outcome === "cap") {
-          console.error("processUpload: curator gallery photo rejected — MAX_CURATOR_PHOTOS reached", objectName);
+          console.error("processUpload: curator gallery photo rejected, MAX_CURATOR_PHOTOS reached", objectName);
         }
         await bucket().file(destPath).delete()
           .catch(logDeleteFailure("processUpload",
@@ -373,12 +373,12 @@ async function processPhoto(objectName: string, generation: string | number): Pr
       await profileRef.update({ [field]: destPath, updatedAt: Date.now() });
     } catch (err) {
       // Profile can be deleted mid-flight too (deleteProfile's
-      // recursiveDelete races this trigger) — gRPC code 5 (NOT_FOUND).
+      // recursiveDelete races this trigger), gRPC code 5 (NOT_FOUND).
       // There's no live doc to point at destPath any more, so the
       // freshly-written public object would otherwise survive as an orphan
       // even after the profile is gone; clean it up regardless of the
       // error's cause. Same swallow-not-rethrow reasoning as the audio
-      // failure path — only log when the cause wasn't the expected
+      // failure path, only log when the cause wasn't the expected
       // "doc is gone" case.
       await bucket().file(destPath).delete().catch(logDeleteFailure("processUpload", "orphaned public photo", destPath));
       if ((err as { code?: number }).code !== 5) {

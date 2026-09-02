@@ -13,14 +13,14 @@ const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gate
 const adb = adminFirestore(admin);
 
 // This file's tests are the first to invoke "reviewProfile"/"grantAdmin" in
-// the suite, so — like the cold-start note in authTriggers.test.ts — the
+// the suite, so, like the cold-start note in authTriggers.test.ts, the
 // Functions emulator's first invocation of each of those callables can take
 // several seconds. Verified via `firebase emulators:exec ... vitest run
 // test/review.test.ts --testTimeout=30000`: the emulator work itself
 // completes (function execution logged at 20-100ms), the wall-clock cost is
-// emulator cold start, not a hang — so raise the default 5s test timeout
+// emulator cold start, not a hang, so raise the default 5s test timeout
 // rather than mask a real failure.
-// 20s (not this file's prior 15s) — the SP4 (Task 7) reject-from-approved
+// 20s (not this file's prior 15s), the SP4 (Task 7) reject-from-approved
 // booking-cascade tests below chain a real applyToGig -> acceptBooking pair
 // on top of the profile setup, matching bookingLifecycle.test.ts's own
 // precedent for this same family of chain-heavy booking tests.
@@ -32,7 +32,7 @@ async function pendingProfile(ownerEmailPrefix: string) {
     "createProfileDraft",
     { type: "curator", subtype: "venue", name: "Rooftop 21", handle: `roof_${Date.now()}` },
     owner.user);
-  // Task 4 added a curator minimum-content gate to submitProfileForReview —
+  // Task 4 added a curator minimum-content gate to submitProfileForReview,
   // this fixture's subject is the review flow, not the gate, so seed the
   // gate's requirements directly rather than re-deriving them per test.
   await seedCuratorGateContent(adb, profileId);
@@ -72,7 +72,7 @@ describe("reviewProfile", () => {
     const { owner, profileId } = await pendingProfile("v3");
     // The client SDK surfaces the HttpsError code as `functions/<code>` on
     // the rejected error's `.code`, not in `.message` (message is "Admin
-    // access required.", which does not match /permission|denied/i) —
+    // access required.", which does not match /permission|denied/i),
     // assert on the code, matching the pattern used in profiles.test.ts.
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, owner.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -85,7 +85,7 @@ describe("reviewProfile", () => {
     await expect(callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
   });
-  // Spec §6: "admins can retroactively unpublish anything" — profiles didn't
+  // Spec §6: "admins can retroactively unpublish anything", profiles didn't
   // have this path before (only reviewTrack did); reject now also accepts an
   // already-approved profile, flipping it to rejected so firestore.rules
   // hides it (and all its tracks, via profileApproved()) from public reads.
@@ -186,7 +186,7 @@ async function seedSeries(curatorProfileId: string, overrides: Partial<GigSeries
   return ref.id;
 }
 
-// SP4 (Task 7) fixture — an approved musician profile with genuine
+// SP4 (Task 7) fixture, an approved musician profile with genuine
 // portfolio-gate content, mirroring bookings.test.ts/bookingLifecycle.test.ts's
 // identical helper. This file's own subject is the review/reject cascade,
 // not booking negotiation mechanics.
@@ -213,7 +213,7 @@ async function makeApprovedMusicianProfile(emailPrefix: string) {
   return { owner, profileId };
 }
 
-// SP4 (Task 7 quality-review fix) — mirrors bookingLifecycle.test.ts/
+// SP4 (Task 7 quality-review fix), mirrors bookingLifecycle.test.ts/
 // bookings.test.ts/gigs.test.ts's identical pollNotifications helper.
 async function pollNotifications(uid: string) {
   const deadline = Date.now() + 10_000;
@@ -228,7 +228,7 @@ async function pollNotifications(uid: string) {
 describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
   it("approving a curator profile sets a curatorAccess marker for every member, including one who joined before approval", async () => {
     const { owner, profileId } = await pendingProfile("ca1");
-    // Note: pendingProfile already submitted for review — invite/accept a
+    // Note: pendingProfile already submitted for review, invite/accept a
     // colleague onto the still-pending profile before it's approved, so the
     // approve path's "every member" claim is actually exercised against more
     // than just the owner.
@@ -237,7 +237,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     await callFn("inviteMember", { profileId, email, role: "member", label: "manager" }, owner.user);
     const inviteId = await fetchPendingInviteId(adb, profileId, colleague.uid);
     await callFn("respondToInvite", { inviteId, accept: true }, colleague.user);
-    expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(false); // not yet — profile isn't approved
+    expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(false); // not yet, profile isn't approved
 
     const adminUser = await makeAdminUser("ca1a");
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
@@ -255,7 +255,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     await callFn("updatePortfolio", { profileId, bio: "x", genres: ["soul"] }, owner.user);
     await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
     // Musicians' submit gate requires a listenable track too; this test's
-    // subject is curatorAccess, not the gate — admin-approve directly is not
+    // subject is curatorAccess, not the gate, admin-approve directly is not
     // possible (approve requires pending_review), so seed status straight to
     // pending_review via the admin SDK rather than clearing the track gate.
     await adb.doc(`profiles/${profileId}`).update({ status: "pending_review" });
@@ -277,7 +277,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(true);
 
     // The colleague ALSO belongs to a second, independently-approved curator
-    // profile — their marker must survive profile A's rejection.
+    // profile, their marker must survive profile A's rejection.
     const otherOwner = await signUpTestUser(`ca3-otherowner-${Date.now()}@test.com`);
     const { profileId: otherProfileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
@@ -315,7 +315,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     expect(logs.docs[0].data().detail).toBe("[was approved] Policy violation. (closed 2 gigs, paused 1 series)");
 
     // curatorAccess recompute: the owner belongs to no OTHER approved curator
-    // profile — marker gone. The colleague still belongs to otherProfileId —
+    // profile, marker gone. The colleague still belongs to otherProfileId,
     // marker survives.
     expect((await adb.doc(`curatorAccess/${owner.uid}`).get()).exists).toBe(false);
     expect((await adb.doc(`curatorAccess/${colleague.uid}`).get()).exists).toBe(true);
@@ -357,9 +357,9 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     expect(after.deposit).toEqual(depositBefore);
 
     const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
-    expect(reliability).toBeUndefined(); // moderation — no mark
+    expect(reliability).toBeUndefined(); // moderation, no mark
 
-    // Minor fix (Task 7 quality review): the musician side is notified —
+    // Minor fix (Task 7 quality review): the musician side is notified,
     // note this profile IS the one just rejected, so this is in addition
     // to (not instead of) reviewProfile's own separate profile_review
     // notification.
@@ -368,7 +368,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
       d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
 
     // F1 (security audit wave): the MUSICIAN side is the one being
-    // moderated here — unlike a curator-side reject/delete (whose own
+    // moderated here, unlike a curator-side reject/delete (whose own
     // cascade already retires its gigs), the CURATOR's content here is
     // entirely innocent and stays live. Without the fix, this gig would sit
     // "filled" (still publicly readable, still linked to a booking that
@@ -384,7 +384,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
       d.data().kind === "booking" && /no longer available|reopened/i.test(d.data().body as string))).toBe(true);
   });
 
-  // F1 (security audit wave) — the past-dated counterpart: a linked gig
+  // F1 (security audit wave), the past-dated counterpart: a linked gig
   // whose date has already elapsed must be left completely untouched (the
   // show already happened; the gig's own filled status is its history).
   it("reject-from-approved on a MUSICIAN profile with a confirmed booking on a PAST-dated gig: the gig is left untouched", async () => {
@@ -407,13 +407,13 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
     expect(after.status).toBe("expired");
 
     const gigAfter = (await adb.doc(`gigs/${gigId}`).get()).data();
-    expect(gigAfter?.status).toBe("filled"); // untouched — the show already happened
+    expect(gigAfter?.status).toBe("filled"); // untouched, the show already happened
     expect(gigAfter?.bookingId).toBe(bookingId);
     expect(gigAfter?.bookedMusicianProfileId).toBe(musicianProfileId);
   });
 
   // SP4 (Task 7 amendment): a whole-run booking fills BOTH a past and a
-  // future occurrence — the reject cascade must treat them differently
+  // future occurrence, the reject cascade must treat them differently
   // (close+unlink the future one; leave the past one, and its show
   // history, completely alone) rather than uniformly via the booking unwind
   // alone, which only ever touches the `bookings` doc, never the gigs.
@@ -449,7 +449,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
       expect(futureAfter?.bookedMusicianProfileId).toBeNull();
 
       const pastAfter = (await adb.doc(`gigs/${pastGigId}`).get()).data();
-      expect(pastAfter?.status).toBe("filled"); // untouched — the show already happened
+      expect(pastAfter?.status).toBe("filled"); // untouched, the show already happened
       expect(pastAfter?.bookingId).toBe(bookingId);
       expect(pastAfter?.bookedMusicianProfileId).toBe(musicianProfileId);
 
@@ -464,7 +464,7 @@ describe("reviewProfile: curatorAccess maintenance + takedown cascade", () => {
         d.data().kind === "booking" && /no longer available/i.test(d.data().body as string))).toBe(true);
     } finally {
       // Never leave an active series behind for the shared emulator's daily
-      // sweep scan — the reject cascade above already pauses it on the
+      // sweep scan, the reject cascade above already pauses it on the
       // success path, but guard defensively in case an assertion throws
       // first.
       await adb.doc(`gigSeries/${seriesId}`).update({ status: "ended" });
@@ -478,7 +478,7 @@ describe("grantAdmin", () => {
     const targetUid = `google-target-${Date.now()}`;
     const targetEmail = `t-${Date.now()}@test.com`;
     // The client SDK's createUserWithEmailAndPassword always yields a
-    // "password" provider — importUsers is the only way (emulator or prod)
+    // "password" provider, importUsers is the only way (emulator or prod)
     // to seed a user with google.com provider data without a real OAuth
     // flow, so the failed-precondition Google-only gate can be exercised
     // on its passing branch.
@@ -500,7 +500,7 @@ describe("grantAdmin", () => {
     await expect(callFn("grantAdmin", { uid: targetUid }, stranger.user)).rejects.toThrow();
   });
 
-  it("rejects granting admin to a non-Google (password) account — spec §8's no-2FA compensating control", async () => {
+  it("rejects granting admin to a non-Google (password) account, spec §8's no-2FA compensating control", async () => {
     const adminUser = await makeAdminUser("admin");
     const target = await signUpTestUser(`pw-${Date.now()}@test.com`);
     await expect(callFn("grantAdmin", { uid: target.uid }, adminUser.user))

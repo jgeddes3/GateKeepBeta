@@ -29,8 +29,8 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     await requireProfileAdmin(profileId, uid);
     const db = getFirestore();
     // Cap check runs BEFORE email resolution, and unconditionally (does not
-    // depend on whether the email resolves). If it ran after resolution —
-    // or only on the resolved-email path — then at/over the cap a caller
+    // depend on whether the email resolves). If it ran after resolution,
+    // or only on the resolved-email path, then at/over the cap a caller
     // could distinguish a resolving email (resource-exhausted) from an
     // unknown one ({ ok: true }), reopening the anti-enumeration oracle
     // this endpoint is otherwise closed against. Running it here keeps the
@@ -43,7 +43,7 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     }
     // Anti-enumeration: an unknown email must be indistinguishable from a
     // known one to any signed-up caller. Resolve the email, but on failure
-    // fall through to a uniform { ok: true } rather than throwing — never
+    // fall through to a uniform { ok: true } rather than throwing, never
     // reveal via response shape/error code whether an account exists for
     // a given email.
     let invited;
@@ -61,7 +61,7 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     return { ok: true as const };
   });
 
-// Exported for reuse by Task 7's invite sweep (scheduled.ts) — the daily job
+// Exported for reuse by Task 7's invite sweep (scheduled.ts), the daily job
 // revokes stale pending invites past the same expiry respondToInvite already
 // enforces at accept-time. Single source of truth, not redefined there.
 export const INVITE_MAX_AGE_MS = 14 * 86_400_000; // 14 days
@@ -90,8 +90,8 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
     if (accept) {
       const memberRef = db.doc(`profiles/${inv.profileId}/members/${uid}`);
       // Transactional: read-then-write must be atomic, otherwise an accept
-      // can blindly .set() over an existing membership doc — e.g. a sole
-      // admin who was already re-added by another flow — silently demoting
+      // can blindly .set() over an existing membership doc, e.g. a sole
+      // admin who was already re-added by another flow, silently demoting
       // or discarding their role and permanently bricking the profile if
       // they were the only admin.
       await db.runTransaction(async (tx) => {
@@ -103,10 +103,10 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
         tx.set(memberRef, member);
         tx.update(ref, { status: "accepted" });
       });
-      // curatorAccess/{uid} (SP4 Task 13 item 6 — repairs the Task 6 fast
+      // curatorAccess/{uid} (SP4 Task 13 item 6, repairs the Task 6 fast
       // path above): the ORIGINAL "accepting can only GAIN access" reasoning
-      // assumed `profileSnap` — read BEFORE the membership transaction above
-      // — was still an accurate picture of the profile's status by the time
+      // assumed `profileSnap`, read BEFORE the membership transaction above
+      //, was still an accurate picture of the profile's status by the time
       // we get here. It might not be: a concurrent reviewProfile
       // reject-from-approved can land in the window between that read and
       // this transaction's commit, and trusting the stale snapshot would
@@ -114,7 +114,7 @@ export const respondToInvite = onCall<{ inviteId: string; accept: boolean }>(
       // fresh (cheap: only curator-typed profiles pay for the follow-up), and
       // hand the actual decision to syncCuratorAccess's full recompute
       // (matches removeMember's own rationale) rather than a blind
-      // `.set({})` on a single profile's possibly-stale status — a recompute
+      // `.set({})` on a single profile's possibly-stale status, a recompute
       // also correctly reflects this uid's access via any OTHER curator
       // profile it belongs to, which a single-profile check never could.
       const freshProfile = await db.doc(`profiles/${inv.profileId}`).get();
@@ -131,7 +131,7 @@ export const revokeInvite = onCall<{ inviteId: string }>(
   { region: "us-central1" }, async (req) => {
     const uid = requireAuthUid(req);
     // SP4 (Task 13 review): was missing both requireVerifiedEmail and an
-    // isValidDocId guard on inviteId — flagged when the same gap in
+    // isValidDocId guard on inviteId, flagged when the same gap in
     // removeMember (below) was fixed and its own comment was found to
     // (incorrectly) claim this callable already matched.
     requireVerifiedEmail(req);
@@ -154,13 +154,13 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
   { region: "us-central1" }, async (req) => {
     const actor = requireAuthUid(req);
     // SP4 (Task 13 item 3, comment corrected per review): requireVerifiedEmail
-    // + isValidDocId guards on both ids — this callable was missing them.
+    // + isValidDocId guards on both ids, this callable was missing them.
     // requireAuthUid -> requireVerifiedEmail -> input validation -> authz
     // guards -> writes is this file's standard ordering; revokeInvite and
     // transferAdmin below were ALSO missing requireVerifiedEmail + an
     // isValidDocId guard on their own ids and got the identical fix in this
     // same review pass. inviteMember and respondToInvite were left as a
-    // separate, not-yet-done cleanup at the time — closed by SP5 Task 3,
+    // separate, not-yet-done cleanup at the time, closed by SP5 Task 3,
     // which added the same isValidDocId(profileId)/isValidDocId(inviteId)
     // guards to both, immediately after destructuring req.data.
     requireVerifiedEmail(req);
@@ -169,7 +169,7 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
       throw new HttpsError("invalid-argument", "A profile id and member uid are required.");
     }
     // Members may remove themselves; otherwise admin required. This check can
-    // stay outside the transaction — it doesn't participate in the
+    // stay outside the transaction, it doesn't participate in the
     // last-admin race (it only reads the actor's own membership, which
     // removeMember never mutates on the actor's behalf).
     if (actor !== uid) await requireProfileAdmin(profileId, actor);
@@ -182,7 +182,7 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
     // proceed, violating the never-zero-admins invariant.
     await db.runTransaction(async (tx) => {
       const target = await tx.get(memberRef);
-      // S4: a missing member doc is treated as success, not not-found — a
+      // S4: a missing member doc is treated as success, not not-found, a
       // retried/duplicate removeMember call (the client's own retry, or two
       // admins clicking "remove" on the same member near-simultaneously)
       // must be idempotent. The recompute below still runs unconditionally
@@ -202,7 +202,7 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
     // curatorAccess/{uid} maintenance (Task 6, repaired S4): recompute
     // unconditionally for any curator-profile removal, regardless of
     // whether THIS profile is currently approved. syncCuratorAccess is a
-    // full, idempotent recompute across every profile the uid belongs to —
+    // full, idempotent recompute across every profile the uid belongs to,
     // gating it on this profile's own approval status was never actually
     // necessary, and meant a member removed from an already-rejected/
     // unpublished curator profile (whose own reviewProfile-time recompute
@@ -219,7 +219,7 @@ export const transferAdmin = onCall<{ profileId: string; toUid: string }>(
   { region: "us-central1" }, async (req) => {
     const actor = requireAuthUid(req);
     // SP4 (Task 13 review): was missing both requireVerifiedEmail and
-    // isValidDocId guards on profileId/toUid — same gap this review pass
+    // isValidDocId guards on profileId/toUid, same gap this review pass
     // fixed on revokeInvite above and removeMember below.
     requireVerifiedEmail(req);
     const { profileId, toUid } = req.data;

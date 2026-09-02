@@ -40,7 +40,7 @@ const seedGig = async (id: string, overrides: Record<string, unknown> = {}) => {
     },
     status: "open", createdAt: 1, updatedAt: 1,
     // SP4: public queryable booking linkage (GigDoc.bookingId /
-    // .bookedMusicianProfileId) — defaulted to "not booked" so every
+    // .bookedMusicianProfileId), defaulted to "not booked" so every
     // pre-SP4 test that doesn't care about booking state keeps working
     // unmodified; the new gigs read rule's closed+booked disjunct and the
     // private/location booked-musician disjunct both reference this field.
@@ -103,10 +103,10 @@ describe("users", () => {
     await assertSucceeds(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" }));
   });
   // Task 8: displayNameLower (searchUsersByName's index field) is maintained
-  // server-side only (onUserCreated + the onUserDocWritten trigger) — it
+  // server-side only (onUserCreated + the onUserDocWritten trigger), it
   // must stay outside the update rule's hasOnly set so a client can never
   // poison it to hide from or spoof admin name search.
-  it("owner cannot set displayNameLower directly — server-maintained only", async () => {
+  it("owner cannot set displayNameLower directly, server-maintained only", async () => {
     await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(updateDoc(doc(alice, "users/alice"), { displayNameLower: "hacked" }));
@@ -294,7 +294,7 @@ describe("tracks", () => {
     const anon = env.unauthenticatedContext().firestore();
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(getDoc(doc(anon, "profiles/prof1/tracks/t1")));
-    // Even the production-shaped filtered+ordered list query must fail here —
+    // Even the production-shaped filtered+ordered list query must fail here,
     // the profile itself is not approved, so no list shape helps.
     await assertFails(getDocs(query(
       collection(anon, "profiles/prof1/tracks"), where("status", "==", "approved"), orderBy("order"))));
@@ -308,7 +308,7 @@ describe("tracks", () => {
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
     await assertFails(setDoc(doc(alice, "profiles/prof1/tracks/hax"), { title: "h", status: "approved" }));
     await assertFails(updateDoc(doc(alice, "profiles/prof1/tracks/t1"), { status: "approved" }));
-    // Admins get elevated read, never write — writes stay Cloud Functions only.
+    // Admins get elevated read, never write, writes stay Cloud Functions only.
     await assertFails(setDoc(doc(admin, "profiles/prof1/tracks/hax2"), { title: "h", status: "approved" }));
     await assertSucceeds(getDocs(query(
       collectionGroup(admin, "tracks"), where("status", "==", "pending_review"))));
@@ -322,12 +322,12 @@ describe("tracks", () => {
     await seed("profiles/prof1/tracks/t2", { title: "Pending", status: "pending_review", order: 1 });
     const anon = env.unauthenticatedContext().firestore();
     // An "in" filter covering both statuses would, if it worked, hand back
-    // the not-yet-public pending track alongside the approved one — rules
+    // the not-yet-public pending track alongside the approved one, rules
     // evaluate the read clause per matched doc, so t2's status ("pending_review",
     // not "approved") fails its own check and the whole query is denied.
     await assertFails(getDocs(query(
       collection(anon, "profiles/prof1/tracks"), where("status", "in", ["approved", "pending_review"]))));
-    // Pinning by documentId() doesn't route around the same per-doc check —
+    // Pinning by documentId() doesn't route around the same per-doc check,
     // a query naming both ids directly still fails for the same reason.
     await assertFails(getDocs(query(
       collection(anon, "profiles/prof1/tracks"), where(documentId(), "in", ["t1", "t2"]))));
@@ -337,7 +337,7 @@ describe("tracks", () => {
     await seed("profiles/prof1/tracks/t1", { title: "Live", status: "approved", order: 0 });
     // Simulate a partial/failed cascade delete: the profile doc is gone but
     // one of its track docs was left behind. profileApproved()'s get() on a
-    // missing doc makes `.data.status` throw during rule evaluation — that
+    // missing doc makes `.data.status` throw during rule evaluation, that
     // must deny the read, not silently pass through.
     await env.withSecurityRulesDisabled(async (ctx) => {
       await deleteDoc(doc(ctx.firestore(), "profiles/prof1"));
@@ -348,7 +348,7 @@ describe("tracks", () => {
   it("a profile member (not a platform admin) cannot run collectionGroup('tracks')", async () => {
     // alice is prof1's own profile-admin (seedProfile's member doc), but that
     // is unrelated to the platform-level isAdmin() the collection-group rule
-    // requires — membership in one profile must not grant a cross-profile
+    // requires, membership in one profile must not grant a cross-profile
     // collection-group read.
     await seedProfile("approved");
     await seed("profiles/prof1/tracks/t1", { title: "x", status: "pending_review", order: 0 });
@@ -376,7 +376,7 @@ describe("private booking subdoc", () => {
     await seed("profiles/prof1", { type: "musician", name: "Band", handle: "band", status: "approved" });
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
     await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
-    // A sibling doc under private/ — pins that the rule is scoped to the
+    // A sibling doc under private/, pins that the rule is scoped to the
     // literal `booking` doc id, not a wildcard over all of private/.
     await seed("profiles/prof1/private/secrets", { apiKey: "nope" });
     const alice = env.authenticatedContext("alice").firestore();
@@ -397,9 +397,9 @@ describe("private booking subdoc", () => {
     await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
     await seed("profiles/prof1/private/booking", { rates: {}, preferences: {}, updatedAt: 1 });
     // carol is not a member of prof1, but she IS a member of >=1 *approved
-    // curator* profile elsewhere — represented here by a seeded curatorAccess
+    // curator* profile elsewhere, represented here by a seeded curatorAccess
     // marker. Pre-SP4 this granted her a private/booking read (SP3's
-    // isApprovedCuratorMember() disjunct); SP4 removes that disjunct — she
+    // isApprovedCuratorMember() disjunct); SP4 removes that disjunct, she
     // must now go through the private/curatorBooking projection instead
     // (see the "private curatorBooking subdoc" describe block below). The
     // live write path that keeps this marker in sync (curator approval /
@@ -424,7 +424,7 @@ describe("private curatorBooking subdoc", () => {
     await seed("profiles/prof1/private/curatorBooking", {
       rates: {}, preferences: {}, reliability: { noShowCount: 0, completedCount: 0 }, updatedAt: 1,
     });
-    // Same curatorAccess/{uid} marker as private/booking used to check —
+    // Same curatorAccess/{uid} marker as private/booking used to check,
     // this projection is now the curator-shopping surface it feeds.
     await seed("curatorAccess/carol", {});
     const alice = env.authenticatedContext("alice").firestore();
@@ -552,20 +552,20 @@ describe("gigs", () => {
       const alice = env.authenticatedContext("alice").firestore();
       const bob = env.authenticatedContext("bob").firestore();
       // curatorProfileId is pinned to 'prof1' by the query's equality filter,
-      // so isMember('prof1') is evaluated once as a query-wide constant —
+      // so isMember('prof1') is evaluated once as a query-wide constant,
       // provable regardless of each doc's actual (unconstrained) status.
       const dashSnap = await assertSucceeds(getDocs(
         query(collection(alice, "gigs"), where("curatorProfileId", "==", "prof1"))));
       if (dashSnap.size < 2) throw new Error("expected both the draft and open gig back for the member's dashboard query");
       // Same query shape, but bob isn't a member of prof1: isMember('prof1')
       // is a provable-but-false constant, and status is still unconstrained,
-      // so no disjunct is provable — the whole list is denied.
+      // so no disjunct is provable, the whole list is denied.
       await assertFails(getDocs(query(collection(bob, "gigs"), where("curatorProfileId", "==", "prof1"))));
     });
 
     it("series detail: a member lists occurrences by curatorProfileId+seriesId (no status filter); seriesId alone (no curatorProfileId) fails even for the member", async () => {
       // Pins the exact query shape apps/web/app/dashboard/curator/[profileId]/series/[seriesId]/page.tsx
-      // issues for its occurrences list — two plain equality filters, sorted
+      // issues for its occurrences list, two plain equality filters, sorted
       // client-side (no orderBy, so no composite index needed beyond the
       // existing single-field ones).
       await seed("profiles/prof1/members/alice", { uid: "alice", role: "admin" });
@@ -577,13 +577,13 @@ describe("gigs", () => {
         collection(alice, "gigs"), where("curatorProfileId", "==", "prof1"), where("seriesId", "==", "s1"))));
       if (occSnap.size < 2) throw new Error("expected both series occurrences back for the member's detail-page query");
       // Same query shape, but bob isn't a member of prof1: same reasoning as
-      // the curator-dashboard test above — isMember('prof1') is a
+      // the curator-dashboard test above, isMember('prof1') is a
       // provable-but-false constant, so the list is denied.
       await assertFails(getDocs(query(
         collection(bob, "gigs"), where("curatorProfileId", "==", "prof1"), where("seriesId", "==", "s1"))));
       // seriesId alone, even for the actual member: curatorProfileId is
       // UNCONSTRAINED by this query, so isMember(resource.data.curatorProfileId)
-      // can't be evaluated as a single query-wide constant — the gigs read
+      // can't be evaluated as a single query-wide constant, the gigs read
       // rule has no seriesId-based disjunct to fall back on either, so this
       // fails even though every matching doc happens to belong to prof1.
       await assertFails(getDocs(query(collection(alice, "gigs"), where("seriesId", "==", "s1"))));
@@ -697,12 +697,12 @@ describe("curatorAccess", () => {
   });
 });
 
-// S2: geocodeBudgets/{uid} — internal rate-limit bookkeeping, never read or
+// S2: geocodeBudgets/{uid}, internal rate-limit bookkeeping, never read or
 // written by any client, not even the owner or an admin (mirrors the
 // catch-all's default-deny, but explicit per the security gate's fix-wave
 // item so the intent is unambiguous in the rules file itself).
 describe("geocodeBudgets", () => {
-  it("nobody reads or writes — not even the owner or an admin", async () => {
+  it("nobody reads or writes, not even the owner or an admin", async () => {
     await seed("geocodeBudgets/alice", { date: "2026-08-26", count: 1 });
     const alice = env.authenticatedContext("alice").firestore();
     const admin = env.authenticatedContext("root", { admin: true }).firestore();
@@ -713,9 +713,9 @@ describe("geocodeBudgets", () => {
   });
 });
 
-// S4: curatorAccessRetries/{uid} — same internal-only shape as geocodeBudgets.
+// S4: curatorAccessRetries/{uid}, same internal-only shape as geocodeBudgets.
 describe("curatorAccessRetries", () => {
-  it("nobody reads or writes — not even the owner or an admin", async () => {
+  it("nobody reads or writes, not even the owner or an admin", async () => {
     await seed("curatorAccessRetries/alice", { createdAt: 1 });
     const alice = env.authenticatedContext("alice").firestore();
     const admin = env.authenticatedContext("root", { admin: true }).firestore();

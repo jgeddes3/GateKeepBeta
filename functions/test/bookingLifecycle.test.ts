@@ -15,10 +15,10 @@ import {
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
-// 20s — matches bookingVisibility.test.ts/bookings.test.ts's precedent for
+// 20s, matches bookingVisibility.test.ts/bookings.test.ts's precedent for
 // this same family of chain-heavy booking suites (createProfileDraft x2,
 // submitProfileForReview x2, reviewProfile x2, createGig, publishGig,
-// applyToGig, acceptBooking, then this file's own callable under test — a
+// applyToGig, acceptBooking, then this file's own callable under test, a
 // happy path can be 8+ chained callables before the first assertion).
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -118,19 +118,19 @@ async function pollNotifications(uid: string) {
 
 // setGigStartsAt / setConfirmedAtAgo / ageConfirmedAt now live in
 // ./helpers (SP5 Task 8 shares them with payments.test.ts's cancellation-
-// money suite) — see their comments there for the ordering rules every
+// money suite), see their comments there for the ordering rules every
 // caller below relies on.
 
 // Builds a real, fully confirmed single-gig booking (through the actual
 // applyToGig -> acceptBooking chain, so membership docs/deposit/acceptedTerms
-// are all genuine) — the shared starting point for the single-gig
+// are all genuine), the shared starting point for the single-gig
 // cancelBooking/reportNoShow tests below. Callers then use setGigStartsAt to
 // control timing precisely right before the callable under test, and pass
 // { startsAt: ... } via gigOverrides for a fixed offset from the start.
 //
 // IMPORTANT: the returned booking's confirmedAt is fresh (acceptBooking just
-// ran) — i.e. inside CANCEL_GRACE_MS. ANY assertion that depends on the SP4
-// forfeit/mark window — including a REFUND/no-mark one — must call
+// ran), i.e. inside CANCEL_GRACE_MS. ANY assertion that depends on the SP4
+// forfeit/mark window, including a REFUND/no-mark one, must call
 // ageConfirmedAt(bookingId) first, or it silently passes for the wrong
 // reason (grace, not the window) instead of testing what it claims to.
 async function makeConfirmedBooking(prefix: string, gigOverrides: Record<string, unknown> = {}) {
@@ -186,7 +186,7 @@ describe("recomputeReliability / cancelBooking", () => {
   it("boundary: EXACTLY CURATOR_FORFEIT_WINDOW_HOURS refunds (strict less-than only forfeits)", async () => {
     const { curator, bookingId, gigId } = await makeConfirmedBooking("cb720");
     // 60s buffer over the exact boundary, applied immediately before the
-    // single remaining call (cancelBooking) — comfortably survives normal
+    // single remaining call (cancelBooking), comfortably survives normal
     // emulator round-trip time while staying on the refund side of the
     // strict "< CURATOR_FORFEIT_WINDOW_HOURS" comparison. See
     // setGigStartsAt's comment on why this must happen this late, not
@@ -208,11 +208,11 @@ describe("recomputeReliability / cancelBooking", () => {
 
   // F6 (security audit wave): the window thresholds must be read from THIS
   // booking's OWN frozen deposit.policy snapshot, never re-read live from
-  // the shared constants — a later change to the shared constants (or, as
+  // the shared constants, a later change to the shared constants (or, as
   // here, a directly-modified snapshot) must not retroactively change the
   // deal the two sides actually accepted. 80h is on the REFUND side of the
   // live CURATOR_FORFEIT_WINDOW_HOURS constant (72h) but on the FORFEIT
-  // side of this booking's own (modified) 100h snapshot — proving the
+  // side of this booking's own (modified) 100h snapshot, proving the
   // snapshot, not the live constant, governs.
   it("F6: cancellation windows are read from the booking's OWN deposit.policy snapshot, not the live shared constant", async () => {
     const { curator, bookingId, gigId } = await makeConfirmedBooking("f6pol");
@@ -266,13 +266,13 @@ describe("recomputeReliability / cancelBooking", () => {
 
   it("boundary: EXACTLY MUSICIAN_MARK_WINDOW_HOURS before start applies no mark (strict less-than only marks)", async () => {
     const { musician, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("mb24");
-    // Mirrors the 72h boundary test's rationale above — buffer applied
+    // Mirrors the 72h boundary test's rationale above, buffer applied
     // immediately before the single remaining call (cancelBooking).
     const BOUNDARY_BUFFER_MS = 60_000;
     await adb.doc(`gigs/${gigId}`).update({
       startsAt: Date.now() + MUSICIAN_MARK_WINDOW_HOURS * 3_600_000 + BOUNDARY_BUFFER_MS,
     });
-    // Ages confirmedAt past CANCEL_GRACE_MS — see the 72h boundary test's
+    // Ages confirmedAt past CANCEL_GRACE_MS, see the 72h boundary test's
     // identical rationale above.
     await ageConfirmedAt(bookingId);
 
@@ -297,7 +297,7 @@ describe("recomputeReliability / cancelBooking", () => {
   it("a caller who is a member of BOTH sides is refused with failed-precondition (ambiguous)", async () => {
     const { curator, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("cbamb");
     await setGigStartsAt(gigId, 50);
-    // Make the curator's own owner ALSO a member of the musician profile —
+    // Make the curator's own owner ALSO a member of the musician profile,
     // deliberately admin-SDK direct (no invite flow needed for this test).
     await adb.doc(`profiles/${musicianProfileId}/members/${curator.uid}`).set({
       uid: curator.uid, role: "member", label: "also here", joinedAt: Date.now(),
@@ -306,7 +306,7 @@ describe("recomputeReliability / cancelBooking", () => {
     await expect(callFn("cancelBooking", { bookingId, reason: "Ambiguous caller." }, curator.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
 
-    // State unchanged — the ambiguous attempt must not have cancelled anything.
+    // State unchanged, the ambiguous attempt must not have cancelled anything.
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.status).toBe("confirmed");
   });
@@ -333,7 +333,7 @@ describe("recomputeReliability / cancelBooking", () => {
       await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
       const series = await seedSeries(curatorProfileId);
       try {
-        // publishGig rejects a past startsAt outright — create it with a
+        // publishGig rejects a past startsAt outright, create it with a
         // future placeholder, then push it into the past via the admin SDK
         // (mirrors setGigStartsAt's rationale).
         const gigPast = await createOpenGig(curatorProfileId, curator.user);
@@ -355,14 +355,14 @@ describe("recomputeReliability / cancelBooking", () => {
 
         const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
         expect(after.status).toBe("cancelled_by_musician");
-        // hoursBeforeStart computed against gigNext (~20h) — the earliest
+        // hoursBeforeStart computed against gigNext (~20h), the earliest
         // FUTURE filled occurrence, not gigLater (~100h).
         expect(after.cancellation?.hoursBeforeStart).toBeLessThan(MUSICIAN_MARK_WINDOW_HOURS);
         expect(after.cancellation?.markApplied).toBe(true);
 
         const [pastAfter, nextAfter, laterAfter] = await Promise.all(
           [gigPast, gigNext, gigLater].map((id) => adb.doc(`gigs/${id}`).get()));
-        expect(pastAfter.data()?.status).toBe("filled"); // untouched — already started
+        expect(pastAfter.data()?.status).toBe("filled"); // untouched, already started
         expect(pastAfter.data()?.bookingId).toBe(bookingId);
         expect(nextAfter.data()?.status).toBe("open");
         expect(nextAfter.data()?.bookingId).toBeNull();
@@ -397,8 +397,8 @@ describe("recomputeReliability / cancelBooking", () => {
         await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 }); // now in the past
 
         // The gig still names this booking (bookingId untouched, only its
-        // startsAt moved) — the run genuinely already started, so
-        // "already started — report instead" is truthful advice here.
+        // startsAt moved), the run genuinely already started, so
+        // "already started, report instead" is truthful advice here.
         await expect(callFn("cancelBooking", { bookingId, reason: "Too late." }, curator.user)).rejects.toMatchObject({
           code: "functions/failed-precondition",
           message: expect.stringMatching(/already started/i),
@@ -408,7 +408,7 @@ describe("recomputeReliability / cancelBooking", () => {
       }
     });
 
-    // SP4 (Task 7) carry-forward (b) — the zombie-run message.
+    // SP4 (Task 7) carry-forward (b), the zombie-run message.
     it("whole-run cancel with no future filled occurrence left AND no date currently linked to this booking (cancelled per-occurrence): truthful 'nothing to cancel' message, NOT 'already started'", async () => {
       const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("wrzombiec");
       const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("wrzombiem");
@@ -421,7 +421,7 @@ describe("recomputeReliability / cancelBooking", () => {
           "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
         await callFn("acceptBooking", { bookingId }, curator.user);
 
-        // Cancel the run's only date PER-OCCURRENCE — the run survives
+        // Cancel the run's only date PER-OCCURRENCE, the run survives
         // (booking stays "confirmed"), but cancelOccurrence clears the gig's
         // own bookingId on reopen, so no gig anywhere still names this
         // booking's id, and none of its own occurrences remain future+filled.
@@ -435,7 +435,7 @@ describe("recomputeReliability / cancelBooking", () => {
             message: expect.stringMatching(/no upcoming booked dates remain/i),
           });
 
-        // Untouched — the refusal must not have changed the booking's status.
+        // Untouched, the refusal must not have changed the booking's status.
         expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("confirmed");
       } finally {
         await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
@@ -445,8 +445,8 @@ describe("recomputeReliability / cancelBooking", () => {
 });
 
 describe("SP5 Task 7: flash-booking grace period (1h, both sides)", () => {
-  // Gig starts in 2h — inside BOTH the curator forfeit window (72h) and the
-  // musician mark window (24h) — so absent grace, either side's cancel would
+  // Gig starts in 2h, inside BOTH the curator forfeit window (72h) and the
+  // musician mark window (24h), so absent grace, either side's cancel would
   // land on the penalty branch. confirmedAt is backdated 10 minutes,
   // comfortably inside CANCEL_GRACE_MS (1h).
   it("curator cancel within the grace window: refunded, graceApplied true, no forfeitedTo", async () => {
@@ -480,7 +480,7 @@ describe("SP5 Task 7: flash-booking grace period (1h, both sides)", () => {
     expect(reliability).toBeUndefined();
   });
 
-  // Same 2h-out gig, but confirmedAt is aged past CANCEL_GRACE_MS — so SP4
+  // Same 2h-out gig, but confirmedAt is aged past CANCEL_GRACE_MS, so SP4
   // behavior applies unmodified: the curator cancel still lands inside the
   // 72h forfeit window and forfeits.
   it("curator cancel after the grace window has elapsed: SP4 behavior intact, forfeited, graceApplied false", async () => {
@@ -545,12 +545,12 @@ describe("cancelOccurrence", () => {
       const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
       expect(after.status).toBe("confirmed"); // run survives
       expect(after.occurrenceCancellations).toHaveLength(1);
-      // gigId1 starts ~20h out — under CURATOR_FORFEIT_WINDOW_HOURS (72h),
+      // gigId1 starts ~20h out, under CURATOR_FORFEIT_WINDOW_HOURS (72h),
       // so this per-date outcome forfeits (curator side never marks).
       expect(after.occurrenceCancellations?.[0]).toMatchObject({
         gigId: gigId1, by: "curator", outcome: "deposit_forfeited", markApplied: false,
       });
-      // hoursBeforeStart is positive — this date hasn't happened yet (unlike
+      // hoursBeforeStart is positive, this date hasn't happened yet (unlike
       // reportNoShow's always-negative value for an already-passed start).
       expect(after.occurrenceCancellations?.[0].hoursBeforeStart).toBeGreaterThan(0);
       // Run-level deposit untouched by a per-occurrence cancellation.
@@ -613,7 +613,7 @@ describe("cancelOccurrence", () => {
 
   // F7 (security audit wave, ruling: reject-when-full): once
   // occurrenceCancellations is already at MAX_OCCURRENCE_CANCELLATIONS, a
-  // further cancelOccurrence call must be REFUSED outright — never silently
+  // further cancelOccurrence call must be REFUSED outright, never silently
   // drop the oldest settlement record to make room for a new one.
   it("F7: refuses with resource-exhausted once occurrenceCancellations is at the cap; the array is left unchanged", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("occcap");
@@ -690,7 +690,7 @@ describe("reportNoShow", () => {
     await expect(callFn("reportNoShow", { bookingId, reason: "Too late to report." }, curator.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
 
-    // Rejected before any write — the reliability doc must never have been
+    // Rejected before any write, the reliability doc must never have been
     // touched (no doc created, so no marks either).
     const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get()).data();
     expect(reliability).toBeUndefined();
@@ -715,7 +715,7 @@ describe("reportNoShow", () => {
 
   // Plan amendment (docs/superpowers/plans/2026-08-26-booking-flow.md, Task
   // 6 reportNoShow bullet): a whole-run no-show ends the run for this
-  // booking exactly like cancelBooking does — the run's remaining future
+  // booking exactly like cancelBooking does, the run's remaining future
   // dates must reopen and the series linkage must clear, not sit "filled"
   // against a booking that has already flipped to cancelled_by_musician.
   it("whole-run: reopens the run's future filled occurrences, clears series linkage, leaves the reported (past) occurrence untouched", async () => {
@@ -724,7 +724,7 @@ describe("reportNoShow", () => {
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const series = await seedSeries(curatorProfileId);
     try {
-      // publishGig rejects a past startsAt outright — create with a future
+      // publishGig rejects a past startsAt outright, create with a future
       // placeholder, then push it into the past (mirrors setGigStartsAt's
       // rationale elsewhere in this file).
       const gigPast = await createOpenGig(curatorProfileId, curator.user);
@@ -749,7 +749,7 @@ describe("reportNoShow", () => {
 
       const [pastAfter, nextAfter, laterAfter] = await Promise.all(
         [gigPast, gigNext, gigLater].map((id) => adb.doc(`gigs/${id}`).get()));
-      expect(pastAfter.data()?.status).toBe("filled"); // untouched — this is the reported occurrence itself
+      expect(pastAfter.data()?.status).toBe("filled"); // untouched, this is the reported occurrence itself
       expect(pastAfter.data()?.bookingId).toBe(bookingId);
       expect(nextAfter.data()?.status).toBe("open");
       expect(nextAfter.data()?.bookingId).toBeNull();
@@ -803,7 +803,7 @@ describe("removeReliabilityMark", () => {
   });
 
   // F4 (security audit wave): reversing a FALSE reported_no_show also
-  // restores the settlement record the false report stole — the booking
+  // restores the settlement record the false report stole, the booking
   // goes back to "completed" (what scheduled.ts step 7 would have resolved
   // it to had the report never happened), completedCount is netted back,
   // and both sides are notified.
@@ -843,7 +843,7 @@ describe("removeReliabilityMark", () => {
       d.data().kind === "booking" && /restored as completed/i.test(d.data().body as string))).toBe(true);
   });
 
-  it("F4: removing a late_cancel mark does NOT touch the booking — the cancellation was real, only the mark judgment changes", async () => {
+  it("F4: removing a late_cancel mark does NOT touch the booking, the cancellation was real, only the mark judgment changes", async () => {
     const { musician, musicianProfileId, bookingId, gigId } = await makeConfirmedBooking("f4lc");
     await setGigStartsAt(gigId, 20); // <24h -> mark applied
     await ageConfirmedAt(bookingId);
@@ -869,7 +869,7 @@ describe("removeReliabilityMark", () => {
   // R1 (post-audit residual): a booking the sweep already resolved to
   // "completed" (crediting completedCount once) that is THEN falsely
   // reported as a no-show must have that credit clawed back by reportNoShow
-  // itself — otherwise sweep(+1) -> report(no change) -> admin restore(+1)
+  // itself, otherwise sweep(+1) -> report(no change) -> admin restore(+1)
   // nets 2 for one single performance. The restore's own +1 is then the
   // correct, single credit for the one show that actually happened.
   it("R1/R2: sweep-completed booking -> reportNoShow nets completedCount back to 0 -> admin restore lands exactly 1", async () => {
@@ -877,7 +877,7 @@ describe("removeReliabilityMark", () => {
     await setGigStartsAt(gigId, -5); // 5 hours ago
     // Simulate scheduled.ts's sweep step 7 having already completed + credited
     // this booking (this file's subject is the callables, not the sweep
-    // itself — scheduled.test.ts owns that; seeding directly isolates this
+    // itself, scheduled.test.ts owns that; seeding directly isolates this
     // test to reportNoShow/removeReliabilityMark's own netting logic).
     await adb.doc(`bookings/${bookingId}`).update({ status: "completed", resolvedAt: Date.now() });
     await adb.doc(`profiles/${musicianProfileId}/private/reliability`).set({
@@ -888,7 +888,7 @@ describe("removeReliabilityMark", () => {
 
     const afterReport = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
       .data() as ReliabilityDoc;
-    expect(afterReport.completedCount).toBe(0); // netted back — the sweep's credit reversed
+    expect(afterReport.completedCount).toBe(0); // netted back, the sweep's credit reversed
 
     const admin = await makeAdminUser("r1aa");
     await callFn("removeReliabilityMark",
@@ -903,7 +903,7 @@ describe("removeReliabilityMark", () => {
   });
 
   // R2 (post-audit residual): restoreFalselyReportedBooking must match the
-  // sweep's own selfDeal exclusion (F5) — the booking still genuinely
+  // sweep's own selfDeal exclusion (F5), the booking still genuinely
   // resolves back to "completed" (the STATUS restore always happens), but a
   // self-dealing profile must never be able to farm the trust metric via a
   // reversed false-report either.
@@ -912,7 +912,7 @@ describe("removeReliabilityMark", () => {
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("r2sdm");
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     // Overlap: the MUSICIAN's own owner uid is ALSO a member of the
-    // CURATOR profile (mirrors bookings.test.ts's F5 fixture — this
+    // CURATOR profile (mirrors bookings.test.ts's F5 fixture, this
     // direction keeps the curator's own acceptBooking/reportNoShow calls
     // below unambiguous, since requireBookingSide/resolveBookingSideStrict
     // resolve a dual-member caller musician-first).
@@ -933,11 +933,11 @@ describe("removeReliabilityMark", () => {
       { musicianProfileId, bookingId, kind: "reported_no_show" }, admin.user);
 
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
-    expect(after.status).toBe("completed"); // restored — the status flip is unconditional
+    expect(after.status).toBe("completed"); // restored, the status flip is unconditional
 
     const reliability = (await adb.doc(`profiles/${musicianProfileId}/private/reliability`).get())
       .data() as ReliabilityDoc;
-    expect(reliability.completedCount ?? 0).toBe(0); // selfDeal — no trust-metric credit
+    expect(reliability.completedCount ?? 0).toBe(0); // selfDeal, no trust-metric credit
   });
 
   it("non-admin callers are denied", async () => {

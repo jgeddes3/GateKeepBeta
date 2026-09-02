@@ -11,7 +11,7 @@ import {
 } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
-// Admin SDK must target the storage emulator (mirrors helpers.ts) — needed
+// Admin SDK must target the storage emulator (mirrors helpers.ts), needed
 // by the deleteProfile storage cascade tests below.
 process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= "localhost:9199";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -31,12 +31,12 @@ const draft = (handle: string): ProfileDraftInput =>
 
 // For submitProfileForReview tests whose subject is the status transition
 // itself (not the Task 4 curator minimum-content gate, tested separately
-// below) — pair with seedCuratorGateContent before submitting so those tests
+// below), pair with seedCuratorGateContent before submitting so those tests
 // stay focused on submit/resubmit/delete mechanics.
 const curatorDraft = (handle: string): ProfileDraftInput =>
   ({ type: "curator", subtype: "venue", name: "The Rooftop", handle });
 
-// SP4 (Task 7) fixture — an approved musician profile with genuine
+// SP4 (Task 7) fixture, an approved musician profile with genuine
 // portfolio-gate content, mirroring bookings.test.ts/bookingLifecycle.test.ts's
 // identical helper. This file's own subject is profile deletion mechanics,
 // not booking negotiation.
@@ -63,7 +63,7 @@ async function makeApprovedMusicianProfile(emailPrefix: string) {
   return { owner, profileId };
 }
 
-// SP4 (Task 7) fixture — a directly-seeded "open" gig, mirroring
+// SP4 (Task 7) fixture, a directly-seeded "open" gig, mirroring
 // review.test.ts's identical seedOpenGig helper.
 async function seedOpenGig(curatorProfileId: string): Promise<string> {
   const ref = adb.collection("gigs").doc();
@@ -85,7 +85,7 @@ async function seedOpenGig(curatorProfileId: string): Promise<string> {
   return ref.id;
 }
 
-// SP4 (Task 7 quality-review fix) — mirrors review.test.ts/
+// SP4 (Task 7 quality-review fix), mirrors review.test.ts/
 // bookingLifecycle.test.ts's identical pollNotifications helper.
 async function pollNotifications(uid: string) {
   const deadline = Date.now() + 10_000;
@@ -157,8 +157,8 @@ describe("deleteProfile", () => {
       "createProfileDraft", draft(handle), user);
     // Simulates the retry edge the fix defends against: an EARLIER
     // deleteProfile attempt on THIS profile already freed the handle (then
-    // crashed before recursiveDelete, leaving the profile doc — still
-    // draft — for a client retry to find, exactly as here), and a totally
+    // crashed before recursiveDelete, leaving the profile doc, still
+    // draft, for a client retry to find, exactly as here), and a totally
     // DIFFERENT profile has since claimed that now-free handle string.
     // Forcing the handles/{handle} doc directly (not via a second real
     // profile) isolates the assertion to deleteProfile's own precondition-
@@ -194,7 +194,7 @@ describe("deleteProfile", () => {
     await expect(callFn("deleteAccount", {}, user)).resolves.toMatchObject({ ok: true });
   });
 
-  // Finding 3: deleteProfile used to be client-gated only — a co-admin could
+  // Finding 3: deleteProfile used to be client-gated only, a co-admin could
   // delete a LIVE approved profile server-side and immediately free the
   // handle for takeover. The server must enforce the same draft/rejected-only
   // gate the UI already assumes.
@@ -269,7 +269,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     const adminUser = await makeAdminUser("s6aadmin");
     await callFn("reviewProfile", { profileId, decision: "approved" }, adminUser.user);
 
-    // Seed a gig (with a private/location subdoc) and a series directly —
+    // Seed a gig (with a private/location subdoc) and a series directly,
     // this test's subject is the cascade, not gig/series creation mechanics.
     const gigRef = adb.collection("gigs").doc();
     await gigRef.set({
@@ -291,7 +291,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     });
 
     // reject-from-approved is required before deleteProfile will accept
-    // this profile (the draft/rejected-only gate) — its cascade closes/pauses
+    // this profile (the draft/rejected-only gate), its cascade closes/pauses
     // "open"/"active" content, but this gig is "draft" (untouched by it),
     // proving what removes it here is deleteProfile's OWN cascade.
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "test" }, adminUser.user);
@@ -303,7 +303,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     expect((await seriesRef.get()).exists).toBe(false);
   });
 
-  it("does not touch another profile's gigs/series — negative control", async () => {
+  it("does not touch another profile's gigs/series, negative control", async () => {
     const { user } = await signUpTestUser(`s6c-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`s6c_${Date.now()}`), user);
@@ -321,11 +321,11 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     expect((await otherGigRef.get()).exists).toBe(true);
   });
 
-  it("recomputes curatorAccess for former members — a uid with no other approved curator membership loses a (possibly stale) marker", async () => {
+  it("recomputes curatorAccess for former members, a uid with no other approved curator membership loses a (possibly stale) marker", async () => {
     const { user, uid } = await signUpTestUser(`s6b-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`s6b_${Date.now()}`), user);
-    // Seeded directly — isolates the assertion to deleteProfile's OWN
+    // Seeded directly, isolates the assertion to deleteProfile's OWN
     // post-cascade recompute rather than any earlier review.ts touchpoint
     // (this profile is deleted straight from "draft", which never runs
     // review.ts's cascade at all).
@@ -335,7 +335,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
   });
 
   // SP4 (Task 7)
-  it("unwinds a confirmed booking naming this profile — the booking survives as an 'expired' top-level record referencing the now-deleted profile id", async () => {
+  it("unwinds a confirmed booking naming this profile, the booking survives as an 'expired' top-level record referencing the now-deleted profile id", async () => {
     const { user: curatorUser } = await signUpTestUser(`s6d-${Date.now()}@test.com`);
     const { profileId: curatorProfileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", curatorDraft(`s6d_${Date.now()}`), curatorUser);
@@ -354,7 +354,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
 
     // Flip straight to "rejected" via the admin SDK (bypassing reviewProfile's
     // OWN reject-from-approved cascade entirely) so this test isolates
-    // deleteProfile's OWN unwind cascade — not a booking already unwound by
+    // deleteProfile's OWN unwind cascade, not a booking already unwound by
     // an earlier step of the normal review-then-delete flow. This also
     // satisfies deleteProfile's own draft/rejected-only gate.
     await adb.doc(`profiles/${curatorProfileId}`).update({ status: "rejected" });
@@ -365,7 +365,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.status).toBe("expired");
     expect(after.cancellation).toBeNull();
-    // Top-level `bookings` doc is untouched by profileRef's recursiveDelete —
+    // Top-level `bookings` doc is untouched by profileRef's recursiveDelete,
     // it survives, still naming the now-deleted curatorProfileId.
     expect(after.curatorProfileId).toBe(curatorProfileId);
 
@@ -377,7 +377,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
 
   // F1 (security audit wave): deleteProfile of a MUSICIAN with a confirmed
   // booking must free the innocent curator's gig exactly like
-  // reviewProfile's reject-from-approved cascade does (review.test.ts) — the
+  // reviewProfile's reject-from-approved cascade does (review.test.ts), the
   // curator's own content is never touched by THIS profile's deletion, so
   // its gig must reopen rather than sit "filled" against a booking that just
   // silently expired.
@@ -400,7 +400,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
 
     // Flip straight to "rejected" via the admin SDK (bypasses reviewProfile's
     // OWN reject-from-approved cascade entirely, isolating deleteProfile's
-    // own unwind — mirrors the curator-side cascade test above).
+    // own unwind, mirrors the curator-side cascade test above).
     await adb.doc(`profiles/${musicianProfileId}`).update({ status: "rejected" });
 
     await callFn("deleteProfile", { profileId: musicianProfileId }, musician.user);
@@ -410,7 +410,7 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     expect(after.status).toBe("expired");
 
     const gigAfter = (await adb.doc(`gigs/${gigId}`).get()).data();
-    expect(gigAfter?.status).toBe("open"); // reopened — the curator's OWN content stays live
+    expect(gigAfter?.status).toBe("open"); // reopened, the curator's OWN content stays live
     expect(gigAfter?.bookingId).toBeNull();
     expect(gigAfter?.bookedMusicianProfileId).toBeNull();
   });
@@ -444,12 +444,12 @@ describe("submitProfileForReview", () => {
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft", draft(`memb_${Date.now()}`), admin);
     const { uid: memberUid, user: member } = await signUpTestUser(`m7-${Date.now()}@test.com`);
-    // Invite flow doesn't exist until Task 8 — seed the membership directly.
+    // Invite flow doesn't exist until Task 8, seed the membership directly.
     await adb.doc(`profiles/${profileId}/members/${memberUid}`).set({
       uid: memberUid, role: "member", label: "x", joinedAt: Date.now(),
     });
     // The client SDK surfaces the HttpsError code as `functions/<code>` on
-    // the rejected error's `.code`, not in `.message` — assert on that
+    // the rejected error's `.code`, not in `.message`, assert on that
     // rather than a message regex.
     await expect(callFn("submitProfileForReview", { profileId }, member))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -494,7 +494,7 @@ describe("submitProfileForReview minimum content (musicians)", () => {
     await callFn("updatePortfolio", { profileId, bio: "Soul from Austin.", genres: ["soul"] }, user);
     await adb.doc(`profiles/${profileId}`).update({ "portfolio.avatarPhotoPath": "public/photos/x/avatar-t.jpg" });
     // createTrack writes the doc (status: "processing") before any bytes are
-    // uploaded — abandon it here, exactly as a musician who never finishes
+    // uploaded, abandon it here, exactly as a musician who never finishes
     // the upload would. LISTENABLE_TRACK_STATUSES excludes "processing", so
     // this must not satisfy the gate.
     await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>(
@@ -531,7 +531,7 @@ describe("submitProfileForReview minimum content (curators)", () => {
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
   });
 
-  it("a venue's location requirement is not satisfied by a bare city — a real address is required", async () => {
+  it("a venue's location requirement is not satisfied by a bare city, a real address is required", async () => {
     const { user } = await signUpTestUser(`cgatev-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "curator", subtype: "venue", name: "No Address Venue", handle: `cgatev_${Date.now()}` }, user);
@@ -539,7 +539,7 @@ describe("submitProfileForReview minimum content (curators)", () => {
     await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": ["public/photos/x/cover-t.jpg"] });
     await callFn("updateCuratorProfile",
       { profileId, lookingFor: { genres: ["rock"], actSizes: ["band"], notes: null } }, user);
-    // Deliberately never set location — a venue's curator.location.address stays null.
+    // Deliberately never set location, a venue's curator.location.address stays null.
     await expect(callFn("submitProfileForReview", { profileId }, user))
       .rejects.toThrow(/location/i);
   });
@@ -620,7 +620,7 @@ describe("submitProfileForReview anti-spam", () => {
   });
 
   // Task 8: resubmitCount lets the admin queue render "resubmitted Nth
-  // time". Extends the cooldown fixture above — every resubmit still has to
+  // time". Extends the cooldown fixture above, every resubmit still has to
   // clear the 24h cooldown, so lastRejectedAt is stamped back via the admin
   // SDK the same way that test does.
   it("resubmitCount increments across reject-then-resubmit cycles, and stays unset after the first-ever submission", async () => {
@@ -668,12 +668,12 @@ describe("submitProfileForReview anti-spam", () => {
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Not yet" }, adminUser.user);
 
     // The check is `Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS`,
-    // evaluated server-side at call time — not at the moment this test sets
+    // evaluated server-side at call time, not at the moment this test sets
     // lastRejectedAt via the admin SDK. A literal "-1ms / -0ms" boundary
     // isn't reliably testable across that gap: the RPC round-trip between
     // the write below and the callable actually running always costs a few
     // ms, which would silently push a naive "-1ms" case past the threshold
-    // (observed while developing this test — it flaked green). A 300ms
+    // (observed while developing this test, it flaked green). A 300ms
     // margin is tight enough to still be testing the boundary (worlds
     // tighter than the existing +1h/+25h test above) while comfortably
     // absorbing local-emulator round-trip jitter in either direction.
@@ -681,7 +681,7 @@ describe("submitProfileForReview anti-spam", () => {
 
     // Just under the cooldown: elapsed at call time is (COOLDOWN - margin) +
     // network jitter, which stays < COOLDOWN as long as that jitter is
-    // under the margin — still blocked.
+    // under the margin, still blocked.
     await adb.doc(`profiles/${profileId}`).update({
       lastRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS - BOUNDARY_MARGIN_MS),
     });
@@ -689,7 +689,7 @@ describe("submitProfileForReview anti-spam", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
 
     // Just at/over the cooldown: elapsed at call time is (COOLDOWN + margin)
-    // + network jitter, which is always >= COOLDOWN regardless of jitter —
+    // + network jitter, which is always >= COOLDOWN regardless of jitter,
     // allowed.
     await adb.doc(`profiles/${profileId}`).update({
       lastRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS + BOUNDARY_MARGIN_MS),
@@ -698,7 +698,7 @@ describe("submitProfileForReview anti-spam", () => {
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
   });
 
-  it("the resubmit cooldown is a shared code path — it also blocks a musician's resubmission", async () => {
+  it("the resubmit cooldown is a shared code path, it also blocks a musician's resubmission", async () => {
     const { user } = await signUpTestUser(`mcool-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "musician", subtype: "solo", name: "Cooldown Act", handle: `mcool_${Date.now()}` }, user);
@@ -727,7 +727,7 @@ describe("deleteProfile storage cascade", () => {
     const { user } = await signUpTestUser(`delc-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "musician", subtype: "solo", name: "Ava", handle: `delc_${Date.now()}` }, user);
-    // Seed storage objects directly — exercising the full pipeline is Task 7's job.
+    // Seed storage objects directly, exercising the full pipeline is Task 7's job.
     await abucket.file(`review/tracks/${profileId}/t1.m4a`).save(Buffer.from([1]), { contentType: "audio/mp4" });
     await abucket.file(`public/tracks/${profileId}/t2.m4a`).save(Buffer.from([1]), { contentType: "audio/mp4" });
     await abucket.file(`public/photos/${profileId}/avatar-x.jpg`).save(Buffer.from([1]), { contentType: "image/jpeg" });
@@ -739,7 +739,7 @@ describe("deleteProfile storage cascade", () => {
     }
   }, 60_000);
 
-  it("does not touch another profile's storage objects — negative control on the prefix sweep", async () => {
+  it("does not touch another profile's storage objects, negative control on the prefix sweep", async () => {
     const { user } = await signUpTestUser(`delcn-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "musician", subtype: "solo", name: "Ava2", handle: `delcn_${Date.now()}` }, user);

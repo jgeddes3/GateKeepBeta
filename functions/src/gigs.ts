@@ -18,9 +18,9 @@ type Result = { ok: true } | { ok: false; reason: string };
 const fail = (reason: string): Result => ({ ok: false, reason });
 
 const MAX_ADDRESS_LENGTH = 300;
-export const GEOCODE_FAILURE_MESSAGE = "Could not locate that — check spelling and try again.";
+export const GEOCODE_FAILURE_MESSAGE = "Could not locate that. Check spelling and try again.";
 
-// A gig's location input is always optional — createGig falls back to the
+// A gig's location input is always optional, createGig falls back to the
 // curator's own profile address for venues (or requires it outright for
 // non-venues); updateGig, when this is entirely omitted, leaves the gig's
 // existing location untouched (no re-geocode).
@@ -62,7 +62,7 @@ function isValidStartsAt(v: unknown): v is number {
 }
 
 // Shared "input validation" step (title/description/wants/duration/provisions
-// + budget + startsAt + location shape) for both createGig and updateGig —
+// + budget + startsAt + location shape) for both createGig and updateGig,
 // runs BEFORE any authz guard, matching the ordering convention. Subtype-
 // dependent business rules (venue-vs-non-venue address requirement) can't
 // live here: they need the profile's subtype, only known once a guard below
@@ -78,7 +78,7 @@ function validateGigInput(input: CreateGigInput | UpdateGigInput): Result {
 
 // Location resolution shared by createGig and createSeries (a series'
 // template stores the exact same resolved public/private split a one-off
-// gig does — Task 7's materializer copies it onto each occurrence without
+// gig does, Task 7's materializer copies it onto each occurrence without
 // re-geocoding). Not reused by updateGig/updateSeries: an update additionally
 // supports a "visibility-only, reuse the already-exact private address"
 // branch that doesn't fit this always-(re)geocode shape.
@@ -95,7 +95,7 @@ export async function resolveGigLocation(
     resolvedAddress = overrideAddress;
   } else if (isVenue) {
     // Approved venue profiles always have an address (submitProfileForReview's
-    // gate requires one) — this is a defensive backstop, not a normal path.
+    // gate requires one), this is a defensive backstop, not a normal path.
     if (!curatorLocation?.address) {
       throw new HttpsError("failed-precondition", "This venue profile has no address set yet.");
     }
@@ -109,7 +109,7 @@ export async function resolveGigLocation(
 
   // S2: this path always creates a brand-new gig/series doc (no prior
   // private location to compare against), so it always consumes the daily
-  // geocode budget — the "skip when unchanged" optimization only applies to
+  // geocode budget, the "skip when unchanged" optimization only applies to
   // updateGig/updateSeries's re-submission case below.
   await consumeGeocodeBudget(uid);
   const result = await getGeocoder().geocode(resolvedAddress);
@@ -135,7 +135,7 @@ export const createGig = onCall<CreateGigInput>({ region: "us-central1", secrets
   const v = validateGigInput(input);
   if (!v.ok) throw new HttpsError("invalid-argument", v.reason);
 
-  // sequential is deliberate — mirrors updateCuratorProfile's rationale:
+  // sequential is deliberate, mirrors updateCuratorProfile's rationale:
   // parallelizing makes rejection order nondeterministic and would leak
   // profile existence/type/approval status to non-members.
   await requireProfileMember(input.profileId, uid);
@@ -188,7 +188,7 @@ export const publishGig = onCall<{ gigId: string }>({ region: "us-central1" }, a
   await requireProfileMember(gig.curatorProfileId, uid);
   // A profile can be rejected/unpublished after a gig was created against it
   // (Task 6 lands the cascade that closes/pauses live gigs+series on that
-  // event, but until it runs — or for a gig created before it existed — a
+  // event, but until it runs, or for a gig created before it existed, a
   // member of a no-longer-approved profile must not be able to publish new
   // content into the world-readable "open" surface).
   await requireApprovedCuratorProfile(gig.curatorProfileId);
@@ -196,7 +196,7 @@ export const publishGig = onCall<{ gigId: string }>({ region: "us-central1" }, a
     throw new HttpsError("failed-precondition", `Cannot publish a gig in status "${gig.status}".`);
   }
   // P1: a draft can sit unpublished indefinitely (e.g. drafted, then
-  // abandoned) — without this check, publishing it after its startsAt has
+  // abandoned), without this check, publishing it after its startsAt has
   // already elapsed would put a bookable-looking "open" gig for a date that
   // already passed onto the world-readable surface, where it would then sit
   // until the NEXT day's sweep finally closes it (up to a 24h window).
@@ -234,14 +234,14 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
   await requireProfileMember(gig.curatorProfileId, uid);
   // Same rationale as publishGig: a member of a since-rejected/unpublished
   // profile must not keep editing a (possibly still world-readable "open")
-  // gig's content. cancelGig deliberately keeps membership-only — cancelling
+  // gig's content. cancelGig deliberately keeps membership-only, cancelling
   // only narrows exposure, it never adds any.
   await requireApprovedCuratorProfile(gig.curatorProfileId);
   if (gig.status === "cancelled" || gig.status === "taken_down") {
     throw new HttpsError("failed-precondition", `Cannot edit a gig in status "${gig.status}".`);
   }
   // F2 (security audit wave): a FILLED gig has a confirmed booking behind
-  // it — its schedule/terms are exactly what the two sides negotiated and
+  // it, its schedule/terms are exactly what the two sides negotiated and
   // accepted, and acceptBooking's own F2 guard (bookings.ts) refuses to
   // accept an offer against a gig edited after the last thread entry
   // specifically to protect that. Freeze the gig itself once it's filled,
@@ -249,13 +249,13 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
   // could otherwise silently change a filled gig's date/duration/budget out
   // over an ALREADY-confirmed booking with no accept ever happening again
   // to catch it. `closed` (a filled gig whose curator profile went dark, or
-  // whose date elapsed) is locked for the same reason — a booking may still
+  // whose date elapsed) is locked for the same reason, a booking may still
   // reference it (see review.ts's reject-from-approved cascade / the
   // dailySweep's completion step). cancelGig already refuses a filled gig
   // in favor of cancelBooking for the identical reason.
   if (gig.status === "filled" || gig.status === "closed") {
     throw new HttpsError("failed-precondition",
-      "This gig is filled/closed — its schedule and terms are locked.");
+      "This gig is filled/closed: its schedule and terms are locked.");
   }
 
   const privateRef = db.doc(`gigs/${input.gigId}/private/location`);
@@ -271,7 +271,7 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
     if (overrideAddress.length > 0) {
       const currentPrivate = (await privateRef.get()).data() as GigPrivateLocation | undefined;
       if (currentPrivate?.geocodedFrom === overrideAddress) {
-        // S2: unchanged address input — reuse the already-resolved geocode
+        // S2: unchanged address input, reuse the already-resolved geocode
         // rather than re-querying (and re-charging the daily budget for)
         // the exact same address a member just re-submitted.
         if (!currentPrivate.geo) {
@@ -280,7 +280,7 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
         resolvedAddress = overrideAddress; lat = currentPrivate.geo.lat; lng = currentPrivate.geo.lng;
         neighborhood = gig.location.neighborhood; city = gig.location.city; geocodedFrom = overrideAddress;
       } else {
-        // Address change — re-geocode.
+        // Address change, re-geocode.
         await consumeGeocodeBudget(uid);
         const result = await getGeocoder().geocode(overrideAddress);
         if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
@@ -288,9 +288,9 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
         neighborhood = result.neighborhood; city = result.city; geocodedFrom = overrideAddress;
       }
     } else {
-      // Visibility-only change (or a no-op location object) — reuse the
+      // Visibility-only change (or a no-op location object), reuse the
       // already-exact private geo/address rather than re-geocoding.
-      // SP4 (Task 13 item 2): typed `| undefined` (not a bare cast) — the
+      // SP4 (Task 13 item 2): typed `| undefined` (not a bare cast), the
       // subdoc can be missing outright (e.g. an admin-SDK-only deletion),
       // not just present-but-missing-`.geo`, and `.data()` on a
       // non-existent doc returns `undefined`. The `!currentPrivate?.geo`
@@ -298,7 +298,7 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
       // `internal` HttpsError instead of an uncaught TypeError on
       // `undefined.geo`/`.lat`.
       const currentPrivate = (await privateRef.get()).data() as GigPrivateLocation | undefined;
-      // P7: explicit guard instead of a `.geo!` non-null assertion — a
+      // P7: explicit guard instead of a `.geo!` non-null assertion, a
       // corrupted/partially-written (or missing) private/location subdoc
       // must surface a clear internal error here, not an uncaught TypeError.
       if (!currentPrivate?.geo) {
@@ -330,7 +330,7 @@ export const updateGig = onCall<UpdateGigInput>({ region: "us-central1", secrets
     },
     location: publicLocation,
     updatedAt: Date.now(),
-    // A direct edit detaches a series occurrence from its template — it
+    // A direct edit detaches a series occurrence from its template, it
     // stops receiving the template's future edits (spec §4).
     ...(gig.seriesId ? { detachedFromTemplate: true } : {}),
   };
@@ -361,11 +361,11 @@ export const cancelGig = onCall<{ gigId: string }>({ region: "us-central1" }, as
   // inside it) rather than acting on the outer, already-possibly-stale
   // `gigSnap` read above. Closes the race where a concurrent acceptBooking
   // (or another cancelGig/publishGig-family call) flips this gig's status
-  // between this callable's outer read and its write — pre-fix, that
+  // between this callable's outer read and its write, pre-fix, that
   // window let a gig get cancelled the instant AFTER it became "filled"
   // underneath this call, silently bypassing the filled-gig refusal below
   // and orphaning a just-confirmed booking with no cancellation record.
-  // Membership is resolved above, outside the transaction — it doesn't
+  // Membership is resolved above, outside the transaction, it doesn't
   // depend on the gig's own mutable status (mirrors this codebase's other
   // "resolve membership once, re-check mutable state in-txn" idiom, e.g.
   // bookingLifecycle.ts's cancelBooking).
@@ -373,16 +373,16 @@ export const cancelGig = onCall<{ gigId: string }>({ region: "us-central1" }, as
     const freshSnap = await tx.get(gigRef);
     if (!freshSnap.exists) throw new HttpsError("not-found", "Gig not found.");
     const freshGig = freshSnap.data() as GigDoc;
-    // SP4: a filled gig has a confirmed booking behind it — cancelGig is a
+    // SP4: a filled gig has a confirmed booking behind it, cancelGig is a
     // plain status flip with no cancellation-window/deposit/reliability
     // consequences, none of which are appropriate once a real booking
     // exists. cancelBooking is the correct callable for that case (it runs
     // the curator-forfeit-window/musician-mark math and notifies the
-    // musician with the real outcome) — refuse here with a pointer to it,
+    // musician with the real outcome), refuse here with a pointer to it,
     // rather than silently reducing a booked act's gig to "cancelled" with
     // no recorded consequence at all.
     if (freshGig.status === "filled") {
-      throw new HttpsError("failed-precondition", "This gig is filled — cancel the booking instead.");
+      throw new HttpsError("failed-precondition", "This gig is filled. Cancel the booking instead.");
     }
     if (freshGig.status !== "draft" && freshGig.status !== "open") {
       throw new HttpsError("failed-precondition", `Cannot cancel a gig in status "${freshGig.status}".`);
@@ -391,7 +391,7 @@ export const cancelGig = onCall<{ gigId: string }>({ region: "us-central1" }, as
     return freshGig.status === "open";
   });
   // SP4: a still-"open" gig may have pending (open) booking requests on it
-  // (applyToGig/offerGig) — those must not be left dangling once the gig
+  // (applyToGig/offerGig), those must not be left dangling once the gig
   // itself is gone. A "draft" gig can never have any (applyToGig/offerGig
   // both require gig.status=="open"), so this is skipped for that branch.
   if (wasOpen) {
@@ -434,19 +434,19 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
   batch.update(gigRef, { status: "taken_down", updatedAt: now });
 
   let siblingsAffected = 0;
-  // Task 7: unwind's gigIds scope — every occurrence THIS call actually
+  // Task 7: unwind's gigIds scope, every occurrence THIS call actually
   // takes down (just this one for scope "occurrence"; this one plus every
   // taken-down sibling for scope "series").
   const affectedGigIds = [gigId];
   if (scope === "series") {
     const seriesRef = db.doc(`gigSeries/${gig.seriesId}`);
     batch.update(seriesRef, { status: "paused", updatedAt: now });
-    // P11 (RESOLVED — Task 7 fix): originally swept status=="open" siblings
+    // P11 (RESOLVED, Task 7 fix): originally swept status=="open" siblings
     // only, on the (then-true) assumption that "open" was the sole
     // publicly/live-reachable non-taken_down status a series occurrence
     // could carry. SP4 broke that assumption by adding "filled" (a booked
     // occurrence) as a SECOND publicly-readable status (the gigs read rule
-    // allows status=='filled' unconditionally) — an "open"-only sweep left
+    // allows status=='filled' unconditionally), an "open"-only sweep left
     // a booked run's other occurrences sitting "filled" forever: still
     // publicly readable, still linked to a booking this call's unwind call
     // below is about to expire. Both statuses are swept now; a future
@@ -467,7 +467,7 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
   await batch.commit();
 
   // Minor fix (Task 7 quality review): the audit entry is written BEFORE
-  // the unwind fan-out below — a throw during unwindBookingsForModeration's
+  // the unwind fan-out below, a throw during unwindBookingsForModeration's
   // own collect phase (a transient Firestore error on one of its queries)
   // must never cost this already-committed takedown its moderation audit
   // trail.
@@ -476,15 +476,15 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
     detail: `[${scope}] ${trimmedReason}`,
   });
 
-  // Task 7: unwind every booking sitting on the taken-down gig(s) — occurrence
+  // Task 7: unwind every booking sitting on the taken-down gig(s), occurrence
   // scope only ever touches this one gig; series scope also covers a
   // whole-run booking via seriesId (its own `gigId` field names just one
-  // occurrence, which may not even be among the ones just swept above — e.g.
+  // occurrence, which may not even be among the ones just swept above, e.g.
   // a whole-run booking's initiating gig can be a PAST occurrence no longer
   // "open"/"filled" by the time it started, so it would never appear in
   // siblingsSnap). unwindBookingsForModeration's own gigId-scoped collect
   // deliberately SKIPS a still-CONFIRMED whole-run booking it finds that
-  // way (see its own comment) — an occurrence-scope takedown must not
+  // way (see its own comment), an occurrence-scope takedown must not
   // silently kill an entire booked run just because ONE of its dates was
   // taken down; series scope (below, when scope=="series") is the admin's
   // tool for removing a booked run outright.
@@ -493,10 +493,10 @@ export const takedownGig = onCall<TakedownGigInput>({ region: "us-central1" }, a
 
   // Task 7 fix: occurrence scope on a gig that was FILLED by a still-
   // CONFIRMED whole-run booking is exactly the case unwindBookingsForModeration
-  // just skipped (see its comment above) — the run survives untouched, but
+  // just skipped (see its comment above), the run survives untouched, but
   // the musician whose ONE date just vanished still deserves to be told.
   // Distinct, run-scoped copy (not unwind's generic "Booking no longer
-  // available") — and no moderation-reason leak, same contract as
+  // available"), and no moderation-reason leak, same contract as
   // unwindBookingsForModeration's own notify.
   if (scope === "occurrence" && gig.status === "filled" && gig.bookingId) {
     const runBookingSnap = await db.doc(`bookings/${gig.bookingId}`).get();

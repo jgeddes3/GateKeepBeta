@@ -13,12 +13,12 @@ const adb = adminFirestore(admin);
 // Function execution (reviewProfile -> notifyProfileMembers -> notifyUser) is async
 // relative to the callable's resolved promise finishing its Firestore writes being
 // visible to a separate admin-SDK read, and a cold-started Functions emulator can add
-// latency on top of that. Poll instead of a single fixed sleep — same pattern as the
+// latency on top of that. Poll instead of a single fixed sleep, same pattern as the
 // cold-start note in authTriggers.test.ts.
 vi.setConfig({ testTimeout: 15_000 });
 
 // Poll a single user's notifications collection until it has at least one doc, or
-// the deadline passes (returns whatever the last read found — possibly still empty,
+// the deadline passes (returns whatever the last read found, possibly still empty,
 // which the caller's assertions will then fail on with a clear message).
 async function pollNotifications(uid: string) {
   const deadline = Date.now() + 10_000;
@@ -41,7 +41,7 @@ describe("review notifications", () => {
   it("approving a profile writes an inbox notification for each member", async () => {
     const owner = await signUpTestUser(`n1-${Date.now()}@test.com`);
     // Curator, not musician: this test's subject is notification fan-out on a
-    // review decision, not the minimum-content gate — seed the gate's
+    // review decision, not the minimum-content gate, seed the gate's
     // requirements directly (Task 4) rather than re-deriving them here.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
@@ -61,7 +61,7 @@ describe("review notifications", () => {
 
   it("rejecting a profile writes a notification whose title and body reflect the decision and reason", async () => {
     const owner = await signUpTestUser(`n2-${Date.now()}@test.com`);
-    // Curator, not musician — see the fixture note above.
+    // Curator, not musician, see the fixture note above.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
       { type: "curator", subtype: "venue", name: "Comet", handle: `comet_${Date.now()}` }, owner.user);
@@ -82,14 +82,14 @@ describe("review notifications", () => {
 
   it("approving a profile with multiple members notifies every member's inbox", async () => {
     const owner = await signUpTestUser(`n3-${Date.now()}@test.com`);
-    // Curator, not musician — see the fixture note above; this test's subject
+    // Curator, not musician, see the fixture note above; this test's subject
     // is member fan-out, unrelated to profile type.
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
       { type: "curator", subtype: "venue", name: "Lunar Sound", handle: `lunar_${Date.now()}` }, owner.user);
 
     // Add a second member directly via the admin SDK, bypassing the invite-accept
-    // callable flow — equivalent end state (a members subcollection doc), simpler
+    // callable flow, equivalent end state (a members subcollection doc), simpler
     // for the purposes of this fan-out test.
     const bandmate = await signUpTestUser(`n3b-${Date.now()}@test.com`);
     const member: MemberDoc = { uid: bandmate.uid, role: "member", label: "drummer", joinedAt: Date.now() };

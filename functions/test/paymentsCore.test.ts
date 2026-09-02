@@ -8,7 +8,7 @@ import {
 } from "@gatekeep/shared";
 
 // Unit-style: calls writeLedger/recomputePaymentSummary directly against the
-// Firestore emulator (no callable/HTTP layer involved) — these are internal
+// Firestore emulator (no callable/HTTP layer involved), these are internal
 // helpers, not endpoints.
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -32,7 +32,7 @@ function basePaymentDoc(overrides: Partial<PaymentDoc> & { gigId: string }): Pay
   };
 }
 
-// Minimal booking shell — buildPaymentDoc only reads the two profile ids off
+// Minimal booking shell, buildPaymentDoc only reads the two profile ids off
 // it; everything else about the money comes from its explicit params.
 function seedBooking(overrides: Partial<BookingRequestDoc> = {}): BookingRequestDoc {
   const now = Date.now();
@@ -54,7 +54,7 @@ describe("currentFeePolicy", () => {
     });
   });
 
-  it("returns a fresh, mutable copy each call — never shared's frozen DEFAULT_FEE_POLICY by reference", () => {
+  it("returns a fresh, mutable copy each call, never shared's frozen DEFAULT_FEE_POLICY by reference", () => {
     const a = currentFeePolicy();
     const b = currentFeePolicy();
     expect(a).not.toBe(b);
@@ -112,7 +112,7 @@ describe("buildPaymentDoc", () => {
   it("perSong: prices from the frozen songCount, ignoring the occurrence's duration", () => {
     const doc = buildPaymentDoc({
       booking: seedBooking({ structure: "perSong" }), bookingId: "bk1",
-      occ: { gigId: "g", startsAt: now, durationMinutes: 600 },   // deliberately huge — must not matter
+      occ: { gigId: "g", startsAt: now, durationMinutes: 600 },   // deliberately huge, must not matter
       amountCents: 933, expectedQuantity: 7, structure: "perSong",
       feePolicy: policy, selfDeal: false, now,
     });
@@ -137,7 +137,7 @@ describe("buildPaymentDoc", () => {
 
   it("the fee share comes from the PASSED policy snapshot, not the live constant", () => {
     // A booking accepted under an older/newer fee regime must keep paying its
-    // own snapshot's rate — the whole reason feePolicy is frozen onto the
+    // own snapshot's rate, the whole reason feePolicy is frozen onto the
     // booking at accept.
     const doubled: FeePolicy = { ...policy, curatorFeePct: 22 };
     const doc = buildPaymentDoc({
@@ -167,7 +167,7 @@ describe("recomputePaymentSummary", () => {
     const bookingId = `pcs-booking-${Date.now()}`;
     await adb.doc(`bookings/${bookingId}`).set({
       curatorProfileId: "cur1", musicianProfileId: "mus1", status: "accepted",
-      createdAt: Date.now(), updatedAt: 1, // deliberately stale — recompute must NOT touch this
+      createdAt: Date.now(), updatedAt: 1, // deliberately stale, recompute must NOT touch this
     });
 
     // Occurrence 1: deposit held, nothing else in flight.
@@ -188,7 +188,7 @@ describe("recomputePaymentSummary", () => {
       transfer: { status: "transferred", id: "tr_2", amountCents: 4400, transferredAt: Date.now() },
     }));
 
-    // Occurrence 3: deposit forfeited — a forfeit IS a transfer to the musician.
+    // Occurrence 3: deposit forfeited, a forfeit IS a transfer to the musician.
     await adb.doc(`bookings/${bookingId}/payments/g3`).set(basePaymentDoc({
       gigId: "g3",
       deposit: { sliceCents: 2000, feeShareCents: 200, intentId: "pi_3", chargeId: "ch_fixture", status: "forfeited", chargedAt: Date.now(), resolvedAt: Date.now(), forfeitTransferId: "tr_3" },
@@ -198,18 +198,18 @@ describe("recomputePaymentSummary", () => {
 
     const booking = await adb.doc(`bookings/${bookingId}`).get();
     const summary = booking.data()?.paymentSummary;
-    // heldCents: ONLY occurrence 1's slice — "applied" and "forfeited" are no
+    // heldCents: ONLY occurrence 1's slice, "applied" and "forfeited" are no
     // longer live escrow, even though they're still "paid" below.
     expect(summary.heldCents).toBe(1000);
     // paidCents: (1000+100 held) + (1000+100 applied) + (5000+500+0 paid
     // settlement) + (2000+200 forfeited) = 1100 + 1100 + 5500 + 2200 = 9900.
     expect(summary.paidCents).toBe(9900);
     // transferredCents: 4400 (transfer.transferred) + 2000 (forfeited
-    // deposit slice — counted as a transfer on top of transfer.status).
+    // deposit slice, counted as a transfer on top of transfer.status).
     expect(summary.transferredCents).toBe(6400);
     expect(summary.state).toBe("current");
     // updatedAt must be untouched by the recompute (only paymentSummary is
-    // written) — still the deliberately stale seed value.
+    // written), still the deliberately stale seed value.
     expect(booking.data()?.updatedAt).toBe(1);
   });
 
@@ -252,14 +252,14 @@ describe("recomputePaymentSummary", () => {
     expect(summary.heldCents).toBe(0);
     // paidCents: refund_pending (1000+100) + forfeit_pending (2000+200); refunded contributes 0.
     expect(summary.paidCents).toBe(3300);
-    // transferredCents: 0 — only "forfeited" (not forfeit_pending) or
+    // transferredCents: 0, only "forfeited" (not forfeit_pending) or
     // transfer.status === "transferred" ever contribute here.
     expect(summary.transferredCents).toBe(0);
   });
 });
 
 describe("writeLedger", () => {
-  it("dedupes on the same kind+stripeId — a second write for the same underlying Stripe object doesn't create a second row", async () => {
+  it("dedupes on the same kind+stripeId, a second write for the same underlying Stripe object doesn't create a second row", async () => {
     const stripeId = `pi_dedupe_${Date.now()}`;
     await writeLedger({ kind: "deposit_charged", amountCents: 500, bookingId: "b1", gigId: "g1", profileId: "cur1", stripeId, detail: "first" });
     await writeLedger({ kind: "deposit_charged", amountCents: 500, bookingId: "b1", gigId: "g1", profileId: "cur1", stripeId, detail: "second (should be suppressed)" });

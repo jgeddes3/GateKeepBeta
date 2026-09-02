@@ -1,12 +1,12 @@
 /**
- * Stripe client layer — the ONLY Stripe surface SP5 code may touch.
+ * Stripe client layer, the ONLY Stripe surface SP5 code may touch.
  *
  * StripeLike is deliberately narrow (only what SP5 uses). FakeStripe backs
  * the emulator/tests and persists idempotency + created objects in
  * Firestore (`stripeFake/*` docs) so behavior is consistent across the
  * emulator's functions process AND the test process, and honors
- * idempotency keys exactly like Stripe (same key => same object — or the
- * same error — back, never a duplicate attempt). RealStripe adapts the real
+ * idempotency keys exactly like Stripe (same key => same object, or the
+ * same error, back, never a duplicate attempt). RealStripe adapts the real
  * Stripe SDK. getStripe() selects between them the same way getGeocoder()
  * does (see geocode.ts), but FAILS CLOSED: outside the emulator, a missing
  * key is a configuration bug (a handler forgot `secrets: [stripeSecretKey]`)
@@ -16,7 +16,7 @@
  * CITATION KEY: "as-built contract #N" throughout SP5 (this file and every
  * payments* module) refers to the NUMBERED list in
  * `docs/superpowers/plans/2026-08-27-payments.md`, section "As-built contract
- * changes from Task 2's review (BINDING on later tasks)" — the rulings that
+ * changes from Task 2's review (BINDING on later tasks)", the rulings that
  * hardened this Stripe layer and override the plan's earlier task snippets
  * wherever they conflict. They are not spec section numbers (those are cited
  * as "spec §N").
@@ -50,14 +50,14 @@ export class StripeCardDeclinedError extends Error {
 
 // A PaymentIntent that ended up `processing` instead of `succeeded` (e.g.
 // some ACH-backed cards settle asynchronously). Recovery does NOT mean
-// "retry chargeOffSession with the same idempotencyKey" — both RealStripe
+// "retry chargeOffSession with the same idempotencyKey", both RealStripe
 // and FakeStripe replay this SAME cached `processing` outcome forever for
 // that key (see FakeStripe.idem), so a same-key retry can never observe a
 // different result. The actual recovery contract: the caller persists
 // `intentId`, leaves its saga/booking marker in the "awaiting payment"
 // state, and the `payment_intent.succeeded` webhook (see Tasks 3/6/11)
 // finalizes the saga out-of-band once Stripe confirms the charge. This
-// class only carries the shape callers need for that — it does not
+// class only carries the shape callers need for that, it does not
 // implement the recovery itself.
 export class StripePaymentPendingError extends Error {
   intentId: string;
@@ -84,7 +84,7 @@ export class StripeAccountMissingError extends Error {
 
 // Review round 1 (I1): a SetupIntent id supplied by the client to
 // refreshPaymentMethod does not belong to the caller's own Stripe customer.
-// Thrown instead of silently resolving a stranger's card — the callable
+// Thrown instead of silently resolving a stranger's card, the callable
 // translates this to failed-precondition.
 export class StripeSetupIntentMismatchError extends Error {
   setupIntentId: string;
@@ -97,12 +97,12 @@ export class StripeSetupIntentMismatchError extends Error {
 
 // H3 (branch audit): the webhook signing secret is not configured. Thrown by
 // constructWebhookEvent BEFORE it verifies anything, so the webhook handler can
-// tell a MISCONFIGURED endpoint (respond 500, loud — an operator must fix the
+// tell a MISCONFIGURED endpoint (respond 500, loud, an operator must fix the
 // secret) apart from a genuine forged/bad signature (respond 400). Never let a
 // missing secret degrade into an empty-string signature check.
 export class StripeWebhookSecretMissingError extends Error {
   constructor() {
-    super("STRIPE_WEBHOOK_SECRET is not configured — refusing to verify webhook signatures.");
+    super("STRIPE_WEBHOOK_SECRET is not configured, refusing to verify webhook signatures.");
     this.name = "StripeWebhookSecretMissingError";
   }
 }
@@ -113,11 +113,11 @@ export interface StripeLike {
   createSetupIntent(customerId: string): Promise<{ id: string; clientSecret: string }>;
   getDefaultPaymentMethod(customerId: string): Promise<{ id: string; brand: string; last4: string } | null>;
   setDefaultPaymentMethod(customerId: string, paymentMethodId: string): Promise<void>;
-  // Resolves the payment method attached to a SPECIFIC SetupIntent — unlike
+  // Resolves the payment method attached to a SPECIFIC SetupIntent, unlike
   // getDefaultPaymentMethod, this does not read the customer's current
   // default, so it's the right call right after Elements confirms a NEW
   // SetupIntent (the customer's default hasn't been repointed at it yet;
-  // reading "default" here would re-resolve the OLD card — review round 1,
+  // reading "default" here would re-resolve the OLD card, review round 1,
   // I1). Throws StripeSetupIntentMismatchError if the SetupIntent's customer
   // isn't `expectedCustomerId`. Returns null if the SetupIntent (or its
   // payment method) doesn't exist, or has no card attached.
@@ -127,16 +127,16 @@ export interface StripeLike {
   createExpressAccount(meta: Record<string, string>): Promise<{ id: string }>;
   createOnboardingLink(accountId: string, returnUrl: string, refreshUrl: string): Promise<{ url: string }>;
   // Throws StripeAccountMissingError when the account was deleted (or never
-  // existed) on Stripe's side — callers must not treat that the same as an
+  // existed) on Stripe's side, callers must not treat that the same as an
   // account that simply hasn't finished onboarding.
   getAccountState(accountId: string): Promise<StripeAccountState>;
   // Off-session charge with a saved payment method. THROWS on every
-  // non-succeeded outcome — callers can never ignore a failure:
+  // non-succeeded outcome, callers can never ignore a failure:
   //   - StripeCardDeclinedError (carries an optional `code`, e.g.
   //     "insufficient_funds", "authentication_required") for a definite
   //     decline.
   //   - StripePaymentPendingError (carries `intentId`) when the intent is
-  //     left `processing` — see that class's doc comment for the actual
+  //     left `processing`, see that class's doc comment for the actual
   //     recovery contract; it is NOT "retry with the same key".
   // Same idempotencyKey ⇒ the same result, or the same modeled error,
   // replayed.
@@ -183,13 +183,13 @@ export interface StripeLike {
     accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
     // The originating charge, when there is one. Forwarded to Stripe as
     // source_transaction so the transfer draws against that charge's funds
-    // directly instead of the platform's overall available balance —
+    // directly instead of the platform's overall available balance,
     // avoids balance_insufficient against a charge that hasn't settled yet.
     sourceChargeId?: string;
   }): Promise<{ id: string }>;
   reverseTransfer(params: { transferId: string; idempotencyKey: string }): Promise<{ id: string }>;
   // BOTH balance buckets in ONE call. `instantAvailableCents` is the
-  // instant-payout-eligible slice — a subset of `availableCents` (funds still
+  // instant-payout-eligible slice, a subset of `availableCents` (funds still
   // settling are available but not instant-eligible). They come off the SAME
   // Stripe balance object, so splitting this into two methods only ever bought
   // two round trips for one answer: every caller either wants both (the status
@@ -205,7 +205,7 @@ export interface StripeLike {
   }): Promise<{ id: string }>;
   // Webhook verification. Real: stripe.webhooks.constructEvent (throws on bad
   // signature). Fake: JSON.parse, signature ignored (emulator only). rawBody
-  // is `string | Buffer` so callers can hand req.rawBody straight through —
+  // is `string | Buffer` so callers can hand req.rawBody straight through,
   // Stripe's own SDK accepts either directly (constructEvent hashes the raw
   // bytes; converting to a string first is a needless extra step, and for a
   // real request rawBody is already a Buffer).
@@ -228,10 +228,10 @@ function isAlreadyExists(e: unknown): boolean {
 }
 
 // Only these count as "the endpoint executed and produced a modeled
-// outcome" — the set of failures a real Stripe idempotency-key replay would
+// outcome", the set of failures a real Stripe idempotency-key replay would
 // also hand back verbatim. Anything else (a transient Firestore UNAVAILABLE
 // mid-`make()`, a programmer error) means we don't actually know whether
-// make()'s side effects committed, so FakeStripe.idem must NOT cache it —
+// make()'s side effects committed, so FakeStripe.idem must NOT cache it,
 // see the comment on idem() itself.
 function isCacheableStripeError(e: unknown): boolean {
   if (e instanceof StripeCardDeclinedError || e instanceof StripePaymentPendingError) return true;
@@ -244,11 +244,11 @@ interface StoredError { name: string; message: string; code?: string; intentId?:
 // State lives in Firestore so the functions process and the test process see
 // the same world. All paths below route through the private *Ref() helpers
 // so the layout lives in exactly one place. `stripeFake/config` is a plain
-// doc (collection `stripeFake`, doc `config` — 2 segments, valid). Every
+// doc (collection `stripeFake`, doc `config`, 2 segments, valid). Every
 // other kind of state hangs off a single holder doc `stripeFake/state` as a
 // subcollection, since e.g. `stripeFake/objects/{id}` would only be a valid
 // *document* path if `objects` were itself a document id, not a collection
-// name — going one level deeper (`stripeFake/state/objects/{id}`) keeps an
+// name, going one level deeper (`stripeFake/state/objects/{id}`) keeps an
 // even segment count (collection/doc/collection/doc) while still reading as
 // "objects", "idem", "cards" collections:
 //   stripeFake/config               { declineCharges?, declineCustomerIds?,  (test knob, admin-SDK-written)
@@ -302,17 +302,17 @@ export class FakeStripe implements StripeLike {
   }
 
   // Mirrors real Stripe idempotency semantics: same key replays the same
-  // outcome — success OR a MODELED error — instead of re-running `make()`.
+  // outcome, success OR a MODELED error, instead of re-running `make()`.
   // Deliberate divergences from the real thing:
   //   - keys never expire (real Stripe expires them after 24h); fine for
   //     tests, which mint fresh Date.now()-suffixed keys per case.
-  //   - only modeled failures are cached (isCacheableStripeError, above) —
+  //   - only modeled failures are cached (isCacheableStripeError, above),
   //     an infra-level throw from make() rethrows UNCACHED so a retry with
   //     the same key re-executes, matching Stripe's "a response is only
   //     saved once the endpoint actually ran to completion" behavior.
   // `fingerprint` is an optional caller-supplied digest of the call's
   // interesting params. It's deliberately AMOUNT-scoped (e.g.
-  // "customerId:amountCents"), not a hash of the full request body — that's
+  // "customerId:amountCents"), not a hash of the full request body, that's
   // the cheapest signal that catches the realistic bug this guards against
   // (a key reused for a different amount) without over-fitting to exact
   // param shapes that will keep changing across SP5 tasks. Reusing a key
@@ -338,10 +338,10 @@ export class FakeStripe implements StripeLike {
 
     try {
       // .create() (not .set()) so a concurrent call racing on the SAME key
-      // can't both "win" the STORED outcome — first writer wins and the
+      // can't both "win" the STORED outcome, first writer wins and the
       // loser replays it. This gives id CONSISTENCY, not mutual exclusion:
       // both racers still fully execute make() before this point (e.g. two
-      // payment_intent docs briefly exist) — harmless for chargeOffSession,
+      // payment_intent docs briefly exist), harmless for chargeOffSession,
       // but NOT for the balance-mutating methods (transferToAccount,
       // createPayout, debitConnectedAccount): two racers both run make(), so
       // the fake double-applies the balance change and only the id is
@@ -352,7 +352,7 @@ export class FakeStripe implements StripeLike {
       // requestId (a double-clicked button, a client retrying before the first
       // response lands) reach createPayout on ONE key at once. What protects
       // production is REAL Stripe, which answers a second in-flight request on
-      // a live idempotency key with a 409 rather than executing it — this fake
+      // a live idempotency key with a 409 rather than executing it, this fake
       // has no such interlock and would decrement the balance twice.
       //
       // Tolerated rather than redesigned because nothing in the emulator
@@ -371,7 +371,7 @@ export class FakeStripe implements StripeLike {
     return outcome.result;
   }
 
-  // Single config read backing chargeOffSession's two test knobs — decline
+  // Single config read backing chargeOffSession's two test knobs, decline
   // (declineCharges global flag OR customerId in declineCustomerIds) and
   // pending (customerId in pendingCustomerIds), scoped exactly the same way.
   private async chargeKnobs(customerId: string): Promise<{ decline: boolean; pending: boolean }> {
@@ -400,18 +400,18 @@ export class FakeStripe implements StripeLike {
   async getDefaultPaymentMethod(customerId: string) {
     // Deterministic contract (see test + markCardSaved below): a marker doc
     // at stripeFake/state/cards/{customerId} decides whether this customer
-    // has a saved Visa •••• 4242 card. Nothing else — no scanning of
+    // has a saved Visa •••• 4242 card. Nothing else, no scanning of
     // created setup intents.
     const marker = await this.cardRef(customerId).get();
     return marker.exists ? { id: "pm_fake_4242", brand: "visa", last4: "4242" } : null;
   }
   async setDefaultPaymentMethod(customerId: string, paymentMethodId: string): Promise<void> {
-    void paymentMethodId; // The fake only ever fabricates one card (pm_fake_4242) — nothing to switch between.
+    void paymentMethodId; // The fake only ever fabricates one card (pm_fake_4242), nothing to switch between.
     await this.cardRef(customerId).set({ saved: true }, { merge: true });
   }
   async getSetupIntentPaymentMethod(setupIntentId: string, expectedCustomerId: string) {
     const snap = await this.objRef(setupIntentId).get();
-    // Unknown (or wrong-kind) SetupIntent id — no card to resolve, and
+    // Unknown (or wrong-kind) SetupIntent id, no card to resolve, and
     // nothing to check ownership against, so this is "no card" rather than
     // a mismatch.
     if (!snap.exists || snap.data()?.kind !== "setup_intent") return null;
@@ -421,14 +421,14 @@ export class FakeStripe implements StripeLike {
     }
     // Deterministic contract, same marker getDefaultPaymentMethod reads: the
     // fake only ever fabricates one card, keyed off the customer, not the
-    // SetupIntent — so "does THIS SetupIntent's customer have a saved card"
+    // SetupIntent, so "does THIS SetupIntent's customer have a saved card"
     // is exactly the same lookup.
     const marker = await this.cardRef(customerId).get();
     return marker.exists ? { id: "pm_fake_4242", brand: "visa", last4: "4242" } : null;
   }
   // Test/webhook hook: the web SaveCardModal can't run against the fake, so
   // createSetupIntent's CALLER (payments.ts) immediately marks the card saved
-  // when running on the fake — see payments.ts Task 4.
+  // when running on the fake, see payments.ts Task 4.
   async markCardSaved(customerId: string): Promise<void> {
     await this.cardRef(customerId).set({ saved: true });
   }
@@ -440,13 +440,13 @@ export class FakeStripe implements StripeLike {
     return { id };
   }
   async createOnboardingLink(accountId: string, returnUrl: string, refreshUrl: string) {
-    void refreshUrl; // The fake never round-trips a real browser through onboarding, so there's nothing for refreshUrl to influence — kept in the signature to match StripeLike exactly.
+    void refreshUrl; // The fake never round-trips a real browser through onboarding, so there's nothing for refreshUrl to influence, kept in the signature to match StripeLike exactly.
     return { url: `https://fake.stripe/onboard/${accountId}?return=${encodeURIComponent(returnUrl)}` };
   }
   async getAccountState(accountId: string): Promise<StripeAccountState> {
     const snap = await this.objRef(accountId).get();
     // createExpressAccount ALWAYS writes the object doc (with explicit false
-    // flags) — so a fresh, never-onboarded account still has a doc. Absent
+    // flags), so a fresh, never-onboarded account still has a doc. Absent
     // means the doc was deleted out from under a cached accountId, i.e. the
     // Connect account itself is gone (review round 1, I2's fake model of a
     // deleted account).
@@ -465,7 +465,7 @@ export class FakeStripe implements StripeLike {
       if (decline) throw new StripeCardDeclinedError("card_declined", "generic_decline");
       const id = this.newId("pi");
       if (pending) {
-        // Create the intent object doc FIRST so intentId is real/pollable —
+        // Create the intent object doc FIRST so intentId is real/pollable,
         // mirrors RealStripe, where the PaymentIntent exists (in
         // `processing`) in Stripe's system before the error is thrown.
         await this.objRef(id).set({
@@ -558,8 +558,8 @@ export class FakeStripe implements StripeLike {
     return this.idem(p.idempotencyKey, async () => {
       const id = this.newId("tr");
       const acct = this.objRef(p.accountId);
-      // Both writes — the transfer object AND the running balance it
-      // depends on — happen in one transaction: no world where the object
+      // Both writes, the transfer object AND the running balance it
+      // depends on, happen in one transaction: no world where the object
       // exists but the balance never moved (or vice versa), including if
       // idem() decides NOT to cache a later failure and this whole make()
       // reruns.
@@ -600,7 +600,7 @@ export class FakeStripe implements StripeLike {
   async getBalances(accountId: string): Promise<StripeBalances> {
     const snap = await this.objRef(accountId).get();
     const balance = (snap.data()?.balanceCents as number | undefined) ?? 0;
-    // The fake tracks one running balance per account — no real card-network
+    // The fake tracks one running balance per account, no real card-network
     // settlement delay to model, so "instant available" coincides with
     // "available".
     return { availableCents: balance, instantAvailableCents: balance };
@@ -623,11 +623,11 @@ export class FakeStripe implements StripeLike {
     return this.idem(p.idempotencyKey, async () => {
       const acct = this.objRef(p.accountId);
       const id = this.newId("adb");
-      // Both writes — the debit object AND the balance it depends on —
+      // Both writes, the debit object AND the balance it depends on,
       // happen in one transaction (same reasoning as transferToAccount):
       // otherwise an infra throw landing between the two would leave the
       // balance moved but no debit doc, and since that throw isn't a
-      // modeled error, idem() rethrows it uncached — a same-key retry would
+      // modeled error, idem() rethrows it uncached, a same-key retry would
       // re-run this and double-decrement the balance.
       await this.db.runTransaction(async (tx) => {
         const s = await tx.get(acct);
@@ -638,7 +638,7 @@ export class FakeStripe implements StripeLike {
     }, `${p.accountId}:${p.amountCents}`);
   }
   constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; account?: string; data: { object: Record<string, unknown> } } {
-    void signature; // Signature verification is a RealStripe-only concern — the emulator's fake webhook calls are same-process and already trusted.
+    void signature; // Signature verification is a RealStripe-only concern, the emulator's fake webhook calls are same-process and already trusted.
     const evt = JSON.parse(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8")) as
       { id: string; type: string; account?: unknown; data: { object: Record<string, unknown> } };
     // M1 (branch audit): mirror the real SDK's top-level connected-account
@@ -706,14 +706,14 @@ export class RealStripe implements StripeLike {
         // PaymentMethod object. If Stripe ever hands back just the id
         // instead (Stripe's types can't express "expand guarantees the
         // object shape" statically), retrieve THAT specific payment method
-        // by id — falling through to "most recently attached card" here
+        // by id, falling through to "most recently attached card" here
         // would silently return a DIFFERENT card than the customer's actual
         // default.
         const pm = typeof dpm === "string" ? await this.s.paymentMethods.retrieve(dpm) : dpm;
         if (pm.card) return { id: pm.id, brand: pm.card.brand, last4: pm.card.last4 };
       }
     }
-    // No explicit default set (or it wasn't a card) — fall back to the most
+    // No explicit default set (or it wasn't a card), fall back to the most
     // recently attached card.
     const pms = await this.s.paymentMethods.list({ customer: customerId, type: "card", limit: 1 });
     const pm = pms.data[0];
@@ -729,7 +729,7 @@ export class RealStripe implements StripeLike {
       si = await this.s.setupIntents.retrieve(setupIntentId, { expand: ["payment_method"] });
     } catch (e) {
       // resource_missing (or a bare 404) means this SetupIntent id doesn't
-      // exist — matches the interface contract (null, not a throw) and the
+      // exist, matches the interface contract (null, not a throw) and the
       // fake's identical "unknown id -> null" behavior. Review round 2, #1.
       if (e instanceof Stripe.errors.StripeInvalidRequestError
         && (e.code === "resource_missing" || e.statusCode === 404)) {
@@ -768,7 +768,7 @@ export class RealStripe implements StripeLike {
       a = await this.s.accounts.retrieve(accountId);
     } catch (e) {
       // resource_missing (or a bare 404) means the Connect account was
-      // deleted (or the id never existed) — distinguish that from any other
+      // deleted (or the id never existed), distinguish that from any other
       // failure so callers can fail closed instead of either 500ing or
       // silently treating "can't reach Stripe" the same as "never
       // onboarded" (review round 1, I2).
@@ -782,7 +782,7 @@ export class RealStripe implements StripeLike {
       id: accountId,
       transfersEnabled: a.capabilities?.transfers === "active",
       payoutsEnabled: a.payouts_enabled === true,
-      // external_accounts with instant-eligible debit cards — approximated by
+      // external_accounts with instant-eligible debit cards, approximated by
       // payouts_enabled + a card external account; refined post-launch.
       instantEligible: a.payouts_enabled === true
         && (a.external_accounts?.data ?? []).some((e) => e.object === "card"),
@@ -805,7 +805,7 @@ export class RealStripe implements StripeLike {
     }
     if (pi.status === "processing") throw new StripePaymentPendingError(pi.id);
     if (pi.status !== "succeeded") {
-      // requires_action / requires_payment_method / canceled etc — an
+      // requires_action / requires_payment_method / canceled etc, an
       // off-session confirm that doesn't succeed outright is effectively a
       // decline (no user is present to complete an authentication step).
       throw new StripeCardDeclinedError(`unexpected off-session status: ${pi.status}`);
@@ -817,7 +817,7 @@ export class RealStripe implements StripeLike {
     const pi = await this.s.paymentIntents.create({
       amount: p.amountCents, currency: "usd", customer: p.customerId, metadata: p.meta,
       automatic_payment_methods: { enabled: true },
-      // payPastDue's whole point is that a curator may pay with a FRESH card —
+      // payPastDue's whole point is that a curator may pay with a FRESH card,
       // the one on file is the one that kept declining. Without this the new
       // card is used once and thrown away, so the very next off-session charge
       // fails against the same dead card. `off_session` tells Stripe to save it
@@ -828,7 +828,7 @@ export class RealStripe implements StripeLike {
       // refreshPaymentMethod, which resolves the confirmed SetupIntent's card
       // and pins it). Making the default follow a past-due payment silently
       // would change which card every future charge lands on without anyone
-      // asking for it — this only makes sure the card CAN be picked up when
+      // asking for it, this only makes sure the card CAN be picked up when
       // they do ask.
       setup_future_usage: "off_session",
     }, { idempotencyKey: p.idempotencyKey });
@@ -869,12 +869,12 @@ export class RealStripe implements StripeLike {
     return { id: r.id };
   }
   async getBalances(accountId: string): Promise<StripeBalances> {
-    // ONE retrieve for both buckets — they are two fields of the same balance
+    // ONE retrieve for both buckets, they are two fields of the same balance
     // object, and reading it twice was two round trips for one answer (and a
     // window in which the two figures could come from different moments).
     const b = await this.s.balance.retrieve({ stripeAccount: accountId });
     // Structurally typed rather than against Stripe's two distinct bucket
-    // types (Balance.Available vs Balance.InstantAvailable) — the only fields
+    // types (Balance.Available vs Balance.InstantAvailable), the only fields
     // this sums are the two they share.
     const usdTotal = (buckets: ReadonlyArray<{ currency: string; amount: number }> | undefined): number =>
       (buckets ?? []).filter((a) => a.currency === "usd").reduce((s, a) => s + a.amount, 0);
@@ -893,7 +893,7 @@ export class RealStripe implements StripeLike {
     // Connect "account debit": pulling funds from a connected account's
     // balance back to the platform via charges.create({ source: accountId })
     // is Stripe's legacy (pre-Treasury) mechanism for this and is thin on
-    // current Connect documentation — re-verify this call against Stripe's
+    // current Connect documentation, re-verify this call against Stripe's
     // current account-debit guidance before this path ever runs in live
     // mode (see Task 13's payouts work).
     const c = await this.s.charges.create(
@@ -904,7 +904,7 @@ export class RealStripe implements StripeLike {
   constructWebhookEvent(rawBody: string | Buffer, signature: string) {
     // H3 (branch audit): resolve the signing secret and FAIL CLOSED when it is
     // absent. Passing `|| ""` to constructEvent (the old behavior) turns a
-    // MISCONFIGURED endpoint — no STRIPE_WEBHOOK_SECRET provisioned — into a
+    // MISCONFIGURED endpoint, no STRIPE_WEBHOOK_SECRET provisioned, into a
     // signature check against the empty string. That is not a bad-signature
     // rejection: it is verification silently degraded to a constant an attacker
     // knows, so it must throw its OWN configuration error BEFORE constructEvent
@@ -916,7 +916,7 @@ export class RealStripe implements StripeLike {
     }
     const evt = this.s.webhooks.constructEvent(rawBody, signature, secret);
     // M1 (branch audit): carry the event's top-level connected-account marker
-    // (`evt.account`) through to the dispatcher — present on a Connect event,
+    // (`evt.account`) through to the dispatcher, present on a Connect event,
     // absent on a platform event.
     const e = evt as unknown as { id: string; type: string; account?: unknown; data: { object: Record<string, unknown> } };
     return {
@@ -930,13 +930,13 @@ export class RealStripe implements StripeLike {
 // key wins if present; otherwise the fake is allowed ONLY when we can prove
 // we're in the emulator (FUNCTIONS_EMULATOR is set by the Functions
 // emulator's runtime; FIRESTORE_EMULATOR_HOST is set explicitly by test
-// processes like stripeClient.test.ts). Anywhere else — a deployed function
-// whose handler forgot `secrets: [stripeSecretKey]` — this throws instead of
+// processes like stripeClient.test.ts). Anywhere else, a deployed function
+// whose handler forgot `secrets: [stripeSecretKey]`, this throws instead of
 // silently moving fake money against production Firestore data.
 export function getStripe(): StripeLike {
   // Cloud Functions v2 injects a secret declared via
   // `secrets: [stripeSecretKey]` directly into process.env.STRIPE_SECRET_KEY
-  // in production, so this env check IS the production fast path — a
+  // in production, so this env check IS the production fast path, a
   // correctly configured handler resolves here without ever touching
   // stripeSecretKey.value().
   const envKey = process.env.STRIPE_SECRET_KEY;
@@ -945,7 +945,7 @@ export function getStripe(): StripeLike {
   if (process.env.FUNCTIONS_EMULATOR === "true" || process.env.FIRESTORE_EMULATOR_HOST) {
     // Never call stripeSecretKey.value() here: the Functions emulator logs
     // a warning on every read of an unbound SecretParam, and the emulator
-    // never provisions Secret Manager secrets anyway — the answer would
+    // never provisions Secret Manager secrets anyway, the answer would
     // always be "". Gating the call out entirely (rather than just
     // reordering the `||`) keeps the emulator's logs clean.
     return new FakeStripe();
@@ -957,9 +957,9 @@ export function getStripe(): StripeLike {
   // (No point trying stripeSecretKey.value() as a last resort here: Cloud
   // Functions v2 backs it with the exact same process.env.STRIPE_SECRET_KEY
   // already checked above, so a second read can't turn up anything the
-  // first one missed — it would only add a spurious emulator-style warning
+  // first one missed, it would only add a spurious emulator-style warning
   // right before this throw.)
-  throw new Error("STRIPE_SECRET_KEY is not configured — refusing to run with FakeStripe outside the emulator.");
+  throw new Error("STRIPE_SECRET_KEY is not configured, refusing to run with FakeStripe outside the emulator.");
 }
 
 export function isFakeStripe(s: StripeLike): s is FakeStripe {

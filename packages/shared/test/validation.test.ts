@@ -105,7 +105,7 @@ describe("validatePortfolioUpdate", () => {
     expect(link("spotify", "https://open.spotify.com.evil.example/x").ok).toBe(false);
     expect(link("spotify", "https://open.spotify.com@evil.example/x").ok).toBe(false);
     expect(link("spotify", "https://opеn.spotify.com/x").ok).toBe(false); // е is Cyrillic "е", not Latin "e"
-    expect(link("spotify", "HTTPS://OPEN.SPOTIFY.COM/artist/a").ok).toBe(true); // regex has /i — uppercase scheme+host are fine
+    expect(link("spotify", "HTTPS://OPEN.SPOTIFY.COM/artist/a").ok).toBe(true); // regex has /i, uppercase scheme+host are fine
   });
   it("accepts query/fragment/explicit-port URL shapes and whitespace padding, and rejects the host:port@ userinfo trick", () => {
     const link = (kind: string, url: string) =>
@@ -136,7 +136,7 @@ describe("validatePortfolioUpdate", () => {
 });
 
 describe("validateBookingUpdate", () => {
-  // SP4: BookingUpdateInput now carries a required `visibility` — this
+  // SP4: BookingUpdateInput now carries a required `visibility`, this
   // literal is the backfill default (all rates + preferences "curators",
   // i.e. pre-SP4 exposure), reused everywhere below that needs a legal one.
   const okVisibility: BookingVisibility = {
@@ -189,7 +189,7 @@ describe("validateBookingUpdate", () => {
     expect(validateBookingUpdate({ ...ok, profileId: "" }).ok).toBe(false);
     expect(validateBookingUpdate({ ...ok, profileId: "p1/x" }).ok).toBe(false);
   });
-  it("delegates to validateBookingVisibility — rejects a garbage visibility payload", () => {
+  it("delegates to validateBookingVisibility, rejects a garbage visibility payload", () => {
     expect(validateBookingUpdate({ ...ok, visibility: { perHour: "public" } as never }).ok).toBe(false);
   });
   it("treats preferences with all scalar fields omitted (undefined, not just explicit null) as valid", () => {
@@ -244,7 +244,7 @@ describe("constants", () => {
 describe("never throws on hostile payloads (defensive runtime guards)", () => {
   // Each of these previously either threw (prototype-chain `in` lookup) or
   // silently validated as ok (missing array/length/id checks). All must now
-  // fail cleanly — no uncaught exception, ok: false.
+  // fail cleanly, no uncaught exception, ok: false.
   const hostileCases: Array<{ name: string; run: () => { ok: boolean } }> = [
     {
       name: "link kind 'constructor' (prototype-chain lookup bypass)",
@@ -290,7 +290,7 @@ describe("never throws on hostile payloads (defensive runtime guards)", () => {
     },
   ];
   for (const { name, run } of hostileCases) {
-    it(`does not throw and reports ok:false — ${name}`, () => {
+    it(`does not throw and reports ok:false, ${name}`, () => {
       let result: { ok: boolean } | undefined;
       expect(() => { result = run(); }).not.toThrow();
       expect(result?.ok).toBe(false);
@@ -498,7 +498,7 @@ describe("validateRecurrence", () => {
   it("rejects an endDate exactly equal to now (must be strictly future)", () => {
     expect(validateRecurrence({ ...ok, endDate: now }, now).ok).toBe(false);
   });
-  it("never calls Date.now() — behavior depends only on the injected now", () => {
+  it("never calls Date.now(), behavior depends only on the injected now", () => {
     const spy = vi.spyOn(Date, "now");
     validateRecurrence(ok, now);
     expect(spy).not.toHaveBeenCalled();
@@ -549,7 +549,7 @@ describe("sub-3 gig/curator constants", () => {
   });
 });
 
-describe("never throws on hostile payloads — sub-3 validators", () => {
+describe("never throws on hostile payloads, sub-3 validators", () => {
   const hostileCases: Array<{ name: string; run: () => { ok: boolean } }> = [
     {
       name: "validateLookingFor genres as a plain object",
@@ -573,7 +573,7 @@ describe("never throws on hostile payloads — sub-3 validators", () => {
     },
   ];
   for (const { name, run } of hostileCases) {
-    it(`does not throw and reports ok:false — ${name}`, () => {
+    it(`does not throw and reports ok:false, ${name}`, () => {
       let result: { ok: boolean } | undefined;
       expect(() => { result = run(); }).not.toThrow();
       expect(result?.ok).toBe(false);
@@ -653,7 +653,7 @@ describe("validateOfferInput", () => {
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: 1.5 })).not.toBeNull();
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: "12" as never })).not.toBeNull();
   });
-  it("perSong rejects a missing (undefined) or null expectedQuantity — it's required", () => {
+  it("perSong rejects a missing (undefined) or null expectedQuantity, it's required", () => {
     expect(validateOfferInput("perSong", { amountCents: 800, note: null } as never)).not.toBeNull();
     expect(validateOfferInput("perSong", { ...perSongOk, expectedQuantity: null })).not.toBeNull();
   });
@@ -687,12 +687,12 @@ describe("validateBookingVisibility", () => {
   });
   it("rejects a swapped-in alien key: exactly 4 own keys, but one required key (preferences) is missing", () => {
     // Same key COUNT as a valid object (so the length check alone can't
-    // catch it) — this is the only input shape that reaches (and exercises)
+    // catch it), this is the only input shape that reaches (and exercises)
     // the hasOwnProperty loop's own reject branch.
     const { preferences: _preferences, ...rest } = ok;
     expect(validateBookingVisibility({ ...rest, alien: "curators" })).toBe(false);
   });
-  it('rejects "public" on a rate field (rates are never public — spec decision 4)', () => {
+  it('rejects "public" on a rate field (rates are never public, spec decision 4)', () => {
     expect(validateBookingVisibility({ ...ok, perHour: "public" })).toBe(false);
   });
   it('rejects "private" on preferences (not a legal PrefsVisibility value)', () => {

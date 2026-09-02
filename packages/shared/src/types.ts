@@ -12,7 +12,7 @@ export interface UserDoc {
   createdAt: number; // epoch ms
   // Task 8: lowercased displayName for prefix search (searchUsersByName).
   // Written by onUserCreated and kept in sync by the onUserDocWritten
-  // trigger — NEVER client-writable (outside firestore.rules' users update
+  // trigger, NEVER client-writable (outside firestore.rules' users update
   // hasOnly set). Optional because pre-Task-8 seed data / in-flight docs may
   // not have it yet until the trigger or backfillDisplayNameLower catches up.
   displayNameLower?: string;
@@ -35,16 +35,16 @@ export interface ProfileDoc {
   lastRejectedAt?: number;
   // Task 8: how many times this profile has been resubmitted after a
   // rejection (i.e. submitProfileForReview called while status was
-  // "rejected") — lets the admin queue render "resubmitted Nth time".
+  // "rejected"), lets the admin queue render "resubmitted Nth time".
   // Absent for a profile that has never been rejected+resubmitted; the
   // FIRST ever submission (draft -> pending_review) deliberately does not
   // count as a resubmit.
   resubmitCount?: number;
   // SP4: mirrors profiles/{id}/private/booking's `preferences` iff that
-  // doc's `visibility.preferences == "public"` — rebuildBookingProjections
+  // doc's `visibility.preferences == "public"`, rebuildBookingProjections
   // is the sole writer; NEVER rates (rates are never public, spec decision
   // 4). Optional (not `publicBooking:`) so pre-SP4 docs/fixtures stay
-  // type-valid, mirroring BookingDoc.visibility's migration strategy —
+  // type-valid, mirroring BookingDoc.visibility's migration strategy,
   // readers must treat an absent value the same as null (`?? null`).
   // Server writers (createProfileDraft, rebuildBookingProjections) always
   // stamp it explicitly, present-and-nullable, going forward.
@@ -52,7 +52,7 @@ export interface ProfileDoc {
 }
 
 export interface MemberDoc {
-  uid: string;               // duplicates the doc id — required for collection-group "my profiles" queries
+  uid: string;               // duplicates the doc id, required for collection-group "my profiles" queries
   role: MemberRole;
   label: string;             // "drummer", "venue manager"
   joinedAt: number;
@@ -91,7 +91,7 @@ export interface NotificationDoc {
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
-  // to the thing it's about — today only booking-kind notifications set it
+  // to the thing it's about, today only booking-kind notifications set it
   // (the bookingId), letting the web notification list link straight to
   // /dashboard/bookings/[refId]. Optional/backward-compatible: every
   // pre-Task-10 notification (profile/track review, gig moderation, system)
@@ -155,11 +155,11 @@ export interface BookingPreferences {
   bringsOwnPA: boolean | null;
   availabilityPattern: AvailabilityPattern | null;
 }
-// profiles/{profileId}/private/booking — members + admins only (sub-3 widens to curators)
+// profiles/{profileId}/private/booking, members + admins only (sub-3 widens to curators)
 export interface BookingDoc {
   rates: BookingRates; preferences: BookingPreferences; updatedAt: number;
   // SP4: per-field read tiers. Optional (not `visibility:`) so pre-SP4
-  // docs/fixtures stay type-valid — updateBookingInfo always writes a
+  // docs/fixtures stay type-valid, updateBookingInfo always writes a
   // complete one going forward, and Task 3's backfill converges legacy docs;
   // consumers must treat an absent value the same as the backfill default
   // (all rates "curators", preferences "curators").
@@ -222,7 +222,7 @@ export interface CuratorDetails {
   location: { address: string | null; city: string; neighborhood: string | null;
               geo: { lat: number; lng: number } | null;
               // S2 (geocoder throttle): the exact query string (address or
-              // city) that produced this geo — lets updateCuratorProfile
+              // city) that produced this geo, lets updateCuratorProfile
               // skip a redundant geocode call (and its budget charge) when a
               // caller re-submits the same location input. Optional so
               // pre-S2 seed data / admin-SDK test fixtures without this
@@ -230,10 +230,10 @@ export interface CuratorDetails {
               geocodedFrom?: string };
   photoPaths: string[];          // public/photos/... "gallery" kind (SP2 photo pipeline, widened in Task 4b)
 }
-// Curator gallery cap — enforced by media.ts's processPhoto trigger when
+// Curator gallery cap, enforced by media.ts's processPhoto trigger when
 // appending a newly processed "gallery" photo to curator.photoPaths.
 export const MAX_CURATOR_PHOTOS = 12;
-// Curator content soft caps — server-enforced in functions/src/curator.ts's
+// Curator content soft caps, server-enforced in functions/src/curator.ts's
 // updateCuratorProfile validation; exported here so client forms (web +
 // mobile) consume the same numbers as maxLength/UX-only soft caps instead of
 // re-declaring their own copies that could drift from the server gate.
@@ -259,12 +259,12 @@ export interface GigDoc {
   provisions: { hasPA: boolean | null; hasBackline: boolean | null; notes: string | null };
   location: GigPublicLocation;
   status: GigStatus; createdAt: number; updatedAt: number;
-  // SP4: public queryable booking linkage — stamped atomically with
+  // SP4: public queryable booking linkage, stamped atomically with
   // status:"filled" by acceptBooking (and by the materializer for a
   // whole-run occurrence born already-filled); cleared back to null
   // whenever the gig reopens (cancellation/moderation unwind). Public
   // (not private) so the Shows section and gigs/{id}/private/location's
-  // booked-musician reveal rule can both read it — it names the booked act
+  // booked-musician reveal rule can both read it, it names the booked act
   // only, no terms.
   bookingId: string | null; bookedMusicianProfileId: string | null;
 }
@@ -272,7 +272,7 @@ export interface GigDoc {
 export interface GigPrivateLocation {
   address: string; geo: { lat: number; lng: number } | null;
   // S2 (geocoder throttle): pass-through of the exact query string that
-  // produced `address`/`geo` — mirrors CuratorDetails.location.geocodedFrom.
+  // produced `address`/`geo`, mirrors CuratorDetails.location.geocodedFrom.
   // Optional for the same reason (pre-S2 fixtures/materialized copies of an
   // older template omit it; absent never matches, so it never wrongly skips
   // a geocode).
@@ -285,7 +285,7 @@ export interface GigSeriesDoc {
     "curatorProfileId"|"seriesId"|"detachedFromTemplate"|"status"|"startsAt"|"createdAt"|"updatedAt"
     |"bookingId"|"bookedMusicianProfileId">;
   // The exact address+geo backing template.location (which is the public,
-  // possibly-coarsened shape) — mirrors gigs/{id}/private/location, but
+  // possibly-coarsened shape), mirrors gigs/{id}/private/location, but
   // inline rather than a subcollection: unlike gigs, a gigSeries doc is
   // NEVER publicly readable (firestore.rules gates it member/admin-only
   // with no "open" disjunct), so there's no doc-level exposure to split
@@ -293,7 +293,7 @@ export interface GigSeriesDoc {
   // it creates without re-geocoding.
   templatePrivateLocation: GigPrivateLocation;
   status: SeriesStatus; materializedThrough: number; createdAt: number; updatedAt: number;
-  // SP4: set when a whole-run booking is accepted (acceptBooking) — mirrors
+  // SP4: set when a whole-run booking is accepted (acceptBooking), mirrors
   // GigDoc's per-occurrence linkage at the series level so the materializer
   // can birth future occurrences already "filled". Both null otherwise;
   // cleared by cancellation/moderation unwind alongside the occurrences'.
@@ -326,7 +326,7 @@ export interface OfferEntry {
   by: BookingSide; amountCents: number;
   // perSong: song count (required int >=1); perHour: hours derived from the
   // gig's durationMinutes at write time (server-set); perSet: null. DISPLAY
-  // DATA ONLY for perHour — a listed thread entry's quantity can go stale if
+  // DATA ONLY for perHour, a listed thread entry's quantity can go stale if
   // the gig's duration is edited later. Never multiply amountCents by this
   // field to compute money owed; always go through
   // computeExpectedTotalCents(structure, amountCents, { durationMinutes }),
@@ -345,7 +345,7 @@ export interface BookingCancellation {
   outcome: "deposit_forfeited" | "deposit_refunded"; markApplied: boolean;
   graceApplied?: boolean;   // SP5: 1h post-accept grace neutralized the penalty
 }
-// Task 6: one entry per cancelOccurrence call against a whole-run booking —
+// Task 6: one entry per cancelOccurrence call against a whole-run booking,
 // unlike BookingCancellation (the run-level outcome, which also moves
 // deposit.forfeitedTo), a per-occurrence outcome is recorded ONLY here;
 // deposit.forfeitedTo is deliberately left untouched by cancelOccurrence
@@ -357,7 +357,7 @@ export interface OccurrenceCancellation {
 }
 // Named BookingRequestDoc (not BookingDoc) because SP2's BookingDoc (the
 // rates+prefs subdoc at profiles/{id}/private/booking, above) already owns
-// the obvious name — use BookingRequestDoc everywhere for this top-level doc.
+// the obvious name, use BookingRequestDoc everywhere for this top-level doc.
 export interface BookingRequestDoc {
   gigId: string; seriesId: string | null;               // seriesId set <=> whole-run booking
   curatorProfileId: string; musicianProfileId: string;
@@ -368,32 +368,32 @@ export interface BookingRequestDoc {
   cancellation: BookingCancellation | null;
   createdAt: number; updatedAt: number; confirmedAt: number | null; resolvedAt: number | null;
   // Task 6: whole-run per-date cancellations (cancelOccurrence). Optional
-  // (not `occurrenceCancellations:`) so every pre-Task-6 booking literal —
+  // (not `occurrenceCancellations:`) so every pre-Task-6 booking literal,
   // bookings.ts's own finalizeBookingRequest write, and every existing
-  // fixture in bookings.test.ts — stays valid without modification; absent
+  // fixture in bookings.test.ts, stays valid without modification; absent
   // is treated identically to an empty array by readers. Capped at
   // MAX_OCCURRENCE_CANCELLATIONS; cancelOccurrence REFUSES (resource-
   // exhausted) once the array is already at the cap rather than
   // dropping the oldest entry (security audit wave F7, ruling:
-  // reject-when-full — a settlement record must never be silently
+  // reject-when-full, a settlement record must never be silently
   // discarded).
   occurrenceCancellations?: OccurrenceCancellation[];
   // Security audit wave F5 (ruling: allow but exclude from trust metric):
   // stamped true by acceptBooking when it detects membership overlap
   // between the two profiles (the same uid is a member of BOTH the
-  // curator and musician side) — e.g. a venue owner performing at their
+  // curator and musician side), e.g. a venue owner performing at their
   // own venue. The booking is allowed to proceed exactly as any other, but
   // scheduled.ts's sweep step 7 skips the completedCount increment (and
   // recompute) for a selfDeal booking so a self-booking can never farm the
   // curator-facing reliability/trust metric. Optional/backward-compatible
-  // — absent on every pre-existing booking and on any booking accepted
+  //, absent on every pre-existing booking and on any booking accepted
   // before this fix landed, treated identically to false.
   selfDeal?: boolean;
   // SP5: fee snapshot + aggregate payment state. Optional so every pre-SP5
   // booking/fixture stays valid; acceptBooking writes both going forward.
   feePolicy?: FeePolicy;
   paymentSummary?: PaymentSummary;
-  // SP5: accept-saga crash marker — true between the staging transaction and
+  // SP5: accept-saga crash marker, true between the staging transaction and
   // the post-charge commit; the hourly payments sweep reconciles stuck ones.
   depositChargePending?: boolean;
   // SP5 Task 6: how many deposit-charge ATTEMPTS this booking has staged.
@@ -406,7 +406,7 @@ export interface BookingRequestDoc {
   // therefore Stripe's original intent) rather than charging twice.
   depositChargeAttempt?: number;
   // SP5 Task 6: pending-charge recovery marker. Set when chargeOffSession
-  // left the PaymentIntent `processing` (StripePaymentPendingError) — a
+  // left the PaymentIntent `processing` (StripePaymentPendingError), a
   // same-key retry is impossible (the cached `processing` outcome replays
   // forever), so the intent id is persisted here, the staged payment docs
   // and depositChargePending are LEFT in place, and the
@@ -452,12 +452,12 @@ export const MUSICIAN_FEE_PCT = 2;
 export const INSTANT_FEE_PCT = 4;
 export const INSTANT_FEE_MIN_CENTS = 100;
 // Owner ruling (M4): the smallest cash-out that may go out INSTANT. Below this
-// the 4% fee is a poor deal and the fast rail isn't worth it — a standard payout
+// the 4% fee is a poor deal and the fast rail isn't worth it, a standard payout
 // (still >= $1) is the route for smaller amounts. Enforced by requestPayout and
 // mirrored by the Earnings page's Instant button.
 export const INSTANT_PAYOUT_MIN_CENTS = 1000;   // $10.00
 export const LATE_FEE_PCT = 10;
-// Percentage-POINTS of the outstanding amount, not "7% of the late fee" —
+// Percentage-POINTS of the outstanding amount, not "7% of the late fee",
 // meaningful only relative to LATE_FEE_PCT: 7 of LATE_FEE_PCT's 10 points go
 // to the musician, the remaining 3 to the platform.
 export const LATE_FEE_MUSICIAN_PCT = 7;
@@ -465,7 +465,7 @@ export const SETTLEMENT_DELAY_MS = 3 * 24 * 60 * 60 * 1000;   // T+3 window afte
 export const CANCEL_GRACE_MS = 60 * 60 * 1000;                // 1h post-accept grace, both sides
 // Owner ruling (M3): how long INSTANT payouts are BLOCKED on a profile after
 // self-deal-funded money lands in its balance (a forfeit transfer or an earnings
-// transfer for a `selfDeal` booking — the same uid on both sides). Self-deal is
+// transfer for a `selfDeal` booking, the same uid on both sides). Self-deal is
 // a card->cash conversion path; the hold removes the FAST conversion, leaving
 // standard-payout-after-settle as the only route. 3 days lines up with the T+3
 // settlement window (SETTLEMENT_DELAY_MS) but is named separately so the two can
@@ -476,9 +476,9 @@ export const SETTLEMENT_RETRY_OFFSETS_MS =
 export const MAX_TRUE_UP_EXTRA_MINUTES = 720;
 export const MAX_TRUE_UP_EXTRA_SONGS = 500;
 
-// Snapshotted onto the booking at accept (alongside SP4's deposit.policy) —
+// Snapshotted onto the booking at accept (alongside SP4's deposit.policy),
 // later fee-constant changes never touch an accepted booking. All five
-// fields are INTEGER percent values — the money layer's assertPct rejects
+// fields are INTEGER percent values, the money layer's assertPct rejects
 // fractional pcts at runtime, so never author a snapshot like 11.5.
 export interface FeePolicy {
   curatorFeePct: number; musicianFeePct: number; instantFeePct: number;
@@ -487,11 +487,11 @@ export interface FeePolicy {
 
 // The deposit state machine. `unpaid` is the birth state; `applied`,
 // `refunded` and `forfeited` are terminal (only Task 12's clawback ever
-// re-opens one, and only from `applied`). Legal transitions — nothing else
+// re-opens one, and only from `applied`). Legal transitions, nothing else
 // is a valid write:
 //   unpaid  -> unpaid           SP5 Task 9: a DECLINED birth-deposit charge
 //                               stays unpaid and bumps depositAttempts +
-//                               depositNextRetryAt (see DepositState below) —
+//                               depositNextRetryAt (see DepositState below),
 //                               a decline is a retry, never a state change
 //   unpaid  -> held             THREE writers: the accept saga's batch charge,
 //                               the sweep's per-birth charge for a materialized
@@ -502,13 +502,13 @@ export interface FeePolicy {
 //                               never-charged date. Only when a charge might
 //                               still be outstanding against it (an intent is
 //                               recorded); the executor then resolves it with
-//                               NO Stripe call in two shapes — a birth charge
+//                               NO Stripe call in two shapes, a birth charge
 //                               left `processing`, and an UNCONFIRMED pay-now
 //                               intent (isUnconfirmedPayDueDeposit), neither of
 //                               which has a charge to refund
 //   unpaid  -> refunded         DIRECT, no executor and no money: the deposit
 //                               obligation is discharged without ever having
-//                               been collected. Three writers, all Task 11 —
+//                               been collected. Three writers, all Task 11,
 //                               the two waive branches' no-executor path (the
 //                               date is owed nothing), finalizeSettlementSuccess
 //                               when a settlement charged the FULL base and so
@@ -520,7 +520,7 @@ export interface FeePolicy {
 //   held    -> forfeit_pending  curator late-cancel of THAT date only
 //   *_pending -> refunded/forfeited   the post-commit executor, or the
 //                               sweep re-running a doc stuck pending
-//   applied -> (clawback)       Task 12 ONLY — needs a transfer reversal,
+//   applied -> (clawback)       Task 12 ONLY, needs a transfer reversal,
 //                               never a refund; no cancellation path may
 //                               touch an applied deposit
 // The two `*_pending` states are the transactional intent-to-move-money:
@@ -530,7 +530,7 @@ export interface FeePolicy {
 // THE CLOSING INVARIANT, and the reason the `unpaid -> refunded` edges above
 // exist at all: `unpaid` IS A DEBT-QUERY ANSWER, NOT A RESTING STATE. Once its
 // retry schedule is exhausted, an `unpaid` doc is precisely what
-// clearDelinquencyIfSettled counts as outstanding deposit debt — the thing that
+// clearDelinquencyIfSettled counts as outstanding deposit debt, the thing that
 // gates the curator out of booking. So no path may leave a doc there once the
 // obligation has been DISCHARGED, by any route: paid, waived, cancelled, or
 // absorbed into a settlement that charged the full base. Leaving it `unpaid`
@@ -544,14 +544,14 @@ export type SettlementStatus = "not_due" | "pending" | "past_due" | "paid" | "wa
 export type TransferStatus = "none" | "pending" | "transferred" | "reversed";
 
 export interface DepositState {
-  sliceCents: number;                    // ceil(the booking's deposit.policy.percent% of baseCents) — the accepted booking's frozen snapshot, never a live constant
+  sliceCents: number;                    // ceil(the booking's deposit.policy.percent% of baseCents), the accepted booking's frozen snapshot, never a live constant
   feeShareCents: number;                 // ceil(sliceCents * curatorFeePct / 100)
   intentId: string | null;               // shared for the accept batch; per-birth otherwise
   // The Stripe CHARGE behind `intentId` (a PaymentIntent's latest_charge),
   // captured at charge time. Transfers backed by a fresh charge must pass it
   // as `sourceChargeId` (Task 8's forfeit transfer) so the transfer draws on
   // that charge's own funds instead of the platform's aggregate available
-  // balance — otherwise a not-yet-settled charge yields balance_insufficient
+  // balance, otherwise a not-yet-settled charge yields balance_insufficient
   // in live mode. Stays null when the charge id isn't known (a deposit
   // finalized out-of-band by the payment_intent.succeeded webhook, whose
   // event payload need not carry latest_charge).
@@ -559,12 +559,12 @@ export interface DepositState {
   status: DepositStatus;
   chargedAt: number | null; resolvedAt: number | null;
   forfeitTransferId: string | null;
-  // SP5 Task 9 — BIRTH-deposit dunning only (a date materialized onto an
+  // SP5 Task 9, BIRTH-deposit dunning only (a date materialized onto an
   // already-booked whole run, charged individually by the hourly payments
   // sweep; the accept saga's own batch charge duns through the BOOKING's
   // `depositChargeAttempt` instead, never these).
   //
-  // `depositAttempts` is load-bearing for money safety, not diagnostics —
+  // `depositAttempts` is load-bearing for money safety, not diagnostics,
   // exactly like BookingRequestDoc.depositChargeAttempt: both real Stripe and
   // FakeStripe CACHE a decline under its idempotency key, so a retry after a
   // decline must carry a different key or it replays the decline forever. The
@@ -575,17 +575,17 @@ export interface DepositState {
   // on a decline.
   //
   // `depositNextRetryAt` is when the next attempt becomes due (offsets from
-  // SETTLEMENT_RETRY_OFFSETS_MS); null/absent means "no retry pending" —
+  // SETTLEMENT_RETRY_OFFSETS_MS); null/absent means "no retry pending",
   // either it has never been attempted, or the retry schedule is exhausted
   // (at which point the curator profile is flagged delinquent instead; there
-  // is deliberately NO late fee on a deposit — late fees are a settlement
+  // is deliberately NO late fee on a deposit, late fees are a settlement
   // concept, spec §4).
   //
   // Both optional so every pre-Task-9 payment doc stays type-valid; readers
   // must treat absent as 0 / null respectively.
   depositAttempts?: number;
   depositNextRetryAt?: number | null;
-  // SP5 Task 11 — the ON-SESSION intent `payPastDue` minted to rescue this
+  // SP5 Task 11, the ON-SESSION intent `payPastDue` minted to rescue this
   // deposit after its retry schedule ran out, mirrored out of `intentId` for
   // exactly the reason SettlementState.payDueIntentId is: `intentId` alone
   // cannot say whether the outstanding charge is one payPastDue may replace,
@@ -600,7 +600,7 @@ export interface SettlementState {
   feeShareCents: number | null;
   trueUp: { extraMinutes: number; extraSongs: number; reportedAt: number } | null;
   intentId: string | null;
-  // SP5 Task 11 — the ON-SESSION intent `payPastDue` minted for this
+  // SP5 Task 11, the ON-SESSION intent `payPastDue` minted for this
   // occurrence, mirrored out of `intentId` so the two can be told apart.
   //
   // LOAD-BEARING, not diagnostics. `intentId` alone cannot answer "is the
@@ -610,7 +610,7 @@ export interface SettlementState {
   // `intentId`, and minting a second, confirmable intent beside it would let
   // the curator pay a night twice. payPastDue therefore refuses whenever
   // `intentId != null && intentId !== payDueIntentId`, and otherwise re-issues
-  // under its own deterministic key — which REPLAYS its previous intent rather
+  // under its own deterministic key, which REPLAYS its previous intent rather
   // than creating a second one, so an abandoned attempt is resumable.
   //
   // Optional so every pre-Task-11 payment doc stays type-valid; readers must
@@ -619,23 +619,23 @@ export interface SettlementState {
   attempts: number; nextRetryAt: number | null;
   lateFeeCents: number | null; lateFeeMusicianCents: number | null;
   // Explicit delinquency marker, set once (never cleared) when delinquency
-  // is declared. lateFeeCents is the MONEY, never the flag — a legitimately
+  // is declared. lateFeeCents is the MONEY, never the flag, a legitimately
   // -zero late fee (e.g. a 0-pct policy snapshot) must not read as
   // "not delinquent" just because the cents happen to be 0.
   delinquentAt: number | null;
-  // SP5 Task 10 — PRE-CHARGE marker, written immediately before the
+  // SP5 Task 10, PRE-CHARGE marker, written immediately before the
   // settlement's Stripe call and cleared by every terminal write. Two jobs,
   // both about the non-transactional gap a charge opens:
   //  1. it closes the true-up window BEFORE the money is computed, so a
   //     curator can never report extra minutes against a charge that is
   //     already in flight (the settlement would then record an amount that
   //     was never charged). `settlement.intentId` closes that window too, but
-  //     only AFTER the call returns — this covers the call itself.
+  //     only AFTER the call returns, this covers the call itself.
   //  2. its write time is the CAS baseline the terminal write is held to, so
   //     the precondition spans the whole charge (same persist-before-charge
   //     idiom as DepositState.depositAttempts).
   // Readers must treat it as advisory and TIME-BOUNDED (IDEMPOTENCY_WINDOW_MS)
-  // — an instance that died mid-charge would otherwise lock the true-up
+  //, an instance that died mid-charge would otherwise lock the true-up
   // window forever. Optional so every pre-Task-10 payment doc stays valid.
   chargingSince?: number | null;
 }
@@ -643,7 +643,7 @@ export interface TransferState {         // musician earnings for this occurrenc
   status: TransferStatus;
   id: string | null; amountCents: number | null; transferredAt: number | null;
 }
-// bookings/{bookingId}/payments/{gigId} — one doc per occurrence, the money
+// bookings/{bookingId}/payments/{gigId}, one doc per occurrence, the money
 // truth for that date. Server-written only; readable by both booking sides.
 export interface PaymentDoc {
   bookingId: string; gigId: string; occurrenceStartsAt: number;
@@ -667,13 +667,13 @@ export interface PaymentSummary {
 // (not a timestamp), so a retried call reuses the same Stripe key and Stripe
 // replays the original payout instead of making a second one. But the
 // callable's own available-balance pre-check runs BEFORE that key is ever
-// used, and the first call already spent the balance — so a retry of a
+// used, and the first call already spent the balance, so a retry of a
 // full-balance cash-out would be refused with "that's more than your available
 // balance" and the caller would never learn the payout id. This record is what
 // makes such a retry return the original result: same `requestId` ⇒ hand back
 // the stored outcome, no Stripe call, no balance check.
 //
-// ONLY THE LAST ONE is kept — a retry of an OLDER requestId falls through to
+// ONLY THE LAST ONE is kept, a retry of an OLDER requestId falls through to
 // the ordinary path, where the balance check (or Stripe's own key replay) still
 // makes a second payout impossible. Retries happen seconds after the original,
 // which is exactly the window "last" covers.
@@ -681,13 +681,13 @@ export interface PayoutRequestRecord {
   requestId: string;
   payoutId: string;
   method: "standard" | "instant";
-  amountCents: number;                     // gross — what left the balance in total
+  amountCents: number;                     // gross, what left the balance in total
   feeCents: number;                        // instant fee (0 for standard)
   netCents: number;                        // what the payout itself moved
   at: number;
 }
 
-// profiles/{profileId}/private/stripe — members + admins read, server-write.
+// profiles/{profileId}/private/stripe, members + admins read, server-write.
 // One profile can hold both halves (a curator that also performs).
 export interface StripeProfileDoc {
   customerId: string | null;               // curator half
@@ -708,12 +708,12 @@ export interface StripeProfileDoc {
   updatedAt: number;
 }
 
-// adminAlerts/{alertId} — SP5 Task 9, extended through Task 11. The money
+// adminAlerts/{alertId}, SP5 Task 9, extended through Task 11. The money
 // paths have ABSORBING states: conditions they deliberately refuse to act on
 // (a charge that must not be replayed on an expired idempotency key, a marker
 // that must not be cleared, an intent that might still capture) and can only
-// escalate. A console.error alone is not an escalation — nobody is reading logs
-// at 3am — so each one also upserts a doc here, which is the durable "a human
+// escalate. A console.error alone is not an escalation, nobody is reading logs
+// at 3am, so each one also upserts a doc here, which is the durable "a human
 // has to look at this" queue. Server-written only; admins read it. Cleared by
 // an operator tool (releaseStuckSaga) setting resolvedAt.
 //
@@ -732,18 +732,18 @@ export interface StripeProfileDoc {
 // Ids are DETERMINISTIC per underlying problem and are built ONLY by
 // paymentsCore.ts's id vocabulary (`stuckSagaAlertId` and friends), so an
 // hourly sweep updates one row rather than minting 24 a day. TWO ids are
-// deliberately SHARED by more than one kind — `stuck-saga:{bookingId}` covers
+// deliberately SHARED by more than one kind, `stuck-saga:{bookingId}` covers
 // all three saga kinds, and `settlement-raced:{...}` covers both shapes of
-// "money moved and no state records it" — because each shared set is one
+// "money moved and no state records it", because each shared set is one
 // problem for one operator. recordAdminAlert re-logs whenever the KIND changes
 // on an existing row, so a condition changing shape is still visible.
 export type AdminAlertKind =
   | "stuck_saga_marker"            // marker set on a booking that is no longer `open`
-  | "stale_accept_saga"            // staged >24h — its charge key can no longer be replayed
+  | "stale_accept_saga"            // staged >24h, its charge key can no longer be replayed
   | "expired_booking_saga_marker"  // an expired booking whose deposits are still a live saga's
-  | "stale_pending_deposit"        // `*_pending` >24h — its refund/transfer key can no longer be re-issued
+  | "stale_pending_deposit"        // `*_pending` >24h, its refund/transfer key can no longer be re-issued
   // SP5 Task 10: a settlement's money moved (charge and/or earnings transfer)
-  // but its terminal write lost a race to a concurrent waive — a post-transfer
+  // but its terminal write lost a race to a concurrent waive, a post-transfer
   // reportNoShow is the one path that can do this. Nothing automatic can
   // decide whether to refund it or re-settle it, so it is escalated.
   | "settlement_raced"
@@ -759,10 +759,10 @@ export type AdminAlertKind =
   // side is done, but the MUSICIAN has no Stripe payout account, so the
   // earnings transfer cannot be made and the doc is left unsettled. Distinct
   // from the two above because nothing is stuck in Stripe and no money is at
-  // risk of moving twice — the fix is the musician finishing (or repairing)
+  // risk of moving twice, the fix is the musician finishing (or repairing)
   // Express onboarding, after which the ordinary sweep settles it.
   | "settlement_payout_blocked"
-  // SP5 Task 9/11: a BIRTH deposit left `unpaid` while carrying an intent — a
+  // SP5 Task 9/11: a BIRTH deposit left `unpaid` while carrying an intent, a
   // charge that came back `processing` and never resolved, or an on-session
   // pay-now intent the curator never confirmed. The deposit twin of
   // `settlement_pending_stuck`, and refused for the identical reason: that
@@ -771,7 +771,7 @@ export type AdminAlertKind =
   // intent in Stripe (there is no birth-deposit webhook finalizer).
   | "deposit_pending_stuck"
   // SP5 Task 11: a pay-now deposit whose intent Stripe confirmed AFTER a racer
-  // (a cancellation, a waive) had already claimed the doc — money captured,
+  // (a cancellation, a waive) had already claimed the doc, money captured,
   // escrow that does not exist. The deposit twin of `settlement_raced`: the
   // ledger row is written from Stripe's own attested amount so the charge is
   // never invisible, and the unwind (refund it) is an operator's call.
@@ -787,8 +787,8 @@ export type AdminAlertKind =
   | "clawback_failed"
   // SP5 Task 13: an INSTANT payout was made but the platform's 4% fee could
   // not be pulled back off the connected account (the account debit threw).
-  // The payout is NEVER unwound for this — the musician has their money and
-  // reversing a paid-out instant payout is not a thing — so the fee is simply
+  // The payout is NEVER unwound for this, the musician has their money and
+  // reversing a paid-out instant payout is not a thing, so the fee is simply
   // uncollected revenue until an operator recovers it (debit the account by
   // hand, or net it off a future payout). The ONE alert kind in SP5 that is
   // profile-scoped rather than booking-scoped: its row carries a null
@@ -830,18 +830,18 @@ export type AdminAlertKind =
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
-  // Null ONLY for `payout_fee_uncollected` (see above) — every other kind is
+  // Null ONLY for `payout_fee_uncollected` (see above), every other kind is
   // raised about a specific occurrence of a specific booking.
   bookingId: string | null; gigId: string | null;
   // The start of the ORIGINAL episode, preserved across reopens: a sweep that
   // observes this condition again after an operator set `resolvedAt` clears
   // that field but never re-stamps this one, so "how long has this money been
-  // stuck" keeps measuring from when it first got stuck — not from the last
+  // stuck" keeps measuring from when it first got stuck, not from the last
   // time someone tried to close the ticket. A genuinely new episode gets a new
   // row only when the underlying problem is a different (bookingId, gigId).
   firstSeenAt: number;
   lastSeenAt: number;
-  // How many times this condition has been OBSERVED — not how many runs it has
+  // How many times this condition has been OBSERVED, not how many runs it has
   // survived, and not a sweep-only counter: one sweep run can observe the same
   // stuck booking from two different steps (step 1's marker guard and step 7's)
   // and both count, and the callable/webhook raisers (a raced settlement, a
@@ -853,7 +853,7 @@ export interface AdminAlertDoc {
 export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   | "forfeit_transfer" | "earnings_transfer" | "late_fee" | "payout_standard"
   | "payout_instant" | "transfer_reversal" | "account_debit"
-  // SP5 Task 13: a payout Stripe later BOUNCED (`payout.failed` — a closed
+  // SP5 Task 13: a payout Stripe later BOUNCED (`payout.failed`, a closed
   // bank account, a rejected debit card). The `payout_standard`/`payout_instant`
   // row is written when the payout is REQUESTED, so this is the row that
   // records the money coming back to the connected account's balance; without
@@ -885,7 +885,7 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   | "ticket_settlement";
 export interface LedgerEntry {
   kind: LedgerKind;
-  amountCents: number;                     // ALWAYS positive/absolute — direction (in vs out, curator vs musician) comes from `kind`, never from sign
+  amountCents: number;                     // ALWAYS positive/absolute, direction (in vs out, curator vs musician) comes from `kind`, never from sign
   bookingId: string | null; gigId: string | null; profileId: string | null;
   stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
   detail: string; at: number;
