@@ -15,7 +15,7 @@
 ## Binding rules (every task respects these)
 
 1. **Behavior UNTOUCHED.** Retint/retype/restyle only. Never change when a state fires, what data drives it, which callable runs, navigation structure, or query shape. The backend gate counts must hold: `emu:test 578`, `emu:rules 77`, `shared 153`. 9B must not edit `functions/` or `packages/shared/` (a money-sentence already shared is already colonized; do not touch shared).
-2. **No em dash (`, `) anywhere** in 9B code, comments, or copy (DESIGN.md). Use comma/period/colon/parentheses.
+2. **No em dash (U+2014) anywhere** in 9B code, comments, or copy (DESIGN.md). Use comma/period/colon/parentheses.
 3. **No hardcoded hex in components.** After task 2, every color comes from `useTokens()`. A literal `#...` in a screen file is a defect (except inside `tokens.ts` itself and the font/asset config).
 4. **No Phosphor import outside `src/ui/icons.tsx`.** No Lucide, ever. No font family named outside `Text.tsx`/`tokens.ts`.
 5. **This machine cannot run the dev client.** Verify with `npx expo export --platform ios` (bundles + links native deps) + `corepack pnpm --filter @gatekeep/mobile lint` + `corepack pnpm typecheck`. Never claim a visual result; the owner verifies live on the next EAS build.
@@ -732,7 +732,7 @@ Apply the standard transform, PLUS the money-surface discipline:
 **Files:** the money files from task 9 (copy audit) + `app/(fan)/index.tsx`, `app/(fan)/search.tsx`,
 `app/(fan)/tickets.tsx`.
 - [ ] **Money-sentence colon parity (9A ruling 8).** Find mobile-local money sentences that still use
-  an em dash (`grep -n ", " apps/mobile/src apps/mobile/app`). For each, apply web's exact colon
+  an em dash (`grep -n $'\xe2\x80\x94' apps/mobile/src apps/mobile/app`). For each, apply web's exact colon
   treatment, open `apps/web`'s twin surface, copy the wording verbatim so the two read byte-identical.
   Strings imported from `@gatekeep/shared/messages.ts` are already colonized; leave them. Do NOT change
   any `===`-compared string (those are shared constants, already correct).
@@ -740,7 +740,7 @@ Apply the standard transform, PLUS the money-surface discipline:
   placeholders. Give each a branded coming-soon empty state: `PageBackground`, a Syne `Text
   variant="heading"` title, a `muted` one-line explainer, a relevant `src/ui/icons` glyph
   (`IconTicket`/`IconMusicNotes`/`IconMagnifyingGlass`). No new behavior, no fetch.
-- [ ] Gates + a final `grep -n ", " apps/mobile` returning nothing.
+- [ ] Gates + a final `grep -n $'\xe2\x80\x94' apps/mobile` returning nothing.
 - [ ] Commit: `feat(mobile): money-sentence colon parity and styled fan coming-soon states`.
 
 ### Task 11: Voice pass + final gates + smoke checklist
@@ -748,7 +748,7 @@ Apply the standard transform, PLUS the money-surface discipline:
 `docs/superpowers/sp9b-rulings.md` is the controller's post-merge job, do NOT create it here.
 - [ ] **Voice/copy pass**: read every screen's copy with the antislop-copywriting lens
   (`~/.claude/skills/antislop-copywriting/SKILL.md`); tighten obviously-AI phrasing; enforce the
-  no-em-dash rule one final time across all touched files (`grep -n ", "` clean, including code
+  no-em-dash rule one final time across all touched files (`grep -n $'\xe2\x80\x94'` clean, including code
   comments and strings).
 - [ ] **README**: add a short "Sub-project 9B (mobile UI/UX)" note + the owner smoke checklist from
   the spec §7 (shell + toggle both themes at phone width; auth/join; dashboards; editors incl. photo

@@ -6,7 +6,7 @@ re-decided here**, 9B translates it to React Native. Prior records: `docs/superp
 (web redesign, carry-forwards), `docs/superpowers/sp5b-rulings.md` (mobile payments, native-module
 posture), `docs/superpowers/sp5-rulings.md` (money authority).
 
-**Hard rule (from DESIGN.md, binding on all 9B code/comments/copy): no em dash (`, `) anywhere.**
+**Hard rule (from DESIGN.md, binding on all 9B code/comments/copy): no em dash (U+2014) anywhere.**
 Use a comma, period, colon, or parentheses.
 
 ## 0. Constraints and non-goals

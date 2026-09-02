@@ -130,7 +130,7 @@ test("trueUpDeltaPreviewCents returns null on malformed input instead of throwin
 ```
 
 If `DEFAULT_FEE_POLICY` does not exist in shared, construct the policy inline from the exported
-fee constants instead (`{ curatorFeePct: CURATOR_FEE_PCT, musicianFeePct: MUSICIAN_FEE_PCT, ... }`
+fee constants instead (`{ curatorFeePct: CURATOR_FEE_PCT, musicianFeePct: MUSICIAN_FEE_PCT, ... }`:
 read `packages/shared/src/types.ts`'s `FeePolicy` for the exact field names and
 `resolveFeePolicy` for the defaults; adjust the import line accordingly). Do NOT invent new
 constants.
@@ -936,7 +936,7 @@ git commit -m "docs(sp5b): README, mobile payments surfaces, launch checklist, s
 
 - [ ] **Step 1:** `pnpm typecheck`, Expected: 5/5 green.
 - [ ] **Step 2:** `pnpm --filter @gatekeep/shared test`, Expected: all pass (149 + new).
-- [ ] **Step 3:** `pnpm emu:test` (single blocking foreground call; `FUNCTIONS_DISCOVERY_TIMEOUT=60`)
+- [ ] **Step 3:** `pnpm emu:test` (single blocking foreground call; `FUNCTIONS_DISCOVERY_TIMEOUT=60`),
   Expected: 578 pass (backend untouched, any failure is environmental or a shared-package
   regression; investigate, don't rerun blindly).
 - [ ] **Step 4:** `pnpm emu:rules`, Expected: 77 pass.

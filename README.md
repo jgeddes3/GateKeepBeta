@@ -212,7 +212,7 @@ public**, each rate structure (`perHour`/`perSong`/`perSet`) is independently `"
 truth (`profiles/{id}/private/booking`) now reads member/admin-only (curators lost their old
 blanket read); `updateBookingInfo` and `bookingVisibility.ts`'s `rebuildBookingProjections` fan
 each save out to two server-built projections in the same batch: `profiles/{id}/private/curatorBooking`
-(rates with any `"private"`-marked structure nulled out, full preferences, the reliability summary
+(rates with any `"private"`-marked structure nulled out, full preferences, the reliability summary:
 **this projection is the curator-facing surface**, readable by curatorAccess holders + members +
 admins) and `ProfileDoc.publicBooking` (the preferences object, only when `preferences: "public"`,
 else `null`, rendered on the public portfolio page, rates never appear here regardless of
@@ -351,7 +351,7 @@ on).
 
 **Surfaces.** Web is the full experience: `apps/web/src/payments/` (save-card modal, onboarding,
 the booking `PaymentsPanel` with true-ups and pay-past-due, the `EarningsPanel` with cash-out, the
-delinquency banner). **Mobile now carries the full action set natively** (`apps/mobile/src/payments/`)
+delinquency banner). **Mobile now carries the full action set natively** (`apps/mobile/src/payments/`):
 a native `PaymentSheet` (cards + Apple Pay + Google Pay) drives both save-card
 (`SaveCardSheet.tsx`) and pay-past-due (`PayPastDueButton.tsx`); musician onboarding opens Stripe's
 hosted Express flow in an in-app browser and re-syncs status by re-polling `getStripeStatus` when
@@ -963,7 +963,7 @@ Smaller items from the sub-project 2 quality-review rounds, recorded in full in
   the server's 50MB limit.
 - **`ProfileContext`** (mobile, Task 14): `switchTo`'s caller-supplied `ProfileSummary` (used by
   the join wizard so the portfolio tab has an active profile before the `myProfiles` listener
-  notices the new membership) is never reconciled against the listener's own copy once it arrives
+  notices the new membership) is never reconciled against the listener's own copy once it arrives:
   not a live bug today, but a footgun for the next caller of `switchTo`. Separately, the
   logout-reset effect is a deliberate choice (see the comment above it) rather than the
   render-time sentinel pattern used elsewhere on this screen (web's `bookingProfileId`, mobile's
