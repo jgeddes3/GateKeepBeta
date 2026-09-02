@@ -4,7 +4,7 @@ import { doc, getDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { GENRES, genreTargetId, type UserDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
-import { follow, useFollows } from "./useFollows";
+import { follow, useFollowsContext } from "./useFollows";
 import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
@@ -19,11 +19,12 @@ async function callMarkGenrePickerSeen(): Promise<void> {
 // any genre. genrePickerSeenAt is read once (getDoc, not a live
 // subscription: it only ever needs to reflect "has this been shown", which
 // this hook's own markSeen already updates optimistically for same-session
-// callers), while the genre-follow check reuses useFollows' live
-// subscription so a fan who picks genres elsewhere never gets asked again
-// mid-session either.
+// callers), while the genre-follow check reuses useFollowsContext's live
+// subscription (shared with FollowButton via FollowsProvider when one is
+// mounted, own listener otherwise) so a fan who picks genres elsewhere
+// never gets asked again mid-session either.
 export function useGenrePickerGate(uid: string | null): { shouldShow: boolean; markSeen: () => Promise<void> } {
-  const { genres, loading: followsLoading } = useFollows(uid);
+  const { genres, loading: followsLoading } = useFollowsContext(uid);
   const [seenAt, setSeenAt] = useState<number | null>(null);
   const [seenLoaded, setSeenLoaded] = useState(false);
   const [trackedUid, setTrackedUid] = useState(uid);

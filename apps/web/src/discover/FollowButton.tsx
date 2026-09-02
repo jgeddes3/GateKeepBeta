@@ -3,20 +3,22 @@ import { useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { FOLLOW_LIMIT_MESSAGE, type FollowTargetType } from "@gatekeep/shared";
 import { useAuth } from "../auth/AuthProvider";
-import { useFollows, follow, unfollow } from "./useFollows";
+import { useFollowsContext, follow, unfollow } from "./useFollows";
 import { Button } from "../ui/button";
 import { IconCheck, IconPlus } from "../ui/icons";
 
 // Reused everywhere a fan can follow a musician, curator, or genre (this
 // task's own /discover lists; Task 9 widens it to /u/[handle] and
-// /e/[eventId]). Owns its own live "am I already following this" read
-// (useFollows) rather than taking it as a prop, so any call site can drop
-// this in with just the three ids it already has on hand.
+// /e/[eventId]). Reads its "am I already following this" state via
+// useFollowsContext rather than taking it as a prop, so any call site can
+// drop this in with just the three ids it already has on hand; on a page
+// wrapped in a FollowsProvider (ArtistsList's up to 60 rows, this task)
+// that shares one live subscription instead of each row opening its own.
 export function FollowButton({ targetId, targetType, label }: { targetId: string; targetType: FollowTargetType; label?: string }) {
   const { user } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
-  const { targets } = useFollows(user?.uid ?? null);
+  const { targets } = useFollowsContext(user?.uid ?? null);
   const isFollowing = targets.has(targetId);
 
   // Optimistic toggle: shows the clicked-toward state immediately, then
@@ -25,6 +27,12 @@ export function FollowButton({ targetId, targetType, label }: { targetId: string
   // instead (the rollback), so the button snaps back to its pre-click state
   // rather than sitting on a value the server never accepted.
   const [pendingOverride, setPendingOverride] = useState<boolean | null>(null);
+  // In-flight guard (fix round 1, review Minor): without this, a double
+  // click during the first click's still-pending callable computed `next`
+  // from the ALREADY-optimistic `following` value and fired a second,
+  // opposite callable (follow then unfollow) concurrently with the first.
+  // The button disables for the duration of one request instead.
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const following = pendingOverride ?? isFollowing;
 
@@ -51,9 +59,11 @@ export function FollowButton({ targetId, targetType, label }: { targetId: string
       router.push(`/sign-in?next=${encodeURIComponent(pathname)}`);
       return;
     }
+    if (pending) return;
     setError(null);
     const next = !following;
     setPendingOverride(next);
+    setPending(true);
     try {
       if (next) await follow(targetId, targetType);
       else await unfollow(targetId);
@@ -61,6 +71,8 @@ export function FollowButton({ targetId, targetType, label }: { targetId: string
       setPendingOverride(null);
       const message = e instanceof Error ? e.message : "Could not update. Try again.";
       setError(message === FOLLOW_LIMIT_MESSAGE ? message : "Could not update. Try again.");
+    } finally {
+      setPending(false);
     }
   }
 
@@ -71,6 +83,7 @@ export function FollowButton({ targetId, targetType, label }: { targetId: string
         variant={following ? "ghost" : "secondary"}
         size="sm"
         onClick={() => { void onClick(); }}
+        disabled={pending}
         aria-pressed={following}
       >
         {following
