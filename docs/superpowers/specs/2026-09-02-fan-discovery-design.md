@@ -48,10 +48,17 @@ public data sub-projects 2 through 6 already publish; nothing here touches money
   `/artist/[handle]`.
 - **Account.** New "Following" screen: artists, venues, genres, each with Unfollow, and "Edit
   genres" which reopens the picker preselected.
-- **Musician context.** "Post about this show" on the events a lineup member's profile appears
-  in (the musician Bookings screen and the event screen when the caller's profile is in the
-  lineup): a sheet with a 280-character field and live counter, plus the profile's posts on that
-  event with Delete.
+- **Musician context.** "Post about this show" lives where an event is already resolved: the
+  event screen (`/event/[eventId]`) when the viewer belongs to a profile in the lineup, and the
+  artist page's new "Upcoming shows" section (the same `lineupMusicianProfileIds` events query
+  the web artist page already runs) when the viewer is a member. Bookings and gigs carry no
+  event id, so the Bookings screen is not an entry point. The composer is a sheet with a
+  280-character field and live counter, plus the profile's posts on that event with Delete.
+  Musicians learn an event went live because `publishEvent` now also notifies every lineup
+  profile's members ("You're on the bill", kind `show_announced`, refId the eventId).
+- **Venue screen.** New `app/venue/[handle].tsx`: photos, about, neighborhood and city,
+  upcoming events, Follow. Mobile had no public curator route before this (the artist route
+  rejects curator profiles), and a followable venue needs a page.
 - **Search tab** stays the sub-8 placeholder.
 - **Notification taps**: `show_announced`, `show_rescheduled`, `show_post` open
   `/event/[eventId]`; `new_music` opens `/artist/[handle]` (handle resolved from the profileId
@@ -67,8 +74,9 @@ public data sub-projects 2 through 6 already publish; nothing here touches money
   artist that has a profile.
 - **Routing**: `SignedInRedirect` on `/` sends users who belong to no profile to `/discover`;
   profile owners keep `/dashboard`. The header nav gains "Discover" for signed-in users.
-- **Dashboard**: musicians get "Post about this show" and their posts with Delete on the events
-  their profile appears in; every profile dashboard shows "N followers" to its members.
+- **Posting on web**: "Post about this show" appears on `/e/[eventId]` for members of a lineup
+  profile and on `/u/[handle]` upcoming-event rows for the profile's own members (client-side
+  membership check); every profile dashboard shows "N followers" to its members.
 - **`/admin`**: a "Show posts" panel listing the latest 50 live posts with Remove.
 - **Landing**: new `FanStorySection` between the venue story and How it works, and a third hero
   path "Find a show" to `/discover` (logged-out visitors go through sign-in with
@@ -157,6 +165,8 @@ anywhere.
 - `events (status, hasFreeTier, startsAt)`
 - `profiles (type, status, name)`
 - `profiles (type, status, portfolio.genres array-contains, name)`
+- `profiles (type, status, updatedAt desc)` and `profiles (type, subtype, status)` for the deck's
+  artist and venue candidate queries
 - `follows (uid, targetType, createdAt)`
 - posts: `(status, createdAt)` within the subcollection
 
@@ -238,7 +248,11 @@ and the dedupe key makes any retry safe, so no announce flag is stored on the ev
 Hooks (all additive to existing functions):
 - `publishEvent` success: targets = the curator profile, each lineup musician profile, and
   `genre:<g>` for each event genre. Kind `show_announced`, key `announce:{eventId}`, title
-  "Show announced", body "{lineup or title} at {venueName}, {date}".
+  "Show announced", body "{lineup or title} at {venueName}, {date}". The same call also
+  notifies the members of every lineup musician profile ("You're on the bill", same kind and
+  refId, key `bill:{eventId}`) so musicians can reach the event screen and post.
+- Dedupe keys use create-if-absent semantics: a notification doc that already exists under the
+  key is left untouched (no re-surfacing as unread, no second push).
 - `updateEvent` on a `published` event: newly added lineup musicians' followers get
   `show_announced` with the same key (fans who already hold it are untouched by the overwrite).
   A changed `startsAt` sends `show_rescheduled` (key `resched:{eventId}:{newStartsAt}`) to the
@@ -262,7 +276,7 @@ Hooks (all additive to existing functions):
   - Artist: cover photo (avatar fallback), name, subtype chip, genres, "Next: {venue}, {date}"
     when present, Follow; tapping elsewhere opens `/artist/[handle]`.
   - Venue: first photo, name, neighborhood and distance, "Next up" line, Follow; tap opens the
-    venue page (`/artist/[handle]` already serves curator profiles on mobile).
+    new `/venue/[handle]` screen.
   - Follow is optimistic with rollback on failure; a followed target reads "Following" and a
     tap unfollows.
 - **Audio.** One `useAudioPlayer` at deck level. `onViewableItemsChanged` at a 50 percent
