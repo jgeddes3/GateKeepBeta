@@ -83,6 +83,10 @@ function Gate() {
             from Home's upcoming list, the Tickets tab, and (later, sub-7)
             discovery. Same themed native header as artist/[handle] above. */}
         <Stack.Screen name="event/[eventId]" options={{ headerShown: true, title: "Event" }} />
+        {/* Sub-project 7 task 11: the fan-facing curator public page, pushed
+            from the Following screen and notification deep links. Same
+            themed native header as artist/[handle] above. */}
+        <Stack.Screen name="venue/[handle]" options={{ headerShown: true, title: "Venue" }} />
       </Stack>
     </>
   );

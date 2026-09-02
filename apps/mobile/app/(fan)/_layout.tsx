@@ -13,6 +13,10 @@ export default function FanTabs() {
         tabBarIcon: ({ color }) => <IconMagnifyingGlass color={color} size={22} /> }} />
       <Tabs.Screen name="account" options={{ title: "Account",
         tabBarIcon: ({ color }) => <IconUserCircle color={color} size={22} /> }} />
+      {/* SP7 Task 11: reachable via router.push("/(fan)/following") from
+          AccountScreen's own "Following" row; href:null keeps it out of the
+          tab bar itself. */}
+      <Tabs.Screen name="following" options={{ title: "Following", href: null }} />
     </Tabs>
   );
 }

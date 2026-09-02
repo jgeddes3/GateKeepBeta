@@ -62,4 +62,8 @@ export const IconUser = wrap(Ph.UserIcon);
 export const IconCamera = wrap(Ph.CameraIcon);
 export const IconCameraSlash = wrap(Ph.CameraSlashIcon);
 export const IconCheckCircle = wrap(Ph.CheckCircleIcon);
+// SP7 Task 11: the Following screen's empty state, and the venue screen's
+// photo-collage empty state.
+export const IconHeart = wrap(Ph.HeartIcon);
+export const IconImages = wrap(Ph.ImagesIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.

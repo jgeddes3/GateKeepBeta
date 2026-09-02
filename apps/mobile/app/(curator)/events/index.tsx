@@ -14,9 +14,10 @@ import {
 } from "../../../src/gigs/GigForms";
 import { EVENT_STATUS_LABEL, EVENT_STATUS_TONE, formatEventFullDate, formatGigTime } from "../../../src/events/eventDisplay";
 import { TierBars } from "../../../src/events/TierEditor";
-import type { ProfileDoc, GigDoc, GigSeriesDoc, EventDoc, EventAct } from "@gatekeep/shared";
+import { formatChipLabel } from "../../../src/discover/discoverQueries";
+import { GENRES, type ProfileDoc, type GigDoc, type GigSeriesDoc, type EventDoc, type EventAct } from "@gatekeep/shared";
 import {
-  Text, Button, Card, Input, TextArea, StatusBadge, PageBackground, Skeleton, SkeletonCard, ErrorBanner,
+  Text, Button, Card, Chip, Input, TextArea, StatusBadge, PageBackground, Skeleton, SkeletonCard, ErrorBanner,
   IconPlus, IconTrash, IconTicket, IconWarningCircle,
 } from "../../../src/ui";
 import { useTokens } from "../../../src/theme/ThemeProvider";
@@ -99,6 +100,27 @@ type EventSourceInput =
 interface CreateEventPayload {
   curatorProfileId: string; source: EventSourceInput;
   title: string; description: string; startsAt: number; endsAt: number; lineup: EventAct[];
+  curatorGenres?: string[];
+}
+
+// ---------- Genres editor (SP7 Task 11, controller ruling): a curator can
+// override the event's discovery genres directly, for when its lineup is all
+// external acts with no GateKeep profile of their own to derive genres from
+// (EventDoc.genres' own doc comment: curatorGenres wins when set, else the
+// union of lineup booking acts' portfolio.genres). Byte-for-byte the web
+// twin's own GenresFields (apps/web/src/events/EventEditor.tsx), reusing the
+// same Chip primitive BioGenresForm's own genre picker already uses. ----------
+function GenresFields({ selected, onChange }: { selected: string[]; onChange: (v: string[]) => void }) {
+  const toggle = (g: string) =>
+    onChange(selected.includes(g) ? selected.filter((x) => x !== g) : selected.length < 3 ? [...selected, g] : selected);
+  return (
+    <View style={{ gap: 8 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        {GENRES.map((g) => <Chip key={g} label={formatChipLabel(g)} active={selected.includes(g)} onPress={() => toggle(g)} />)}
+      </View>
+      <Text variant="meta" muted>Used when your acts have no GateKeep profile. Up to three.</Text>
+    </View>
+  );
 }
 
 function LineupFields({ lineup, onChange }: { lineup: EventAct[]; onChange: (v: EventAct[]) => void }) {
@@ -168,6 +190,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
   const [endDT, setEndDT] = useState(seedStartsAt ? oneOffDateTimeFrom(seedStartsAt + 2 * 3_600_000) : emptyOneOffDateTime());
   const [lineup, setLineup] = useState<EventAct[]>(seedLineup ?? []);
   const [location, setLocation] = useState<LocationValue>({ address: "", visibility: isVenue ? "public" : "neighborhood" });
+  const [genres, setGenres] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -194,6 +217,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
     try {
       const payload: CreateEventPayload = {
         curatorProfileId: profileId, source: resolvedSource, title: trimmedTitle, description: description.trim(), startsAt, endsAt, lineup,
+        curatorGenres: genres.length > 0 ? genres : undefined,
       };
       const { data } = await httpsCallable<CreateEventPayload, { eventId: string }>(getFirebase().functions, "createEvent")(payload);
       onCreated(data.eventId);
@@ -232,6 +256,10 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
       <View style={{ gap: 4 }}>
         <Text variant="label">Lineup</Text>
         <LineupFields lineup={lineup} onChange={setLineup} />
+      </View>
+      <View style={{ gap: 4 }}>
+        <Text variant="label">Genres (optional)</Text>
+        <GenresFields selected={genres} onChange={setGenres} />
       </View>
       {source.kind === "standalone" ? (
         <LocationFields

@@ -33,7 +33,15 @@ const firebaseConfig = {
 // reaches the host at 10.0.2.2, everything else at localhost. Dev-only code
 // path either way (__DEV__ guard below).
 const metroHost = Constants.expoConfig?.hostUri?.split(":")[0];
-const EMU_HOST = metroHost ?? (Platform.OS === "android" ? "10.0.2.2" : "localhost");
+export const EMU_HOST = metroHost ?? (Platform.OS === "android" ? "10.0.2.2" : "localhost");
+
+// SP7 Task 11: `__DEV__` is exactly the condition getFirebase() below gates
+// its own connectStorageEmulator (and every other connect*Emulator) call on,
+// so this constant, computed once at module scope from that same global,
+// always agrees with whether THIS process actually wired up the emulators.
+// Exported so storageUrl.ts's publicStorageUrl can pick the emulator vs.
+// production URL form without reaching into getFirebase()'s private cache.
+export const usesEmulators = __DEV__;
 
 let cached: { app: FirebaseApp; auth: Auth; db: Firestore; functions: Functions; storage: FirebaseStorage } | null = null;
 

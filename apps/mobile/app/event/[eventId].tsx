@@ -17,6 +17,7 @@ import {
   TIER_AVAILABILITY_LABEL, eventSalesClosedReason,
 } from "../../src/events/eventDisplay";
 import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "../../src/payments/stripe";
+import { PostPurchaseGenrePrompt } from "../../src/discover/GenrePickerSheet";
 import {
   Text, Button, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconTicket, IconMapPin, IconMinus, IconPlus,
@@ -383,6 +384,11 @@ export default function EventScreen() {
               <Text variant="label">You&apos;re in.</Text>
               <Text>{purchasedQty} ticket{purchasedQty === 1 ? "" : "s"} confirmed.</Text>
               <Button title="View your tickets" onPress={() => router.push("/(fan)/tickets")} style={{ marginTop: tokens.space.sm, alignSelf: "flex-start" }} />
+              {/* SP7 Task 11: the genre-picker nudge lives ONLY inside this
+                  paid-done branch, never in the buy flow itself (binding
+                  rule). event.genres is optional on pre-SP7 docs; `?? []`
+                  treats an absent projection the same as "no preselection". */}
+              <PostPurchaseGenrePrompt eventGenres={event.genres ?? []} />
             </Callout>
           )}
           {orderStatus === "pending" && (
