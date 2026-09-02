@@ -10,7 +10,7 @@ import { Footer } from "./Footer";
 import {
   Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger,
 } from "../ui/sheet";
-import { IconBookings, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconTicket, type IconProps } from "../ui/icons";
+import { IconBookings, IconCompass, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconTicket, type IconProps } from "../ui/icons";
 
 // Routes that get the signed-in shell (slim top bar + footer). An allowlist
 // of prefixes rather than a blocklist: everything under these is the
@@ -40,7 +40,13 @@ import { IconBookings, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, 
 // the nav array below now points every signed-in context at, so leaving it
 // out would strand a fan on the one page this task adds with no shell
 // chrome at all (no way back to the rest of the app, no account switcher).
-const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs", "/tickets"];
+//
+// Sub-project 7 task 8: /discover joins the list for the same reason again.
+// It's now the FIRST nav destination in every context's array below (and
+// the fan-facing signed-in home SignedInRedirect sends a no-profile account
+// to), so it needs the identical shell chrome every other primary-nav
+// destination already gets.
+const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs", "/tickets", "/discover"];
 
 function isShellRoute(pathname: string): boolean {
   return SHELL_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
@@ -98,12 +104,22 @@ function resolveContext(pathname: string, profiles: ProfileSummary[]): NavContex
 // existing dashboard nav entries"): only a curator profile can own an
 // event, so it appears solely in that one context's array, matching the
 // same profile-gated shape Bookings/Gigs already have there.
+//
+// Discover (sub-project 7 task 8) is in every context's array too, same
+// reasoning as Tickets: any signed-in account, profile or not, can follow
+// artists/venues/genres and browse shows. It leads the generic context's
+// array (the fan-facing signed-in home, see SignedInRedirect) and sits
+// right after Dashboard for a musician or curator, ahead of that profile's
+// own work (Gigs/Bookings/Earnings/Events): a working musician or curator
+// is also, on this product, a fan of other people's shows.
 function navItemsFor(context: NavContext): NavItem[] {
   const dashboard: NavItem = { label: "Dashboard", href: "/dashboard", icon: IconHouse };
+  const discover: NavItem = { label: "Discover", href: "/discover", icon: IconCompass };
   const tickets: NavItem = { label: "Tickets", href: "/tickets", icon: IconTicket };
   if (context.kind === "musician") {
     return [
       dashboard,
+      discover,
       { label: "Gigs", href: "/gigs", icon: IconGigs },
       { label: "Bookings", href: `/dashboard/portfolio/${context.profileId}`, icon: IconBookings },
       { label: "Earnings", href: "/dashboard/earnings", icon: IconEarnings },
@@ -113,13 +129,14 @@ function navItemsFor(context: NavContext): NavItem[] {
   if (context.kind === "curator") {
     return [
       dashboard,
+      discover,
       { label: "Gigs", href: `/dashboard/curator/${context.profileId}/gigs`, icon: IconGigs },
       { label: "Bookings", href: `/dashboard/curator/${context.profileId}`, icon: IconBookings },
       { label: "Events", href: "/dashboard/events", icon: IconEvents },
       tickets,
     ];
   }
-  return [dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
+  return [discover, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
 }
 
 // Which single nav item, if any, is "active" for the current route. A

@@ -14,6 +14,7 @@ import {
   ChatCircle,
   Check,
   Circle,
+  Compass,
   DotsThreeVertical,
   FunnelSimple,
   Globe,
@@ -174,6 +175,13 @@ export const IconMinus = pin(Minus);
 // so this is the plain calendar mark, "a scheduled thing" rather than
 // "a booking already confirmed."
 export const IconEvents = pin(CalendarBlank);
+
+// Sub-project 7 task 8: the signed-in shell's new "Discover" nav
+// destination (/discover, the fan-facing shows/artists browse). A compass
+// is the literal "find your way to things" glyph, distinct from IconSearch
+// (MagnifyingGlass, already spoken for by text-search affordances
+// elsewhere) the same way antislop R-04 asks every icon choice to be.
+export const IconCompass = pin(Compass);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At
