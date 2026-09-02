@@ -8,8 +8,7 @@ import { getFirebase } from "../../src/lib/firebase";
 import { formatGigDateTime } from "../../src/gigs/GigForms";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import { formatEventFullDate } from "../../src/events/eventDisplay";
-import { useProfileContext } from "../../src/shell/ProfileContext";
-import { LatestPostLine, PostComposerSheet } from "../../src/discover/ShowPosts";
+import { LatestPostLine, PostComposerSheet, useShowPostComposerGate } from "../../src/discover/ShowPosts";
 import type {
   ProfileDoc, TrackDoc, GigDoc, GigPublicLocation, ActSize, AvailabilityPattern, EventDoc,
 } from "@gatekeep/shared";
@@ -129,19 +128,16 @@ async function loadMusicianUpcomingEvents(profileId: string): Promise<UpcomingEv
 
 // One "Upcoming events" row: title/date/location push to the event screen,
 // LatestPostLine adds a quiet preview underneath, and (for a signed-in
-// member of THIS profile, per useProfileContext().myProfiles) a "Post about
-// this show" trigger opens PostComposerSheet directly, no full posts list
-// here (that lives on the event screen's own Lineup section instead, see
-// ShowPostsForAct there). The trigger is hidden once the show has ended,
-// matching ShowPostsForAct's own eventEnded gate, so this never opens a
-// composer that would only ever be rejected by the server.
+// member of THIS profile, per the shared useShowPostComposerGate) a "Post
+// about this show" trigger opens PostComposerSheet directly, no full posts
+// list here (that lives on the event screen's own Lineup section instead,
+// see ShowPostsForAct there). The trigger is hidden once the show has
+// ended, matching ShowPostsForAct's own gate exactly (same hook), so this
+// never opens a composer that would only ever be rejected by the server.
 function UpcomingEventRow({ event, profileId, artistName, onPress }: {
   event: UpcomingEventSummary; profileId: string; artistName: string; onPress: () => void;
 }) {
-  const { myProfiles } = useProfileContext();
-  const isMember = myProfiles.some((p) => p.profileId === profileId);
-  const [now] = useState(() => Date.now());
-  const eventEnded = event.endsAtMs <= now;
+  const { isMember, eventEnded } = useShowPostComposerGate(profileId, event.endsAtMs);
   const [composerOpen, setComposerOpen] = useState(false);
 
   return (

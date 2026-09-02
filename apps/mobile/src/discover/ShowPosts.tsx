@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { View, Pressable } from "react-native";
+import { View, Pressable, KeyboardAvoidingView, Platform } from "react-native";
 import { collection, getDocs, limit, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import {
@@ -55,6 +55,24 @@ function showPostErrorMessage(e: unknown): string {
   return "Could not post. Try again.";
 }
 
+// Shared composer-visibility gate: a "Post about this show" trigger only
+// ever shows for a signed-in member of musicianProfileId whose show hasn't
+// ended. Extracted so ShowPostsForAct and the artist page's own
+// UpcomingEventRow (apps/mobile/app/artist/[handle].tsx) compute it
+// identically instead of each re-deriving isMember/eventEnded on its own.
+// `now` is captured once per mount (React Compiler purity rule: no bare
+// Date.now() call in the render body), same idiom event/[eventId].tsx's own
+// useNow and this file's `now` used to duplicate before this extraction.
+export function useShowPostComposerGate(musicianProfileId: string, endsAt: number): {
+  isMember: boolean; eventEnded: boolean;
+} {
+  const { myProfiles } = useProfileContext();
+  const isMember = myProfiles.some((p) => p.profileId === musicianProfileId);
+  const [now] = useState(() => Date.now());
+  const eventEnded = endsAt <= now;
+  return { isMember, eventEnded };
+}
+
 function PostRowItem({ post, canRemove, onRemoved }: {
   post: PostRow; canRemove: boolean; onRemoved: (postId: string) => void;
 }) {
@@ -105,8 +123,6 @@ function PostRowItem({ post, canRemove, onRemoved }: {
 export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt }: {
   eventId: string; musicianProfileId: string; artistName: string; endsAt: number;
 }) {
-  const { myProfiles } = useProfileContext();
-  const isMember = myProfiles.some((p) => p.profileId === musicianProfileId);
   const [posts, setPosts] = useState<PostRow[] | "loading">("loading");
   const [composerOpen, setComposerOpen] = useState(false);
 
@@ -118,13 +134,9 @@ export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Captured once per mount, not a bare Date.now() call in the render body
-  // (React Compiler purity rule), same idiom event/[eventId].tsx's useNow
-  // and this file's own PostComposerSheet avoid re-deriving mid-render. A
-  // client-side pre-check only, the server's own SHOW_POST_EVENT_CLOSED_MESSAGE
+  // A client-side pre-check only; the server's own SHOW_POST_EVENT_CLOSED_MESSAGE
   // stays the real authority on a real attempt.
-  const [now] = useState(() => Date.now());
-  const eventEnded = endsAt <= now;
+  const { isMember, eventEnded } = useShowPostComposerGate(musicianProfileId, endsAt);
   const showComposerTrigger = isMember && !eventEnded;
 
   return (
@@ -191,22 +203,35 @@ export function PostComposerSheet({ visible, onClose, eventId, musicianProfileId
 
   return (
     <Sheet visible={visible} onClose={() => { if (!posting) onClose(); }}>
-      <View style={{ gap: tokens.space.md }}>
-        <Text variant="title">Post about this show</Text>
-        <TextArea
-          value={text} onChangeText={(v) => setText(v.slice(0, SHOW_POST_MAX_CHARS))}
-          maxLength={SHOW_POST_MAX_CHARS} placeholder="What should fans know about this show?"
-          accessibilityLabel={`Post as ${artistName} about this show`} editable={!posting}
-        />
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
-          <Text variant="meta" muted>{text.length} / {SHOW_POST_MAX_CHARS}</Text>
-          <Button
-            title={posting ? "Posting…" : "Post"} onPress={() => void post()}
-            disabled={posting || text.trim().length === 0}
+      {/* Sheet itself takes no stance on keyboard avoidance (its own header
+          comment: "a caller putting a form inside a Sheet is responsible for
+          its own KeyboardAvoidingView"); without this, the keyboard covers
+          the TextArea/counter/Post row on device. iOS needs an explicit
+          "padding" behavior to shift the sheet's own content up; Android's
+          own default resize behavior already handles this without one, so
+          `behavior` is left undefined there rather than forcing a second,
+          redundant shift. */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={0}
+      >
+        <View style={{ gap: tokens.space.md }}>
+          <Text variant="title">Post about this show</Text>
+          <TextArea
+            value={text} onChangeText={(v) => setText(v.slice(0, SHOW_POST_MAX_CHARS))}
+            maxLength={SHOW_POST_MAX_CHARS} placeholder="What should fans know about this show?"
+            accessibilityLabel={`Post as ${artistName} about this show`} editable={!posting}
           />
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
+            <Text variant="meta" muted>{text.length} / {SHOW_POST_MAX_CHARS}</Text>
+            <Button
+              title={posting ? "Posting…" : "Post"} onPress={() => void post()}
+              disabled={posting || text.trim().length === 0}
+            />
+          </View>
+          {error && <ErrorBanner message={error} />}
         </View>
-        {error && <ErrorBanner message={error} />}
-      </View>
+      </KeyboardAvoidingView>
     </Sheet>
   );
 }
