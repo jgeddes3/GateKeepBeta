@@ -511,11 +511,17 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
       const payload: UpdateEventPayload = {
         curatorProfileId: profileId, eventId: event.id, title: trimmedTitle, description: description.trim(),
         startsAt, endsAt, maxTicketsPerBuyer: maxTix, lineup,
-        // Always resent, never carried forward as "no change": updateEvent's
-        // own full-replace convention (this payload's posterPath field just
-        // below is the same discipline) means curatorGenres is REPLACED on
-        // every save, so an absent field here would silently clear a
-        // previously-set selection rather than leaving it alone.
+        // Fix round 1 (Minor, review): the current selection is always
+        // resent, never carried forward as "no change" (updateEvent's own
+        // full-replace convention, same discipline this payload's posterPath
+        // field just below follows). It can't be sent as a bare empty array
+        // though: validateCuratorGenres (functions/src/eventsCore.ts) treats
+        // undefined/null as "not provided" but throws "Pick 1-3 genres." on
+        // any array shorter than 1, so an empty selection has to go as
+        // `undefined`, not `[]`. That's still "always resend the current
+        // selection", not "no change": updateEvent stores `curatorGenres ??
+        // []`, so an absent field here is what CLEARS a previously-set
+        // selection server-side, exactly matching an empty `genres` here.
         curatorGenres: genres.length > 0 ? genres : undefined,
         // Fix round 1 (Important): updateEvent's own full-replace convention
         // treats an absent posterPath as "clear it" (resolvePosterPath in

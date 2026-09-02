@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import {
@@ -16,10 +16,10 @@ import { IconTrash, IconWarning } from "../ui/icons";
 // preview. Two exports because the two call sites (MusicianProfile.tsx's
 // upcoming-events rows) need different weights: LatestPostLine is a quiet
 // always-visible line, ShowPostsForAct is the full list + composer, mounted
-// inside a collapsible so the public page stays quiet by default (see that
-// file's own comment on the wrapping <details>). EventPageClient.tsx mounts
-// ShowPostsForAct directly (no collapsible there: the event page's own
-// Lineup section is already the "more detail" surface).
+// inside a collapsible so the public page stays quiet by default (see
+// ShowPostsDisclosure below). EventPageClient.tsx mounts ShowPostsForAct
+// directly (no collapsible there: the event page's own Lineup section is
+// already the "more detail" surface).
 
 type PostRow = { id: string } & ShowPostDoc;
 
@@ -211,4 +211,31 @@ export function LatestPostLine({ eventId, musicianProfileId }: { eventId: string
 
   if (post === "loading" || post === null) return null;
   return <p className="mt-1 truncate font-sora text-xs italic text-gk-muted">&quot;{post.text}&quot;</p>;
+}
+
+// Fix round 1 (review, Important): MusicianProfile.tsx's own <details> used
+// to wrap ShowPostsForAct directly, but a plain <details> mounts its
+// children into the DOM regardless of the open/closed state (only their
+// visual rendering is hidden), so ShowPostsForAct's two effects (the posts
+// fetch, duplicating LatestPostLine's own fetch on the row right above it,
+// and, when signed in, a membership getDoc) fired on every profile-page
+// visit for every upcoming-events row, collapsed or not. This client
+// wrapper lazy-mounts its children instead: nothing renders inside until
+// the first time the <details> is opened, and it stays mounted afterward
+// (closing again doesn't re-fetch on next open). MusicianProfile.tsx stays
+// a Server Component with no client state of its own; this is the one
+// small "use client" boundary that gates it.
+export function ShowPostsDisclosure({ summary, children }: { summary: string; children: ReactNode }) {
+  const [opened, setOpened] = useState(false);
+  return (
+    <details
+      className="ml-2 rounded-gk-sm"
+      onToggle={(e) => { if (e.currentTarget.open) setOpened(true); }}
+    >
+      <summary className="cursor-pointer list-none font-sora text-xs font-medium text-gk-muted outline-none [&::-webkit-details-marker]:hidden hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus">
+        {summary}
+      </summary>
+      <div className="mt-2">{opened && children}</div>
+    </details>
+  );
 }

@@ -9,7 +9,7 @@ import { MiniPlayer } from "../../../src/components/MiniPlayer";
 import { PhotoPlaceholder } from "../../../src/components/GigCard";
 import { OfferGigButton } from "../../../src/bookings/OfferGigButton";
 import { FollowButton } from "../../../src/discover/FollowButton";
-import { LatestPostLine, ShowPostsForAct } from "../../../src/discover/ShowPosts";
+import { LatestPostLine, ShowPostsDisclosure, ShowPostsForAct } from "../../../src/discover/ShowPosts";
 import { formatChipLabel } from "./chipLabel";
 import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
@@ -68,11 +68,17 @@ const EXTERNAL_LINK_LABEL: Record<ExternalLinkKind, string> = {
 // Task 9 (SP7): below the row, LatestPostLine adds a quiet one-line preview
 // (hidden entirely while there's nothing to show), and a collapsible "Post
 // about this show" reveals the full thread plus, for a signed-in member of
-// THIS profile, a composer. Collapsed by default (a plain <details>, no
-// client state needed just to gate visibility) so a stranger's visit to this
-// page stays as quiet as before Task 9; ShowPostsForAct itself decides
-// whether the composer renders, since this file is a Server Component with
-// no signed-in identity of its own to check.
+// THIS profile, a composer. ShowPostsDisclosure (fix round 1, review
+// Important) lazy-mounts ShowPostsForAct instead of a plain <details>: a
+// bare <details> mounts its children into the DOM regardless of open state,
+// so every visit to this page would have fired ShowPostsForAct's own posts
+// fetch (duplicating LatestPostLine's own fetch right above it) and, when
+// signed in, a membership getDoc, for every upcoming-events row, collapsed
+// or not. Nothing under the summary renders (or fetches) until a visitor
+// actually opens it, keeping the public page as quiet as before Task 9;
+// ShowPostsForAct itself still decides whether the composer renders, since
+// this file is a Server Component with no signed-in identity of its own to
+// check.
 function UpcomingEventRow({ event, musicianProfileId, artistName }: {
   event: UpcomingEventSummary; musicianProfileId: string; artistName: string;
 }) {
@@ -85,16 +91,11 @@ function UpcomingEventRow({ event, musicianProfileId, artistName }: {
         href={`/e/${event.eventId}`}
       />
       <LatestPostLine eventId={event.eventId} musicianProfileId={musicianProfileId} />
-      <details className="ml-2 rounded-gk-sm">
-        <summary className="cursor-pointer list-none font-sora text-xs font-medium text-gk-muted outline-none [&::-webkit-details-marker]:hidden hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus">
-          Post about this show
-        </summary>
-        <div className="mt-2">
-          <ShowPostsForAct
-            eventId={event.eventId} musicianProfileId={musicianProfileId} artistName={artistName} endsAt={event.endsAtMs}
-          />
-        </div>
-      </details>
+      <ShowPostsDisclosure summary="Post about this show">
+        <ShowPostsForAct
+          eventId={event.eventId} musicianProfileId={musicianProfileId} artistName={artistName} endsAt={event.endsAtMs}
+        />
+      </ShowPostsDisclosure>
     </div>
   );
 }
