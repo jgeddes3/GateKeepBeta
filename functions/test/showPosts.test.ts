@@ -45,6 +45,18 @@ describe("createShowPost", () => {
     await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - 1000 });
     await expect(post("five")).rejects.toMatchObject({ code: "functions/failed-precondition", message: SHOW_POST_EVENT_CLOSED_MESSAGE });
   });
+  it("rate limit survives remove-then-repost; removed posts do not count toward the cap", async () => {
+    const { musician, eventId } = await makePublishedBookingEvent("sp5");
+    const post = (text: string) => callFn<Record<string, unknown>, { postId: string }>("createShowPost", { eventId, musicianProfileId: musician.profileId, text }, musician.owner.user);
+    const first = await post("one");
+    await callFn("removeShowPost", { eventId, postId: first.postId }, musician.owner.user);
+    // The removed post still counts toward the rate limit: no immediate repost.
+    await expect(post("two")).rejects.toMatchObject({ code: "functions/failed-precondition", message: SHOW_POST_RATE_MESSAGE });
+    // Once the removed post ages past the interval, a new post succeeds, and
+    // the removed post did not count toward the three-live-post cap.
+    await adb.doc(`events/${eventId}/posts/${first.postId}`).update({ createdAt: Date.now() - 11 * 60 * 1000 });
+    await post("two");
+  });
 });
 
 describe("removeShowPost", () => {

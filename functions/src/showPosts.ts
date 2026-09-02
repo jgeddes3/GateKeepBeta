@@ -38,8 +38,12 @@ export const createShowPost = onCall<{ eventId: string; musicianProfileId: strin
       if (!event.lineupMusicianProfileIds.includes(musicianProfileId)) {
         throw new HttpsError("permission-denied", "This profile is not on the lineup.");
       }
-      const mine = await tx.get(postsRef.where("musicianProfileId", "==", musicianProfileId).where("status", "==", "live"));
-      if (mine.size >= SHOW_POST_MAX_PER_EVENT) throw new HttpsError("failed-precondition", SHOW_POST_LIMIT_MESSAGE);
+      // Rate limit considers EVERY post by this profile on this event, live or
+      // removed: a remove-then-repost must not dodge the cooldown. The 3-post
+      // cap, by contrast, counts only live posts (a removed post frees its slot).
+      const mine = await tx.get(postsRef.where("musicianProfileId", "==", musicianProfileId));
+      const liveCount = mine.docs.filter((d) => (d.data() as ShowPostDoc).status === "live").length;
+      if (liveCount >= SHOW_POST_MAX_PER_EVENT) throw new HttpsError("failed-precondition", SHOW_POST_LIMIT_MESSAGE);
       const latest = mine.docs.reduce((max, d) => Math.max(max, (d.data() as ShowPostDoc).createdAt), 0);
       if (now - latest < SHOW_POST_MIN_INTERVAL_MS) throw new HttpsError("failed-precondition", SHOW_POST_RATE_MESSAGE);
       const ref = postsRef.doc();
