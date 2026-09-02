@@ -31,3 +31,4 @@ export {
   createTicketOrder, finalizeTicketOrder, refundTicket, checkInTicket, offerTransfer, respondToTransfer,
 } from "./ticketing.js";
 export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js";
+export { createShowPost, removeShowPost } from "./showPosts.js";

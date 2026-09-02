@@ -80,7 +80,9 @@ export interface AuditLogDoc {
     | "reliability_mark_removed" | "booking_visibility_backfilled"
     // SP5 Task 9: an operator manually released a stuck accept saga
     // (releaseStuckSaga) after reconciling the Stripe side by hand.
-    | "booking_saga_released";
+    | "booking_saga_released"
+    // SP7 Task 6: an admin removed a musician's show post (not the author).
+    | "show_post_removed";
   targetId: string;          // profileId, uid, or bookingId (booking_saga_released)
   detail: string;
   at: number;

@@ -1484,6 +1484,7 @@ const AUDIT_ACTION_LABEL: Record<AuditLogDoc["action"], string> = {
   reliability_mark_removed: "Reliability mark removed",
   booking_visibility_backfilled: "Booking visibility backfilled",
   booking_saga_released: "Booking saga released",
+  show_post_removed: "Show post removed",
 };
 
 function AuditLog() {
