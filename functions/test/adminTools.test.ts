@@ -34,7 +34,7 @@ describe("searchUsersByName", () => {
     await seedUser(`${tag}-c`, "Totally unrelated name");
 
     const adminUser = await makeAdminUser("search1");
-    // Uppercase query — the callable itself must lowercase it before
+    // Uppercase query, the callable itself must lowercase it before
     // ranging against the already-lowercased displayNameLower field.
     const { results } = await callFn<{ q: string }, { results: { uid: string; displayName: string; email: string }[] }>(
       "searchUsersByName", { q: tag.toUpperCase() }, adminUser.user);
@@ -133,7 +133,7 @@ describe("flagAccount", () => {
     await expect(callFn("flagAccount", { uid: target.uid, text: "one too many" }, adminUser.user))
       .rejects.toMatchObject({ code: "functions/resource-exhausted" });
     const after = (await adb.doc(`adminNotes/${target.uid}`).get()).data()?.notes as unknown[];
-    expect(after.length).toBe(200); // unchanged — the 201st entry was rejected
+    expect(after.length).toBe(200); // unchanged, the 201st entry was rejected
   });
 
   it("non-admin callers are denied", async () => {
@@ -147,12 +147,12 @@ describe("flagAccount", () => {
 describe("backfillDisplayNameLower", () => {
   // NOTE on why this doesn't assert `updated >= N`: onUserDocWritten (a LIVE
   // trigger in this same emulator session) reacts to every write to
-  // users/{uid} within single-digit milliseconds — including these seed
+  // users/{uid} within single-digit milliseconds, including these seed
   // writes. backfillDisplayNameLower's own collection-wide scan (paging the
   // whole `users` collection, ~150ms+ once the suite has accumulated
   // hundreds of test accounts) takes far longer than that, so by the time
   // its query reaches these docs the trigger has almost always already
-  // fixed them — `updated` legitimately lands at 0 most runs. That's not
+  // fixed them, `updated` legitimately lands at 0 most runs. That's not
   // this test flaking; it's the real, deterministic ordering of two
   // independent async reactors racing over the same collection. The
   // decision logic backfill shares with the trigger (computeDisplayNameLowerFix)
@@ -180,7 +180,7 @@ describe("backfillDisplayNameLower", () => {
     // Converged, whichever of backfill / the live trigger got there first.
     expect((await adb.doc(`users/${missingUid}`).get()).data()?.displayNameLower).toBe("legacy missing lower");
     expect((await adb.doc(`users/${staleUid}`).get()).data()?.displayNameLower).toBe("legacy stale lower");
-    // Untouched — was already correct going in.
+    // Untouched, was already correct going in.
     expect((await adb.doc(`users/${alreadyOkUid}`).get()).data()?.displayNameLower).toBe("already consistent");
   });
 

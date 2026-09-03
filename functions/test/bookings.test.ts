@@ -11,7 +11,7 @@ import {
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
-// 30s (not the file-wide-standard 15s, nor the prior 20s) — the 20s step
+// 30s (not the file-wide-standard 15s, nor the prior 20s), the 20s step
 // matched bookingVisibility.test.ts's own precedent for this suite's other
 // unusually chain-heavy booking file; the further bump to 30s matches
 // members.test.ts's own 30s precedent instead (bookingVisibility.test.ts
@@ -20,11 +20,11 @@ const adb = adminFirestore(admin);
 // createGig, publishGig, applyToGig, counterBooking, acceptBooking...)
 // before ever reaching an assertion. Task 5's acceptBooking gates pushed the
 // "applyToGig happy path" test (already ~14s of the prior 15s budget in
-// isolation) over the edge under full-suite load once — one more deployed
+// isolation) over the edge under full-suite load once, one more deployed
 // function measurably adds dispatch overhead across all ~300+ other tests'
 // calls too, not just this file's own. Task 5's own money-ready fixtures
 // (createSetupIntent/createOnboardingLink, added to nearly every test in
-// this file) pushed it over the 20s mark next — that pair of callables' own
+// this file) pushed it over the 20s mark next, that pair of callables' own
 // process-wide cold start lands on whichever test in this file happens to
 // run first, so the margin needs to absorb a full cold start, not just the
 // warm per-call cost the other ~440 calls to them elsewhere in the suite pay.
@@ -44,7 +44,7 @@ async function makeApprovedCuratorProfile(emailPrefix: string) {
 }
 
 // Admin-SDK shortcut for the musician submission gate (bio+genre+avatar+
-// track) — the upload/transcode pipeline has its own tests (tracks.test.ts);
+// track), the upload/transcode pipeline has its own tests (tracks.test.ts);
 // this suite's subject is booking negotiation, not portfolio gate mechanics.
 // Mirrors seedCuratorGateContent's identical rationale in helpers.ts.
 async function makeApprovedMusicianProfile(emailPrefix: string) {
@@ -96,7 +96,7 @@ function offerPayload(overrides: Record<string, unknown> = {}): Record<string, u
   return { amountCents: 15000, note: "Looking forward to it!", ...overrides };
 }
 
-// Mirrors notifications.test.ts's pollNotifications — see its comment on why
+// Mirrors notifications.test.ts's pollNotifications, see its comment on why
 // polling (not a single read) is needed even though the callable already
 // awaited the write.
 async function pollNotifications(uid: string) {
@@ -111,7 +111,7 @@ async function pollNotifications(uid: string) {
 
 // NOTE: the suite runs every test file against ONE persistent Firestore
 // emulator instance with no reset between files (see scheduled.test.ts's own
-// comment on this) — a "status: active" gigSeries doc left behind here is
+// comment on this), a "status: active" gigSeries doc left behind here is
 // visible to scheduled.test.ts's runDailySweep, which scans every active
 // series. An earlier version of this fixture used `template: {}`, which
 // crashed that scan (`series.template.title` undefined) and silently
@@ -204,7 +204,7 @@ describe("applyToGig", () => {
     expect((await adb.doc(`bookings/${perOccurrenceBookingId}`).get()).data()?.seriesId).toBeNull();
 
     // Cleanup: flip both out of "active" now that this test is done with
-    // them — minimizes the window where a cross-file dailySweep run (see
+    // them, minimizes the window where a cross-file dailySweep run (see
     // seedSeries's comment) could scan and materialize against them.
     await Promise.all([
       adb.doc(`gigSeries/${wholeRunSeries.id}`).update({ status: "ended" }),
@@ -228,7 +228,7 @@ describe("applyToGig", () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("at4c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("at4m");
     const gigId = await createOpenGig(curatorProfileId, curator.user);
-    // Direct status flip (not reviewProfile) — isolates this guard from
+    // Direct status flip (not reviewProfile), isolates this guard from
     // reviewProfile's reject-from-approved cascade, which would also close
     // the gig; this test's subject is the curator re-approval re-check alone.
     await adb.doc(`profiles/${curatorProfileId}`).update({ status: "rejected" });
@@ -365,7 +365,7 @@ describe("counterBooking", () => {
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
-    // awaitingSide is "curator" after the apply — the musician (initiator,
+    // awaitingSide is "curator" after the apply, the musician (initiator,
     // non-awaiting) tries to counter out of turn.
     await expect(callFn("counterBooking", { bookingId, offer: offerPayload({ amountCents: 20000 }) }, musician.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -513,12 +513,12 @@ describe("acceptBooking", () => {
 
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload({ amountCents: 9000 }) }, musician.user);
-    // Curator counters — this becomes the LAST thread entry, and must be
+    // Curator counters, this becomes the LAST thread entry, and must be
     // what gets frozen, not the musician's original 9000 offer. Chosen so
     // BOTH ceils actually round up: 10001c/hr * 1.5hr = 15001.5 ->
     // expectedTotalCents 15002; 15002 * 35% = 5250.7 -> deposit 5251.
     await callFn("counterBooking", { bookingId, offer: offerPayload({ amountCents: 10001 }) }, curator.user);
-    // awaitingSide flipped to musician after the counter — musician accepts.
+    // awaitingSide flipped to musician after the counter, musician accepts.
 
     await callFn("acceptBooking", { bookingId }, musician.user);
 
@@ -528,12 +528,12 @@ describe("acceptBooking", () => {
     expect(booking.acceptedTerms).toEqual({ amountCents: 10001, expectedQuantity: 1.5, expectedTotalCents: 15002 });
     // SP5 Task 6: the run-level deposit is still SP4's one-occurrence
     // summary, but its status now reflects the real deposit charge the
-    // accept saga landed — "held", not the pre-money "unpaid".
+    // accept saga landed, "held", not the pre-money "unpaid".
     expect(booking.deposit).toEqual({
       amountCents: 5251, status: "held", forfeitedTo: null,
       policy: { percent: DEPOSIT_PERCENT, curatorForfeitHours: CURATOR_FORFEIT_WINDOW_HOURS, musicianMarkHours: MUSICIAN_MARK_WINDOW_HOURS },
     });
-    // F5: no membership overlap between the two profiles here — selfDeal
+    // F5: no membership overlap between the two profiles here, selfDeal
     // must stay unset (falsy) on an ordinary booking.
     expect(booking.selfDeal).toBeFalsy();
 
@@ -560,13 +560,13 @@ describe("acceptBooking", () => {
 
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload({ amountCents: 800, expectedQuantity: 10 }) }, musician.user);
-    // Curator counters with a different songCount — this becomes the LAST
+    // Curator counters with a different songCount, this becomes the LAST
     // thread entry and must be what's frozen, not the musician's original
     // 10-song offer: 933c/song * 7 songs = 6531; deposit ceil(6531 * 35%) =
     // ceil(2285.85) = 2286.
     await callFn("counterBooking",
       { bookingId, offer: offerPayload({ amountCents: 933, expectedQuantity: 7 }) }, curator.user);
-    // awaitingSide flipped to musician after the counter — musician accepts.
+    // awaitingSide flipped to musician after the counter, musician accepts.
 
     await callFn("acceptBooking", { bookingId }, musician.user);
 
@@ -580,14 +580,14 @@ describe("acceptBooking", () => {
     });
   });
 
-  it("enforces awaitingSide — the non-awaiting side cannot accept (failed-precondition), booking left open", async () => {
+  it("enforces awaitingSide, the non-awaiting side cannot accept (failed-precondition), booking left open", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab2c");
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ab2m");
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     const gigId = await createOpenGig(curatorProfileId, curator.user);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
-    // awaitingSide is "curator" after the apply — the musician (initiator,
+    // awaitingSide is "curator" after the apply, the musician (initiator,
     // non-awaiting) tries to accept out of turn.
     await expect(callFn("acceptBooking", { bookingId }, musician.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -696,7 +696,7 @@ describe("acceptBooking", () => {
       const rivalAfter = (await adb.doc(`bookings/${rivalBookingId}`).get()).data() as BookingRequestDoc;
       expect(rivalAfter.status).toBe("superseded");
     } finally {
-      // Cleanup — never leave an "active" gigSeries fixture behind (the
+      // Cleanup, never leave an "active" gigSeries fixture behind (the
       // shared emulator's scheduled.test.ts sweep scans every active
       // series). In a `finally` so an assertion failure above can't leak an
       // active series into the shared emulator.
@@ -717,7 +717,7 @@ describe("acceptBooking", () => {
       "applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user);
     expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.seriesId).toBe(series.id);
 
-    // Series paused mid-thread — after the booking was created (and so
+    // Series paused mid-thread, after the booking was created (and so
     // targets the whole run), before the accept.
     await adb.doc(`gigSeries/${series.id}`).update({ status: "paused" });
 
@@ -726,11 +726,11 @@ describe("acceptBooking", () => {
 
     const after = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
     expect(after.status).toBe("open");
-    // Already non-active ("paused") — the shared sweep only scans
+    // Already non-active ("paused"), the shared sweep only scans
     // status:"active" series, so no further cleanup is needed.
   });
 
-  // SP4 (Task 7) carry-forward (a) — the rebooking door.
+  // SP4 (Task 7) carry-forward (a), the rebooking door.
   it("whole-run: refuses to accept a SECOND whole-run booking on a series whose activeBookingId already names a different confirmed booking", async () => {
     const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ab9c");
     const { owner: winner, profileId: winnerProfileId } = await makeApprovedMusicianProfile("ab9w");
@@ -750,8 +750,8 @@ describe("acceptBooking", () => {
       expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(winnerBookingId);
 
       // A FRESH occurrence appears on the already-booked run (simulating a
-      // cancelOccurrence-reopened date, or — as here — a newly materialized
-      // one) — still "open", still whole_run+active, so a rival can apply
+      // cancelOccurrence-reopened date, or, as here, a newly materialized
+      // one), still "open", still whole_run+active, so a rival can apply
       // and have their own booking targeted at the whole run too.
       const gigId3 = await createOpenGig(curatorProfileId, curator.user);
       await adb.doc(`gigs/${gigId3}`).update({ seriesId: series.id });
@@ -764,7 +764,7 @@ describe("acceptBooking", () => {
         message: expect.stringMatching(/already booked/i),
       });
 
-      // Untouched — the refusal must not have disturbed either booking or
+      // Untouched, the refusal must not have disturbed either booking or
       // the series' existing linkage.
       const rivalAfter = (await adb.doc(`bookings/${rivalBookingId}`).get()).data();
       expect(rivalAfter?.status).toBe("open");
@@ -797,7 +797,7 @@ describe("acceptBooking", () => {
 
   // F2 (security audit wave): if the gig was edited (updateGig) AFTER the
   // thread's last offer, the terms about to be frozen may no longer match
-  // what the two sides actually negotiated over — most dangerously for
+  // what the two sides actually negotiated over, most dangerously for
   // perHour, where a silently-changed durationMinutes changes the money
   // owed even though amountCents itself never moved. Refuse rather than
   // silently accept stale terms against a since-edited gig.
@@ -826,7 +826,7 @@ describe("acceptBooking", () => {
     const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("sd1m");
     await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
     // Overlap: the MUSICIAN's own owner uid is ALSO a member of the
-    // CURATOR profile (deliberately this direction, not the reverse —
+    // CURATOR profile (deliberately this direction, not the reverse,
     // requireBookingSide resolves a dual-member caller "musician"-first, so
     // adding the CURATOR's own uid to the musician profile would make the
     // curator's own acceptBooking call below misresolve as the musician

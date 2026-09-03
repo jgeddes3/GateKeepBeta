@@ -8,3 +8,7 @@ dist/
 .superpowers/
 .worktrees/
 functions/.secret.local
+
+apps/web/AGENTS.md
+.claude/settings.local.json
+.claude/worktrees/

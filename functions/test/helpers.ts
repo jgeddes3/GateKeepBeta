@@ -30,8 +30,8 @@ const adminAppInstance = adminApp.getApps()[0] ?? adminApp.initializeApp({ proje
 // starts as email_verified: false), then marks the account verified via the
 // Admin SDK and force-refreshes the client ID token so the email_verified
 // claim is present for callers that gate on it (createProfileDraft,
-// inviteMember). Centralized here so every existing test — all of which go
-// through this helper — keeps working without per-test changes.
+// inviteMember). Centralized here so every existing test, all of which go
+// through this helper, keeps working without per-test changes.
 export async function signUpTestUser(email: string) {
   const cred = await createUserWithEmailAndPassword(auth, email, "test-password-1");
   await getAdminAuth(adminAppInstance).updateUser(cred.user.uid, { emailVerified: true });
@@ -47,7 +47,7 @@ export async function signUpUnverifiedTestUser(email: string) {
 }
 
 // Signs up a fresh test user and grants the `admin` custom claim directly via
-// the Admin SDK — bypasses grantAdmin's Google-linked-account-only rule,
+// the Admin SDK, bypasses grantAdmin's Google-linked-account-only rule,
 // which is fine for tests (every review-flow test needs an admin caller
 // without wiring up a fake Google OAuth provider). Centralized here so
 // review.test.ts and tracks.test.ts share one implementation.
@@ -60,13 +60,13 @@ export async function makeAdminUser(prefix: string) {
 
 // Makes both sides of a booking money-ready for the Task 5 gates: the
 // curator gets a saved card (createSetupIntent's fake contract caches it on
-// profiles/{curator}/private/stripe immediately — no separate Elements flow
+// profiles/{curator}/private/stripe immediately, no separate Elements flow
 // needed against the fake), and the musician gets an Express account whose
 // transfer flags are force-enabled directly (createOnboardingLink alone only
 // creates the account; onboarding completion is normally driven by the
 // account.updated webhook, which nothing in these fixtures triggers). Both
 // the fake's own object doc AND the cached private/stripe doc are flipped so
-// every gate helper — which reads the cached doc, not the fake's live state —
+// every gate helper, which reads the cached doc, not the fake's live state,
 // sees a payout-ready musician. As-built fake object path (see stripeClient.ts):
 // `stripeFake/state/objects/{id}`, NOT the stale `stripeFake/objects/{id}`
 // some earlier plan drafts show.
@@ -90,14 +90,14 @@ export async function makeMoneyReady(
     { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
 }
 
-// Sets a gig's startsAt relative to "now" AT THE MOMENT THIS RUNS — called
+// Sets a gig's startsAt relative to "now" AT THE MOMENT THIS RUNS, called
 // immediately before the boundary-sensitive callable under test, never
 // before the (multi-call, multi-second) profile/gig/booking setup chain.
 // That ordering matters: the setup chain's own wall-clock time would
 // otherwise erode any fixed buffer computed before it ran.
 //
 // NOTE (SP5): this moves the GIG's date only. A payment doc's
-// `occurrenceStartsAt` is stamped at accept time and does NOT follow — which
+// `occurrenceStartsAt` is stamped at accept time and does NOT follow, which
 // is correct for the cancellation-window tests (they only need the gig's
 // date to move), but a test that needs a genuinely PAST-dated payment doc
 // must push the gig into the past BEFORE acceptBooking instead.
@@ -107,7 +107,7 @@ export async function setGigStartsAt(gigId: string, hoursFromNow: number): Promi
 }
 
 // SP5 Task 7: pushes a booking's confirmedAt `msAgo` milliseconds into the
-// past — called immediately before the boundary-sensitive callable under
+// past, called immediately before the boundary-sensitive callable under
 // test (same ordering rationale as setGigStartsAt above).
 export async function setConfirmedAtAgo(bookingId: string, msAgo: number): Promise<void> {
   await getAdminFirestore(adminAppInstance).doc(`bookings/${bookingId}`)
@@ -116,7 +116,7 @@ export async function setConfirmedAtAgo(bookingId: string, msAgo: number): Promi
 
 // The common case: safely outside CANCEL_GRACE_MS (1h). Every cancellation-
 // window test (forfeit AND refund/no-mark alike) calls this immediately
-// before its cancel/cancelOccurrence call — a booking that was just accepted
+// before its cancel/cancelOccurrence call, a booking that was just accepted
 // is INSIDE the grace window, so without this a refund/no-mark assertion
 // silently passes for the wrong reason (grace, not the window it claims to
 // test), and a forfeit assertion fails outright.
@@ -135,11 +135,11 @@ export async function callFn<T, R>(name: string, data: T, asUser?: User): Promis
 
 export const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// inviteMember now returns a uniform { ok: true } (anti-enumeration — see
+// inviteMember now returns a uniform { ok: true } (anti-enumeration, see
 // members.ts), so tests that need the created invite's doc id fetch it via
 // the admin SDK instead. Filters on invitedUid via a single-field query
 // (no composite index needed for tests), then narrows to the target
-// profile's pending invite in application code — this correctly picks out
+// profile's pending invite in application code, this correctly picks out
 // a fresh invite even when an earlier invite to the same invitedUid already
 // exists in a non-pending state (see the "already a member" test).
 export async function fetchPendingInviteId(
@@ -162,7 +162,7 @@ export async function uploadTestAudio(path: string, bytes: Uint8Array, contentTy
   await uploadBytes(storageRef(storage, path), bytes, { contentType });
 }
 
-// Generates a valid mono 16-bit PCM WAV of `seconds` at 8kHz — a real audio
+// Generates a valid mono 16-bit PCM WAV of `seconds` at 8kHz, a real audio
 // file ffmpeg can transcode, without committing a binary fixture.
 export function makeWav(seconds: number): Uint8Array {
   const sampleRate = 8000;
@@ -183,7 +183,7 @@ export function makeWav(seconds: number): Uint8Array {
 }
 
 // Minimal admin-SDK shortcut for satisfying submitProfileForReview's curator
-// content gate (Task 4) — analogous to the "avatar via admin SDK shortcut"
+// content gate (Task 4), analogous to the "avatar via admin SDK shortcut"
 // pattern profiles.test.ts already uses for the musician gate (the photo
 // pipeline's own behavior has its own tests). Tests whose subject is
 // something else entirely (delete/submit mechanics, notification fan-out,

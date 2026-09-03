@@ -66,7 +66,7 @@ describe("deleteAccount", () => {
 
   it("S5: clears the curatorAccess marker (and any pending retry doc) as the first phase of deletion", async () => {
     const fan = await signUpTestUser(`d5-${Date.now()}@test.com`);
-    // Seeded directly — this test's subject is deleteAccount's own cleanup,
+    // Seeded directly, this test's subject is deleteAccount's own cleanup,
     // not how the marker/retry doc ordinarily gets there.
     await adb.doc(`curatorAccess/${fan.uid}`).set({});
     await adb.doc(`curatorAccessRetries/${fan.uid}`).set({ createdAt: Date.now() });

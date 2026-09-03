@@ -9,7 +9,7 @@ service firebase.storage {
 
     // Serving path: only ever contains approved/instantly-publishable content
     // (the transcode/photo pipelines are the only writers). World-readable.
-    // Segment-constrained (not a bare {allPaths=**} + get:if true) — a fully
+    // Segment-constrained (not a bare {allPaths=**} + get:if true), a fully
     // permissive recursive wildcard would also match a literal object name
     // like "public/../review/tracks/p1/x.m4a" (GCS object names are flat
     // strings; ".." is just a literal path segment, not filesystem
@@ -24,13 +24,13 @@ service firebase.storage {
         && profileId.matches('[A-Za-z0-9_-]{1,64}')
         && fileName.matches('[A-Za-z0-9_.-]{1,128}');
       // Paths are resolved from Firestore docs, never by listing. Listing would
-      // enumerate every profileId (drafts included) — mirrors the /handles
+      // enumerate every profileId (drafts included), mirrors the /handles
       // get/list split in firestore.rules.
       allow list: if false;
       allow write: if false;
     }
 
-    // Pending clips awaiting review — admins listen to exactly what would go live.
+    // Pending clips awaiting review, admins listen to exactly what would go live.
     match /review/{allPaths=**} {
       allow read: if isAdmin();
       allow write: if false;
@@ -38,9 +38,9 @@ service firebase.storage {
 
     // Owner-only staging. Objects are consumed and deleted by the processUpload
     // trigger; a 24h lifecycle rule (console/deploy config) reaps strays.
-    // Membership of {profileId} is NOT checkable here — the trigger verifies it
+    // Membership of {profileId} is NOT checkable here, the trigger verifies it
     // before any content reaches a profile.
-    // customMetadata on staging objects is client-controlled and untrusted — the
+    // customMetadata on staging objects is client-controlled and untrusted, the
     // processUpload trigger derives uid/profileId from the OBJECT PATH only and
     // must never read object.metadata.
     match /staging/audio/{uid}/{profileId}/{trackId} {
@@ -52,12 +52,12 @@ service firebase.storage {
         && request.resource.contentType.matches('audio/.*');
       allow delete: if false; // the processUpload trigger owns staging cleanup
       allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
-                               // fail by design — upload UIs must not read back staging.
+                               // fail by design, upload UIs must not read back staging.
     }
     match /staging/photos/{uid}/{profileId}/{fileName} {
       // fileName is deliberately extensionless: the path builder emits
       // `${kind}-${nonce}` with no extension; nonces must stick to A-Za-z0-9 and hyphen.
-      // "gallery" is the curator profile's photo-gallery kind (Task 4b) —
+      // "gallery" is the curator profile's photo-gallery kind (Task 4b),
       // processUpload gates it to curator profiles only, same as it gates
       // avatar/cover to musician profiles; these rules only police shape.
       // "poster" (SP6) is also curator-side, gated the same way as gallery,
@@ -70,7 +70,7 @@ service firebase.storage {
         && fileName.matches('(avatar|cover|gallery|poster)-[A-Za-z0-9-]{1,80}');
       allow delete: if false; // the processUpload trigger owns staging cleanup
       allow read: if false;   // NOTE: getDownloadURL/getMetadata on a staging ref will
-                               // fail by design — upload UIs must not read back staging.
+                               // fail by design, upload UIs must not read back staging.
     }
 
     match /{allPaths=**} { allow read, write: if false; }

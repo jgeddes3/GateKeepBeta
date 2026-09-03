@@ -14,7 +14,7 @@ import {
   type RequestPayoutInput, type RequestPayoutResult,
 } from "../src/paymentsPayouts.js";
 import { payoutFeeAlertId, recordAdminAlert, resolveDepositPending } from "../src/paymentsCore.js";
-// The fake's own balance API, used to SEED and to READ balances below — see
+// The fake's own balance API, used to SEED and to READ balances below, see
 // seedBalance's note on why this suite touches it directly.
 import { getStripe } from "../src/stripeClient.js";
 
@@ -27,7 +27,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 // A DRAFT musician profile is enough for every callable in this file:
 // getStripeStatus gates on profile MEMBERSHIP and requestPayout on profile
-// ADMIN (owner ruling H2) — createProfileDraft grants the creator BOTH
+// ADMIN (owner ruling H2), createProfileDraft grants the creator BOTH
 // immediately (the owner's member doc is role:"admin"), never on review status.
 // Skipping the approval chain keeps this suite's fixtures to three calls.
 async function makeMusicianProfile(prefix: string) {
@@ -47,7 +47,7 @@ async function makeMusicianProfile(prefix: string) {
 
 // Creates the Express account (via the real callable) and then force-enables
 // the payout flags on BOTH the fake's account object and the cached
-// private/stripe doc — the same shortcut makeMoneyReady takes, for the same
+// private/stripe doc, the same shortcut makeMoneyReady takes, for the same
 // reason: onboarding completion is normally driven by the account.updated
 // webhook, which nothing in these fixtures triggers. `instantEligible` is a
 // parameter because two tests need a payout-ready account that is NOT
@@ -67,7 +67,7 @@ async function makePayoutReady(prefix: string, instantEligible = true) {
 // settled booking's earnings transfer (Task 10) or a forfeited deposit (Task
 // 8), and both of those chains are covered at length in
 // paymentsSettlement.test.ts / payments.test.ts. This suite's subject is what
-// happens AFTER a balance exists, so it calls the fake's transfer directly —
+// happens AFTER a balance exists, so it calls the fake's transfer directly,
 // the very call those paths end in, so the balance it produces is the same
 // balance in the same place.
 async function seedBalance(accountId: string, amountCents: number): Promise<void> {
@@ -83,7 +83,7 @@ const balanceOf = async (accountId: string) => (await getStripe().getBalances(ac
 // Re-derived from the constants rather than hard-coded, so a rate change moves
 // the expectation with the product instead of failing the suite.
 //
-// ONE HARD-CODED FIGURE SURVIVES ON PURPOSE — the `expect(feeCents).toBe(200)`
+// ONE HARD-CODED FIGURE SURVIVES ON PURPOSE, the `expect(feeCents).toBe(200)`
 // in the 4%-of-$50 test below. That one is a RATE ANCHOR, not a duplicate of
 // this helper: without it, a change to INSTANT_FEE_PCT would silently flow
 // through both the code and every expectation here and the suite would still
@@ -120,7 +120,7 @@ async function postWebhook(body: unknown): Promise<{ status: number; text: strin
   return { status: res.status, text: await res.text() };
 }
 
-describe("requestPayout — standard", () => {
+describe("requestPayout, standard", () => {
   it("pays out the full amount, decrements the balance, and writes a payout_standard ledger row", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("postd");
     await seedBalance(accountId, 10_000);
@@ -137,7 +137,7 @@ describe("requestPayout — standard", () => {
     expect(row.exists).toBe(true);
     expect(row.data()?.amountCents).toBe(4_000);
     expect(row.data()?.profileId).toBe(profileId);
-    // Payouts are not booking-scoped — both ids are null by design.
+    // Payouts are not booking-scoped, both ids are null by design.
     expect(row.data()?.bookingId).toBeNull();
     expect(row.data()?.gigId).toBeNull();
   });
@@ -161,7 +161,7 @@ describe("requestPayout — standard", () => {
     expect(payoutRows).toHaveLength(1);
   });
 
-  it("replays even when the first payout drained the balance — the memo answers before the balance check", async () => {
+  it("replays even when the first payout drained the balance, the memo answers before the balance check", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("porpld");
     await seedBalance(accountId, 5_000);
     const requestId = freshRequestId();
@@ -170,7 +170,7 @@ describe("requestPayout — standard", () => {
     expect(await balanceOf(accountId)).toBe(0);
 
     // Without the `lastPayout` memo this is the case that would refuse with
-    // "more than your available balance" and never hand back the payout id —
+    // "more than your available balance" and never hand back the payout id,
     // and cashing out the FULL balance is the web's default.
     const second = await payout({ profileId, amountCents: 5_000, method: "standard", requestId }, owner.user);
     expect(second.payoutId).toBe(first.payoutId);
@@ -181,7 +181,7 @@ describe("requestPayout — standard", () => {
     expect(memo.lastPayout?.payoutId).toBe(first.payoutId);
   });
 
-  it("LAYER 2 — with the memo gone, Stripe's own key still replays the payout instead of making a second one", async () => {
+  it("LAYER 2, with the memo gone, Stripe's own key still replays the payout instead of making a second one", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("porpl2");
     await seedBalance(accountId, 10_000);
     const requestId = freshRequestId();
@@ -197,7 +197,7 @@ describe("requestPayout — standard", () => {
     const second = await payout({ profileId, amountCents: 4_000, method: "standard", requestId }, owner.user);
     // Same Stripe object, no second movement, no second ledger row. This
     // assertion PINS THE KEY SCHEMA: `{profileId}:payout:{requestId}` must stay
-    // derivable from the request alone — folding a nonce, a timestamp or an
+    // derivable from the request alone, folding a nonce, a timestamp or an
     // attempt counter into it would make this call mint a second payout.
     expect(second.payoutId).toBe(first.payoutId);
     expect(await balanceOf(accountId)).toBe(balanceAfterFirst);
@@ -209,7 +209,7 @@ describe("requestPayout — standard", () => {
   });
 });
 
-describe("requestPayout — instant", () => {
+describe("requestPayout, instant", () => {
   it("nets the 4% fee (min $1) out of the amount, debits the fee, and takes the FULL amount off the balance", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("poinst");
     await seedBalance(accountId, 10_000);
@@ -254,8 +254,8 @@ describe("requestPayout — instant", () => {
   it("refuses a sub-$10 instant amount with the $10 minimum (M4), which now subsumes the old fee-would-swallow-it belt", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("pofeeeq");
     await seedBalance(accountId, 10_000);
-    // $1.00: below the $10 instant minimum, which fires BEFORE — and now
-    // subsumes — the fee-swallow-whole belt (that belt only ever bit at/below
+    // $1.00: below the $10 instant minimum, which fires BEFORE, and now
+    // subsumes, the fee-swallow-whole belt (that belt only ever bit at/below
     // ~$1, itself well under $10, so it is kept in the callable purely as
     // defense-in-depth against a future rate/minimum change). Balance untouched.
     await expect(payout({ profileId, amountCents: 100, method: "instant", requestId: freshRequestId() }, owner.user))
@@ -280,7 +280,7 @@ describe("requestPayout — instant", () => {
   });
 });
 
-describe("requestPayout — refusals", () => {
+describe("requestPayout, refusals", () => {
   it("over the available balance fails with failed-precondition and moves nothing", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("poover");
     await seedBalance(accountId, 1_000);
@@ -321,7 +321,7 @@ describe("requestPayout — refusals", () => {
     const requestId = freshRequestId();
     await payout({ profileId, amountCents: 2_000, method: "standard", requestId }, owner.user);
 
-    // Same id, different amount — and the same id, different method. Either
+    // Same id, different amount, and the same id, different method. Either
     // would otherwise come back as "already sent" for a payout that isn't the
     // one being asked for.
     await expect(payout({ profileId, amountCents: 3_000, method: "standard", requestId }, owner.user))
@@ -355,7 +355,7 @@ describe("payout webhooks", () => {
       { profileId, amountCents: 3_000, method: "standard", requestId: freshRequestId() }, owner.user);
 
     // M1 (branch audit): a payout is a connected-account event, so it carries a
-    // top-level `account` — the handler pins it to the profile's cached account.
+    // top-level `account`, the handler pins it to the profile's cached account.
     const res = await postWebhook({ ...fakeEvent("payout.failed", {
       id: result.payoutId, amount: 3_000, currency: "usd", status: "failed",
       failure_code: "account_closed", failure_message: "The bank account has been closed.",
@@ -368,14 +368,14 @@ describe("payout webhooks", () => {
     expect(row.data()?.amountCents).toBe(3_000);
     expect(row.data()?.profileId).toBe(profileId);
     expect(row.data()?.detail).toContain("account_closed");
-    // The request-time row is untouched — the two are different kinds keyed off
+    // The request-time row is untouched, the two are different kinds keyed off
     // the same payout, which is exactly what writeLedger's id scheme allows.
     expect((await adb.doc(`ledger/payout_standard:${result.payoutId}`).get()).exists).toBe(true);
 
     expect((await notificationsFor(owner.uid)).some((n) => n.title === "Payout failed")).toBe(true);
   });
 
-  it("payout.paid writes NO ledger row — the request-time row already recorded it", async () => {
+  it("payout.paid writes NO ledger row, the request-time row already recorded it", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("popaid");
     await seedBalance(accountId, 10_000);
     const result = await payout(
@@ -405,7 +405,7 @@ describe("payout webhooks", () => {
   });
 });
 
-describe("getStripeStatus — balances", () => {
+describe("getStripeStatus, balances", () => {
   interface Status {
     payoutsEnabled: boolean; instantEligible: boolean;
     availableBalanceCents: number | null; instantAvailableBalanceCents: number | null;
@@ -424,7 +424,7 @@ describe("getStripeStatus — balances", () => {
     expect(s.instantAvailableBalanceCents).toBe(12_345);
   });
 
-  it("reports 0/0 — not null — for a profile with no Stripe account at all", async () => {
+  it("reports 0/0, not null, for a profile with no Stripe account at all", async () => {
     const { owner, profileId } = await makeMusicianProfile("postatnone");
     const s = await status(profileId, owner.user);
     expect(s.payoutsEnabled).toBe(false);
@@ -450,7 +450,7 @@ describe("getStripeStatus — balances", () => {
     // The narrowest way to make FakeStripe's balance calls throw: an accountId
     // that isn't a legal Firestore doc-id segment, so every objRef() built from
     // it rejects. That stands in for the real-world case this branch exists for
-    // — a Stripe outage or network blip mid-read — which the fake, whose reads
+    //, a Stripe outage or network blip mid-read, which the fake, whose reads
     // otherwise cannot fail, has no other way to produce.
     await adb.doc(`profiles/${profileId}/private/stripe`).set(
       { accountId: "acct_unreadable/segment", payoutsEnabled: true }, { merge: true });
@@ -469,8 +469,8 @@ describe("the uncollected-fee escalation", () => {
     expect(payoutFeeAlertId("prof1", "req-a")).not.toBe(payoutFeeAlertId("prof1", "req-b"));
   });
 
-  // The raiser itself is unreachable in the emulator — FakeStripe's account
-  // debit cannot fail — so the ROW SHAPE is covered directly. It is the one
+  // The raiser itself is unreachable in the emulator, FakeStripe's account
+  // debit cannot fail, so the ROW SHAPE is covered directly. It is the one
   // alert in SP5 with no booking behind it, which is why AdminAlertDoc's
   // bookingId is nullable at all.
   it("records a profile-scoped row with null booking/gig ids", async () => {
@@ -489,7 +489,7 @@ describe("the uncollected-fee escalation", () => {
 });
 
 // Seeds one `forfeit_pending` deposit payment doc and runs the REAL executor
-// (resolveDepositPending — the exact call the cancel/no-show paths end in) so a
+// (resolveDepositPending, the exact call the cancel/no-show paths end in) so a
 // self-deal forfeit's hold is set by production code, not by the test. `selfDeal`
 // is the only thing that changes between the two M3 cases.
 async function forfeitDepositTo(musicianProfileId: string, selfDeal: boolean): Promise<{ bookingId: string; gigId: string }> {
@@ -517,7 +517,7 @@ async function forfeitDepositTo(musicianProfileId: string, selfDeal: boolean): P
   return { bookingId, gigId };
 }
 
-describe("requestPayout — authority (H2: admin only)", () => {
+describe("requestPayout, authority (H2: admin only)", () => {
   it("a non-admin member cannot request a payout (permission-denied); the admin owner can", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("h2auth");
     await seedBalance(accountId, 10_000);
@@ -528,14 +528,14 @@ describe("requestPayout — authority (H2: admin only)", () => {
 
     await expect(payout({ profileId, amountCents: 5_000, method: "standard", requestId: freshRequestId() }, member.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
-    // The admin owner is allowed — the money-draining action is admin-gated,
+    // The admin owner is allowed, the money-draining action is admin-gated,
     // like removeMember/transferAdmin.
     const ok = await payout({ profileId, amountCents: 5_000, method: "standard", requestId: freshRequestId() }, owner.user);
     expect(ok.payoutId).toMatch(/^po_/);
   });
 });
 
-describe("requestPayout — instant $10 minimum (M4)", () => {
+describe("requestPayout, instant $10 minimum (M4)", () => {
   it("refuses instant below $10 (invalid-argument), allows exactly $10, and standard is unaffected below $10", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("m4min");
     await seedBalance(accountId, 20_000);
@@ -553,7 +553,7 @@ describe("requestPayout — instant $10 minimum (M4)", () => {
   });
 });
 
-describe("requestPayout — self-deal instant hold (M3)", () => {
+describe("requestPayout, self-deal instant hold (M3)", () => {
   it("a self-deal forfeit sets the instant hold; instant is then refused (held) while standard is still allowed", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("m3hold");
 
@@ -574,7 +574,7 @@ describe("requestPayout — self-deal instant hold (M3)", () => {
     expect(std.netCents).toBe(1_000);
   });
 
-  it("a NON-self-deal forfeit sets NO instant hold — instant stays available", async () => {
+  it("a NON-self-deal forfeit sets NO instant hold, instant stays available", async () => {
     const { owner, profileId, accountId } = await makePayoutReady("m3nohold");
 
     await forfeitDepositTo(profileId, false);

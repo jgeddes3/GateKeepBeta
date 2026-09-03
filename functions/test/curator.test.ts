@@ -38,7 +38,7 @@ describe("createProfileDraft curator seed", () => {
     });
   });
 
-  it("musician drafts are unaffected — no curator field", async () => {
+  it("musician drafts are unaffected, no curator field", async () => {
     const { user } = await signUpTestUser(`cseedm-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
       "createProfileDraft",
@@ -170,17 +170,17 @@ describe("updateCuratorProfile geocoder throttle (S2)", () => {
     const { user, uid } = await signUpTestUser(`s2a-${Date.now()}@test.com`);
     const profileId = await makeCuratorProfile(user, "planner");
     const location = { address: null, city: `Austin-${Date.now()}` };
-    // First call: no stored geocodedFrom yet — always geocodes, consuming
+    // First call: no stored geocodedFrom yet, always geocodes, consuming
     // the budget once.
     await callFn("updateCuratorProfile", { profileId, location }, user);
     const afterFirst = (await adb.doc(`geocodeBudgets/${uid}`).get()).data();
     expect(afterFirst?.count).toBe(1);
-    // Second call with the EXACT same location input — the query string
+    // Second call with the EXACT same location input, the query string
     // matches curator.location.geocodedFrom, so this must skip the geocoder
     // (and the budget charge) entirely.
     await callFn("updateCuratorProfile", { profileId, location }, user);
     const afterSecond = (await adb.doc(`geocodeBudgets/${uid}`).get()).data();
-    expect(afterSecond?.count).toBe(1); // unchanged — the second call was skipped
+    expect(afterSecond?.count).toBe(1); // unchanged, the second call was skipped
   });
 
   it("a changed location input DOES consume the budget again", async () => {
@@ -239,7 +239,7 @@ describe("removeCuratorPhoto", () => {
     const profileId = await makeCuratorProfile(user);
     await adb.doc(`profiles/${profileId}`).update({ "curator.photoPaths": [`public/photos/${profileId}/gallery-a.jpg`] });
     // Path prefix-matches this profile's own gallery segment (Task 6's
-    // defense-in-depth assertion) but isn't in the array — must still reach
+    // defense-in-depth assertion) but isn't in the array, must still reach
     // the not-found branch, not get short-circuited earlier.
     await expect(callFn("removeCuratorPhoto",
       { profileId, path: `public/photos/${profileId}/gallery-not-there.jpg` }, user))
@@ -257,7 +257,7 @@ describe("removeCuratorPhoto", () => {
   it("succeeds (best-effort) even when the storage object is already gone", async () => {
     const { user } = await signUpTestUser(`rp5-${Date.now()}@test.com`);
     const profileId = await makeCuratorProfile(user);
-    // No object actually written at this path — the array entry is
+    // No object actually written at this path, the array entry is
     // orphaned (e.g. a prior manual bucket cleanup). Removal must still
     // succeed and clear the array entry, not fail on the storage delete.
     const path = `public/photos/${profileId}/gallery-already-gone.jpg`;
@@ -275,7 +275,7 @@ describe("removeCuratorPhoto", () => {
   it("rejects a path outside this profile's own gallery prefix with invalid-argument, checked before membership (defense-in-depth)", async () => {
     const { user } = await signUpTestUser(`rp6-${Date.now()}@test.com`);
     const profileId = await makeCuratorProfile(user);
-    // `user` genuinely IS a member of `profileId` in both calls below — if
+    // `user` genuinely IS a member of `profileId` in both calls below, if
     // the path-prefix assertion did not run before the membership check
     // (or didn't exist at all), these would instead fall through to the
     // not-found branch (photo not on this profile's array), not

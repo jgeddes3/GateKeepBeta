@@ -3,7 +3,7 @@
 // createOnboardingLink's as-built implementation (functions/src/payments.ts)
 // hardcodes the return_url/refresh_url as `${origin}/dashboard/earnings/
 // onboarding/return` and `.../refresh` with NO query params, and Stripe
-// redirects back to exactly that URL — there is no way for the onboarding
+// redirects back to exactly that URL, there is no way for the onboarding
 // pages to read a profileId out of the URL itself. sessionStorage survives a
 // same-tab redirect out to connect.stripe.com and back (it's scoped to the
 // browsing context + origin, not to any one page), so the Earnings page

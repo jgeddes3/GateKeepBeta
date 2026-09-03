@@ -17,7 +17,7 @@ const HANDLE_RE = /^[a-z0-9_]{3,30}$/;
 
 export function validateHandle(handle: string): { ok: true } | { ok: false; reason: string } {
   // Defensive runtime guard: the compile-time `string` type only binds
-  // trusted callers — an onCall's generic type parameter does not validate
+  // trusted callers, an onCall's generic type parameter does not validate
   // the untrusted request payload at runtime, so `handle` can arrive as any
   // JSON value. RESERVED_HANDLES.includes() does not coerce, so a non-string
   // (e.g. an array or number) would otherwise sail past the reserved check.
@@ -64,13 +64,13 @@ const fail = (reason: string): Result => ({ ok: false, reason });
 
 // Guards Firestore document-id-shaped fields (profileId, etc.) against empty
 // strings, path traversal ("a/b"), and absurdly long values before they reach
-// a doc() call — Firestore would throw on "/" in an id, and we want a clean
+// a doc() call, Firestore would throw on "/" in an id, and we want a clean
 // validation failure from an onCall handler, not an uncaught exception.
 //
 // L2 (branch audit): also reject Firestore's own reserved `__…__` ids
 // (`__proto__`, `__name__`, …). These pass the character-class check above
 // (underscores are allowed), but Firestore reserves the `__.*__` pattern and
-// throws INVALID_ARGUMENT deep in a doc()/query — a 500 to the caller — rather
+// throws INVALID_ARGUMENT deep in a doc()/query, a 500 to the caller, rather
 // than a clean invalid-argument. Rejecting them here turns that into the same
 // tidy validation failure every other bad id gets, and closes the small
 // prototype-pollution-flavoured surface of a `__proto__` id reaching a path.
@@ -81,7 +81,7 @@ export const isValidDocId = (s: unknown): s is string =>
 // so behavior is identical on Node and React Native/Hermes.
 // NOTE: "website" accepts any https host, which may resolve to localhost,
 // private IPs, or internal hostnames. These links are display-only (rendered
-// as an <a href>) and MUST NEVER be fetched server-side — that would be an
+// as an <a href>) and MUST NEVER be fetched server-side, that would be an
 // SSRF vector.
 const LINK_HOSTS: Record<ExternalLink["kind"], readonly string[] | null> = {
   spotify: ["open.spotify.com"],
@@ -96,7 +96,7 @@ function validateLink(link: unknown): Result {
   if (typeof l !== "object" || l === null || typeof l.kind !== "string" || typeof l.url !== "string") {
     return fail("Invalid link.");
   }
-  // hasOwnProperty, not `in` — `in` walks the prototype chain, so kind values
+  // hasOwnProperty, not `in`, `in` walks the prototype chain, so kind values
   // like "constructor"/"toString"/"__proto__" would otherwise pass this guard
   // and crash `hosts.includes` below with an uncaught TypeError. Called via
   // Object.prototype (not Object.hasOwn) to avoid an engine-version
@@ -114,7 +114,7 @@ function validateLink(link: unknown): Result {
 }
 
 export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
-  // Untrusted onCall payload — same defensive-runtime rationale as validateHandle.
+  // Untrusted onCall payload, same defensive-runtime rationale as validateHandle.
   if (typeof input !== "object" || input === null) {
     return fail("Invalid portfolio update.");
   }
@@ -183,7 +183,7 @@ export function validateBookingUpdate(input: BookingUpdateInput): Result {
   }
   // != null (not !==) on these five scalars: an absent (undefined) field is
   // treated the same as an explicit null, matching validateRate's
-  // absent-means-unset semantics — the musician just hasn't filled it in yet.
+  // absent-means-unset semantics, the musician just hasn't filled it in yet.
   if (p.travelRadiusKm != null && (typeof p.travelRadiusKm !== "number"
       || !Number.isInteger(p.travelRadiusKm) || p.travelRadiusKm < 0 || p.travelRadiusKm > 3000)) {
     return fail("Travel radius must be 0-3000 km.");
@@ -221,7 +221,7 @@ export function validateTrackCreate(input: CreateTrackInput): Result {
     return fail("Audio files must be at most 50 MB.");
   }
   if (!(AUDIO_CONTENT_TYPES as readonly string[]).includes(input.contentType)) {
-    return fail("Unsupported audio format — use mp3, wav, m4a, aac, flac, or ogg.");
+    return fail("Unsupported audio format: use mp3, wav, m4a, aac, flac, or ogg.");
   }
   return { ok: true };
 }
@@ -236,7 +236,7 @@ function validateGenresAndActSizes(genres: unknown, actSizes: unknown): Result {
   if (!Array.isArray(genres) || genres.length < 1) return fail("Pick at least one genre.");
   // Array caps + dedupe (S1), mirroring validatePortfolioUpdate's identical
   // genres pattern: an untrusted onCall payload could otherwise submit a
-  // wildly oversized or duplicate-padded array — length alone doesn't catch
+  // wildly oversized or duplicate-padded array, length alone doesn't catch
   // "same genre repeated N times", and an unbounded array is a cheap
   // resource-exhaustion vector even before considering the per-element
   // membership check below.
@@ -255,7 +255,7 @@ function validateGenresAndActSizes(genres: unknown, actSizes: unknown): Result {
 }
 
 export function validateLookingFor(input: LookingFor): Result {
-  // Untrusted onCall payload — same defensive-runtime rationale as validateHandle.
+  // Untrusted onCall payload, same defensive-runtime rationale as validateHandle.
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     return fail("Invalid looking-for.");
   }
@@ -347,7 +347,7 @@ export function validateRecurrence(input: GigRecurrence, now: number): Result {
     return fail("Invalid cadence.");
   }
   if (input.endDate != null) {
-    // Strictly future of the caller-supplied reference time — no Date.now()
+    // Strictly future of the caller-supplied reference time, no Date.now()
     // in shared code, so callers (functions/src) inject `now` explicitly.
     if (typeof input.endDate !== "number" || !Number.isFinite(input.endDate) || input.endDate <= now) {
       return fail("End date must be in the future.");
@@ -358,7 +358,7 @@ export function validateRecurrence(input: GigRecurrence, now: number): Result {
 
 // ---------- Sub-project 4: booking flow ----------
 
-// Pure — no Date.now() in shared code (mirrors validateRecurrence's `now`
+// Pure, no Date.now() in shared code (mirrors validateRecurrence's `now`
 // injection rationale). `structure` decides which of durationMinutes/
 // songCount applies; the other is ignored.
 export function computeExpectedTotalCents(
@@ -376,13 +376,13 @@ export function computeDepositCents(expectedTotalCents: number): number {
 }
 
 // Note: returns an error string (or null when valid) rather than this file's
-// usual {ok,reason} Result — matches the exact signature later tasks
+// usual {ok,reason} Result, matches the exact signature later tasks
 // (applyToGig/offerGig/counterBooking) are written against.
 export function validateOfferInput(
   structure: BudgetStructure,
   input: { amountCents: unknown; expectedQuantity: unknown; note: unknown },
 ): string | null {
-  // Untrusted onCall payload — same defensive-runtime rationale as
+  // Untrusted onCall payload, same defensive-runtime rationale as
   // validateHandle: the declared param shape only binds trusted callers.
   if (typeof input !== "object" || input === null) return "Invalid offer.";
   if (typeof input.amountCents !== "number" || !Number.isInteger(input.amountCents)
@@ -402,7 +402,7 @@ export function validateOfferInput(
     }
   } else if (input.expectedQuantity != null) {
     // perHour/perSet: the server derives (perHour) or ignores (perSet) this
-    // field — a caller-supplied value here is a malformed request, not
+    // field, a caller-supplied value here is a malformed request, not
     // silently dropped, so a musician/curator never wonders why their
     // submitted quantity vanished.
     return "Song count does not apply to this rate structure.";
@@ -416,7 +416,7 @@ const BOOKING_VISIBILITY_KEYS = ["perHour", "perSong", "perSet", "preferences"] 
 
 export function validateBookingVisibility(v: unknown): v is BookingVisibility {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  // Exact key set: every expected key present (hasOwnProperty, not `in` —
+  // Exact key set: every expected key present (hasOwnProperty, not `in`,
   // same prototype-chain rationale as validateLink's LINK_HOSTS lookup) AND
   // no extras, checked via a length match against the own-key count.
   if (Object.keys(v).length !== BOOKING_VISIBILITY_KEYS.length) return false;

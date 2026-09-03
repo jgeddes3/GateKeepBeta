@@ -36,12 +36,12 @@ export const deleteAccount = onCall({ region: "us-central1" }, async (req) => {
   // memberships, then the user doc tree, then the auth account. Each phase
   // is independently retry-idempotent (re-deleting an already-deleted
   // membership/doc, or re-deleting an already-deleted auth user, is a no-op
-  // or a clean not-found) — so on partial failure we don't attempt a
+  // or a clean not-found), so on partial failure we don't attempt a
   // compensating rollback. Instead we log which phase failed for diagnosis
   // and tell the client it's safe to call deleteAccount again, rather than
   // surfacing a raw internal error or silently leaving things half-deleted.
   //
-  // S5: curatorAccess/{uid} is deleted FIRST, before memberships — once this
+  // S5: curatorAccess/{uid} is deleted FIRST, before memberships, once this
   // account is gone, the marker must never keep granting
   // isApprovedCuratorMember() access to a uid the Auth user for no longer
   // exists (deleteUser below can't be undone if a later phase fails, but a
@@ -55,25 +55,25 @@ export const deleteAccount = onCall({ region: "us-central1" }, async (req) => {
     ]);
   } catch (e) {
     console.error("deleteAccount phase failed", { uid, phase: "curatorAccess" }, e);
-    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+    throw new HttpsError("internal", "Account deletion did not complete. It is safe to try again.");
   }
   try {
     await Promise.all(memberships.docs.map((m) => m.ref.delete()));
   } catch (e) {
     console.error("deleteAccount phase failed", { uid, phase: "memberships" }, e);
-    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+    throw new HttpsError("internal", "Account deletion did not complete. It is safe to try again.");
   }
   try {
     await db.recursiveDelete(db.doc(`users/${uid}`));
   } catch (e) {
     console.error("deleteAccount phase failed", { uid, phase: "firestore" }, e);
-    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+    throw new HttpsError("internal", "Account deletion did not complete. It is safe to try again.");
   }
   try {
     await getAuth().deleteUser(uid);
   } catch (e) {
     console.error("deleteAccount phase failed", { uid, phase: "auth" }, e);
-    throw new HttpsError("internal", "Account deletion did not complete — it is safe to try again.");
+    throw new HttpsError("internal", "Account deletion did not complete. It is safe to try again.");
   }
   return { ok: true };
 });

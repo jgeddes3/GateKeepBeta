@@ -15,11 +15,11 @@ import { unwindBookingsForModeration } from "./bookingLifecycle.js";
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
 
-// Distinct from tracks.ts's ACTIVE_TRACK_STATUSES (which is slot-occupancy —
+// Distinct from tracks.ts's ACTIVE_TRACK_STATUSES (which is slot-occupancy,
 // "processing" counts against the 10-track cap). This gate cares about
 // actually-uploaded, listenable content: createTrack writes the doc BEFORE
 // the client uploads bytes, so a "processing" track can be an abandoned
-// upload with nothing behind it — that must not satisfy the gate.
+// upload with nothing behind it, that must not satisfy the gate.
 const LISTENABLE_TRACK_STATUSES = ["pending_review", "approved"] as const;
 
 export async function requireProfileAdmin(profileId: string, uid: string) {
@@ -29,11 +29,11 @@ export async function requireProfileAdmin(profileId: string, uid: string) {
   }
 }
 
-// S6 deleteProfile cascade helpers — page in PAGE-sized chunks (not one
+// S6 deleteProfile cascade helpers, page in PAGE-sized chunks (not one
 // unbounded .get()) since a prolific curator's gig/series history can be
 // arbitrarily large. Re-querying with the same `.limit(PAGE)` after each
-// page's docs are deleted naturally returns the NEXT page — deleted docs
-// never reappear in the next `.get()` — so no `startAfter` cursor is needed.
+// page's docs are deleted naturally returns the NEXT page, deleted docs
+// never reappear in the next `.get()`, so no `startAfter` cursor is needed.
 const DELETE_CASCADE_PAGE_SIZE = 200;
 
 async function deleteGigsForProfile(db: FirebaseFirestore.Firestore, profileId: string): Promise<void> {
@@ -56,7 +56,7 @@ async function deleteSeriesForProfile(db: FirebaseFirestore.Firestore, profileId
       .where("curatorProfileId", "==", profileId).limit(DELETE_CASCADE_PAGE_SIZE).get();
     if (snap.empty) return;
     const batch = db.batch();
-    for (const doc of snap.docs) batch.delete(doc.ref); // gigSeries has no subcollections — a plain delete suffices
+    for (const doc of snap.docs) batch.delete(doc.ref); // gigSeries has no subcollections, a plain delete suffices
     await batch.commit();
     if (snap.docs.length < DELETE_CASCADE_PAGE_SIZE) return;
   }
@@ -87,7 +87,7 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
   }
   if (unsubmittedCount >= MAX_UNSUBMITTED_PROFILES) {
     throw new HttpsError("resource-exhausted",
-      "Too many unsubmitted profiles — finish or delete an existing draft first.");
+      "Too many unsubmitted profiles. Finish or delete an existing draft first.");
   }
 
   const profileRef = db.collection("profiles").doc();
@@ -104,7 +104,7 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
       status: "draft", rejectionReason: null, createdAt: now, updatedAt: now,
       // SP4: rebuildBookingProjections is the sole writer of this field
       // post-creation (Task 6's recomputeReliability only ever touches
-      // curatorBooking's `reliability` summary, never publicBooking) — no
+      // curatorBooking's `reliability` summary, never publicBooking), no
       // booking prefs are public yet for a brand-new draft.
       publicBooking: null,
       ...(input.type === "musician"
@@ -141,7 +141,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
   }
 
   // Anti-spam: resubmitting too soon after a rejection is blocked regardless
-  // of profile type — reviewProfile stamps lastRejectedAt on every reject
+  // of profile type, reviewProfile stamps lastRejectedAt on every reject
   // (routine "revise and resubmit" and retroactive-unpublish alike).
   const lastRejectedAt = data?.lastRejectedAt;
   if (lastRejectedAt !== undefined && Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS) {
@@ -164,11 +164,11 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
     }
     if (pendingCuratorCount >= MAX_PENDING_CURATOR_PROFILES) {
       throw new HttpsError("resource-exhausted",
-        "You already have a curator profile pending review — wait for that decision first.");
+        "You already have a curator profile pending review. Wait for that decision first.");
     }
   }
 
-  // Spec §6 minimum content: reviewers approve a *portfolio* — there must be
+  // Spec §6 minimum content: reviewers approve a *portfolio*, there must be
   // something to look at (and, for musicians, listen to).
   if (data?.type === "musician") {
     const p = data?.portfolio as PortfolioData | undefined;
@@ -177,7 +177,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
     if (!p?.genres?.length) missing.push("at least one genre");
     if (!p?.avatarPhotoPath) missing.push("a profile photo");
     // This read (and the status check above) is not transactional with the
-    // ref.update below — a deleteTrack racing this call could remove the
+    // ref.update below, a deleteTrack racing this call could remove the
     // one qualifying track between the query and the update. That leaves
     // the profile pending_review with no listenable content, which
     // self-heals: an admin rejects it as empty and the musician resubmits.
@@ -211,7 +211,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
   }
 
   // Task 8: resubmitCount lets the admin queue render "resubmitted Nth
-  // time" — only stamped when this submission is a genuine resubmit (status
+  // time", only stamped when this submission is a genuine resubmit (status
   // was "rejected"), never on the first-ever draft -> pending_review
   // submission, which isn't a resubmit of anything.
   await ref.update({
@@ -223,7 +223,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
 
 // Resolves the spec §4 deletion dead-end: deleteAccount refuses while the
 // caller is a sole admin anywhere, but until now there was no way to act on
-// that — a sole admin of an unwanted/never-submitted profile had no path to
+// that, a sole admin of an unwanted/never-submitted profile had no path to
 // give up the handle and then delete their account. Also gives admins a way
 // to remediate handle-squatting drafts.
 export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
@@ -238,7 +238,7 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const profileRef = db.doc(`profiles/${profileId}`);
   const snap = await profileRef.get();
   if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
-  // Finding 3: this used to be enforced client-side only — a co-admin could
+  // Finding 3: this used to be enforced client-side only, a co-admin could
   // call deleteProfile directly on a LIVE approved profile and immediately
   // free its handle for takeover. draft/rejected are the only statuses with
   // nothing publicly live to lose; pending_review and approved profiles must
@@ -247,14 +247,14 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const status = snap.data()?.status;
   if (status !== "draft" && status !== "rejected") {
     throw new HttpsError("failed-precondition",
-      "Approved or in-review profiles can't be deleted — contact support / unpublish first.");
+      "Approved or in-review profiles can't be deleted. Contact support / unpublish first.");
   }
   const handle = snap.data()?.handle as string | undefined;
   const name = snap.data()?.name as string | undefined;
   const isCurator = snap.data()?.type === "curator";
 
   // S6: collect member uids BEFORE the profile's own recursiveDelete removes
-  // the members subcollection — syncCuratorAccess (post-delete, below) needs
+  // the members subcollection, syncCuratorAccess (post-delete, below) needs
   // to run for each of them once this profile's membership docs are truly
   // gone, so a member whose ONLY approved-curator access came from this
   // profile correctly loses the marker (a member who belongs to another
@@ -267,18 +267,18 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   }
 
   // S6: cascade-delete this curator's gigs and series before the profile's
-  // own recursiveDelete — deleteProfile only ever runs on a draft/rejected
+  // own recursiveDelete, deleteProfile only ever runs on a draft/rejected
   // profile (the gate above), but a profile reaches "rejected" either
-  // straight from draft (never approved, so never any gigs/series — createGig
+  // straight from draft (never approved, so never any gigs/series, createGig
   // requires an approved profile) or via reviewProfile's retroactive
   // reject-from-approved, which CLOSES/PAUSES live gigs/series but does not
-  // delete them — deleting the profile is the deliberate second step for a
+  // delete them, deleting the profile is the deliberate second step for a
   // full scrub (README's "Content takedown is a two-step" note), and those
   // closed/paused docs (plus their exact private addresses) must not survive
   // it. Each gig gets its own recursiveDelete (not a plain doc delete) so its
   // private/location subdoc is reached too; gigSeries has no subcollections,
   // so a plain batched delete suffices. Both queries page in PAGE-sized
-  // chunks rather than fetching the whole collection in one unbounded read —
+  // chunks rather than fetching the whole collection in one unbounded read,
   // a prolific curator's cancelled/closed/taken_down gig history is
   // otherwise unbounded (unlike MAX_OPEN_GIGS_PER_PROFILE, which only caps
   // "open" gigs).
@@ -287,33 +287,33 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
     await deleteSeriesForProfile(db, profileId);
   }
 
-  // SP4 (Task 7): unwind every booking naming this profile as either side —
+  // SP4 (Task 7): unwind every booking naming this profile as either side,
   // musician or curator. Deliberately runs before recursiveDelete (mirrors
   // the gig/series cascade's own ordering just above), though it would work
   // equally well after: `bookings` is a top-level collection, not a
   // subcollection of this profile, so recursiveDelete never reaches it
   // either way. These bookings deliberately SURVIVE as "expired" top-level
-  // records that now reference a dead profile id — sub-5 must tolerate that.
+  // records that now reference a dead profile id, sub-5 must tolerate that.
   await unwindBookingsForModeration({ profileId });
 
   // SP4 (Task 13 item 5): handle delete moved to AFTER the gig/series/booking
   // cascade above (was: the first write this callable made). Freeing the
   // handle FIRST would let a brand-new profile claim it while this cascade
-  // is still in flight — every step above is its own await, any of which can
+  // is still in flight, every step above is its own await, any of which can
   // throw and abort the rest, leaving gigs/series/bookings that still name
   // THIS (about-to-be-orphaned) profileId while a DIFFERENT, unrelated
   // profile now owns the handle that used to point at them. Keeping the
   // handle claimed until the cascade's writes are actually done, and only
-  // freeing it here — right before recursiveDelete finally removes the
-  // profile doc itself — closes that window.
+  // freeing it here, right before recursiveDelete finally removes the
+  // profile doc itself, closes that window.
   if (handle) {
     const handleRef = db.doc(`handles/${handle}`);
     // SP4 (Task 13 review): only delete the handle doc if it STILL names
-    // THIS profileId — a precondition-read, not a blind delete. Closes a
+    // THIS profileId, a precondition-read, not a blind delete. Closes a
     // retry edge: if an EARLIER deleteProfile attempt on this same profile
     // already reached this point and freed the handle, then crashed before
-    // recursiveDelete below ever ran (so this profile doc — and its
-    // draft/rejected status — is still here for a client retry to find), a
+    // recursiveDelete below ever ran (so this profile doc, and its
+    // draft/rejected status, is still here for a client retry to find), a
     // DIFFERENT profile could have claimed that now-free handle string in
     // between. A blind unconditional delete on the retry would destroy that
     // new owner's claim instead of correctly no-op'ing (this profile's own
@@ -326,12 +326,12 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
 
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections
 
-  // S6: post-deletion recompute — now that the membership docs are truly
+  // S6: post-deletion recompute, now that the membership docs are truly
   // gone, syncCuratorAccess's collectionGroup('members') scan for each
   // former member no longer finds this profile, so a member whose only
   // curator access came from here correctly loses the marker. Best-effort
   // (allSettled), matching reviewProfile's identical reject-cascade
-  // rationale — deleting a profile is a rare, admin/owner-initiated action
+  // rationale, deleting a profile is a rare, admin/owner-initiated action
   // (unlike reviewProfile's automatic cascade on every reject), so a failed
   // recompute here is logged rather than queued to curatorAccessRetries; the
   // far more common path to a marker needing recompute (reviewProfile's
@@ -347,20 +347,20 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
     });
   }
 
-  // Storage cascade — best-effort. force: true is required: without it,
+  // Storage cascade, best-effort. force: true is required: without it,
   // deleteFiles aborts the ENTIRE prefix sweep on the first per-object
   // error, silently abandoning every remaining object in that prefix; with
   // it, deletion continues past individual failures and collects them
   // instead. staging/audio/{uid}/... and staging/photos/{uid}/... are
   // deliberately NOT swept here even though every {uid} is technically
-  // reachable — a members subcollection query, run before recursiveDelete
-  // removes it, would enumerate them — but the processUpload trigger always
+  // reachable, a members subcollection query, run before recursiveDelete
+  // removes it, would enumerate them, but the processUpload trigger always
   // deletes its own staging object in a `finally` on every path (success,
   // validation failure, or a crash-recovery retry), so a residual staging
   // object means the trigger never fired at all, not that this cascade
   // missed it. Those are backstopped by the Storage bucket's 24h lifecycle
   // rule on staging/, which is a LAUNCH BLOCKER follow-up (not yet
-  // configured — tracked in the SP2 plan's manual follow-ups; Task 16 owes
+  // configured, tracked in the SP2 plan's manual follow-ups; Task 16 owes
   // the README entry).
   const cascadeTargets = [
     `public/tracks/${profileId}/`,
@@ -372,7 +372,7 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   results.forEach((r, i) => {
     if (r.status !== "rejected") return;
     // force: true's rejection reason is an ARRAY of per-object errors
-    // (@google-cloud/storage collects them), not a single Error — log each
+    // (@google-cloud/storage collects them), not a single Error, log each
     // one individually rather than dumping the array as one opaque entry.
     // The non-array fallback is NOT dead code: a listing failure still
     // rejects with a single Error even under force: true.

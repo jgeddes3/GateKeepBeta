@@ -46,7 +46,23 @@ Done and merged (each has a rulings doc that is the authority for its area):
    off device, same posture as sub-6's door scanner before it. The Discover-page marketing capture
    for the landing page's fan section is also still owed (it currently reuses artist-page.jpg).
 
-NEXT: **8 Search**. Deferred: 5c band payout splits.
+10A. Hardening branch A (merged 2026-09-02 at `ee433d4`, plan
+   `plans/2026-09-02-hardening-sweep.md`): every em dash removed repo-wide, Cloud Functions on
+   Node 22 (`.nvmrc`), the `tickets.orderId` and `members.uid` index overrides repaired, `.claude/`
+   local files ignored, and GitHub Actions CI (`.github/workflows/ci.yml`) running every gate plus
+   an em-dash check on every push. Sub-project 7 merged main after this and re-ran every gate
+   under Node 22 before landing.
+
+NEXT: **10B Hardening branch B** (spec `specs/2026-09-02-hardening-design.md`, plan
+`plans/2026-09-02-hardening.md`, branches from main), then 8 Search. Deferred: 5c band payout
+splits.
+
+**Audit context:** `docs/superpowers/audit-2026-09-01.md` is the whole-project audit run after
+the 6 merge (19 blockers and near-blockers, per-area verdicts, the SP7 brief, and the
+fix-before-SP7 list). Sub-project 7 was brainstormed and built before that audit was read on this
+machine; 10B should reconcile the audit's SP7 brief against `sp7-rulings.md` and pick up anything
+the built surface missed. Detail reports live in `docs/superpowers/audit/` and
+`anti-slop/audit-001-2026-09-01.md`.
 
 ## Binding rules for ALL work
 
@@ -80,7 +96,7 @@ NEXT: **8 Search**. Deferred: 5c band payout splits.
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
 - Gates before any merge: `pnpm typecheck` (5/5), shared tests (167), `pnpm emu:test` (735,
-  single blocking call), `pnpm emu:rules` (113), web lint + build, mobile lint.
+  single blocking call), `pnpm emu:rules` (114), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
   locally; EAS cloud is unaffected).

@@ -13,7 +13,7 @@ import { newMusicNote } from "./announce.js";
 
 // Statuses that occupy one of the 10 slots. rejected/failed tracks keep their
 // docs (for the reason display) but don't count. This is slot occupancy for
-// the 10-track cap, NOT listenability — see profiles.ts's
+// the 10-track cap, NOT listenability, see profiles.ts's
 // LISTENABLE_TRACK_STATUSES, which deliberately excludes "processing".
 const ACTIVE_TRACK_STATUSES = ["processing", "pending_review", "approved"] as const;
 
@@ -33,17 +33,17 @@ export const createTrack = onCall<CreateTrackInput>({ region: "us-central1" }, a
     const active = await tx.get(tracksCol.where("status", "in", [...ACTIVE_TRACK_STATUSES]));
     if (active.size >= MAX_TRACKS) {
       throw new HttpsError("resource-exhausted",
-        `Portfolios hold at most ${MAX_TRACKS} tracks — delete one first.`);
+        `Portfolios hold at most ${MAX_TRACKS} tracks. Delete one first.`);
     }
     const now = Date.now();
     const doc: TrackDoc = {
       title: input.title.trim(), status: "processing", uploaderUid: uid,
       startSec: input.startSec, durationSec: null, storagePath: null,
       rejectionReason: null, failureReason: null,
-      // Max ACTIVE order + 1, not active.size — delete-then-add otherwise
+      // Max ACTIVE order + 1, not active.size, delete-then-add otherwise
       // produces duplicate order values once a track has ever been removed.
       // The max is only over active docs, so a reject-then-create can still
-      // collide with a dead (rejected/failed) doc's leftover order value —
+      // collide with a dead (rejected/failed) doc's leftover order value,
       // accepted, since reorderTracks heals it on the next reorder (see the
       // duplicate-order-healing test).
       order: Math.max(-1, ...active.docs.map((d) => (d.data().order as number) ?? -1)) + 1,
@@ -73,7 +73,7 @@ export const updateTrack = onCall<{ profileId: string; trackId: string; title?: 
     try {
       await ref.update({ title: title.trim(), updatedAt: Date.now() });
     } catch (err) {
-      // Firestore's NOT_FOUND status maps to gRPC code 5 — thrown by update()
+      // Firestore's NOT_FOUND status maps to gRPC code 5, thrown by update()
       // against a missing doc instead of a separate pre-read, since a plain
       // get()-then-update() has a TOCTOU gap (the doc can vanish between the
       // two calls, e.g. a racing deleteTrack).
@@ -97,7 +97,7 @@ export const deleteTrack = onCall<{ profileId: string; trackId: string }>(
     const ref = getFirestore().doc(`profiles/${profileId}/tracks/${trackId}`);
     if (!(await ref.get()).exists) throw new HttpsError("not-found", "Track not found.");
     // Storage cleanup is best-effort: a transcode in flight when the doc is
-    // deleted can still write a review clip afterwards — Task 7's trigger
+    // deleted can still write a review clip afterwards, Task 7's trigger
     // must re-check the doc after transcoding and remove its own output if
     // the doc is gone (see plan Task 7).
     await Promise.allSettled([
@@ -119,7 +119,7 @@ export const reorderTracks = onCall<{ profileId: string; trackIds: string[] }>(
       throw new HttpsError("invalid-argument", "A profile id and a list of unique track ids are required.");
     }
     // The reordered list spans every doc in the collection, not just the 10
-    // active ones — rejected/failed tracks persist by design (for the reason
+    // active ones, rejected/failed tracks persist by design (for the reason
     // display), so ordinary reject-then-create churn can reach 21+ docs over
     // a profile's lifetime. 200 stays comfortably clear of Firestore's
     // 500-writes-per-transaction limit.
@@ -174,7 +174,7 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
     // Firestore silently retries the loser's read against the now-updated
     // doc, so it sees the new status and fails its own precondition check.
     // The Functions emulator serializes concurrent invocations of the same
-    // callable, so this race is untestable there — the transaction itself is
+    // callable, so this race is untestable there, the transaction itself is
     // the guarantee, deliberately with no accompanying test.
     const prior = await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
@@ -184,7 +184,7 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         throw new HttpsError("failed-precondition", "Track is not pending review.");
       }
       // Reject also accepts "approved" (retroactive takedown, spec §6) AND a
-      // second "rejected" (idempotent retry — lets an admin re-run a
+      // second "rejected" (idempotent retry, lets an admin re-run a
       // takedown whose storage cleanup failed the first time; see the
       // "unavailable" throw below).
       if (decision === "rejected" && data.status !== "pending_review"
@@ -205,20 +205,20 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
       return data;
     });
 
-    // Reject's decision is final the instant the transaction above commits —
+    // Reject's decision is final the instant the transaction above commits,
     // unlike approve (which can still be rolled back below if the copy
     // fails), nothing downstream undoes "rejected". Write the audit AND
-    // notify the musician right here, unconditionally-once at claim time —
+    // notify the musician right here, unconditionally-once at claim time,
     // not gated on the storage outcome below. This used to live at the very
     // end, alongside approve's notification, but the storage-cleanup step
     // below can throw HttpsError("unavailable", ...) when the public delete
-    // fails for a non-404 reason (see that throw's comment) — that aborts
+    // fails for a non-404 reason (see that throw's comment), that aborts
     // the call before ever reaching a post-storage notification block, so a
     // takedown whose first storage attempt failed would silently never
     // notify the musician, even on a successful retry (the retry's `prior`
     // is already "rejected" by then, which is exactly the idempotency guard
     // below and correctly suppresses a second notification). Firing both
-    // here instead — before any storage work — means the musician always
+    // here instead, before any storage work, means the musician always
     // hears about a reject exactly once, regardless of how storage cleanup
     // goes. Both are guarded on prior.status !== "rejected" so an idempotent
     // reject-from-rejected retry doesn't produce a duplicate audit row or
@@ -227,7 +227,7 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
       await writeAudit({
         actorUid,
         action: "track_rejected",
-        // Detail records the prior status too — a takedown trail (was
+        // Detail records the prior status too, a takedown trail (was
         // "approved" and live, vs. a routine first-time reject from
         // "pending_review") is worth more to an auditor than the reason alone.
         detail: `[was ${prior.status}] ${reason!.trim()}`,
@@ -239,8 +239,8 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         kind: "track_review",
         title: wasApproved ? `"${rejectTitle}" was removed from your portfolio` : `"${rejectTitle}" needs attention`,
         body: wasApproved
-          ? `Reviewer note: ${reason!.trim()} — this track is no longer on your public page. You can delete it and upload a replacement.`
-          : `Reviewer note: ${reason!.trim()} — you can delete it and upload a replacement.`,
+          ? `Reviewer note: ${reason!.trim()}. This track is no longer on your public page. You can delete it and upload a replacement.`
+          : `Reviewer note: ${reason!.trim()}. You can delete it and upload a replacement.`,
       });
     }
 
@@ -253,7 +253,7 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         // in public/ only as part of an approval that already committed.
         await reviewFile.copy(publicFile);
       } catch (err) {
-        // The Firestore claim above already committed "approved" — if the
+        // The Firestore claim above already committed "approved", if the
         // copy itself fails, roll the doc back to pending_review inside its
         // own transaction, and only if it's still OUR claim: a concurrent
         // reject (often the very thing that deleted the review clip and
@@ -263,19 +263,19 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         await db.runTransaction(async (tx) => {
           const s = await tx.get(ref);
           // Only roll back OUR claim. If another admin has since taken the
-          // track down — often the very thing that deleted the clip and
-          // made the copy fail — their decision stands.
+          // track down, often the very thing that deleted the clip and
+          // made the copy fail, their decision stands.
           if (!s.exists || s.data()?.status !== "approved") return;
           tx.update(ref, { status: "pending_review", storagePath: prior.storagePath ?? null, updatedAt: Date.now() });
         }).catch((e) => console.error("reviewTrack: approve rollback failed", `${profileId}/${trackId}`, e));
         // @google-cloud/storage surfaces a missing source object as an
         // ApiError with HTTP code 404 (unlike Firestore's gRPC code 5 used
-        // elsewhere) — the review clip was already gone (a race, or a prior
+        // elsewhere), the review clip was already gone (a race, or a prior
         // partial failure that already consumed it). That's a recoverable
         // admin action (reject + ask for a re-upload), not a server error.
         if ((err as { code?: number }).code === 404) {
           throw new HttpsError("failed-precondition",
-            "The review clip is missing — reject this track and ask the musician to re-upload.");
+            "The review clip is missing. Reject this track and ask the musician to re-upload.");
         }
         throw err;
       }
@@ -290,8 +290,8 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         logDeleteFailure("reviewTrack", "reject: public delete", publicTrackPath(profileId, trackId))(publicResult.reason);
       }
       // A pending track's public object shouldn't exist, so its delete 404s
-      // harmlessly. If the public delete fails for any OTHER reason — for
-      // ANY prior status, not just a retroactive takedown from "approved" —
+      // harmlessly. If the public delete fails for any OTHER reason, for
+      // ANY prior status, not just a retroactive takedown from "approved",
       // the object may still exist and be publicly reachable even though
       // the doc says "rejected"; surface that to the admin as a retryable
       // failure instead of quietly reporting success. The audit row for
@@ -300,16 +300,16 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
       // call safely re-attempts the same delete without duplicating it.
       if (publicResult.status === "rejected" && (publicResult.reason as { code?: number })?.code !== 404) {
         throw new HttpsError("unavailable",
-          "Takedown incomplete — the public clip could not be removed. Try again.");
+          "Takedown incomplete: the public clip could not be removed. Try again.");
       }
     }
 
     // Storage work finishes asynchronously after the transactional claim
-    // committed — a concurrent review of the SAME track (e.g. another admin
+    // committed, a concurrent review of the SAME track (e.g. another admin
     // rejects it while this approve's copy is still in flight) can move the
     // status again before we get here, or deleteTrack/deleteProfile's
     // cascade can remove the doc entirely. Re-read and require the status to
-    // still match what THIS call claimed, not just that the doc exists — an
+    // still match what THIS call claimed, not just that the doc exists, an
     // existence-only check would let a superseded approve still write its
     // audit/notification and leave the public object it just copied behind
     // as the only trace of a decision that no longer stands.
@@ -320,16 +320,16 @@ export const reviewTrack = onCall<{ profileId: string; trackId: string; decision
         await publicFile.delete()
           .catch(logDeleteFailure("reviewTrack", "superseded public (post-review race)", publicTrackPath(profileId, trackId)));
       }
-      // Only approve's audit/notify are skipped here — the other admin's
+      // Only approve's audit/notify are skipped here, the other admin's
       // decision stands. Reject's already fired unconditionally above,
       // before this re-read, so there's nothing to skip for it.
       return { ok: true };
     }
 
     // Reject's audit + notification already ran (right after the
-    // transaction, above, unconditionally-once at claim time — see the
+    // transaction, above, unconditionally-once at claim time, see the
     // comment there for why). Approve's are gated here instead because
-    // approve — unlike reject — can still be superseded by a concurrent
+    // approve, unlike reject, can still be superseded by a concurrent
     // reject between the copy finishing and this re-read; the `stillOurs`
     // check above already returned early without audit/notify if so.
     if (decision === "approved") {

@@ -22,7 +22,7 @@ const SEED_LOCATION: GigDoc["location"] = {
 const SEED_PRIVATE_LOCATION = { address: SEED_ADDRESS, geo: { lat: 30.27, lng: -97.74 } };
 
 // Independent oracle for the anchor computation (NOT a copy of scheduled.ts's
-// implementation) — walks forward day by day from createdAt (UTC calendar
+// implementation), walks forward day by day from createdAt (UTC calendar
 // day) until it lands on the target weekday, then sets hour/minute; if that
 // lands before createdAt (same weekday, earlier time of day) rolls forward a
 // full week. Used to compute the expected first-occurrence timestamp so the
@@ -39,7 +39,7 @@ let profileCounter = 0;
 function fakeProfileId(): string { return `sched-profile-${Date.now()}-${profileCounter++}`; }
 
 // `overrides.recurrence`, when given, must be a COMPLETE recurrence object
-// (all 5 fields) — it wholesale-replaces the default below via the trailing
+// (all 5 fields), it wholesale-replaces the default below via the trailing
 // spread, matching gigSeries.test.ts's seed-fixture convention.
 async function seedSeries(
   overrides: Partial<GigSeriesDoc> = {},
@@ -122,7 +122,7 @@ async function seedInvite(overrides: Partial<InviteDoc> = {}): Promise<string> {
 let uidCounter = 0;
 function fakeUid(): string { return `sched-uid-${Date.now()}-${uidCounter++}`; }
 
-// notifyProfileMembers fans out to every doc in profiles/{id}/members — the
+// notifyProfileMembers fans out to every doc in profiles/{id}/members, the
 // doc's own content is never read, only its id (the uid), so an empty stub
 // is enough to make a profile "have a member" for notification-delivery
 // assertions.
@@ -131,7 +131,7 @@ async function seedMember(profileId: string, uid: string): Promise<void> {
 }
 
 // Mirrors bookings.test.ts's own pollNotifications (see its comment on why
-// polling — not a single read — is needed even though the callable/sweep
+// polling, not a single read, is needed even though the callable/sweep
 // step already awaited the notify call).
 async function pollNotifications(uid: string): Promise<FirebaseFirestore.QuerySnapshot> {
   const deadline = Date.now() + 10_000;
@@ -146,7 +146,7 @@ async function pollNotifications(uid: string): Promise<FirebaseFirestore.QuerySn
 // `gigId`/`seriesId` in overrides are deliberately allowed to be caller-chosen
 // placeholders (a test seeding a booking before its linked gig/series exists
 // yet can pass a throwaway string and patch the real id in afterward via a
-// plain admin `.update()` — same "create booking first, patch gigId after"
+// plain admin `.update()`, same "create booking first, patch gigId after"
 // ordering bookings.test.ts's own fixtures don't need, but scheduled.test.ts's
 // booking-then-gig-referencing-that-booking's-own-id ordering does).
 async function seedBooking(overrides: Partial<BookingRequestDoc> & { gigId: string }): Promise<{
@@ -170,7 +170,7 @@ async function seedBooking(overrides: Partial<BookingRequestDoc> & { gigId: stri
   return { bookingId: ref.id, musicianProfileId: doc.musicianProfileId, curatorProfileId: doc.curatorProfileId };
 }
 
-describe("runDailySweep — series materialization", () => {
+describe("runDailySweep, series materialization", () => {
   it("weekly series materializes exactly ceil(8w/1w)=8 occurrences with the correct startsAt sequence", async () => {
     const createdAt = Date.now();
     const { seriesId } = await seedSeries({ createdAt, updatedAt: createdAt });
@@ -179,7 +179,7 @@ describe("runDailySweep — series materialization", () => {
     const report = await runDailySweep(anchor);
 
     // The suite runs every test file against ONE persistent Firestore
-    // emulator instance (no reset between files) — other files' fixtures
+    // emulator instance (no reset between files), other files' fixtures
     // leave their own "active" series/gigs/tracks/invites lying around, so a
     // SweepReport's global counts can only be a LOWER bound of what THIS
     // test's own fixture caused, never an exact figure. Every scoped
@@ -234,7 +234,7 @@ describe("runDailySweep — series materialization", () => {
     expect(occs.map((d) => d.data().startsAt)).toEqual(expectedStarts);
   });
 
-  it("respects recurrence.endDate — caps occurrences and advances materializedThrough to endDate, not the full window", async () => {
+  it("respects recurrence.endDate, caps occurrences and advances materializedThrough to endDate, not the full window", async () => {
     const createdAt = Date.now();
     const anchor = expectedAnchor(createdAt, 5, 20, 0);
     const endDate = anchor + 20 * DAY_MS; // partway through the weekly cadence
@@ -256,7 +256,7 @@ describe("runDailySweep — series materialization", () => {
 
     // Not asserting on the global report here (other active series elsewhere
     // in the shared emulator could legitimately contribute nonzero counts of
-    // their own) — the invariant under test is scoped to THIS series: it
+    // their own), the invariant under test is scoped to THIS series: it
     // must gain zero occurrences and its watermark must never move.
     await runDailySweep(anchor);
     const occs = await occurrencesFor(seriesId);
@@ -273,7 +273,7 @@ describe("runDailySweep — series materialization", () => {
     expect((await occurrencesFor(seriesId)).length).toBe(0);
   });
 
-  it("double-run at the same `now` is idempotent — the second run creates nothing new", async () => {
+  it("double-run at the same `now` is idempotent, the second run creates nothing new", async () => {
     const createdAt = Date.now();
     const { seriesId } = await seedSeries({ createdAt, updatedAt: createdAt });
     const anchor = expectedAnchor(createdAt, 5, 20, 0);
@@ -282,9 +282,9 @@ describe("runDailySweep — series materialization", () => {
     const afterFirst = await occurrencesFor(seriesId);
     expect(afterFirst.length).toBe(8);
 
-    await runDailySweep(anchor); // identical `now` — nothing new to materialize
+    await runDailySweep(anchor); // identical `now`, nothing new to materialize
     const afterSecond = await occurrencesFor(seriesId);
-    expect(afterSecond.length).toBe(8); // still exactly 8 — no duplicates
+    expect(afterSecond.length).toBe(8); // still exactly 8, no duplicates
     expect(afterSecond.map((d) => d.id).sort()).toEqual(afterFirst.map((d) => d.id).sort());
   });
 
@@ -296,7 +296,7 @@ describe("runDailySweep — series materialization", () => {
     await runDailySweep(anchor);
     // A week later: the window slides forward by 7 days, so exactly one more
     // weekly occurrence should newly fall inside it. (Not asserting on the
-    // global report's occurrencesCreated — see the weekly test's comment on
+    // global report's occurrencesCreated, see the weekly test's comment on
     // shared-emulator contamination; this test's own series is the scoped,
     // deterministic check.)
     await runDailySweep(anchor + 7 * DAY_MS);
@@ -308,7 +308,7 @@ describe("runDailySweep — series materialization", () => {
   it("clamps to `now`: a series whose anchor already elapsed before this run never materializes a past-dated occurrence", async () => {
     // The four sweep steps share one deferred WriteBatch, so the past-gig
     // sweep's read query can never see this run's own not-yet-committed
-    // creates — a past-dated occurrence created here would stay "open" and
+    // creates, a past-dated occurrence created here would stay "open" and
     // world-readable until the NEXT day's run finally closes it. Simulates
     // the ordinary "materializedThrough: 0 on first run" case where the
     // sweep happens to run a few days after the series' own anchor slot
@@ -330,7 +330,7 @@ describe("runDailySweep — series materialization", () => {
   });
 });
 
-describe("runDailySweep — past-gig sweep", () => {
+describe("runDailySweep, past-gig sweep", () => {
   it("closes an open gig whose startsAt has elapsed; leaves a future open gig untouched", async () => {
     const now = Date.now();
     const profileId = fakeProfileId();
@@ -343,7 +343,7 @@ describe("runDailySweep — past-gig sweep", () => {
 
     // >= not ===: other test files may leave their own past-dated "open"
     // gigs sitting in the shared emulator (e.g. gigSeries.test.ts's endSeries
-    // fixtures) — see the weekly materialization test's comment. The doc-id
+    // fixtures), see the weekly materialization test's comment. The doc-id
     // checks below are the deterministic, scoped assertions.
     expect(report.pastGigsClosed).toBeGreaterThanOrEqual(1);
     expect((await adb.doc(`gigs/${pastId}`).get()).data()?.status).toBe("closed");
@@ -352,7 +352,7 @@ describe("runDailySweep — past-gig sweep", () => {
   });
 });
 
-describe("runDailySweep — track reaper", () => {
+describe("runDailySweep, track reaper", () => {
   it("fails a processing track older than 24h; leaves a fresh processing track and an older non-processing track untouched", async () => {
     const now = Date.now();
     const profileId = fakeProfileId();
@@ -371,7 +371,7 @@ describe("runDailySweep — track reaper", () => {
   });
 });
 
-describe("runDailySweep — invite sweep", () => {
+describe("runDailySweep, invite sweep", () => {
   it("revokes a pending invite past the 14-day expiry; leaves a fresh pending invite and an old non-pending invite untouched", async () => {
     const now = Date.now();
     const staleId = await seedInvite({ status: "pending", createdAt: now - 15 * DAY_MS });
@@ -387,21 +387,21 @@ describe("runDailySweep — invite sweep", () => {
   });
 });
 
-describe("runDailySweep — S3 sweep resilience", () => {
-  it("a poisoned series (malformed recurrence, forced via admin SDK) does not prevent steps 2-4 — their effects still land", async () => {
+describe("runDailySweep, S3 sweep resilience", () => {
+  it("a poisoned series (malformed recurrence, forced via admin SDK) does not prevent steps 2-4, their effects still land", async () => {
     const now = Date.now();
     // Force a genuinely-throwing series doc: destructuring `null` inside
     // anchorFor's `const { weekday, hour, minute } = series.recurrence;`
     // throws a TypeError. This bypasses createSeries/validateRecurrence
-    // entirely (an admin-SDK-only shape — the real callables can never
+    // entirely (an admin-SDK-only shape, the real callables can never
     // produce it), simulating the kind of malformed data step 1's per-series
     // try/catch (SP4 Task 13 item 8) must survive without blocking the rest
-    // of the sweep — or any OTHER series in the same step 1 pass.
+    // of the sweep, or any OTHER series in the same step 1 pass.
     const { seriesId: poisonedId } = await seedSeries({
       createdAt: now, updatedAt: now, recurrence: null as unknown as GigSeriesDoc["recurrence"],
     });
 
-    // Independent fixtures for steps 2-4, unrelated to the poisoned series —
+    // Independent fixtures for steps 2-4, unrelated to the poisoned series,
     // step 1's per-series (not step-level) catch must not stop steps 2/3/4
     // from running at all.
     const profileId = fakeProfileId();
@@ -413,7 +413,7 @@ describe("runDailySweep — S3 sweep resilience", () => {
 
     // SP4 (Task 13 item 8): a single poisoned series is now caught PER-DOC
     // (report.errors.seriesMaterialize), not by the step-level catch
-    // (report.errors.series) — the latter no longer fires for this scenario
+    // (report.errors.series), the latter no longer fires for this scenario
     // at all, since the per-series catch prevents the throw from ever
     // reaching step 1's outer try/catch.
     expect(report.errors.seriesMaterialize).toBeGreaterThanOrEqual(1);
@@ -427,7 +427,7 @@ describe("runDailySweep — S3 sweep resilience", () => {
 
     // Cleanup: this file runs every test against ONE persistent, never-reset
     // Firestore emulator instance, and step 1's query is unscoped
-    // (`where("status","==","active")` over the WHOLE collection) — leaving
+    // (`where("status","==","active")` over the WHOLE collection), leaving
     // this doc "active" forever would poison every LATER test in this file
     // that also calls runDailySweep. Flip it out of the query's match set
     // once this test is done with it.
@@ -437,10 +437,10 @@ describe("runDailySweep — S3 sweep resilience", () => {
   it("SP4 Task 13 item 8: a poisoned series (malformed template, forced via admin SDK) does not stop a healthy active series from materializing in the SAME step 1 pass", async () => {
     const now = Date.now();
     const createdAt = now - 60 * DAY_MS; // far enough back that both series have a due occurrence by `now`
-    // Malformed `template` (not `recurrence` — the OTHER poisoned-series
+    // Malformed `template` (not `recurrence`, the OTHER poisoned-series
     // test above already covers that vector): computeOccurrences succeeds
     // (recurrence is intact), so this throws later in the SAME per-series
-    // iteration, at `series.template.title` while building the gig doc —
+    // iteration, at `series.template.title` while building the gig doc,
     // proving the try/catch wraps the WHOLE per-series body, not just the
     // early planning call.
     const { seriesId: poisonedId } = await seedSeries({
@@ -454,7 +454,7 @@ describe("runDailySweep — S3 sweep resilience", () => {
     const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
     expect(poisoned.materializedThrough).toBe(0); // its own iteration aborted, never advanced
 
-    // The healthy series — same run, same page — still materialized.
+    // The healthy series, same run, same page, still materialized.
     const healthy = (await adb.doc(`gigSeries/${healthyId}`).get()).data() as GigSeriesDoc;
     expect(healthy.materializedThrough).toBeGreaterThan(0);
     const healthyOccurrences = await occurrencesFor(healthyId);
@@ -465,15 +465,15 @@ describe("runDailySweep — S3 sweep resilience", () => {
     await adb.doc(`gigSeries/${healthyId}`).update({ status: "ended" });
   });
 
-  it("SP4 Task 13 (review): a poisoned series (valid template, invalid templatePrivateLocation) commits NOTHING for that series — no orphan gig doc — while a healthy sibling still materializes", async () => {
+  it("SP4 Task 13 (review): a poisoned series (valid template, invalid templatePrivateLocation) commits NOTHING for that series, no orphan gig doc, while a healthy sibling still materializes", async () => {
     const now = Date.now();
     const createdAt = now - 60 * DAY_MS;
     // Distinct poison shape from the "malformed template" test above: the
     // TEMPLATE is valid (so the gig doc for the first occurrence builds and
-    // validates fine), but templatePrivateLocation is a bare string — legal
+    // validates fine), but templatePrivateLocation is a bare string, legal
     // to SEED (Firestore is fine with any value nested as a map FIELD), but
     // illegal as the top-level argument to a document `.set()` (which
-    // requires a plain object) — batch.set() throws synchronously the
+    // requires a plain object), batch.set() throws synchronously the
     // moment it's used for the private/location subdoc write. This is
     // exactly the partial-commit shape the review flagged: without staging,
     // the gig doc's write would already be durably queued on the shared
@@ -489,12 +489,12 @@ describe("runDailySweep — S3 sweep resilience", () => {
     expect(report.errors.seriesMaterialize).toBeGreaterThanOrEqual(1);
     const poisoned = (await adb.doc(`gigSeries/${poisonedId}`).get()).data() as GigSeriesDoc;
     expect(poisoned.materializedThrough).toBe(0); // never advanced
-    // No orphan gig doc — the staged-then-validated write set means NOTHING
+    // No orphan gig doc, the staged-then-validated write set means NOTHING
     // for this series ever reached the shared writer's batch.
     const poisonedOccurrences = await occurrencesFor(poisonedId);
     expect(poisonedOccurrences.length).toBe(0);
 
-    // The healthy series — same run, same page — still materialized.
+    // The healthy series, same run, same page, still materialized.
     const healthy = (await adb.doc(`gigSeries/${healthyId}`).get()).data() as GigSeriesDoc;
     expect(healthy.materializedThrough).toBeGreaterThan(0);
     const healthyOccurrences = await occurrencesFor(healthyId);
@@ -506,7 +506,7 @@ describe("runDailySweep — S3 sweep resilience", () => {
   });
 });
 
-describe("runDailySweep — S4 curatorAccess retry sweep", () => {
+describe("runDailySweep, S4 curatorAccess retry sweep", () => {
   it("retries a seeded curatorAccessRetries doc via syncCuratorAccess and deletes it on success", async () => {
     const uid = `retry-uid-${Date.now()}`;
     await adb.doc(`curatorAccessRetries/${uid}`).set({ createdAt: Date.now() });
@@ -515,14 +515,14 @@ describe("runDailySweep — S4 curatorAccess retry sweep", () => {
     expect((await adb.doc(`curatorAccessRetries/${uid}`).get()).exists).toBe(false);
   });
 
-  it("SP4 Task 13 item 1: a poisoned uid (invalid, forced via admin SDK) does not starve the retry queue — the next uid still drains", async () => {
+  it("SP4 Task 13 item 1: a poisoned uid (invalid, forced via admin SDK) does not starve the retry queue, the next uid still drains", async () => {
     const now = Date.now();
     // ">64 chars" fails @gatekeep/shared's isValidDocId (syncCuratorAccess's
-    // own guard — SP4 Task 13 item 1) while still being a perfectly legal
+    // own guard, SP4 Task 13 item 1) while still being a perfectly legal
     // Firestore document id (well under its own 1500-byte limit), so this
     // seeds fine via the admin SDK but syncCuratorAccess rejects it. Prefixed
     // "0-" so it sorts BEFORE the healthy uid under step 5's
-    // orderBy(FieldPath.documentId()) — first in the queue.
+    // orderBy(FieldPath.documentId()), first in the queue.
     const poisonedUid = `0-invalid-${"x".repeat(70)}`;
     const healthyUid = `zzz-healthy-uid-${now}`;
     await adb.doc(`curatorAccessRetries/${poisonedUid}`).set({ createdAt: now });
@@ -538,13 +538,13 @@ describe("runDailySweep — S4 curatorAccess retry sweep", () => {
     expect((await adb.doc(`curatorAccessRetries/${healthyUid}`).get()).exists).toBe(false);
 
     // Fixture hygiene: step 5's query is unscoped over the whole collection
-    // (same as step 1's series query) — leaving this doc in place would
+    // (same as step 1's series query), leaving this doc in place would
     // poison every LATER test in this file that also calls runDailySweep.
     await adb.doc(`curatorAccessRetries/${poisonedUid}`).delete();
   });
 });
 
-describe("runDailySweep — P4 materializer cap guard + TOCTOU re-read", () => {
+describe("runDailySweep, P4 materializer cap guard + TOCTOU re-read", () => {
   it("a profile already at MAX_OPEN_GIGS_PER_PROFILE open gigs materializes nothing for its series", async () => {
     const createdAt = Date.now();
     const { seriesId, profileId } = await seedSeries({ createdAt, updatedAt: createdAt });
@@ -571,7 +571,7 @@ describe("runDailySweep — P4 materializer cap guard + TOCTOU re-read", () => {
     const occs = await occurrencesFor(seriesId);
     expect(occs.length).toBe(0);
     const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
-    expect(series.materializedThrough).toBe(0); // untouched — capped before advancing the watermark
+    expect(series.materializedThrough).toBe(0); // untouched, capped before advancing the watermark
   });
 
   it("M-10 TOCTOU: a series paused between the scan and its write materializes nothing", async () => {
@@ -583,7 +583,7 @@ describe("runDailySweep — P4 materializer cap guard + TOCTOU re-read", () => {
     // the initial scan (status=='active') already matches this series by
     // the time both promises start, but the write path performs its OWN
     // fresh `seriesDoc.ref.get()` immediately before writing (P4/M-10 fix)
-    // — that fresh read must see "paused" and skip, even though the
+    //, that fresh read must see "paused" and skip, even though the
     // ORIGINAL scan saw "active". Started via Promise.all (not a fixed
     // delay/sleep) so the pause genuinely races the sweep's own real
     // Firestore round-trips (the scan query, then the per-series cap-check
@@ -597,11 +597,11 @@ describe("runDailySweep — P4 materializer cap guard + TOCTOU re-read", () => {
     expect(occs.length).toBe(0);
     const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
     expect(series.status).toBe("paused");
-    expect(series.materializedThrough).toBe(0); // untouched — skipped before advancing the watermark
+    expect(series.materializedThrough).toBe(0); // untouched, skipped before advancing the watermark
   });
 });
 
-describe("runDailySweep — SP4 Task 8: booking expiry sweep (step 6)", () => {
+describe("runDailySweep, SP4 Task 8: booking expiry sweep (step 6)", () => {
   it("expires an open booking whose gig's startsAt has elapsed; notifies the musician side", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();
@@ -661,7 +661,7 @@ describe("runDailySweep — SP4 Task 8: booking expiry sweep (step 6)", () => {
     await seedMember(musicianProfileId, musicianUid);
     const gigId = await seedOccurrence("not-a-real-series", curatorProfileId, { status: "open", startsAt: now + 3600_000 });
     const { bookingId } = await seedBooking({ gigId, seriesId: null, curatorProfileId, musicianProfileId, status: "open" });
-    await adb.doc(`gigs/${gigId}`).delete(); // gig gone outright — the strongest "can never be accepted" case
+    await adb.doc(`gigs/${gigId}`).delete(); // gig gone outright, the strongest "can never be accepted" case
 
     await runDailySweep(now);
 
@@ -673,7 +673,7 @@ describe("runDailySweep — SP4 Task 8: booking expiry sweep (step 6)", () => {
   });
 });
 
-describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () => {
+describe("runDailySweep, SP4 Task 8: booking completion sweep (step 7)", () => {
   it("completes a single-gig confirmed booking once its gig has ended; increments completedCount and recomputes the projection", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();
@@ -748,7 +748,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     const { bookingId } = await seedBooking({
       gigId: "pending", seriesId: null, curatorProfileId, musicianProfileId, status: "confirmed",
     });
-    // Started 30 minutes ago, runs 90 minutes — 60 minutes still remain. A
+    // Started 30 minutes ago, runs 90 minutes, 60 minutes still remain. A
     // formula that forgets to convert durationMinutes to milliseconds before
     // adding it to the epoch-ms `startsAt` (durationMinutes is minutes, not
     // ms) would wrongly treat this as already ended, since the un-converted
@@ -765,7 +765,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     expect(booking.status).toBe("confirmed");
   });
 
-  it("completes a whole-run confirmed booking only once its LAST linked occurrence has ended — a mid-run sweep does not complete it", async () => {
+  it("completes a whole-run confirmed booking only once its LAST linked occurrence has ended, a mid-run sweep does not complete it", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();
     const musicianProfileId = fakeProfileId();
@@ -774,7 +774,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     });
     const { seriesId } = await seedSeries({
       createdAt: now, updatedAt: now, curatorProfileId, status: "active",
-      // Far-future watermark — this fixture's own materializer pass (step 1,
+      // Far-future watermark, this fixture's own materializer pass (step 1,
       // which always runs before step 7 in the same sweep call) must never
       // birth a fresh occurrence here; the test's whole point is to control
       // the linked-occurrence set by hand.
@@ -786,7 +786,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
       status: "filled", startsAt: now - 3 * 3600_000, durationMinutes: 60,
       bookingId, bookedMusicianProfileId: musicianProfileId,
     });
-    // Its own future date, still linked and "filled" — the mid-run sweep
+    // Its own future date, still linked and "filled", the mid-run sweep
     // must not complete the booking while this exists.
     await seedOccurrence(seriesId, curatorProfileId, {
       status: "filled", startsAt: now + 2 * 3600_000, durationMinutes: 60,
@@ -875,7 +875,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     }
   });
 
-  it("Task 8 ruling: a future TAKEN_DOWN linked date does not delay completion — resolves 'completed' immediately once a PAST FILLED linked date exists, without waiting for the taken-down date's fictional end", async () => {
+  it("Task 8 ruling: a future TAKEN_DOWN linked date does not delay completion, resolves 'completed' immediately once a PAST FILLED linked date exists, without waiting for the taken-down date's fictional end", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();
     const musicianProfileId = fakeProfileId();
@@ -895,7 +895,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     await adb.doc(`bookings/${bookingId}`).update({ gigId: pastFilledGigId });
     // takedownGig's occurrence scope leaves bookingId/bookedMusicianProfileId
     // set on a "taken_down" gig belonging to a still-confirmed whole-run
-    // booking (see gigs.ts) — this future date will NEVER happen, but stays
+    // booking (see gigs.ts), this future date will NEVER happen, but stays
     // linked. Without the status:"filled" query filter, this would be picked
     // as the "last linked occurrence" and delay resolution until its
     // fictional end time, then wrongly award "completed".
@@ -920,7 +920,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
     }
   });
 
-  it("Task 8 ruling variant: a future TAKEN_DOWN linked date with NO past FILLED linked date resolves 'expired', not 'completed' — completedCount stays 0", async () => {
+  it("Task 8 ruling variant: a future TAKEN_DOWN linked date with NO past FILLED linked date resolves 'expired', not 'completed', completedCount stays 0", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();
     const musicianProfileId = fakeProfileId();
@@ -955,7 +955,7 @@ describe("runDailySweep — SP4 Task 8: booking completion sweep (step 7)", () =
   });
 });
 
-describe("runDailySweep — SP4 Task 8: run-aware materializer (step 1 change)", () => {
+describe("runDailySweep, SP4 Task 8: run-aware materializer (step 1 change)", () => {
   it("materializes a whole-run series' occurrences already status:'filled' + linked, when the series' active booking is still confirmed", async () => {
     const createdAt = Date.now();
     const musicianProfileId = fakeProfileId();
@@ -1016,7 +1016,7 @@ describe("runDailySweep — SP4 Task 8: run-aware materializer (step 1 change)",
     }
   });
 
-  it("filled births skip the MAX_OPEN_GIGS_PER_PROFILE cap guard — a profile already at the cap still materializes a booked run's filled occurrences", async () => {
+  it("filled births skip the MAX_OPEN_GIGS_PER_PROFILE cap guard, a profile already at the cap still materializes a booked run's filled occurrences", async () => {
     const createdAt = Date.now();
     const musicianProfileId = fakeProfileId();
     const { bookingId } = await seedBooking({
@@ -1057,7 +1057,7 @@ describe("runDailySweep — SP4 Task 8: run-aware materializer (step 1 change)",
   });
 });
 
-describe("runDailySweep — SP4 Task 8: double-run idempotency across the new steps", () => {
+describe("runDailySweep, SP4 Task 8: double-run idempotency across the new steps", () => {
   it("a second run at the same `now` makes zero further changes across booking expiry, completion (single + zombie), and filled materialization", async () => {
     const now = Date.now();
     const curatorProfileId = fakeProfileId();
@@ -1105,7 +1105,7 @@ describe("runDailySweep — SP4 Task 8: double-run idempotency across the new st
     });
     await adb.doc(`bookings/${bookingD}`).update({ seriesId: seriesD, curatorProfileId: curatorD });
     // anchorD >= now always (anchorFor never lands before its series' own
-    // createdAt) — running the WHOLE sweep at anchorD is valid for (a)/(b)/(c)
+    // createdAt), running the WHOLE sweep at anchorD is valid for (a)/(b)/(c)
     // too: their past-dated triggers stay just as past relative to anchorD.
     const anchorD = expectedAnchor(now, 5, 20, 0);
 

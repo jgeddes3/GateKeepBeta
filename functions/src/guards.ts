@@ -16,7 +16,7 @@ export function requireVerifiedEmail(req: { auth?: { token?: Record<string, unkn
   }
 }
 
-// Any member may edit portfolio content (spec §6) — contrast requireProfileAdmin
+// Any member may edit portfolio content (spec §6), contrast requireProfileAdmin
 // in profiles.ts, which gates membership/deletion actions.
 export async function requireProfileMember(profileId: string, uid: string): Promise<void> {
   const m = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
@@ -42,7 +42,7 @@ export async function requireCuratorProfile(profileId: string): Promise<Document
 }
 
 // Sub-project 3: gig-posting actions (createGig) require not just a curator
-// profile but one that has cleared review — an unapproved (draft/pending/
+// profile but one that has cleared review, an unapproved (draft/pending/
 // rejected) curator has nothing public to post against yet.
 export async function requireApprovedCuratorProfile(profileId: string): Promise<DocumentSnapshot> {
   const p = await requireCuratorProfile(profileId);
@@ -53,7 +53,7 @@ export async function requireApprovedCuratorProfile(profileId: string): Promise<
 }
 
 // Sub-project 4: booking actions (applyToGig and offerGig's target side)
-// require not just a musician profile but one that has cleared review — an
+// require not just a musician profile but one that has cleared review, an
 // unapproved (draft/pending/rejected) musician has no public act to book
 // yet. Mirrors requireApprovedCuratorProfile above.
 export async function requireApprovedMusicianProfile(profileId: string): Promise<DocumentSnapshot> {

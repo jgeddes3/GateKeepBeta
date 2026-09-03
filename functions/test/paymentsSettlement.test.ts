@@ -26,7 +26,7 @@ const WEBHOOK_URL = "http://localhost:5001/gatekeep-dev-jg/us-central1/stripeWeb
 
 // 60s: every case chains two approved profiles, makeMoneyReady, a
 // createGig/publishGig pair and a real accept BEFORE the two sweep runs it
-// actually asserts on (schedule, then charge) — same budget paymentsSweep.ts's
+// actually asserts on (schedule, then charge), same budget paymentsSweep.ts's
 // suite runs on, for the same reason.
 vi.setConfig({ testTimeout: 60_000 });
 
@@ -36,7 +36,7 @@ const DAY_MS = 24 * HOUR_MS;
 // ---------------------------------------------------------------------------
 // Expected money, DERIVED (never transcribed). Every figure below comes out of
 // the same shared helpers the server uses, applied to the fixtures' own frozen
-// terms — so a change to a fee constant or a rounding law moves the assertion
+// terms, so a change to a fee constant or a rounding law moves the assertion
 // and the implementation together, and a test can never quietly enshrine a
 // number the money layer no longer produces.
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ const FLAT_CHARGE_CENTS = FLAT_DUE_CENTS + FLAT_FEE_CENTS;
 const FLAT_EARNINGS_CENTS = computeEarningsCents(BASE_CENTS, FEE.musicianFeePct);
 
 // Task 12: what the SAME date costs when NO deposit slice is credited against
-// it — the shape both a post-clawback restore re-run and an absorbed deposit
+// it, the shape both a post-clawback restore re-run and an absorbed deposit
 // settle on. The full base plus commission on the full base, which is strictly
 // more than FLAT_CHARGE_CENTS above (the slice is no longer paying for part of
 // the night). The musician's earnings are unchanged either way: they are a
@@ -195,7 +195,7 @@ async function musicianAccountId(profileId: string): Promise<string> {
 }
 
 // Scoped charge knobs (as-built contract #6): ALWAYS this test's OWN
-// customerId, never the global declineCharges flag — stripeFake/config is
+// customerId, never the global declineCharges flag, stripeFake/config is
 // shared with every other suite running against this emulator.
 async function setChargeKnob(
   knob: "declineCustomerIds" | "pendingCustomerIds", customerId: string, on: boolean,
@@ -209,7 +209,7 @@ async function fakeObject(id: string): Promise<Record<string, unknown> | undefin
   return (await adb.doc(`stripeFake/state/objects/${id}`).get()).data();
 }
 
-// FakeStripe's running per-account balance — the only honest way to assert
+// FakeStripe's running per-account balance, the only honest way to assert
 // that money actually reached the musician (a transfer object alone would also
 // exist if the balance write had been lost).
 async function accountBalanceCents(accountId: string): Promise<number> {
@@ -221,13 +221,13 @@ async function idemUsed(key: string): Promise<boolean> {
 }
 
 // FakeStripe's keys never expire; REAL Stripe's do, after 24h. Dropping the
-// cached entry is how a test reproduces that expiry — past it the same key is
+// cached entry is how a test reproduces that expiry, past it the same key is
 // brand new, so anything that "retries" on it mints a genuinely second charge.
 async function expireIdemKey(key: string): Promise<void> {
   await adb.doc(`stripeFake/state/idem/${encodeURIComponent(key)}`).delete();
 }
 
-// The durable escalation queue — a refusal that isn't recorded here is a
+// The durable escalation queue, a refusal that isn't recorded here is a
 // refusal nobody will ever action.
 async function adminAlert(alertId: string): Promise<AdminAlertDoc | undefined> {
   return (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc | undefined;
@@ -256,7 +256,7 @@ async function postWebhook(body: unknown): Promise<{ status: number; text: strin
 }
 
 // A real, fully confirmed single-gig booking whose date has already ENDED
-// (`pastStartHours` pushes the gig into the past BEFORE the accept — a payment
+// (`pastStartHours` pushes the gig into the past BEFORE the accept, a payment
 // doc's own `occurrenceStartsAt` is stamped at accept time and never follows a
 // later gig edit).
 async function makeEndedBooking(
@@ -277,7 +277,7 @@ async function makeEndedBooking(
 }
 
 // Step 4 opens the settlement window; this is the T+3 wait, compressed. The
-// due CLOCK is pulled back rather than the sweep's `now` pushed forward —
+// due CLOCK is pulled back rather than the sweep's `now` pushed forward,
 // `now` also drives the staleness guards and every other step's window, and
 // moving it days ahead would silently change what those do to the shared
 // emulator's world (the idiom paymentsSweep.test.ts's dunning case uses).
@@ -307,7 +307,7 @@ async function scheduleSettlement(bookingId: string, gigId: string): Promise<voi
 
 // ---------------------------------------------------------------------------
 
-describe("settlement — the full T+3 pipeline", () => {
+describe("settlement, the full T+3 pipeline", () => {
   it("perHour: schedules, takes the curator's +30min true-up, then charges final − slice + fee and transfers the earnings", async () => {
     const { curator, musician, gigId, bookingId } = await makeEndedBooking("stfull");
     const accountId = await musicianAccountId(musician.profileId);
@@ -336,7 +336,7 @@ describe("settlement — the full T+3 pipeline", () => {
     await callFn("confirmOccurrenceActuals", { bookingId, gigId, extraMinutes: EXTRA_MINUTES }, curator.owner.user);
     expect((await getPayment(bookingId, gigId))?.settlement.trueUp?.extraMinutes).toBe(EXTRA_MINUTES);
 
-    // The window also closes for the duration of a charge that is IN FLIGHT —
+    // The window also closes for the duration of a charge that is IN FLIGHT,
     // the one-write-wide gap between the amount being computed and the intent
     // id being recorded. Seeded directly, because the real marker only exists
     // inside a single awaited chargeSettlement call.
@@ -354,7 +354,7 @@ describe("settlement — the full T+3 pipeline", () => {
     // ...and the seeded marker is CLEARED before this case goes on to settle
     // normally. Leaving it set would hand the sweep below a doc that looks
     // like an instance died mid-charge on it, which chargeSettlement refuses
-    // outright (the stale-claim terminator) — this case is about the ordinary
+    // outright (the stale-claim terminator), this case is about the ordinary
     // charge, and the refusal has its own case in the dunning suite.
     await paymentRef.update({ "settlement.chargingSince": null });
 
@@ -385,7 +385,7 @@ describe("settlement — the full T+3 pipeline", () => {
     expect(await idemUsed(`${bookingId}:${gigId}:settle:0`)).toBe(true);
     expect(await idemUsed(`${bookingId}:${gigId}:earn:0`)).toBe(true);
 
-    // The musician's balance actually moved — and the transfer is backed by
+    // The musician's balance actually moved, and the transfer is backed by
     // the settlement charge (as-built contract #3's sourceChargeId).
     expect(await accountBalanceCents(accountId)).toBe(EARNINGS_CENTS);
     const transferObj = await fakeObject(paid!.transfer.id!);
@@ -412,7 +412,7 @@ describe("settlement — the full T+3 pipeline", () => {
 
     expect((await notificationsFor(musician.owner.uid)).some((n) => n.title === "You've been paid")).toBe(true);
 
-    // A true-up AFTER the charge is refused — the window is closed for good.
+    // A true-up AFTER the charge is refused, the window is closed for good.
     await expect(callFn("confirmOccurrenceActuals",
       { bookingId, gigId, extraMinutes: EXTRA_MINUTES + 15 }, curator.owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -442,7 +442,7 @@ describe("settlement — the full T+3 pipeline", () => {
     const earnings = computeEarningsCents(finalBase, FEE.musicianFeePct);
 
     await scheduleSettlement(bookingId, gigId);
-    // A perSong booking bills songs — minutes are not its unit.
+    // A perSong booking bills songs, minutes are not its unit.
     await expect(callFn("confirmOccurrenceActuals", { bookingId, gigId, extraMinutes: 30 }, curator.owner.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
     await callFn("confirmOccurrenceActuals", { bookingId, gigId, extraSongs }, curator.owner.user);
@@ -493,7 +493,7 @@ describe("settlement — the full T+3 pipeline", () => {
     expect(await accountBalanceCents(accountId)).toBe(earnings);
   });
 
-  it("a selfDeal booking settles identically — the fees apply to a venue booking itself", async () => {
+  it("a selfDeal booking settles identically, the fees apply to a venue booking itself", async () => {
     const curator = await makeApprovedCuratorProfile("stselfc");
     const musician = await makeApprovedMusicianProfile("stselfm");
     await makeMoneyReady(curator, musician);
@@ -517,7 +517,7 @@ describe("settlement — the full T+3 pipeline", () => {
 
     const paid = await getPayment(bookingId, gigId);
     expect(paid?.selfDeal).toBe(true);
-    // EXACTLY the ordinary no-true-up amounts — selfDeal excludes a booking
+    // EXACTLY the ordinary no-true-up amounts, selfDeal excludes a booking
     // from the trust metric (SP4 F5), never from the money.
     expect(paid?.settlement.status).toBe("paid");
     expect(paid?.settlement.computedCents).toBe(FLAT_DUE_CENTS);
@@ -528,7 +528,7 @@ describe("settlement — the full T+3 pipeline", () => {
   });
 });
 
-describe("settlement — defenses", () => {
+describe("settlement, defenses", () => {
   it("waives (and refunds) an occurrence whose gig left this booking after the settlement was scheduled", async () => {
     const { musician, gigId, bookingId } = await makeEndedBooking("stwaive");
     const accountId = await musicianAccountId(musician.profileId);
@@ -536,7 +536,7 @@ describe("settlement — defenses", () => {
     await scheduleSettlement(bookingId, gigId);
     const depositIntentId = (await getPayment(bookingId, gigId))!.deposit.intentId!;
 
-    // The date is no longer this booking's (cancelOccurrence's shape) —
+    // The date is no longer this booking's (cancelOccurrence's shape),
     // charging it would bill a curator for a night nobody owes them.
     await adb.doc(`gigs/${gigId}`).update({ status: "open", bookingId: null, bookedMusicianProfileId: null });
     await makeSettlementDue(bookingId, gigId);
@@ -559,7 +559,7 @@ describe("settlement — defenses", () => {
 
   // Rule 1, the invariant the whole settlement sweep is built around: a
   // cancelled booking's PAST-start date still settles. The musician played
-  // that night — only the paperwork moved on.
+  // that night, only the paperwork moved on.
   it("settles a CANCELLED booking's past-start occurrence normally (never gated on booking.status)", async () => {
     const curator = await makeApprovedCuratorProfile("stcanc");
     const musician = await makeApprovedMusicianProfile("stcanm");
@@ -579,7 +579,7 @@ describe("settlement — defenses", () => {
       await callFn("acceptBooking", { bookingId }, curator.owner.user);
       const accountId = await musicianAccountId(musician.profileId);
 
-      // The musician cancels the rest of the run (48h out — outside the mark
+      // The musician cancels the rest of the run (48h out, outside the mark
       // window, so this is a plain refund of the FUTURE date only).
       await callFn("cancelBooking", { bookingId, reason: "Van broke down." }, musician.owner.user);
       const cancelled = await getBooking(bookingId);
@@ -610,8 +610,8 @@ describe("settlement — defenses", () => {
 
   // The R8 branch (spec §4's below-deposit rule) is UNREACHABLE through the
   // app: true-ups only increase, and the slice is a fraction of the base. It
-  // is exercised by seeding the only state that produces it — a slice larger
-  // than the date is finally worth — and calling chargeSettlement directly.
+  // is exercised by seeding the only state that produces it, a slice larger
+  // than the date is finally worth, and calling chargeSettlement directly.
   it("a settlement at or below the deposit slice charges nothing, refunds any excess, and still transfers", async () => {
     const zero = await makeEndedBooking("stzero");
     const below = await makeEndedBooking("stbelow");
@@ -644,7 +644,7 @@ describe("settlement — defenses", () => {
     expect(await idemUsed(`${zero.bookingId}:${zero.gigId}:settle:0`)).toBe(false);
     expect(zeroPaid?.deposit.status).toBe("applied");
     expect(await fakeObject(zeroDeposit.deposit.intentId!).then((i) => i?.refundedCents)).toBe(0);
-    // The musician is still owed the full base — and with no fresh charge to
+    // The musician is still owed the full base, and with no fresh charge to
     // draw on, the transfer is backed by the DEPOSIT's charge instead.
     expect(zeroPaid?.transfer.amountCents).toBe(FLAT_EARNINGS_CENTS);
     expect(await accountBalanceCents(zeroAccount)).toBe(FLAT_EARNINGS_CENTS);
@@ -666,14 +666,14 @@ describe("settlement — defenses", () => {
   });
 
   // M5 (branch audit): the no_customer / gig_missing refusals used to be
-  // console-only. SP5's rule is "never refuse silently" — both must leave a
+  // console-only. SP5's rule is "never refuse silently", both must leave a
   // durable row an operator works. Testing the no_customer branch here.
-  it("M5: chargeSettlement with no curator Stripe customer refuses AND raises a durable alert — not a silent console-only refusal", async () => {
+  it("M5: chargeSettlement with no curator Stripe customer refuses AND raises a durable alert, not a silent console-only refusal", async () => {
     const { curator, gigId, bookingId } = await makeEndedBooking("m5nocust");
     await scheduleSettlement(bookingId, gigId);
     await makeSettlementDue(bookingId, gigId);
 
-    // Strip the curator's cached customerId — the "nothing to charge against"
+    // Strip the curator's cached customerId, the "nothing to charge against"
     // anomaly (normally unreachable, since accept gates on a chargeable curator,
     // which is exactly why a silent refusal here would never be seen).
     await adb.doc(`profiles/${curator.profileId}/private/stripe`).update({ customerId: FieldValue.delete() });
@@ -694,7 +694,7 @@ describe("settlement — defenses", () => {
   });
 });
 
-describe("settlement — a charge left processing", () => {
+describe("settlement, a charge left processing", () => {
   it("persists the intent and finalizes via payment_intent.succeeded; a replay is a no-op", async () => {
     const { curator, musician, gigId, bookingId } = await makeEndedBooking("stpend");
     const customerId = await curatorCustomerId(curator.profileId);
@@ -714,7 +714,7 @@ describe("settlement — a charge left processing", () => {
 
     // Not a failure and not a success: the intent exists and is settling, so
     // the settlement stays `pending` with NO retry bookkeeping (a same-key
-    // retry is impossible — the cached `processing` outcome replays forever),
+    // retry is impossible, the cached `processing` outcome replays forever),
     // and nothing has been transferred.
     const pending = await getPayment(bookingId, gigId);
     expect(pending?.settlement.status).toBe("pending");
@@ -733,7 +733,7 @@ describe("settlement — a charge left processing", () => {
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
 
     // THE DOUBLE-CHARGE TERMINATOR. This doc is still `pending` with its
-    // `settleAfter` in the past, so every hourly run finds it again — and it
+    // `settleAfter` in the past, so every hourly run finds it again, and it
     // must never be charged a second time. Reproduced under the condition that
     // makes it dangerous: the idempotency key EXPIRED (real Stripe drops it
     // after 24h; the fake's never do, so the test drops it by hand) and the
@@ -760,7 +760,7 @@ describe("settlement — a charge left processing", () => {
     expect(stuckAlert?.gigId).toBe(gigId);
     expect(stuckAlert?.resolvedAt).toBeNull();
 
-    // Stripe confirms it — the settlement finishes out-of-band, exactly as the
+    // Stripe confirms it, the settlement finishes out-of-band, exactly as the
     // synchronous path would have.
     const evt = fakeEvent("payment_intent.succeeded", {
       id: intentId, amount: FLAT_CHARGE_CENTS, amount_received: FLAT_CHARGE_CENTS,
@@ -797,7 +797,7 @@ describe("settlement — a charge left processing", () => {
 
   // The PRE-TRANSFER race, end to end. A charge is outstanding when the
   // curator reports a no-show, which waives the very occurrence the charge was
-  // for. When the intent then succeeds, the musician must NOT be paid — but
+  // for. When the intent then succeeds, the musician must NOT be paid, but
   // the curator's money did move, so it has to be recorded and escalated
   // rather than dropped.
   it("a no-show waive landing under an outstanding charge blocks the transfer, records the charge, and escalates", async () => {
@@ -818,7 +818,7 @@ describe("settlement — a charge left processing", () => {
 
     // The curator reports the no-show while that intent is still settling.
     // Task 8 waives the reported occurrence's settlement and sends its deposit
-    // back — it is the one path that knows this date did not happen.
+    // back, it is the one path that knows this date did not happen.
     await callFn("reportNoShow", { bookingId, reason: "The act never turned up." }, curator.owner.user);
     const waived = await getPayment(bookingId, gigId);
     expect(waived?.settlement.status).toBe("waived");
@@ -836,14 +836,14 @@ describe("settlement — a charge left processing", () => {
     expect(await accountBalanceCents(accountId)).toBe(0);
     expect(after?.transfer.status).toBe("none");
     expect(after?.transfer.id).toBeNull();
-    // The waive stands — the raced write is merge-only and touches no status
+    // The waive stands, the raced write is merge-only and touches no status
     // the racer owns.
     expect(after?.settlement.status).toBe("waived");
     expect(after?.deposit.status).toBe("refunded");
     expect(after?.settlement.intentId).toBe(intentId);
     expect(after?.settlement.chargingSince).toBeNull();
     // The curator's money DID move, so the audit row exists regardless of the
-    // exceptional exit — an operator reconciling the alert reads the ledger.
+    // exceptional exit, an operator reconciling the alert reads the ledger.
     const chargeRow = (await ledgerRows(bookingId)).find((r) => r.kind === "settlement_charged");
     expect(chargeRow?.amountCents).toBe(FLAT_CHARGE_CENTS);
     expect(chargeRow?.stripeId).toBe(intentId);
@@ -862,7 +862,7 @@ describe("settlement — a charge left processing", () => {
   // idempotency window would re-derive the SAME attempt-scoped `earn:{attempts}`
   // key on a now-stale key and transfer a SECOND time. The finalize path must
   // refuse (and escalate) instead of re-transferring.
-  it("M2: a >24h webhook redelivery finalizing under a STALE chargingSince claim does NOT re-transfer — it refuses and escalates", async () => {
+  it("M2: a >24h webhook redelivery finalizing under a STALE chargingSince claim does NOT re-transfer, it refuses and escalates", async () => {
     const { curator, musician, gigId, bookingId } = await makeEndedBooking("m2stale");
     const customerId = await curatorCustomerId(curator.profileId);
     const accountId = await musicianAccountId(musician.profileId);
@@ -887,7 +887,7 @@ describe("settlement — a charge left processing", () => {
 
     // Simulate the dangerous shape: the FIRST finalize's terminal write never
     // landed (the doc is still pending), and the redelivery arrives with its
-    // pre-charge claim already older than Stripe's key window — so the
+    // pre-charge claim already older than Stripe's key window, so the
     // `earn:{attempts}` key can no longer replay the original transfer, and
     // re-deriving it would be a genuine SECOND payout.
     const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
@@ -917,7 +917,7 @@ describe("settlement — a charge left processing", () => {
   });
 });
 
-describe("settlement — a declined charge (Task 11 owns the ladder from here)", () => {
+describe("settlement, a declined charge (Task 11 owns the ladder from here)", () => {
   it("goes past_due with one attempt and the first retry scheduled, and the retry uses a FRESH key", async () => {
     const { curator, musician, gigId, bookingId } = await makeEndedBooking("stdecl");
     const customerId = await curatorCustomerId(curator.profileId);
@@ -952,7 +952,7 @@ describe("settlement — a declined charge (Task 11 owns the ladder from here)",
     expect((await getPayment(bookingId, gigId))?.settlement.attempts).toBe(1);
     expect(await idemUsed(`${bookingId}:${gigId}:settle:1`)).toBe(false);
 
-    // At the retry's due time, on a good card: the key MUST differ — both real
+    // At the retry's due time, on a good card: the key MUST differ, both real
     // Stripe and the fake cache the decline under the key that produced it.
     await adb.doc(`bookings/${bookingId}/payments/${gigId}`)
       .update({ "settlement.nextRetryAt": Date.now() - 1000 });
@@ -974,11 +974,11 @@ describe("settlement — a declined charge (Task 11 owns the ladder from here)",
 });
 
 // ---------------------------------------------------------------------------
-// Task 12 — the post-transfer no-show clawback and its mark-removal re-run
+// Task 12, the post-transfer no-show clawback and its mark-removal re-run
 // ---------------------------------------------------------------------------
 
 // A booking taken all the way through the ordinary pipeline: charged at T+3 and
-// the earnings transferred. The starting position for every clawback case —
+// the earnings transferred. The starting position for every clawback case,
 // the clawback only exists for money that has ALREADY moved in both directions.
 async function settleFully(prefix: string) {
   const f = await makeEndedBooking(prefix);
@@ -995,7 +995,7 @@ async function reliabilityFor(profileId: string): Promise<ReliabilityDoc | undef
   return (await adb.doc(`profiles/${profileId}/private/reliability`).get()).data() as ReliabilityDoc | undefined;
 }
 
-describe("settlement — the post-transfer no-show clawback", () => {
+describe("settlement, the post-transfer no-show clawback", () => {
   it("reverses the transfer, refunds the settlement AND the applied deposit, then re-settles in full when an admin reverses the report", async () => {
     const { curator, musician, gigId, bookingId, paid, accountId } = await settleFully("clawpipe");
     const settleIntentId = paid.settlement.intentId!;
@@ -1004,7 +1004,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
 
     // R1's precondition: the sweep has already resolved this booking to
-    // "completed" and credited it once. Seeded directly — scheduled.test.ts
+    // "completed" and credited it once. Seeded directly, scheduled.test.ts
     // owns step 7 itself; this case is about what the report does to that.
     await adb.doc(`bookings/${bookingId}`).update({ status: "completed", resolvedAt: Date.now() });
     await adb.doc(`profiles/${musician.profileId}/private/reliability`)
@@ -1012,19 +1012,19 @@ describe("settlement — the post-transfer no-show clawback", () => {
 
     // --- the report, inside the 14-day window, AFTER the money moved ---
     await callFn("reportNoShow",
-      { bookingId, reason: "They never turned up — and I've already been billed for it." }, curator.owner.user);
+      { bookingId, reason: "They never turned up, and I've already been billed for it." }, curator.owner.user);
 
     const clawed = await getPayment(bookingId, gigId);
     expect(clawed?.settlement.status).toBe("waived");
     expect(clawed?.transfer.status).toBe("reversed");
-    // The reversed transfer's own record is deliberately KEPT — it is what the
+    // The reversed transfer's own record is deliberately KEPT, it is what the
     // reversal undid, and the ledger row keys off the reversal's own id.
     expect(clawed?.transfer.id).toBe(transferId);
     expect(clawed?.transfer.amountCents).toBe(FLAT_EARNINGS_CENTS);
     expect(clawed?.deposit.status).toBe("refunded");
     expect(typeof clawed?.deposit.resolvedAt).toBe("number");
     // The consumed charge handle stays until the RESTORE clears it (the
-    // outstanding-intent guard's contract) — the clawback never clears it.
+    // outstanding-intent guard's contract), the clawback never clears it.
     expect(clawed?.settlement.intentId).toBe(settleIntentId);
     expect(clawed?.settlement.chargingSince).toBeNull();
 
@@ -1057,7 +1057,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     expect((await reliabilityFor(musician.profileId))?.completedCount).toBe(0);
     expect((await getBooking(bookingId)).status).toBe("cancelled_by_musician");
 
-    // A SECOND clawback is a silent no-op — the CAS refuses a doc that is no
+    // A SECOND clawback is a silent no-op, the CAS refuses a doc that is no
     // longer paid/transferred, so nothing moves and no ticket is raised.
     await clawbackSettledOccurrence(bookingId, gigId, Date.now());
     expect(await accountBalanceCents(accountId)).toBe(0);
@@ -1110,7 +1110,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     expect(resettled?.settlement.feeShareCents).toBe(FULL_FEE_CENTS);
     expect(resettled?.settlement.intentId).not.toBe(settleIntentId);
     expect(await fakeObject(resettled!.settlement.intentId!).then((i) => i?.amountCents)).toBe(FULL_CHARGE_CENTS);
-    // Fresh, attempt-scoped keys on both legs — without the attempts bump these
+    // Fresh, attempt-scoped keys on both legs, without the attempts bump these
     // would replay the consumed originals and no money would move.
     expect(await idemUsed(`${bookingId}:${gigId}:settle:1`)).toBe(true);
     expect(await idemUsed(`${bookingId}:${gigId}:earn:1`)).toBe(true);
@@ -1119,7 +1119,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     expect(resettled?.transfer.id).not.toBe(transferId);
     expect(resettled?.transfer.amountCents).toBe(FLAT_EARNINGS_CENTS);
     expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
-    // The deposit is never re-applied — claiming escrow that came back would be
+    // The deposit is never re-applied, claiming escrow that came back would be
     // a second, phantom credit against the same date.
     expect(resettled?.deposit.status).toBe("refunded");
     expect(await fakeObject(depositIntentId).then((i) => i?.refundedCents)).toBe(DEPOSIT_CHARGE_CENTS);
@@ -1136,7 +1136,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     // credits no slice, so the settlement charges the FULL base and
     // finalizeSettlementSuccess retires the deposit as `refunded` with no money
     // moving. Seeded, because the app cannot produce it on a past-dated
-    // occurrence — step 3 only charges future-dated deposits.
+    // occurrence, step 3 only charges future-dated deposits.
     await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
       "deposit.status": "unpaid", "deposit.intentId": null,
       "deposit.chargeId": null, "deposit.chargedAt": null,
@@ -1180,7 +1180,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
 
     // The shape the CAS cannot see: the doc is back to paid/transferred (an
     // operator's repair, a restored backup) against a transfer Stripe has
-    // ALREADY reversed — and with the key that would replay our own reversal
+    // ALREADY reversed, and with the key that would replay our own reversal
     // expired, exactly as real Stripe drops it after 24h.
     await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({
       "settlement.status": "paid", "transfer.status": "transferred", "deposit.status": "applied",
@@ -1216,7 +1216,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     // THE TRIGGER, deterministic and honest: this deposit's charge has already
     // been refunded in full by something else (an operator in the dashboard, a
     // whole-run sibling's own unwind), so the clawback's slice+fee refund would
-    // take that intent past what it still holds — FakeStripe's "refund exceeds
+    // take that intent past what it still holds, FakeStripe's "refund exceeds
     // charge" guard, and real Stripe's 400. Seeded on the fake's intent OBJECT
     // rather than by poisoning an idempotency key, so the refusal comes from
     // the money rule under test rather than from test plumbing. It is also the
@@ -1227,7 +1227,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
 
     await clawbackSettledOccurrence(bookingId, gigId, Date.now());
 
-    // The two legs that SUCCEEDED both moved money AND left their audit row —
+    // The two legs that SUCCEEDED both moved money AND left their audit row,
     // the whole point of writing each row as its call returns rather than
     // batching them after the terminal write that never happens.
     expect(await accountBalanceCents(accountId)).toBe(0);
@@ -1261,7 +1261,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
   it("records a FOREIGN transfer.reversed as a ledger row only, and dedupes every replay of it", async () => {
     const { musician, gigId, bookingId, paid } = await settleFully("clawwh");
     const transferId = paid.transfer.id!;
-    // A reversal nothing in this codebase made — an operator reversing our
+    // A reversal nothing in this codebase made, an operator reversing our
     // transfer by hand in the Stripe dashboard.
     const reversalId = `trr_dashboard_${Date.now()}`;
     const object = {
@@ -1278,7 +1278,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
     expect(row?.profileId).toBe(musician.profileId);
     expect(row?.gigId).toBe(gigId);
 
-    // LEDGER ONLY: the payment doc is deliberately untouched — half-applying
+    // LEDGER ONLY: the payment doc is deliberately untouched, half-applying
     // someone else's decision (flipping the transfer while leaving the curator
     // charged) is worse than recording it and saying so.
     const after = await getPayment(bookingId, gigId);
@@ -1287,7 +1287,7 @@ describe("settlement — the post-transfer no-show clawback", () => {
 
     // Same event id: the claim machine dedupes it before the handler runs.
     expect((await postWebhook(evt)).text).toBe("duplicate");
-    // A FRESH event id carrying the same reversal DOES reach the handler — and
+    // A FRESH event id carrying the same reversal DOES reach the handler, and
     // the deterministic ledger id collapses it into the row above.
     expect((await postWebhook(fakeEvent("transfer.reversed", object))).status).toBe(200);
     expect((await ledgerRows(bookingId)).filter((r) => r.kind === "transfer_reversal").length).toBe(1);

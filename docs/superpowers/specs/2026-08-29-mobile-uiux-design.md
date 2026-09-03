@@ -1,12 +1,12 @@
-# Sub-project 9B: Mobile UI/UX Redesign — Design Spec
+# Sub-project 9B: Mobile UI/UX Redesign, Design Spec
 
 Date: 2026-08-29. Carries the "Ember, Deeper Night" brand from web sub-project 9A to the Expo app
 (`apps/mobile`). The brand contract is fixed: **`DESIGN.md` (repo root) is binding and is not
-re-decided here** — 9B translates it to React Native. Prior records: `docs/superpowers/sp9a-rulings.md`
+re-decided here**, 9B translates it to React Native. Prior records: `docs/superpowers/sp9a-rulings.md`
 (web redesign, carry-forwards), `docs/superpowers/sp5b-rulings.md` (mobile payments, native-module
 posture), `docs/superpowers/sp5-rulings.md` (money authority).
 
-**Hard rule (from DESIGN.md, binding on all 9B code/comments/copy): no em dash (`—`) anywhere.**
+**Hard rule (from DESIGN.md, binding on all 9B code/comments/copy): no em dash (U+2014) anywhere.**
 Use a comma, period, colon, or parentheses.
 
 ## 0. Constraints and non-goals
@@ -26,10 +26,10 @@ Use a comma, period, colon, or parentheses.
 
 ## 1. Owner decisions (this brainstorm)
 
-- **Icons: Phosphor duotone, matching web** — add `phosphor-react-native` + `react-native-svg`
+- **Icons: Phosphor duotone, matching web**, add `phosphor-react-native` + `react-native-svg`
   (native module; bundles via `expo export`, renders live on the next EAS build, consistent with
   mobile already awaiting a rebuild for sp5b). No Lucide, ever (DESIGN.md).
-- **Token/theme architecture: Approach A** — a React context ThemeProvider + a typed token object +
+- **Token/theme architecture: Approach A**, a React context ThemeProvider + a typed token object +
   a `useTokens()` hook feeding an owned `src/ui/` primitive library. The RN-idiomatic version of
   9A's "owned components + tokens, no component dependency."
 - **Skeleton + graceful states**: every screen gets branded loading (skeleton), empty, and error
@@ -37,7 +37,7 @@ Use a comma, period, colon, or parentheses.
 
 ## 2. Token & theme layer (`apps/mobile/src/theme/`)
 
-- **`tokens.ts`** — the `--gk-*` values from DESIGN.md transcribed as a typed object
+- **`tokens.ts`**, the `--gk-*` values from DESIGN.md transcribed as a typed object
   `{ dark: GkTokens, light: GkTokens }` over one `GkTokens` interface: `bg0/bg1/bg2`, `surface`,
   `border`, `text`, `muted`, `accent`, `onAccent`, `success`/`warning`/`destructive` + `onDestructive`,
   `focus`. Exact hexes including the AA-safe re-derivations: light `focus` `#BF5038`, light
@@ -50,14 +50,14 @@ Use a comma, period, colon, or parentheses.
   gradient in both themes** (DESIGN.md: it keeps photo captions legible, not page chrome). A header
   comment names `DESIGN.md` as the source of truth and states the governance rule (values change
   there first).
-- **`ThemeProvider.tsx`** — context resolving the active theme: an explicit `AsyncStorage["gk-theme"]`
+- **`ThemeProvider.tsx`**, context resolving the active theme: an explicit `AsyncStorage["gk-theme"]`
   choice (`"light"`/`"dark"`) wins; otherwise RN `useColorScheme()`, with **dark as the brand default**
   when the system value is null/unknown. Reads the stored choice once on mount before rendering the
   tree (RN has no server render, so there is no flash-of-wrong-theme hazard the way web has). Exposes
   `useTokens(): GkTokens` and `useThemeChoice(): { choice: "light"|"dark"|"system"; setChoice(...) }`
   (setter writes/clears AsyncStorage). Mounted in `app/_layout.tsx` above the existing
   Auth/Profile/Stripe providers.
-- **`fonts.ts`** — `useAppFonts()` wrapping expo-font's `useFonts` with the Syne (600/700/800) and
+- **`fonts.ts`**, `useAppFonts()` wrapping expo-font's `useFonts` with the Syne (600/700/800) and
   Sora (400/500/600) TTFs added under `apps/mobile/assets/fonts/`. `_layout.tsx` holds the splash
   screen until fonts load. Runtime load, no native rebuild (expo-font is already installed).
 
@@ -67,42 +67,42 @@ Every primitive consumes `useTokens()`; the scattered inline hex across the app 
 replaced by these. Each is a small, single-responsibility RN component mirroring its web `src/ui/`
 counterpart's contract.
 
-- **`Text.tsx`** — typed variants mapping the DESIGN.md ramp: `display`/`heading` → Syne (600–800),
+- **`Text.tsx`**, typed variants mapping the DESIGN.md ramp: `display`/`heading` → Syne (600–800),
   `body`/`label`/`meta` → Sora (400–600); `muted` prop; default color `token.text`. The only place
   font families are applied.
-- **`Button.tsx`** — the four surviving web variants only (9A post-launch fix): `default` (ember
+- **`Button.tsx`**, the four surviving web variants only (9A post-launch fix): `default` (ember
   pill, `onAccent`), `secondary` (outlined ghost, `border`), `destructive` (status red,
   `onDestructive`), `ghost`. Radius `pill` for `default`, `card` otherwise. Pressed/disabled states;
   minimum 44px touch target.
-- **`Card.tsx`** — solid `surface` + `border`, radius `card`, flat. No shadow (borders separate).
-- **`Chip.tsx`** — pill radius; active = ember fill + `onAccent`, inactive = `surface` + `border`.
+- **`Card.tsx`**, solid `surface` + `border`, radius `card`, flat. No shadow (borders separate).
+- **`Chip.tsx`**, pill radius; active = ember fill + `onAccent`, inactive = `surface` + `border`.
   Replaces the current inline `Chip` in `GigForms`/`PortfolioForms`.
-- **`Badge.tsx` + `StatusBadge.tsx`** — 6px radius; the status variant pairs the saturated tint with
+- **`Badge.tsx` + `StatusBadge.tsx`**, 6px radius; the status variant pairs the saturated tint with
   its **14%-opacity** background of the same color (the one soft-tint figure), re-derived per theme;
   real state only, never decorative. The gig/booking status maps (`STATUS_BG`/`STATUS_FG`) move here
   as token-based, replacing raw hexes.
-- **`Input.tsx` / `TextArea.tsx`** — `surface` bg, `border`, solid `focus` border on focus (the 3:1
+- **`Input.tsx` / `TextArea.tsx`**, `surface` bg, `border`, solid `focus` border on focus (the 3:1
   indicator), `muted` placeholder.
-- **`Sheet.tsx`** — the one shadowed overlay primitive (dialogs/bottom sheets, e.g. `CancelDialog`).
+- **`Sheet.tsx`**, the one shadowed overlay primitive (dialogs/bottom sheets, e.g. `CancelDialog`).
   Shadows are reserved for overlays only.
-- **`Skeleton.tsx`** — token-colored placeholder blocks (`surface`/`border`, radius `card`/`sm`)
+- **`Skeleton.tsx`**, token-colored placeholder blocks (`surface`/`border`, radius `card`/`sm`)
   shaped to the content they stand in for. A slow subtle shimmer that **pauses under
   `prefers-reduced-motion`** (static tint fallback), honoring MOTION 1.
-- **`ThemeToggle.tsx`** — Light / Dark / System control writing through `useThemeChoice()`; mounts in
+- **`ThemeToggle.tsx`**, Light / Dark / System control writing through `useThemeChoice()`; mounts in
   the account screens.
-- **`icons.tsx`** — Phosphor duotone wrapper: `phosphor-react-native` + `react-native-svg`, a curated
+- **`icons.tsx`**, Phosphor duotone wrapper: `phosphor-react-native` + `react-native-svg`, a curated
   `Icon`-prefixed set with `weight` locked to `"duotone"` (no caller override). **No other file
-  imports Phosphor directly** — exactly web's `src/ui/icons.tsx` contract. Form-control glyph
+  imports Phosphor directly**, exactly web's `src/ui/icons.tsx` contract. Form-control glyph
   exceptions (a solid radio/selection dot) follow web's `IconRadioDot` precedent if needed.
 
 **Glass cap**: DESIGN.md allows exactly two blur uses product-wide (web's landing nav + mini-player).
-Mobile has no landing page, so **at most one** blur use on mobile — the artist-page MiniPlayer, if it
+Mobile has no landing page, so **at most one** blur use on mobile, the artist-page MiniPlayer, if it
 adopts glass (confirmed in §4). Everything else is solid `surface`. No other blur anywhere.
 
 **Accent dosage** (DESIGN.md): ember belongs to the primary action and money/brand moments only
 (primary CTA, price, active tab, status-badge tint, brand mark). Where bare ember as text would fail
 AA on a light surface, use the filled-chip treatment or the `focus` (`#BF5038`) substitute, per the
-DESIGN.md accent note — verified per theme wherever ember lands on `text`.
+DESIGN.md accent note, verified per theme wherever ember lands on `text`.
 
 ## 4. Shell (tab bars, headers, context switcher)
 
@@ -135,7 +135,7 @@ Each group is an independent, reviewable task; every screen applies the loading/
 - **Browse + gigs/events** (`GigBrowse`, `MusicianBrowse`, `events/*`, `gigs.tsx`): photo-forward
   GigCard/MusicianCard with the scrim-over-photo motif and status badges.
 - **Artist page** (`artist/[handle]`): the DESIGN.md-locked hero anatomy (scrim over cover),
-  scrollable Shows, and the **MiniPlayer** — the one candidate for mobile's single allowed glass use
+  scrollable Shows, and the **MiniPlayer**, the one candidate for mobile's single allowed glass use
   (confirmed blur-vs-solid at build; default to solid if blur cost/legibility disappoints). Track
   playback behavior untouched.
 - **Booking + money surfaces** (`BookingThread`, `BookingInbox`, `BookingForms`, `OfferForm`,

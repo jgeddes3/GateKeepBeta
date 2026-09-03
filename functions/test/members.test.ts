@@ -25,7 +25,7 @@ async function bandWithOwner(prefix: string) {
 }
 
 // Approved curator profile fixture, for the curatorAccess touchpoint tests
-// below — mirrors gigs.test.ts's/gigSeries.test.ts's identical helper.
+// below, mirrors gigs.test.ts's/gigSeries.test.ts's identical helper.
 async function approvedVenueWithOwner(prefix: string) {
   const owner = await signUpTestUser(`${prefix}-own-${Date.now()}@test.com`);
   const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
@@ -96,7 +96,7 @@ describe("invites", () => {
     await callFn("inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
     const first = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await callFn("respondToInvite", { inviteId: first, accept: true }, invitee.user);
-    // A second, independent invite to the same (now-member) email — accepting
+    // A second, independent invite to the same (now-member) email, accepting
     // it must not blindly .set() over the existing membership doc.
     await callFn("inviteMember", { profileId, email, role: "admin", label: "sax2" }, owner.user);
     const second = await fetchPendingInviteId(adb, profileId, invitee.uid);
@@ -210,7 +210,7 @@ describe("invites", () => {
     await signUpTestUser(email);
     await expect(callFn("inviteMember", { profileId, email, role: "member", label: "x" }, owner.user))
       .rejects.toMatchObject({ code: "functions/resource-exhausted" });
-    // The cap check runs before email resolution, so it fires uniformly —
+    // The cap check runs before email resolution, so it fires uniformly,
     // an email with no account gets resource-exhausted too, not { ok: true
     // }, at/over the cap. Otherwise a caller could distinguish a resolving
     // email from an unknown one once 20 pending invites exist, reopening
@@ -244,7 +244,7 @@ describe("removal and admin transfer", () => {
     const { owner, profileId } = await bandWithOwner("rm1");
     // The client SDK surfaces the HttpsError message verbatim for known
     // codes (see review.test.ts note on .code vs .message for other
-    // cases) — here the failed-precondition message literally contains
+    // cases), here the failed-precondition message literally contains
     // "last admin", so the brief's /last admin/i regex matches directly.
     await expect(callFn("removeMember", { profileId, uid: owner.uid }, owner.user))
       .rejects.toThrow(/last admin/i);
@@ -304,7 +304,7 @@ describe("removal and admin transfer", () => {
     await expect(callFn("transferAdmin", { profileId, toUid: owner.uid }, unverified.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
 
-    // Owner is still the only admin — none of the rejected calls took effect.
+    // Owner is still the only admin, none of the rejected calls took effect.
     expect((await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get()).data()?.role).toBe("admin");
   });
   it("transferAdmin to a non-member fails not-found", async () => {
@@ -321,7 +321,7 @@ describe("removal and admin transfer", () => {
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
     await expect(callFn("removeMember", { profileId: "", uid: owner.uid }, owner.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
-    // None of the rejected calls actually removed anything — owner is still
+    // None of the rejected calls actually removed anything, owner is still
     // a member (and still admin) of the real profile.
     const ownerMember = await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get();
     expect(ownerMember.exists).toBe(true);
@@ -432,20 +432,20 @@ describe("curatorAccess touchpoints", () => {
 
     // Genuine concurrency (not sequenced): fire the accept and a direct
     // status flip to "rejected" at (nearly) the same instant, unawaited
-    // relative to each other — a best-effort discriminator, not a
+    // relative to each other, a best-effort discriminator, not a
     // deterministic one. respondToInvite's own membership transaction +
-    // (post-fix) fresh re-read/recompute is several sequential round trips —
-    // slower than this one direct admin write — so in PRACTICE the flip
+    // (post-fix) fresh re-read/recompute is several sequential round trips,
+    // slower than this one direct admin write, so in PRACTICE the flip
     // reliably lands before respondToInvite's post-transaction curatorAccess
     // decision runs, and consistently does in this suite. But the true
     // regression this pins only manifests when the flip lands AFTER
     // respondToInvite's very FIRST profileSnap read (the one taken before
-    // its own transaction) — if the flip instead won THAT earlier race too,
+    // its own transaction), if the flip instead won THAT earlier race too,
     // even the OLD code's single pre-transaction read would already see
     // "rejected" and correctly skip granting the marker, and this test would
     // pass under both old and new code without having exercised the bug.
     // What's asserted below (marker absent once the profile ends up
-    // rejected) is a real invariant either way — it just isn't a guaranteed
+    // rejected) is a real invariant either way, it just isn't a guaranteed
     // RED-under-old-code proof on every run, only a highly likely one.
     const [acceptOutcome] = await Promise.allSettled([
       callFn("respondToInvite", { inviteId, accept: true }, invitee.user),
@@ -472,7 +472,7 @@ describe("curatorAccess touchpoints", () => {
     expect((await adb.doc(`profiles/${profileId}/members/${invitee.uid}`).get()).exists).toBe(false);
 
     // Second removal on the now-gone member doc: S4 requires this to
-    // succeed (not throw not-found) AND still run the recompute — proven
+    // succeed (not throw not-found) AND still run the recompute, proven
     // here by it simply not throwing (the recompute is a no-op re-affirming
     // the already-cleared marker).
     await expect(callFn("removeMember", { profileId, uid: invitee.uid }, owner.user))
@@ -490,7 +490,7 @@ describe("curatorAccess touchpoints", () => {
     expect((await adb.doc(`curatorAccess/${invitee.uid}`).get()).exists).toBe(true);
 
     // Flip the profile to rejected directly (bypassing reviewProfile's own
-    // reject-from-approved cascade entirely) — this reproduces exactly the
+    // reject-from-approved cascade entirely), this reproduces exactly the
     // "stale marker" state that cascade's own recompute failing (and being
     // queued to curatorAccessRetries rather than resolved inline) would
     // leave behind: an already-REJECTED curator profile whose member still

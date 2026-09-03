@@ -120,7 +120,7 @@ describe("updateBookingInfo", () => {
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
     await expect(callFn("updateBookingInfo", { ...b, visibility: { ...CURATORS_ONLY_VISIBILITY, extra: "x" } }, user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
-    // "public" is not a legal RateVisibility (rates are never public — spec decision 4).
+    // "public" is not a legal RateVisibility (rates are never public, spec decision 4).
     await expect(callFn("updateBookingInfo", { ...b, visibility: { ...CURATORS_ONLY_VISIBILITY, perHour: "public" } }, user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
   });
@@ -149,7 +149,7 @@ describe("updatePortfolio backfills a legacy/partial portfolio map field-wise", 
     const { user } = await signUpTestUser(`legacy1-${Date.now()}@test.com`);
     const profileId = await makeMusicianProfile(user);
     // Simulate a legacy profile: portfolio map removed entirely, then only
-    // the media pipeline's avatarPhotoPath write landed — a partial map,
+    // the media pipeline's avatarPhotoPath write landed, a partial map,
     // not simply a missing one.
     await adb.doc(`profiles/${profileId}`).update({ portfolio: FieldValue.delete() });
     await adb.doc(`profiles/${profileId}`).update({
@@ -210,7 +210,7 @@ describe("unverified-email member is rejected", () => {
   it("updatePortfolio and updateBookingInfo both reject with failed-precondition", async () => {
     const { user: owner } = await signUpTestUser(`unv1-${Date.now()}@test.com`);
     const profileId = await makeMusicianProfile(owner);
-    // signUpUnverifiedTestUser leaves the account unverified — can't create a
+    // signUpUnverifiedTestUser leaves the account unverified, can't create a
     // profile itself (createProfileDraft gates on it), so a verified owner
     // creates the profile and the admin SDK seeds the membership directly.
     const { uid: memberUid, user: memberUser } = await signUpUnverifiedTestUser(`unv2-${Date.now()}@test.com`);

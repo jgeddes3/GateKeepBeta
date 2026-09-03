@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A running GateKeep app on iOS, Android, and web where people sign in, create musician/curator profiles that go through team approval, switch contexts, and receive notifications — with the monorepo, Firebase backend, security rules, and admin dashboard that every later sub-project builds on.
+**Goal:** A running GateKeep app on iOS, Android, and web where people sign in, create musician/curator profiles that go through team approval, switch contexts, and receive notifications, with the monorepo, Firebase backend, security rules, and admin dashboard that every later sub-project builds on.
 
 **Architecture:** pnpm monorepo: Expo mobile app + Next.js web app sharing one Firebase backend (Auth, Firestore, Cloud Functions, App Check) and one `@gatekeep/shared` types/validation package. All privileged mutations (profile status, memberships, admin claims) go through Cloud Functions; Firestore rules are default-deny. Everything is developed and tested against the Firebase Emulator Suite.
 
@@ -14,11 +14,11 @@
 
 - Node 20+, pnpm 9+. TypeScript `strict: true` in every package.
 - Firebase region: `us-central1`. Dev project id: `gatekeep-dev` (create at Task 2; if the console assigns a different id, use that id everywhere `gatekeep-dev` appears).
-- Sign-in methods: email/password, Google, Apple — a user picks exactly ONE; no account linking (spec §4).
+- Sign-in methods: email/password, Google, Apple, a user picks exactly ONE; no account linking (spec §4).
 - Clients may NEVER write: `profiles.status`, any `members` doc, `handles`, `auditLogs`, `admin` claims. These change only via Cloud Functions (spec §7, §8).
 - Firestore rules are default-deny. Every rules change must pass the `firebase-security-rules-auditor` skill before deploy (spec §8).
 - Run the `security-review` skill on the branch before final merge (spec §8).
-- All tests run against the Firebase Emulator Suite — never against a live project.
+- All tests run against the Firebase Emulator Suite, never against a live project.
 - Expo: use a dev build (`expo-dev-client`); Expo Go cannot do Google/Apple native sign-in.
 - Reserved handles list must include at minimum: `admin`, `gatekeep`, `support`, `help`, `api`, `www` (spec §8).
 - Commit at the end of every task (and at any green-test checkpoint inside a task).
@@ -52,7 +52,7 @@ GateKeepBeta/
     └── app/admin/                # team dashboard (claim-gated)
 ```
 
-Responsibilities: `packages/shared` owns every cross-boundary type and validation rule — functions and both apps import from it, nothing redefines a shape locally. `functions` owns every privileged mutation. Apps own UI and only ever read Firestore directly or call callables.
+Responsibilities: `packages/shared` owns every cross-boundary type and validation rule, functions and both apps import from it, nothing redefines a shape locally. `functions` owns every privileged mutation. Apps own UI and only ever read Firestore directly or call callables.
 
 ---
 
@@ -160,7 +160,7 @@ export interface ProfileDoc {
 }
 
 export interface MemberDoc {
-  uid: string;               // duplicates the doc id — required for collection-group "my profiles" queries
+  uid: string;               // duplicates the doc id, required for collection-group "my profiles" queries
   role: MemberRole;
   label: string;             // "drummer", "venue manager"
   joinedAt: number;
@@ -242,7 +242,7 @@ describe("validateProfileDraft", () => {
 - [ ] **Step 5: Run tests, verify they fail**
 
 Run: `pnpm install && pnpm --filter @gatekeep/shared test`
-Expected: FAIL — `validateHandle` is not exported.
+Expected: FAIL, `validateHandle` is not exported.
 
 - [ ] **Step 6: Implement validation**
 
@@ -312,7 +312,7 @@ git commit -m "feat: monorepo scaffold + @gatekeep/shared types and validation"
 - Consumes: nothing
 - Produces: `pnpm emu` (root script) boots Auth/Firestore/Functions emulators on ports 9099/8080/5001 with UI on 4000. Every later task's tests assume these ports.
 
-- [ ] **Step 1: Create the Firebase project (interactive — needs the user's Google account)**
+- [ ] **Step 1: Create the Firebase project (interactive, needs the user's Google account)**
 
 Run: `npx -y firebase-tools@latest login` (skip if already logged in), then:
 ```bash
@@ -323,7 +323,7 @@ Then in the [Firebase console](https://console.firebase.google.com) for the proj
 
 - [ ] **Step 2: Create the Firestore instance**
 
-Per the firebase-firestore skill: list locations, then create with the default (Enterprise) edition unless the CLI rejects it for this project type — in that case create Standard and note it in the commit message.
+Per the firebase-firestore skill: list locations, then create with the default (Enterprise) edition unless the CLI rejects it for this project type, in that case create Standard and note it in the commit message.
 ```bash
 npx -y firebase-tools@latest firestore:locations --project gatekeep-dev
 npx -y firebase-tools@latest firestore:databases:create "(default)" --location nam5 --project gatekeep-dev
@@ -350,7 +350,7 @@ npx -y firebase-tools@latest firestore:databases:create "(default)" --location n
 }
 ```
 
-`firestore.rules` (placeholder until Task 4 — deny everything):
+`firestore.rules` (placeholder until Task 4, deny everything):
 ```
 rules_version = '2';
 service cloud.firestore {
@@ -503,7 +503,7 @@ export default function Index() {
   const { app } = getFirebase();
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text>GateKeep — connected to {app.options.projectId}</Text>
+      <Text>GateKeep, connected to {app.options.projectId}</Text>
     </View>
   );
 }
@@ -517,7 +517,7 @@ pnpm add firebase && pnpm add -D vitest
 ```
 Set `"name": "@gatekeep/web"`, add `"@gatekeep/shared": "workspace:*"`, script `"typecheck": "tsc --noEmit"`.
 
-`apps/web/src/lib/firebase.ts`: same shape as mobile's, with three differences — use plain `getAuth(app)` (browser persistence is built in; no AsyncStorage/initializeAuth), the emulator guard is `process.env.NODE_ENV !== "production"`, and the host is always `localhost` (no Platform import). Config object identical.
+`apps/web/src/lib/firebase.ts`: same shape as mobile's, with three differences, use plain `getAuth(app)` (browser persistence is built in; no AsyncStorage/initializeAuth), the emulator guard is `process.env.NODE_ENV !== "production"`, and the host is always `localhost` (no Platform import). Config object identical.
 
 `apps/web/app/page.tsx`:
 ```tsx
@@ -670,7 +670,7 @@ describe("invites and notifications", () => {
 - [ ] **Step 3: Run tests, verify they fail**
 
 Run: `pnpm install && pnpm emu:rules`
-Expected: FAIL — deny-all rules reject the owner reads the tests assert succeed.
+Expected: FAIL, deny-all rules reject the owner reads the tests assert succeed.
 
 - [ ] **Step 4: Write the rules**
 
@@ -753,7 +753,7 @@ git commit -m "feat: default-deny firestore rules with tested narrow allows"
 
 ---
 
-### Task 5: Auth trigger — users doc on signup
+### Task 5: Auth trigger, users doc on signup
 
 **Files:**
 - Create: `functions/src/authTriggers.ts`
@@ -762,7 +762,7 @@ git commit -m "feat: default-deny firestore rules with tested narrow allows"
 
 **Interfaces:**
 - Consumes: `UserDoc` from `@gatekeep/shared`.
-- Produces: Auth `onCreate` trigger `onUserCreated` writing `users/{uid}` per `UserDoc`. Test helper `signUpTestUser(email: string): Promise<{ uid: string; idToken: string; user: User }>` and `callFn<T, R>(name: string, data: T, asUser?: User): Promise<R>` in `functions/test/helpers.ts` — reused by Tasks 6-8, 13, 14.
+- Produces: Auth `onCreate` trigger `onUserCreated` writing `users/{uid}` per `UserDoc`. Test helper `signUpTestUser(email: string): Promise<{ uid: string; idToken: string; user: User }>` and `callFn<T, R>(name: string, data: T, asUser?: User): Promise<R>` in `functions/test/helpers.ts`, reused by Tasks 6-8, 13, 14.
 
 - [ ] **Step 1: Test helpers (client SDK pointed at emulators)**
 
@@ -827,7 +827,7 @@ describe("onUserCreated", () => {
 - [ ] **Step 3: Run, verify fail**
 
 Run: `pnpm --filter functions build && pnpm emu:test`
-Expected: FAIL — users doc never appears (trigger not implemented).
+Expected: FAIL, users doc never appears (trigger not implemented).
 
 - [ ] **Step 4: Implement trigger**
 
@@ -938,7 +938,7 @@ describe("submitProfileForReview", () => {
 - [ ] **Step 2: Run, verify fail**
 
 Run: `pnpm --filter functions build && pnpm emu:test`
-Expected: FAIL — callables not found.
+Expected: FAIL, callables not found.
 
 - [ ] **Step 3: Implement**
 
@@ -1029,7 +1029,7 @@ git commit -m "feat: profile draft creation with handle ledger + submit for revi
 
 **Interfaces:**
 - Consumes: helpers + profile callables from Tasks 5-6; `AuditLogDoc` from `@gatekeep/shared`.
-- Produces: callables `reviewProfile(data: { profileId: string; decision: "approved" | "rejected"; reason?: string }) → { ok: true }` (admin-claim only; writes `auditLogs`) and `grantAdmin(data: { uid: string }) → { ok: true }` (admin-claim only; writes `auditLogs`). Test helper pattern for minting an admin user via the Auth emulator Admin SDK — reused by Task 12's manual verification.
+- Produces: callables `reviewProfile(data: { profileId: string; decision: "approved" | "rejected"; reason?: string }) → { ok: true }` (admin-claim only; writes `auditLogs`) and `grantAdmin(data: { uid: string }) → { ok: true }` (admin-claim only; writes `auditLogs`). Test helper pattern for minting an admin user via the Auth emulator Admin SDK, reused by Task 12's manual verification.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1108,7 +1108,7 @@ describe("grantAdmin", () => {
 - [ ] **Step 2: Run, verify fail**
 
 Run: `pnpm --filter functions build && pnpm emu:test`
-Expected: FAIL — callables not found.
+Expected: FAIL, callables not found.
 
 - [ ] **Step 3: Implement**
 
@@ -1175,7 +1175,7 @@ export { reviewProfile, grantAdmin } from "./review.js";
 
 - [ ] **Step 4: First-admin seed script**
 
-`scripts/seed-admin.ts` (run manually with Admin credentials; grants the claim to a user by email — used once per environment for you and your partner):
+`scripts/seed-admin.ts` (run manually with Admin credentials; grants the claim to a user by email, used once per environment for you and your partner):
 ```typescript
 // Usage: pnpm tsx scripts/seed-admin.ts someone@example.com
 // Spec §8: admin accounts must be Google sign-in accounts (inherits Google 2FA).
@@ -1206,7 +1206,7 @@ git commit -m "feat: profile review + admin claim granting with audit log"
 
 ---
 
-### Task 8: Membership — invites, removal, admin transfer
+### Task 8: Membership, invites, removal, admin transfer
 
 **Files:**
 - Create: `functions/src/members.ts`
@@ -1287,7 +1287,7 @@ describe("removal and admin transfer", () => {
 - [ ] **Step 2: Run, verify fail**
 
 Run: `pnpm --filter functions build && pnpm emu:test`
-Expected: FAIL — callables not found.
+Expected: FAIL, callables not found.
 
 - [ ] **Step 3: Implement**
 
@@ -1402,7 +1402,7 @@ git commit -m "feat: membership invites with consent, removal, admin transfer"
 
 **Interfaces:**
 - Consumes: `getFirebase()` from Task 3.
-- Produces: `useAuth(): { user: User | null; loading: boolean; signOutUser(): Promise<void> }` React context — every later mobile screen uses this. Route group `(auth)` shown when signed out; the rest of the app when signed in.
+- Produces: `useAuth(): { user: User | null; loading: boolean; signOutUser(): Promise<void> }` React context, every later mobile screen uses this. Route group `(auth)` shown when signed out; the rest of the app when signed in.
 
 - [ ] **Step 1: Install auth dependencies**
 
@@ -1524,7 +1524,7 @@ export default function SignIn() {
         if (!email.trim()) { Alert.alert("Reset password", "Enter your email above first."); return; }
         const { sendPasswordResetEmail } = await import("firebase/auth");
         try { await sendPasswordResetEmail(auth, email.trim());
-              Alert.alert("Reset password", "Reset link sent — check your email."); }
+              Alert.alert("Reset password", "Reset link sent, check your email."); }
         catch { Alert.alert("Reset password", "Couldn't send the reset email."); }
       }}><Text>Forgot password?</Text></Pressable>
       <Link href="/(auth)/sign-up"><Text>New here? Create an account</Text></Link>
@@ -1552,7 +1552,7 @@ export default function SignUp() {
       Alert.alert("Welcome!", "We sent a verification link to your email.");
     } catch (e: any) {
       const msg = e?.code === "auth/email-already-in-use"
-        ? "That email already has an account — try signing in instead."
+        ? "That email already has an account, try signing in instead."
         : e?.code === "auth/weak-password" ? "Password must be at least 6 characters."
         : "Couldn't create the account. Try again.";
       Alert.alert("Sign up", msg);
@@ -1572,7 +1572,7 @@ export default function SignUp() {
   );
 }
 ```
-(Google/Apple sign-up IS the sign-in flow — the buttons on the sign-in screen create the account on first use; spec's one-method rule holds because Firebase keys accounts by provider.)
+(Google/Apple sign-up IS the sign-in flow, the buttons on the sign-in screen create the account on first use; spec's one-method rule holds because Firebase keys accounts by provider.)
 
 - [ ] **Step 5: Gate routes in the root layout**
 
@@ -1603,7 +1603,7 @@ export default function RootLayout() {
 - [ ] **Step 6: Manual verification against emulator**
 
 Run: `pnpm emu` + `pnpm --filter @gatekeep/mobile exec expo start`.
-Verify: signed-out state shows sign-in; email sign-up creates a user (visible in emulator Auth UI at :4000) AND a `users/{uid}` doc appears in emulator Firestore (Task 5's trigger); sign-out returns to sign-in. (Google/Apple buttons need a dev build + real credentials — verify email path now; native providers get verified in Task 15's device pass.)
+Verify: signed-out state shows sign-in; email sign-up creates a user (visible in emulator Auth UI at :4000) AND a `users/{uid}` doc appears in emulator Firestore (Task 5's trigger); sign-out returns to sign-in. (Google/Apple buttons need a dev build + real credentials, verify email path now; native providers get verified in Task 15's device pass.)
 
 - [ ] **Step 7: Typecheck + commit**
 
@@ -1612,12 +1612,12 @@ Expected: PASS.
 
 ```bash
 git add -A
-git commit -m "feat: mobile auth — email/google/apple sign-in, route gating"
+git commit -m "feat: mobile auth, email/google/apple sign-in, route gating"
 ```
 
 ---
 
-### Task 10: Mobile app shell — context switcher + tabs + join flow
+### Task 10: Mobile app shell, context switcher + tabs + join flow
 
 **Files:**
 - Create: `apps/mobile/src/shell/ProfileContext.tsx`, `apps/mobile/src/shell/ContextSwitcher.tsx`
@@ -1631,7 +1631,7 @@ git commit -m "feat: mobile auth — email/google/apple sign-in, route gating"
 - Consumes: `useAuth` (Task 9), callables `createProfileDraft`/`submitProfileForReview` (Task 6), members collection-group reads under Task 4's rules.
 - Produces: `useProfileContext(): { activeContext: "fan" | { profileId: string; type: ProfileType; name: string; status: ProfileStatus }; myProfiles: ProfileSummary[]; switchTo(ctx): void }` where `ProfileSummary = { profileId: string; type: ProfileType; name: string; status: ProfileStatus }`. Later sub-projects render into the tab placeholders created here.
 
-- [ ] **Step 1: ProfileContext — load my profiles via collection-group query**
+- [ ] **Step 1: ProfileContext, load my profiles via collection-group query**
 
 `apps/mobile/src/shell/ProfileContext.tsx`:
 ```tsx
@@ -1708,7 +1708,7 @@ export function ContextSwitcher() {
               <Pressable key={p.profileId} style={{ padding: 12 }}
                 onPress={() => { switchTo(p); setOpen(false);
                   router.replace(p.type === "musician" ? "/(musician)/dashboard" : "/(curator)/dashboard"); }}>
-                <Text>{p.name} ({p.type}){p.status !== "approved" ? ` — ${p.status.replace("_", " ")}` : ""}</Text>
+                <Text>{p.name} ({p.type}){p.status !== "approved" ? `, ${p.status.replace("_", " ")}` : ""}</Text>
               </Pressable>
             ))}
             <Pressable onPress={() => { setOpen(false); router.push("/join"); }} style={{ padding: 12 }}>
@@ -1748,7 +1748,7 @@ export default function Screen() {
     <Text>Coming in a later phase</Text></View>;
 }
 ```
-Exception — each `account.tsx` shows real actions:
+Exception, each `account.tsx` shows real actions:
 ```tsx
 import { View, Text, Pressable } from "react-native";
 import { useAuth } from "../../src/auth/AuthProvider";
@@ -1764,7 +1764,7 @@ export default function Account() {
 ```
 Wrap the app in `ProfileProvider` inside `app/_layout.tsx` (inside `AuthProvider`), and change `app/index.tsx` to `import { Redirect } from "expo-router"; export default () => <Redirect href="/(fan)" />;`
 
-- [ ] **Step 4: Join wizard (minimal per spec — full wizards are sub-projects 2-3)**
+- [ ] **Step 4: Join wizard (minimal per spec, full wizards are sub-projects 2-3)**
 
 `apps/mobile/app/join.tsx`:
 ```tsx
@@ -1825,7 +1825,7 @@ export default function Join() {
       </View>
       <TextInput placeholder="Name (band, venue, or your stage name)" value={name} onChangeText={setName}
         style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
-      <TextInput placeholder="Handle (yourname — lowercase, no spaces)" autoCapitalize="none"
+      <TextInput placeholder="Handle (yourname, lowercase, no spaces)" autoCapitalize="none"
         value={handle} onChangeText={setHandle} style={{ borderWidth: 1, padding: 12, borderRadius: 8 }} />
       <Pressable onPress={submit} style={{ backgroundColor: "#111", padding: 14, borderRadius: 8 }}>
         <Text style={{ color: "#fff", textAlign: "center" }}>Submit for review</Text>
@@ -1837,7 +1837,7 @@ export default function Join() {
 
 - [ ] **Step 5: Manual verification**
 
-Run: emulators + expo. Verify end-to-end: sign in → fan tabs render → switcher → "+ Join" → submit a band → switcher now lists it "— pending review" → emulator UI shows the profile with `status: pending_review`, member doc with your uid and `uid` field, handle doc claimed.
+Run: emulators + expo. Verify end-to-end: sign in → fan tabs render → switcher → "+ Join" → submit a band → switcher now lists it ", pending review" → emulator UI shows the profile with `status: pending_review`, member doc with your uid and `uid` field, handle doc claimed.
 
 - [ ] **Step 6: Typecheck + commit**
 
@@ -1846,12 +1846,12 @@ Expected: PASS (including the `uid`-field schema change ripple from Step 1).
 
 ```bash
 git add -A
-git commit -m "feat: mobile shell — context switcher, role tabs, join-as flow"
+git commit -m "feat: mobile shell, context switcher, role tabs, join-as flow"
 ```
 
 ---
 
-### Task 11: Web app — auth, public pages, dashboard shell
+### Task 11: Web app, auth, public pages, dashboard shell
 
 **Files:**
 - Create: `apps/web/src/auth/AuthProvider.tsx` (client), `apps/web/app/sign-in/page.tsx`
@@ -1860,7 +1860,7 @@ git commit -m "feat: mobile shell — context switcher, role tabs, join-as flow"
 
 **Interfaces:**
 - Consumes: `getFirebase()` web (Task 3), rules (Task 4), same Firestore shapes.
-- Produces: web `useAuth()` with the same signature as mobile's (Task 9). Public profile route `/u/[handle]` — later sub-projects extend this page with portfolio content. (`gatekeep.app/@handle` vanity URLs arrive with real hosting config; `/u/[handle]` is the canonical route.)
+- Produces: web `useAuth()` with the same signature as mobile's (Task 9). Public profile route `/u/[handle]`, later sub-projects extend this page with portfolio content. (`gatekeep.app/@handle` vanity URLs arrive with real hosting config; `/u/[handle]` is the canonical route.)
 
 - [ ] **Step 1: Web AuthProvider + sign-in page**
 
@@ -1918,7 +1918,7 @@ export default function SignInPage() {
       <button onClick={async () => {
         if (!email.trim()) { setError("Enter your email above, then press Forgot password."); return; }
         const { sendPasswordResetEmail } = await import("firebase/auth");
-        try { await sendPasswordResetEmail(auth, email.trim()); setError("Reset link sent — check your email."); }
+        try { await sendPasswordResetEmail(auth, email.trim()); setError("Reset link sent, check your email."); }
         catch { setError("Couldn't send the reset email."); }
       }}>Forgot password?</button>
       {error && <p style={{ color: "#dc2626" }}>{error}</p>}
@@ -1928,7 +1928,7 @@ export default function SignInPage() {
 ```
 Wrap `app/layout.tsx`'s body content in `<AuthProvider>`.
 
-- [ ] **Step 2: Public profile page (reads only approved — rules enforce it)**
+- [ ] **Step 2: Public profile page (reads only approved, rules enforce it)**
 
 `apps/web/app/u/[handle]/page.tsx`:
 ```tsx
@@ -2003,9 +2003,9 @@ export default function Dashboard() {
       <h1>Dashboard</h1>
       <p>{user.email} · <button onClick={signOutUser}>Sign out</button></p>
       <h2>Your profiles</h2>
-      {profiles.length === 0 && <p>None yet — join as a musician or curator from the mobile app, or right here once wizards land in the next phase.</p>}
+      {profiles.length === 0 && <p>None yet, join as a musician or curator from the mobile app, or right here once wizards land in the next phase.</p>}
       <ul>{profiles.map((p) => (
-        <li key={p.profileId}>{p.name} — {p.type} — {p.status.replace("_", " ")}</li>
+        <li key={p.profileId}>{p.name}, {p.type}, {p.status.replace("_", " ")}</li>
       ))}</ul>
     </main>
   );
@@ -2100,7 +2100,7 @@ export function AdminGate({ children }: { children: ReactNode }) {
 }
 ```
 
-- [ ] **Step 3: Admin page — queue, lookup, audit log**
+- [ ] **Step 3: Admin page, queue, lookup, audit log**
 
 `apps/web/app/admin/page.tsx`:
 ```tsx
@@ -2131,10 +2131,10 @@ function Queue() {
   return (
     <section>
       <h2>Approvals queue ({pending.length})</h2>
-      {/* Review checklist per spec §6: verify identity — is this really them? */}
+      {/* Review checklist per spec §6: verify identity, is this really them? */}
       {pending.map((p) => (
         <div key={p.id} style={{ border: "1px solid #ddd", padding: 12, marginBottom: 8 }}>
-          <strong>{p.name}</strong> @{p.handle} — {p.type} ({p.subtype})
+          <strong>{p.name}</strong> @{p.handle}, {p.type} ({p.subtype})
           <div>
             <button onClick={() => review(p.id, "approved")}>Approve</button>{" "}
             <button onClick={() => review(p.id, "rejected")}>Reject…</button>
@@ -2174,7 +2174,7 @@ function AuditLog() {
     <section>
       <h2>Audit log</h2>
       {logs.map((l) => (
-        <p key={l.id}>{new Date(l.at).toLocaleString()} — {l.action} — target {l.targetId} — by {l.actorUid} {l.detail && `— ${l.detail}`}</p>
+        <p key={l.id}>{new Date(l.at).toLocaleString()}, {l.action}, target {l.targetId}, by {l.actorUid} {l.detail && `, ${l.detail}`}</p>
       ))}
     </section>
   );
@@ -2203,7 +2203,7 @@ Expected: PASS.
 
 ```bash
 git add -A
-git commit -m "feat: admin dashboard — approvals queue, user lookup, audit log"
+git commit -m "feat: admin dashboard, approvals queue, user lookup, audit log"
 ```
 
 ---
@@ -2211,15 +2211,15 @@ git commit -m "feat: admin dashboard — approvals queue, user lookup, audit log
 ### Task 13: Notifications plumbing
 
 **Files:**
-- Create: `functions/src/notifications.ts`, `apps/mobile/src/notifications/push.ts`, `apps/mobile/src/shell/NotificationsList.tsx` (rendered inside each Account screen — see Step 4)
+- Create: `functions/src/notifications.ts`, `apps/mobile/src/notifications/push.ts`, `apps/mobile/src/shell/NotificationsList.tsx` (rendered inside each Account screen, see Step 4)
 - Modify: `functions/src/review.ts`, `functions/src/index.ts`
 - Test: `functions/test/notifications.test.ts`
 
 **Interfaces:**
 - Consumes: `reviewProfile` (Task 7), `NotificationDoc` from shared, `pushTokens` rules (Task 4).
-- Produces: `notifyUser(uid: string, note: Omit<NotificationDoc, "read" | "createdAt">): Promise<void>` in `functions/src/notifications.ts` — every later trigger (bookings, tickets) calls this exact function. It writes the inbox doc AND sends Expo push to all of the user's registered tokens. Mobile: `registerForPush(uid: string)` stores the Expo token at `users/{uid}/pushTokens/{token}`.
+- Produces: `notifyUser(uid: string, note: Omit<NotificationDoc, "read" | "createdAt">): Promise<void>` in `functions/src/notifications.ts`, every later trigger (bookings, tickets) calls this exact function. It writes the inbox doc AND sends Expo push to all of the user's registered tokens. Mobile: `registerForPush(uid: string)` stores the Expo token at `users/{uid}/pushTokens/{token}`.
 
-- [ ] **Step 1: Write failing test — approval notifies all profile members**
+- [ ] **Step 1: Write failing test, approval notifies all profile members**
 
 `functions/test/notifications.test.ts`:
 ```typescript
@@ -2301,12 +2301,12 @@ In `functions/src/review.ts`, after the audit write in `reviewProfile`, add:
       title: decision === "approved" ? `${profileName} is approved!` : `${profileName} needs changes`,
       body: decision === "approved"
         ? "Your profile is live on GateKeep."
-        : `Reviewer note: ${reason!.trim()} — update and resubmit anytime.`,
+        : `Reviewer note: ${reason!.trim()}, update and resubmit anytime.`,
     });
 ```
 with `import { notifyProfileMembers } from "./notifications.js";`
 
-- [ ] **Step 4: Mobile — token registration + inbox list**
+- [ ] **Step 4: Mobile, token registration + inbox list**
 
 ```bash
 cd apps/mobile && npx expo install expo-notifications expo-device expo-constants
@@ -2334,7 +2334,7 @@ export async function registerForPush(uid: string): Promise<void> {
 ```
 Call `registerForPush(user.uid)` from a `useEffect` in `ProfileProvider` (Task 10) when `user` becomes non-null.
 
-Add a Notifications section to each `account.tsx` (fan/musician/curator — same component, extract to `apps/mobile/src/shell/NotificationsList.tsx`):
+Add a Notifications section to each `account.tsx` (fan/musician/curator, same component, extract to `apps/mobile/src/shell/NotificationsList.tsx`):
 ```tsx
 import { View, Text, Pressable, FlatList } from "react-native";
 import { useEffect, useState } from "react";
@@ -2370,7 +2370,7 @@ export function NotificationsList() {
 ```
 Web: add the same list (JSX-adapted with `div`/`p`) to `apps/web/app/dashboard/page.tsx` below the profiles list.
 
-**Deliberate deferral:** background web push (FCM service worker + VAPID keys) is NOT in foundation — on web, notifications appear in the realtime dashboard inbox only. Background web push ships with sub-project 7 (fan discovery), where fan-facing notifications actually matter. This narrows spec §7's "web push/FCM (web)" line for v1 foundation — flagged to the user at plan review.
+**Deliberate deferral:** background web push (FCM service worker + VAPID keys) is NOT in foundation, on web, notifications appear in the realtime dashboard inbox only. Background web push ships with sub-project 7 (fan discovery), where fan-facing notifications actually matter. This narrows spec §7's "web push/FCM (web)" line for v1 foundation, flagged to the user at plan review.
 
 - [ ] **Step 5: Run tests + manual verification**
 
@@ -2381,7 +2381,7 @@ Manual: approve a pending profile in `/admin` → notification appears in the mo
 
 ```bash
 git add -A
-git commit -m "feat: notification plumbing — inbox, expo push tokens, review notifications"
+git commit -m "feat: notification plumbing, inbox, expo push tokens, review notifications"
 ```
 
 ---
@@ -2395,7 +2395,7 @@ git commit -m "feat: notification plumbing — inbox, expo push tokens, review n
 
 **Interfaces:**
 - Consumes: membership invariants (Task 8), helpers (Task 5).
-- Produces: callable `deleteAccount(data: Record<string, never>) → { ok: true }` — deletes auth user, `users/{uid}` + subcollections, and removes their memberships; refuses (`failed-precondition`) if they are the sole admin of any profile, naming the profiles in the error message (spec §4).
+- Produces: callable `deleteAccount(data: Record<string, never>) → { ok: true }`, deletes auth user, `users/{uid}` + subcollections, and removes their memberships; refuses (`failed-precondition`) if they are the sole admin of any profile, naming the profiles in the error message (spec §4).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -2451,7 +2451,7 @@ describe("deleteAccount", () => {
 - [ ] **Step 2: Run, verify fail**
 
 Run: `pnpm --filter functions build && pnpm emu:test`
-Expected: FAIL — callable not found.
+Expected: FAIL, callable not found.
 
 - [ ] **Step 3: Implement**
 
@@ -2494,7 +2494,7 @@ Add to `functions/src/index.ts`: `export { deleteAccount } from "./account.js";`
 
 - [ ] **Step 4: UI entry points**
 
-Mobile — add to the shared account screen component, below Sign out:
+Mobile, add to the shared account screen component, below Sign out:
 ```tsx
 <Pressable onPress={() => {
   Alert.alert("Delete account", "This permanently deletes your account and data. Continue?",
@@ -2507,7 +2507,7 @@ Mobile — add to the shared account screen component, below Sign out:
   <Text style={{ color: "#dc2626" }}>Delete account</Text>
 </Pressable>
 ```
-Web — same action with `window.confirm` in the dashboard, then `router.push("/")`.
+Web, same action with `window.confirm` in the dashboard, then `router.push("/")`.
 
 - [ ] **Step 5: Run, verify pass; commit**
 
@@ -2533,7 +2533,7 @@ git commit -m "feat: in-app account deletion with sole-admin guard"
 
 - [ ] **Step 1: App Check (spec §8)**
 
-Console: Firebase → App Check → register the web app with **reCAPTCHA v3** and the mobile apps with **Play Integrity** (Android) / **App Attest** (iOS). Keep enforcement in "monitor" mode until both stores' builds exist — flip to "enforce" for Firestore + Functions as a launch-checklist item.
+Console: Firebase → App Check → register the web app with **reCAPTCHA v3** and the mobile apps with **Play Integrity** (Android) / **App Attest** (iOS). Keep enforcement in "monitor" mode until both stores' builds exist, flip to "enforce" for Firestore + Functions as a launch-checklist item.
 
 Web (`apps/web/src/lib/firebase.ts`, inside `getFirebase()` before returning, browser-only):
 ```typescript
@@ -2545,9 +2545,9 @@ if (typeof window !== "undefined" && process.env.NODE_ENV === "production") {
   });
 }
 ```
-Mobile: `npx expo install @react-native-firebase/app @react-native-firebase/app-check` is the native path — but mixing `@react-native-firebase` with the JS SDK is a real architecture decision. **Decision recorded:** v1 mobile ships with App Check in monitor mode via the console only (no client change); native App Check attestation lands with the EAS production build task in sub-project 2, where the dev-build pipeline already exists. This keeps foundation unblocked and is why enforcement stays in monitor mode.
+Mobile: `npx expo install @react-native-firebase/app @react-native-firebase/app-check` is the native path, but mixing `@react-native-firebase` with the JS SDK is a real architecture decision. **Decision recorded:** v1 mobile ships with App Check in monitor mode via the console only (no client change); native App Check attestation lands with the EAS production build task in sub-project 2, where the dev-build pipeline already exists. This keeps foundation unblocked and is why enforcement stays in monitor mode.
 
-- [ ] **Step 2: Crash reporting — Sentry (works on Expo AND Next.js; one vendor for both)**
+- [ ] **Step 2: Crash reporting, Sentry (works on Expo AND Next.js; one vendor for both)**
 
 ```bash
 cd apps/mobile && npx expo install @sentry/react-native

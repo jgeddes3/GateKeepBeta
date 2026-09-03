@@ -18,7 +18,7 @@ describe("FakeStripe", () => {
   // below is about the standard one.
   const balanceOf = async (accountId: string) => (await fake.getBalances(accountId)).availableCents;
 
-  it("honors idempotency keys — same key, same intent, one object", async () => {
+  it("honors idempotency keys, same key, same intent, one object", async () => {
     const key = `test-idem-${Date.now()}`;
     const a = await fake.chargeOffSession({ customerId: "cus_x", amountCents: 1000, idempotencyKey: key, meta: {} });
     const b = await fake.chargeOffSession({ customerId: "cus_x", amountCents: 1000, idempotencyKey: key, meta: {} });
@@ -31,13 +31,13 @@ describe("FakeStripe", () => {
     expect(chargeId).toMatch(/^ch_fake_/);
   });
 
-  it("declines when the config knob is set — the SAME key replays the cached decline even after the knob clears, a NEW key succeeds", async () => {
+  it("declines when the config knob is set, the SAME key replays the cached decline even after the knob clears, a NEW key succeeds", async () => {
     const key = `d-${Date.now()}`;
     await adb.doc("stripeFake/config").set({ declineCharges: true });
     await expect(fake.chargeOffSession({ customerId: "cus_x", amountCents: 500, idempotencyKey: key, meta: {} }))
       .rejects.toBeInstanceOf(StripeCardDeclinedError);
     await adb.doc("stripeFake/config").set({ declineCharges: false });
-    // Idempotency replay of the SAME key rethrows the cached decline — the
+    // Idempotency replay of the SAME key rethrows the cached decline, the
     // config knob only gates a fresh attempt, not a replay.
     await expect(fake.chargeOffSession({ customerId: "cus_x", amountCents: 500, idempotencyKey: key, meta: {} }))
       .rejects.toBeInstanceOf(StripeCardDeclinedError);
@@ -46,7 +46,7 @@ describe("FakeStripe", () => {
     expect(fresh.chargeId).toBeTruthy();
   });
 
-  it("decline knob scopes to declineCustomerIds — only the listed customer is declined", async () => {
+  it("decline knob scopes to declineCustomerIds, only the listed customer is declined", async () => {
     await adb.doc("stripeFake/config").set({ declineCharges: false, declineCustomerIds: ["cus_blocked"] });
     await expect(fake.chargeOffSession({ customerId: "cus_blocked", amountCents: 100, idempotencyKey: `sd-${Date.now()}`, meta: {} }))
       .rejects.toBeInstanceOf(StripeCardDeclinedError);
@@ -69,11 +69,11 @@ describe("FakeStripe", () => {
     expect(caught).toBeInstanceOf(StripePaymentPendingError);
     const intentId = (caught as StripePaymentPendingError).intentId;
     expect(intentId).toMatch(/^pi_fake_/);
-    // "Pollable" — the intent object the error points at actually exists,
+    // "Pollable", the intent object the error points at actually exists,
     // in `processing`, exactly like the real PaymentIntent would.
     const snap = await adb.doc(`stripeFake/state/objects/${intentId}`).get();
     expect(snap.data()).toMatchObject({ status: "processing" });
-    // Same key replays the SAME cached pending outcome — this is the actual
+    // Same key replays the SAME cached pending outcome, this is the actual
     // recovery contract StripePaymentPendingError's doc comment describes:
     // a retry can never observe a different intentId, so callers must key
     // off the ORIGINAL intentId (persisted, then finalized by the
@@ -110,7 +110,7 @@ describe("FakeStripe", () => {
       .rejects.toThrow("reused with different params");
   });
 
-  it("createOnSessionIntent honors idempotency keys — same key, same intent", async () => {
+  it("createOnSessionIntent honors idempotency keys, same key, same intent", async () => {
     const key = `osi-${Date.now()}`;
     const a = await fake.createOnSessionIntent({ customerId: "cus_x", amountCents: 2000, idempotencyKey: key, meta: {} });
     const b = await fake.createOnSessionIntent({ customerId: "cus_x", amountCents: 2000, idempotencyKey: key, meta: {} });
@@ -221,7 +221,7 @@ describe("FakeStripe", () => {
   });
 });
 
-// L8 (branch audit): getStripe()'s selection must FAIL CLOSED — a deployed
+// L8 (branch audit): getStripe()'s selection must FAIL CLOSED, a deployed
 // handler that forgot `secrets: [stripeSecretKey]` (so process.env has no key)
 // and is NOT in the emulator must THROW rather than silently move FakeStripe's
 // pretend money against real Firestore data. This is the runtime backstop behind
@@ -246,7 +246,7 @@ describe("getStripe() selection (fail-closed)", () => {
     }
   }
 
-  it("throws OUTSIDE the emulator with no STRIPE_SECRET_KEY — never a silent FakeStripe fallback", () => {
+  it("throws OUTSIDE the emulator with no STRIPE_SECRET_KEY, never a silent FakeStripe fallback", () => {
     withEnv(() => {
       delete process.env.STRIPE_SECRET_KEY;
       delete process.env.FUNCTIONS_EMULATOR;

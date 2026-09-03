@@ -30,7 +30,7 @@ describe("stripeWebhook", () => {
     expect(doc.data()?.processed).toBe(true);
   });
 
-  it("is exactly-once per event id — a replay is a 200 \"duplicate\" no-op, and receivedAt is unchanged", async () => {
+  it("is exactly-once per event id, a replay is a 200 \"duplicate\" no-op, and receivedAt is unchanged", async () => {
     const evt = fakeEvent("some.unknown.type", {});
     expect((await post(evt)).status).toBe(200);
     const firstReceivedAt = (await adb.doc(`stripeEvents/${evt.id}`).get()).data()?.receivedAt;
@@ -63,9 +63,9 @@ describe("stripeWebhook", () => {
   });
 
   // gatekeep.test.throw / gatekeep.test.ok are registered only when
-  // FUNCTIONS_EMULATOR === "true" (see paymentsWebhook.ts) — the functions
+  // FUNCTIONS_EMULATOR === "true" (see paymentsWebhook.ts), the functions
   // emulator this suite runs against sets that itself.
-  it("a handler that throws returns 500, leaves processed:false, and marks failedAt + attempts:1 (no delete — the audit row survives)", async () => {
+  it("a handler that throws returns 500, leaves processed:false, and marks failedAt + attempts:1 (no delete, the audit row survives)", async () => {
     const evt = fakeEvent("gatekeep.test.throw", {});
     const res = await post(evt);
     expect(res.status).toBe(500);
@@ -77,7 +77,7 @@ describe("stripeWebhook", () => {
     expect(data?.attempts).toBe(1);
   });
 
-  it("redelivery of a FAILED event (failedAt set) re-processes IMMEDIATELY — no waiting out STALE_CLAIM_MS — another 500, attempts incremented, firstReceivedAt preserved", async () => {
+  it("redelivery of a FAILED event (failedAt set) re-processes IMMEDIATELY, no waiting out STALE_CLAIM_MS, another 500, attempts incremented, firstReceivedAt preserved", async () => {
     const evt = fakeEvent("gatekeep.test.throw", {});
     expect((await post(evt)).status).toBe(500);
     const first = (await adb.doc(`stripeEvents/${evt.id}`).get()).data();
@@ -105,12 +105,12 @@ describe("stripeWebhook", () => {
     expect(res.text).toBe("duplicate");
   });
 
-  it("an in-flight claim gone STALE (receivedAt older than STALE_CLAIM_MS, no failedAt — an unknown death) re-claims and reprocesses", async () => {
+  it("an in-flight claim gone STALE (receivedAt older than STALE_CLAIM_MS, no failedAt, an unknown death) re-claims and reprocesses", async () => {
     const evt = fakeEvent("gatekeep.test.throw", {});
     const staleReceivedAt = Date.now() - STALE_CLAIM_MS - 1000;
     // Seed directly via admin SDK (not by actually failing a delivery first)
     // so this isolates the STALE branch from the KNOWN-failure branch above
-    // — a real failed delivery would set failedAt itself and re-claim
+    //, a real failed delivery would set failedAt itself and re-claim
     // immediately regardless of staleness.
     await adb.doc(`stripeEvents/${evt.id}`).set({
       type: evt.type, receivedAt: staleReceivedAt, processed: false, failedAt: null,

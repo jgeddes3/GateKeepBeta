@@ -1,12 +1,12 @@
-# Sub-project 5b — Mobile Native Payments Implementation Plan
+# Sub-project 5b, Mobile Native Payments Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Full payment parity on mobile — native Stripe PaymentSheet (cards + Apple Pay +
+**Goal:** Full payment parity on mobile, native Stripe PaymentSheet (cards + Apple Pay +
 Google Pay) for save-card and pay-past-due, in-app-browser Express onboarding, and RN ports of
-cash-out, true-up, gates, and the delinquency banner — wiring SP5's finished backend with zero
+cash-out, true-up, gates, and the delinquency banner, wiring SP5's finished backend with zero
 backend changes.
 
 **Architecture:** `@stripe/stripe-react-native` behind a single seam module
@@ -22,7 +22,7 @@ single-sourced in `@gatekeep/shared`. Keyless (emulator) mode skips the native s
 
 ## Global Constraints
 
-- **No client-supplied amounts** ever reach a money callable — clients send ids (+ bounded
+- **No client-supplied amounts** ever reach a money callable, clients send ids (+ bounded
   true-up quantities, + a payout `amountCents` the server independently checks against the live
   balance). Never compute a charge client-side except as a labeled preview.
 - **Verbatim server-error surfacing**: clients branch only on exact message constants from
@@ -31,28 +31,28 @@ single-sourced in `@gatekeep/shared`. Keyless (emulator) mode skips the native s
   key must never appear in any client app.
 - **`src/payments/stripe.ts` is the ONLY file that imports `@stripe/stripe-react-native`**, and
   it loads the module lazily (a dev client built before this native module exists must not crash
-  at JS load — see the expo-audio precedent in `app/_layout.tsx`).
+  at JS load, see the expo-audio precedent in `app/_layout.tsx`).
 - **Keyless mode** (no publishable key): skip the sheet; `createSetupIntent` already saved the
   fake card server-side (see `SaveCardModal`'s header comment, apps/web).
 - **Parity**: row-state mapping (`paymentRowKind`), `PAID_DEPOSIT_STATUSES`, and fee previews
-  come from `@gatekeep/shared` — never re-implement them per platform.
+  come from `@gatekeep/shared`, never re-implement them per platform.
 - `availableBalanceCents: null` renders "unavailable", never $0.00.
 - **House idioms**: `httpsCallable(getFirebase().functions, ...)`, inline styles, busy/error
   local state pairs, `key={profileId}` remount on context switch, no `Intl.ListFormat` (Hermes).
-- Mobile has **no unit-test runner** — do not add one. Mobile tasks verify with
+- Mobile has **no unit-test runner**, do not add one. Mobile tasks verify with
   `pnpm --filter @gatekeep/mobile typecheck` and `pnpm --filter @gatekeep/mobile lint`.
   Shared-package logic gets real tests.
-- Windows: PS 5.1 corrupts UTF-8 on `Get-Content`/`Set-Content` pipelines — edit files with
+- Windows: PS 5.1 corrupts UTF-8 on `Get-Content`/`Set-Content` pipelines, edit files with
   byte-safe tools only. Run the emulator suite as a single blocking foreground call.
 - Commit after every task; message prefix `feat(sp5b):` (or `docs(sp5b):`/`chore(sp5b):`).
 
 ## File Structure
 
 ```
-packages/shared/src/feePreviews.ts        (new — moved from apps/web/src/payments/fees.ts)
+packages/shared/src/feePreviews.ts        (new, moved from apps/web/src/payments/fees.ts)
 packages/shared/test/feePreviews.test.ts  (new)
-packages/shared/src/paymentDisplay.ts     (modified — gains StripeStatusResult)
-apps/mobile/src/payments/stripe.ts        (new — the one native-import seam)
+packages/shared/src/paymentDisplay.ts     (modified, gains StripeStatusResult)
+apps/mobile/src/payments/stripe.ts        (new, the one native-import seam)
 apps/mobile/src/payments/SaveCardSheet.tsx    (new)
 apps/mobile/src/payments/GatePrompt.tsx       (new)
 apps/mobile/src/payments/delinquentBookings.ts (new)
@@ -90,7 +90,7 @@ README.md                                     (smoke walkthrough + launch checkl
 
 - [ ] **Step 1: Write the failing test**
 
-`packages/shared/test/feePreviews.test.ts` (follow `money.test.ts`'s runner idiom — node:test +
+`packages/shared/test/feePreviews.test.ts` (follow `money.test.ts`'s runner idiom, node:test +
 assert, same as the existing shared tests):
 
 ```ts
@@ -130,15 +130,15 @@ test("trueUpDeltaPreviewCents returns null on malformed input instead of throwin
 ```
 
 If `DEFAULT_FEE_POLICY` does not exist in shared, construct the policy inline from the exported
-fee constants instead (`{ curatorFeePct: CURATOR_FEE_PCT, musicianFeePct: MUSICIAN_FEE_PCT, ... }`
-— read `packages/shared/src/types.ts`'s `FeePolicy` for the exact field names and
+fee constants instead (`{ curatorFeePct: CURATOR_FEE_PCT, musicianFeePct: MUSICIAN_FEE_PCT, ... }`:
+read `packages/shared/src/types.ts`'s `FeePolicy` for the exact field names and
 `resolveFeePolicy` for the defaults; adjust the import line accordingly). Do NOT invent new
 constants.
 
 - [ ] **Step 2: Run it to make sure it fails**
 
 Run (repo root): `pnpm --filter @gatekeep/shared test`
-Expected: FAIL — `feePreviews` module not found.
+Expected: FAIL, `feePreviews` module not found.
 
 - [ ] **Step 3: Create the module (verbatim move)**
 
@@ -154,8 +154,8 @@ import {
 } from "./index.js";
 ```
 
-(If `./index.js` self-import trips the build, import from the concrete modules —
-`./money.js` / `./types.js` — matching where each symbol actually lives; check with grep.)
+(If `./index.js` self-import trips the build, import from the concrete modules,
+`./money.js` / `./types.js`, matching where each symbol actually lives; check with grep.)
 Keep every comment: they carry the "preview, never authoritative" contract. Update the header's
 file references ("apps/web/src/payments/fees.ts" → "packages/shared/src/feePreviews.ts, shared
 by web and mobile").
@@ -164,7 +164,7 @@ Append to `packages/shared/src/paymentDisplay.ts` (verbatim from
 `apps/web/src/payments/types.ts`, comments included):
 
 ```ts
-// Response shape of the getStripeStatus callable — client-shared so web and
+// Response shape of the getStripeStatus callable, client-shared so web and
 // mobile render the SAME contract (moved from apps/web/src/payments/types.ts
 // in SP5b; the null-balance rule in the comment below is binding on both).
 export interface StripeStatusResult {
@@ -172,7 +172,7 @@ export interface StripeStatusResult {
   hasAccount: boolean; transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
   delinquent: boolean;
   // 0 means "asked, nothing there"; null means "Stripe couldn't be read just
-  // now" — MUST render as "balance unavailable", never $0.00.
+  // now", MUST render as "balance unavailable", never $0.00.
   availableBalanceCents: number | null;
   instantAvailableBalanceCents: number | null;
 }
@@ -231,7 +231,7 @@ git commit -m "feat(sp5b): move fee previews + StripeStatusResult to @gatekeep/s
 Run (in `apps/mobile/`): `npx expo install @stripe/stripe-react-native`
 (`expo install` picks the SDK-57-compatible version and writes via pnpm.) If the repo's
 `minimumReleaseAgeExclude` supply-chain gate rejects the resolved version, add the exact
-`@stripe/stripe-react-native@<version>` to that list in `pnpm-workspace.yaml` — same mechanism
+`@stripe/stripe-react-native@<version>` to that list in `pnpm-workspace.yaml`, same mechanism
 the expo@57 packages already use.
 
 - [ ] **Step 2: Plugin config**
@@ -253,11 +253,11 @@ In `apps/mobile/app.json`, append to the `plugins` array (after `"expo-audio"`):
 Create `apps/mobile/src/payments/stripe.ts`:
 
 ```ts
-// SP5b — the ONLY file in this app that touches @stripe/stripe-react-native.
+// SP5b, the ONLY file in this app that touches @stripe/stripe-react-native.
 // Two reasons it exists:
 //  1. Keyless mode is one branch: no EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY
 //     (emulator dev) means stripeEnabled === false and NOTHING in this file
-//     past the two consts ever runs — callers skip the sheet entirely
+//     past the two consts ever runs, callers skip the sheet entirely
 //     (FakeStripe already did the server-side work; see SaveCardSheet).
 //  2. The native import is LAZY (require inside the function, never a
 //     top-level import): a dev client built before this native module was
@@ -277,7 +277,7 @@ function native(): StripeNative {
   return require("@stripe/stripe-react-native");
 }
 
-// testEnv keys Google Pay off the KEY, not __DEV__ — a preview/internal build
+// testEnv keys Google Pay off the KEY, not __DEV__, a preview/internal build
 // running a pk_test_ key is still a test environment.
 const SHEET_BASE = {
   merchantDisplayName: "GateKeep",
@@ -295,7 +295,7 @@ async function runSheet(
   if (initError) return { ok: false, cancelled: false, message: initError.message ?? null };
   const { error } = await presentPaymentSheet();
   if (!error) return { ok: true };
-  // The sheet's own dismissal is a USER CANCEL, not a failure — callers stay
+  // The sheet's own dismissal is a USER CANCEL, not a failure, callers stay
   // silent on it (parity with web, where closing the modal shows no error).
   return { ok: false, cancelled: error.code === "Canceled", message: error.message ?? null };
 }
@@ -307,7 +307,7 @@ export function runPaymentSheet(clientSecret: string): Promise<SheetOutcome> {
   return runSheet({ paymentIntentClientSecret: clientSecret });
 }
 
-// "seti_xxx_secret_yyy" -> "seti_xxx" — the id refreshPaymentMethod expects;
+// "seti_xxx_secret_yyy" -> "seti_xxx", the id refreshPaymentMethod expects;
 // same id Stripe.js hands web's confirmSetup result.
 export function setupIntentIdFromClientSecret(clientSecret: string): string {
   return clientSecret.split("_secret")[0];
@@ -315,7 +315,7 @@ export function setupIntentIdFromClientSecret(clientSecret: string): string {
 ```
 
 If the installed version's `PaymentSheetError` cancel code differs from the literal `"Canceled"`,
-import the enum from the lazy `native()` result and compare against it — check
+import the enum from the lazy `native()` result and compare against it, check
 `node_modules/@stripe/stripe-react-native/lib/typescript` for the exact member before guessing.
 
 - [ ] **Step 4: Provider in the root layout**
@@ -325,7 +325,7 @@ In `apps/mobile/app/_layout.tsx`, add below the imports:
 ```tsx
 import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
 
-// Renders children bare when keyless — the provider (and the native module
+// Renders children bare when keyless, the provider (and the native module
 // behind it) never loads in emulator dev or on a dev client from before this
 // module existed. Lazy require for the same reason stripe.ts documents.
 function MaybeStripeProvider({ children }: { children: React.ReactNode }) {
@@ -355,7 +355,7 @@ return (
 - [ ] **Step 5: Verify**
 
 Run (repo root): `pnpm --filter @gatekeep/mobile typecheck && pnpm --filter @gatekeep/mobile lint`
-Then: `cd apps/mobile && npx expo export --platform ios` — Expected: bundle succeeds.
+Then: `cd apps/mobile && npx expo export --platform ios`, Expected: bundle succeeds.
 
 - [ ] **Step 6: Commit**
 
@@ -378,7 +378,7 @@ git commit -m "feat(sp5b): add @stripe/stripe-react-native + provider + seam mod
 - Consumes: Task 2's `stripeEnabled`, `runSetupSheet`, `setupIntentIdFromClientSecret`.
 - Produces: `SaveCardSheet({ profileId, onSaved, onClose })`,
   `GatePrompt({ message, curatorProfileId?, viewerIsMusician?, onRetry })`,
-  `fetchDelinquentBookingIds(curatorProfileId): Promise<string[]>` — Tasks 4 and 6 reuse
+  `fetchDelinquentBookingIds(curatorProfileId): Promise<string[]>`, Tasks 4 and 6 reuse
   `SaveCardSheet` and `fetchDelinquentBookingIds`.
 
 - [ ] **Step 1: delinquentBookings.ts (verbatim port)**
@@ -398,19 +398,19 @@ import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
 import { stripeEnabled, runSetupSheet, setupIntentIdFromClientSecret } from "./stripe";
 
-// SP5b — the native counterpart of apps/web/src/payments/SaveCardModal.tsx.
+// SP5b, the native counterpart of apps/web/src/payments/SaveCardModal.tsx.
 // Same flow, with the PaymentSheet replacing Elements:
 //  1. createSetupIntent({profileId}) -> clientSecret.
 //  2a. REAL mode: initPaymentSheet(setupIntentClientSecret)+present (cards +
 //      Apple Pay + Google Pay), then refreshPaymentMethod({profileId,
-//      setupIntentId}) — the id parsed off the client secret is the same one
+//      setupIntentId}), the id parsed off the client secret is the same one
 //      web reads from confirmSetup's result, and passing it is what pins THIS
 //      card as the customer default (see refreshPaymentMethod's as-built note
 //      in functions/src/payments.ts).
 //  2b. FAKE mode (!stripeEnabled): createSetupIntent already marked the card
 //      saved server-side before returning (SaveCardModal's header documents
-//      why) — show the confirmation, no sheet, no refresh call.
-// A user-cancelled sheet is silent (no error, stays open) — parity with web's
+//      why), show the confirmation, no sheet, no refresh call.
+// A user-cancelled sheet is silent (no error, stays open), parity with web's
 // modal close.
 export function SaveCardSheet({ profileId, onSaved, onClose }: {
   profileId: string; onSaved: () => void; onClose: () => void;
@@ -435,7 +435,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
         return;
       }
       // The card and SetupIntent both succeeded with Stripe; only our own
-      // follow-up can fail past here — same honest distinction web draws.
+      // follow-up can fail past here, same honest distinction web draws.
       try {
         await httpsCallable(getFirebase().functions, "refreshPaymentMethod")({
           profileId, setupIntentId: setupIntentIdFromClientSecret(res.data.clientSecret),
@@ -443,7 +443,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
         onSaved();
       } catch (e) {
         setError(e instanceof Error ? e.message
-          : "The card was saved with Stripe, but we couldn't confirm it here — try again.");
+          : "The card was saved with Stripe, but we couldn't confirm it here, try again.");
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not start card setup.");
@@ -462,7 +462,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
       {fakeSaved ? (
         <>
           <Text style={{ color: "#166534" }}>
-            Test card saved (visa •••• 4242) — no real payment sheet runs in the emulator.
+            Test card saved (visa •••• 4242), no real payment sheet runs in the emulator.
           </Text>
           <Pressable onPress={onSaved} style={{ alignSelf: "flex-start", borderWidth: 1, borderColor: "#ddd", borderRadius: 6, padding: 10 }}>
             <Text>Done</Text>
@@ -487,7 +487,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
 
 - [ ] **Step 3: GatePrompt (faithful RN port)**
 
-Create `apps/mobile/src/payments/GatePrompt.tsx` — port `apps/web/src/payments/GatePrompt.tsx`
+Create `apps/mobile/src/payments/GatePrompt.tsx`, port `apps/web/src/payments/GatePrompt.tsx`
 branch-for-branch (READ IT FIRST; keep its L11 viewer-side guard comments). Differences from web,
 and ONLY these:
 - `Link href` → `expo-router` navigation: delinquent-booking links use
@@ -512,7 +512,7 @@ Mirror web's SP5 integration exactly (web references in parentheses):
 2. `MusicianBrowse.tsx` (web `OfferComposer.tsx:109`): in the offer form, replace
    `{error && <ErrorBox message={error} />}` with
    `{error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={() => void submit()} />}`.
-   NOTE: the open-gigs subscription's load error also writes `error` — GatePrompt's fall-through
+   NOTE: the open-gigs subscription's load error also writes `error`, GatePrompt's fall-through
    branch renders it identically to ErrorBox, so this is safe (web has the same property).
 3. `BookingThread.tsx` (web `BookingThread.tsx:452-455`): ONLY the negotiation action-bar error
    (currently line ~398, the one under the Accept/Counter/Decline row) becomes
@@ -543,7 +543,7 @@ git commit -m "feat(sp5b): SaveCardSheet + GatePrompt with gate mounts at apply/
 
 - [ ] **Step 1: PayPastDueButton (RN port)**
 
-Create `apps/mobile/src/payments/PayPastDueButton.tsx` — port
+Create `apps/mobile/src/payments/PayPastDueButton.tsx`, port
 `apps/web/src/payments/PayPastDueButton.tsx` (READ IT FIRST; keep its webhook-finalizes and
 delinquency-lift-lag comments). The Elements `ConfirmForm` is replaced by the sheet:
 
@@ -575,7 +575,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
         return;
       }
       if (!res.data.clientSecret) {
-        setError("Could not start this payment — try again.");
+        setError("Could not start this payment, try again.");
         return;
       }
       if (!stripeEnabled) {
@@ -601,7 +601,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
   };
 
   if (done) {
-    return <Text style={{ color: "#166534" }}>Payment sent — clearing any overdue status may take a moment.</Text>;
+    return <Text style={{ color: "#166534" }}>Payment sent, clearing any overdue status may take a moment.</Text>;
   }
   return (
     <View style={{ gap: 6 }}>
@@ -623,18 +623,18 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
 
 In `apps/mobile/src/bookings/PaymentStatus.tsx`:
 
-1. **Labels** — revert SP5's two read-only divergences (divergence 1 in the file header; update
+1. **Labels**, revert SP5's two read-only divergences (divergence 1 in the file header; update
    that header comment to say SP5b removed it): `settlementPastDue` curator label →
-   `"Past due — pay now"`, `depositPastDue` curator label → `"Deposit past due — pay now"`.
+   `"Past due, pay now"`, `depositPastDue` curator label → `"Deposit past due, pay now"`.
    Musician labels unchanged.
 2. **Card-on-file row** (mirror web `PaymentsPanel.tsx:181-205`): curator-side only, above the
    rows. Add state `stripeStatus: StripeStatusResult | "loading" | "error"`,
    `stripeReloadKey`, `showSaveCard`; the same `getStripeStatus({ profileId: curatorProfileId })`
    effect web's panel runs (gated on `isCuratorSide && curatorProfileId`, no synchronous
-   set-to-loading on reload — copy web's idiom comment). Render: `showSaveCard` →
+   set-to-loading on reload, copy web's idiom comment). Render: `showSaveCard` →
    `<SaveCardSheet profileId={curatorProfileId} onSaved={() => { setShowSaveCard(false); setStripeReloadKey(k => k + 1); }} onClose={() => setShowSaveCard(false)} />`;
    else loading/error/card line `Card on file: {brand} •••• {last4}` / `No card on file` with an
-   Update/Add pressable. Import `StripeStatusResult` from `@gatekeep/shared` (Task 1) — do NOT
+   Update/Add pressable. Import `StripeStatusResult` from `@gatekeep/shared` (Task 1), do NOT
    reuse the local `StripeStatusSummary` (that's EarningsCard's, removed in Task 7).
 3. **Pay now mount** (mirror web `PaymentsPanel.tsx:216-218`): inside the row map, after the
    Badge: `{isCuratorSide && (kind === "settlementPastDue" || kind === "depositPastDue") && (
@@ -663,10 +663,10 @@ git commit -m "feat(sp5b): native pay-past-due + card-on-file management in Paym
 
 **Interfaces:**
 - Consumes: Task 1's `trueUpDeltaPreviewCents` (shared); mobile `BookingThread.tsx`'s
-  `useOccurrences(bookingId): Occurrence[]` (currently un-exported at line ~108 — add `export`,
+  `useOccurrences(bookingId): Occurrence[]` (currently un-exported at line ~108, add `export`,
   exactly as web's BookingThread already exports it for its PaymentsPanel).
 - Produces: `TrueUpForm({ bookingId, gigId, structure, amountCents, feePolicy, durationMinutes,
-  songCount, current, onDone, onCancel })` — same prop contract as web.
+  songCount, current, onDone, onCancel })`, same prop contract as web.
 
 - [ ] **Step 1: Export useOccurrences**
 
@@ -675,7 +675,7 @@ In `apps/mobile/src/bookings/BookingThread.tsx`, change `function useOccurrences
 
 - [ ] **Step 2: TrueUpForm (faithful RN port)**
 
-Create `apps/mobile/src/payments/TrueUpForm.tsx` — port `apps/web/src/payments/TrueUpForm.tsx`
+Create `apps/mobile/src/payments/TrueUpForm.tsx`, port `apps/web/src/payments/TrueUpForm.tsx`
 line-for-line (READ IT FIRST): identical validation ladder (shape → cap → increase-only, each
 mirroring the server's own ordering, comments preserved), identical preview sentence, the
 `perSet` early return, the empty-not-"0" default note. RN specifics: `TextInput` with
@@ -706,7 +706,7 @@ Mirror web `PaymentsPanel.tsx:219-233` inside the row map (after the PayPastDueB
 ```
 
 with supporting additions copied from web's panel: `openTrueUpFor` state,
-`const occurrences = useOccurrences(bookingId);` (unconditional, before the early returns —
+`const occurrences = useOccurrences(bookingId);` (unconditional, before the early returns,
 hooks-order comment applies), `const durationByGigId = new Map(occurrences.map((o) => [o.id, o.durationMinutes]));`,
 and `resolveFeePolicy` in the `@gatekeep/shared` import.
 
@@ -733,7 +733,7 @@ git commit -m "feat(sp5b): report-actuals true-up on mobile"
 
 - [ ] **Step 1: Port the banner**
 
-Create `apps/mobile/src/payments/DelinquencyBanner.tsx` — port
+Create `apps/mobile/src/payments/DelinquencyBanner.tsx`, port
 `apps/web/src/payments/DelinquencyBanner.tsx` exactly (READ IT FIRST; both effects, the
 `status?.delinquent !== true` early return, the loading/links/fallback copy). RN specifics:
 `Link href` → `router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })`
@@ -745,7 +745,7 @@ to find and settle the overdue date." (mobile's bookings live in a tab, not "bel
 
 In `apps/mobile/app/(curator)/dashboard.tsx`, render
 `<DelinquencyBanner key={`delinquency-${profileId}`} profileId={profileId} />` directly under
-the `Status:` line (inside the approved-and-otherwise ScrollView, before the rejected block) —
+the `Status:` line (inside the approved-and-otherwise ScrollView, before the rejected block),
 one mount, all statuses; the banner self-hides when not delinquent.
 
 - [ ] **Step 3: Verify + commit**
@@ -775,32 +775,32 @@ git commit -m "feat(sp5b): delinquency banner on the curator dashboard"
 
 - [ ] **Step 1: Port the panel**
 
-Create `apps/mobile/src/payments/EarningsPanel.tsx` — port
-`apps/web/src/payments/EarningsPanel.tsx` (READ IT FIRST — every helper travels):
+Create `apps/mobile/src/payments/EarningsPanel.tsx`, port
+`apps/web/src/payments/EarningsPanel.tsx` (READ IT FIRST, every helper travels):
 `parseDollarsToCents` (+ `MAX_PREVIEW_CENTS`), `usePaymentRows` (the musician-pinned bookings
-onSnapshot + generation-guarded n+1 payments fan-out — comments preserved; the
+onSnapshot + generation-guarded n+1 payments fan-out, comments preserved; the
 `(musicianProfileId, updatedAt)` index already exists), `PendingSettlementsList`, `HistoryList`
 (+ `HISTORY_LIMIT`), the status effect with its amount-field default, `submitPayout` with the
 one-requestId-per-press `requestRef` semantics, the instant-button gating
 (`instantEligible`/`belowInstantMin`/fee≥amount) with the two tooltip messages rendered as a
 small `Text` hint under the buttons (RN has no `title` attr). Differences, and ONLY these:
 
-1. **requestId mint** — RN has no `crypto.randomUUID` (see the recorded precedent at
+1. **requestId mint**, RN has no `crypto.randomUUID` (see the recorded precedent at
    `src/portfolio/PortfolioForms.tsx:196`). Use the same nonce idiom, which satisfies
    requestPayout's `8-64 chars of [A-Za-z0-9_-]` check:
 
 ```ts
-// RN has no crypto.randomUUID — timestamp+random nonce is fine (uniqueness,
+// RN has no crypto.randomUUID, timestamp+random nonce is fine (uniqueness,
 // not secrecy; requestPayout's REQUEST_ID_RE accepts 8-64 [A-Za-z0-9_-]).
 const mintRequestId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 10)}`;
 ```
 
-   Because this can't throw, the web comment about minting inside the try no longer applies —
+   Because this can't throw, the web comment about minting inside the try no longer applies,
    drop that comment, keep the mint inside `submitPayout` all the same.
 
-2. **Onboarding** — replace `window.location.assign` + sessionStorage bridge with the in-app
-   browser + foreground re-sync (`rememberOnboardingProfileId` is NOT ported — the return page
+2. **Onboarding**, replace `window.location.assign` + sessionStorage bridge with the in-app
+   browser + foreground re-sync (`rememberOnboardingProfileId` is NOT ported, the return page
    runs on web; mobile re-syncs by re-calling getStripeStatus itself):
 
 ```tsx
@@ -812,7 +812,7 @@ const onboardingInFlight = useRef(false);
 
 // Stripe-hosted Express onboarding opens in the in-app browser. The return/
 // refresh URLs are the server-built APP_ORIGIN web pages (fail-closed, never
-// client-supplied — createOnboardingLink's contract); mobile doesn't need to
+// client-supplied, createOnboardingLink's contract); mobile doesn't need to
 // land on them: getStripeStatus re-syncs the gate flags live (it re-reads the
 // account from Stripe), so re-polling on browser dismiss AND on app
 // re-foreground covers both the in-app-browser path and a user who bounced
@@ -825,7 +825,7 @@ const setupPayouts = async () => {
       getFirebase().functions, "createOnboardingLink")({ profileId });
     onboardingInFlight.current = true;
     await WebBrowser.openBrowserAsync(res.data.url);
-    // Browser dismissed — whatever happened in there, re-read the truth.
+    // Browser dismissed, whatever happened in there, re-read the truth.
     onboardingInFlight.current = false;
     setReloadKey((k) => k + 1);
   } catch (e) {
@@ -849,7 +849,7 @@ useEffect(() => {
 3. HTML → RN primitives throughout; `formatCents`/`formatGigDateTime` from `../gigs/GigForms`;
    the "first payout may be held ~7 days" line and the delinquent notice travel verbatim.
 4. **No admin gating client-side** (spec §4): buttons render for any member; a non-admin's press
-   surfaces the server's permission refusal verbatim — exactly web's posture.
+   surfaces the server's permission refusal verbatim, exactly web's posture.
 
 - [ ] **Step 2: Swap the dashboard mount**
 
@@ -874,12 +874,12 @@ Run: `pnpm --filter @gatekeep/mobile typecheck && pnpm --filter @gatekeep/mobile
 
 ```bash
 git add apps/mobile
-git commit -m "feat(sp5b): full earnings panel — Stripe onboarding + cash-out on mobile"
+git commit -m "feat(sp5b): full earnings panel, Stripe onboarding + cash-out on mobile"
 ```
 
 ---
 
-### Task 8: README — surfaces rewrite, launch checklist, device smoke walkthrough
+### Task 8: README, surfaces rewrite, launch checklist, device smoke walkthrough
 
 **Files:**
 - Modify: `README.md`
@@ -892,7 +892,7 @@ action set natively (PaymentSheet save-card + pay-past-due with Apple Pay/Google
 Stripe Express onboarding, cash-out, true-ups, gates, delinquency banner), sharing row-state
 mapping AND fee previews with web via `@gatekeep/shared` (`paymentDisplay.ts`,
 `feePreviews.ts`); Stripe-hosted onboarding still returns to the web pages by design
-(server-built `APP_ORIGIN` URLs — mobile re-syncs status on re-foreground instead).
+(server-built `APP_ORIGIN` URLs, mobile re-syncs status on re-foreground instead).
 
 - [ ] **Step 2: Launch checklist additions**
 
@@ -904,9 +904,9 @@ Add to the launch checklist (new "Sub-project 5b" grouping, wording from spec §
    Google Pay in test mode.)
 3. Set `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` as an EAS environment variable (dashboard or
    `eas env:create`), plus `apps/mobile/.env` for local dev-client runs. `eas.json` stays
-   key-free. No key = keyless mode (sheets skipped — emulator dev posture).
+   key-free. No key = keyless mode (sheets skipped, emulator dev posture).
 4. Cut a NEW EAS dev-client build for both platforms before device testing
-   (`npx eas-cli build --profile development --platform all` from `apps/mobile/`) — the Stripe
+   (`npx eas-cli build --profile development --platform all` from `apps/mobile/`), the Stripe
    native module changed the binary.
 5. `APP_ORIGIN` must be set on deployed functions before testing onboarding from a device (the
    Stripe return/refresh pages live on web).
@@ -925,7 +925,7 @@ returned fee); a perHour true-up whose preview delta matches the settled charge.
 
 ```bash
 git add README.md
-git commit -m "docs(sp5b): README — mobile payments surfaces, launch checklist, smoke walkthrough"
+git commit -m "docs(sp5b): README, mobile payments surfaces, launch checklist, smoke walkthrough"
 ```
 
 ---
@@ -934,15 +934,15 @@ git commit -m "docs(sp5b): README — mobile payments surfaces, launch checklist
 
 **Files:** none (verification only; fix anything red, folding fixes into the responsible area).
 
-- [ ] **Step 1:** `pnpm typecheck` — Expected: 5/5 green.
-- [ ] **Step 2:** `pnpm --filter @gatekeep/shared test` — Expected: all pass (149 + new).
-- [ ] **Step 3:** `pnpm emu:test` (single blocking foreground call; `FUNCTIONS_DISCOVERY_TIMEOUT=60`)
-  — Expected: 578 pass (backend untouched — any failure is environmental or a shared-package
+- [ ] **Step 1:** `pnpm typecheck`, Expected: 5/5 green.
+- [ ] **Step 2:** `pnpm --filter @gatekeep/shared test`, Expected: all pass (149 + new).
+- [ ] **Step 3:** `pnpm emu:test` (single blocking foreground call; `FUNCTIONS_DISCOVERY_TIMEOUT=60`),
+  Expected: 578 pass (backend untouched, any failure is environmental or a shared-package
   regression; investigate, don't rerun blindly).
-- [ ] **Step 4:** `pnpm emu:rules` — Expected: 77 pass.
-- [ ] **Step 5:** `pnpm --filter @gatekeep/web lint && pnpm --filter @gatekeep/web build` — clean.
-- [ ] **Step 6:** `pnpm --filter @gatekeep/mobile lint` — 0 errors.
-- [ ] **Step 7:** `cd apps/mobile && npx expo export --platform ios` — bundles.
+- [ ] **Step 4:** `pnpm emu:rules`, Expected: 77 pass.
+- [ ] **Step 5:** `pnpm --filter @gatekeep/web lint && pnpm --filter @gatekeep/web build`, clean.
+- [ ] **Step 6:** `pnpm --filter @gatekeep/mobile lint`, 0 errors.
+- [ ] **Step 7:** `cd apps/mobile && npx expo export --platform ios`, bundles.
 - [ ] **Step 8:** Commit anything the gates forced, then hand off: device verification requires
-  the operator steps (README, Task 8) — a new EAS dev build with the publishable key, merchant
+  the operator steps (README, Task 8), a new EAS dev build with the publishable key, merchant
   ID, and the smoke walkthrough. Those are the owner's manual steps, not this plan's.
