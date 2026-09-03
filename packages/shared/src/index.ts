@@ -6,3 +6,4 @@ export * from "./paymentDisplay.js";
 export * from "./messages.js";
 export * from "./feePreviews.js";
 export * from "./discover.js";
+export * from "./notificationHref.js";

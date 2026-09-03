@@ -153,3 +153,19 @@ export const FOLLOW_LIMIT_MESSAGE = "You are following the maximum number of art
 export const SHOW_POST_LIMIT_MESSAGE = "You have already posted three times about this show.";
 export const SHOW_POST_RATE_MESSAGE = "Give it ten minutes before posting again.";
 export const SHOW_POST_EVENT_CLOSED_MESSAGE = "This show has ended, so posts are closed.";
+
+// ---------- Sub-project 10 hardening ----------
+export const EMAIL_NOT_VERIFIED_MESSAGE = "Please verify your email address first.";
+export const DELETE_PROFILE_BALANCE_MESSAGE = "This profile still has a Stripe balance. Pay it out before deleting.";
+export const DELETE_PROFILE_DELINQUENT_MESSAGE = "This profile has an overdue payment. Settle it before deleting.";
+export const DELETE_PROFILE_PAYMENTS_MESSAGE = "This profile has bookings with money still moving. Wait for them to settle before deleting.";
+export const DELETE_PROFILE_EVENTS_MESSAGE = "This profile has a published or unsettled event. Cancel or settle it before deleting.";
+export const DELETE_ACCOUNT_TICKETS_MESSAGE = "You hold tickets to an upcoming event. Transfer them or wait until the event ends before deleting your account.";
+export const DELETE_ACCOUNT_TRANSFERS_MESSAGE = "You have a ticket transfer in progress. Resolve it before deleting your account.";
+export const DELETE_ACCOUNT_ORDERS_MESSAGE = "You have a ticket order in progress. Let it finish or cancel it before deleting your account.";
+export const CHECK_IN_TOO_EARLY_MESSAGE = "Check-in opens 12 hours before the event starts.";
+export const GIG_ALREADY_PROMOTED_MESSAGE = "This gig already has an event.";
+export const PENDING_ORDERS_CAP_MESSAGE = "You have too many ticket orders in progress. Finish or cancel one first.";
+export const THREAD_FULL_MESSAGE = "Thread is full: accept, decline or withdraw.";
+export const SCANNER_OFFLINE_MESSAGE = "Couldn't reach GateKeep. Try again.";
+export const SALES_FINAL_LINE = "All sales are final unless the event is cancelled or the organizer refunds you. Service fee included in the total.";

@@ -18,6 +18,9 @@ export interface UserDoc {
   displayNameLower?: string;
   // SP7, stamped by markGenrePickerSeen
   genrePickerSeenAt?: number;
+  // SP10: stamped when this user's own profile is rejected, mirrors
+  // ProfileDoc.lastRejectedAt at the user level for account-scoped gates.
+  lastProfileRejectedAt?: number;
 }
 
 export interface ProfileDoc {
@@ -82,7 +85,10 @@ export interface AuditLogDoc {
     // (releaseStuckSaga) after reconciling the Stripe side by hand.
     | "booking_saga_released"
     // SP7 Task 6: an admin removed a musician's show post (not the author).
-    | "show_post_removed";
+    | "show_post_removed"
+    // SP10 hardening: an admin took down a published event; an account
+    // deletion completed; a profile's Stripe ids were cleared on deletion.
+    | "event_taken_down" | "account_deleted" | "profile_deleted_stripe_ids";
   targetId: string;          // profileId, uid, or bookingId (booking_saga_released)
   detail: string;
   at: number;
@@ -107,6 +113,15 @@ export interface NotificationDoc {
   // SP7: eventId for show_announced / show_rescheduled / show_post; the artist's profileId for new_music.
   refId?: string;
 }
+
+// ---------- Sub-project 10 hardening ----------
+export const CHECK_IN_OPENS_BEFORE_MS = 12 * 3600 * 1000;
+export const PENDING_ORDERS_PER_USER_CAP = 3;
+export const SETTLEMENT_CLAIM_STALE_MS = 24 * 3600 * 1000;
+export const WEBHOOK_SYNC_OWNER_WINDOW_MS = 15 * 60 * 1000;
+export const TICKET_ORDER_STUCK_AFTER_MS = 2 * 3600 * 1000;
+export const POSTER_UPLOAD_TTL_MS = 24 * 3600 * 1000;
+export type NotificationKind = NotificationDoc["kind"];
 
 export interface ProfileDraftInput {
   type: ProfileType;
@@ -275,6 +290,11 @@ export interface GigDoc {
   // booked-musician reveal rule can both read it, it names the booked act
   // only, no terms.
   bookingId: string | null; bookedMusicianProfileId: string | null;
+  // SP10: set when this gig is promoted to an event (GIG_ALREADY_PROMOTED_MESSAGE
+  // guards a second promotion), mirrors the series-level FillMode for a
+  // standalone (non-series) gig. Optional/backward-compatible: absent on every
+  // pre-SP10 gig and on any gig that was never promoted.
+  fillMode?: "whole_run" | "per_occurrence" | null;
 }
 // gigs/{id}/private/location:
 export interface GigPrivateLocation {
@@ -600,6 +620,10 @@ export interface DepositState {
   // and an `unpaid` deposit can also be carrying a birth charge left
   // `processing` by the sweep. Optional; absent means null.
   payDueIntentId?: string | null;
+  // SP10: the amount actually charged for this deposit's PaymentIntent, may
+  // differ from `sliceCents` when Stripe rounds or when a partial/legacy
+  // charge amount was recorded. Optional; absent means "use sliceCents".
+  chargeAmountCents?: number;
 }
 export interface SettlementState {
   status: SettlementStatus;
@@ -834,7 +858,12 @@ export type AdminAlertKind =
   // above); the ticket id, order id, and amount are named in `detail`.
   // Never a silent no-op: refundTicket THROWS after raising this, so the
   // caller (and the curator) sees the refund did not cleanly resolve.
-  | "ticket_refund_convergence_failed";
+  | "ticket_refund_convergence_failed"
+  // SP10 hardening: a Stripe dispute was opened against a platform charge;
+  // reversing the money for a lost dispute failed and needs an operator; a
+  // refund was issued outside the normal flows and needs reconciling; a
+  // ticket order has sat unresolved (pending, unpaid) past its stuck window.
+  | "dispute_opened" | "dispute_reversal_failed" | "external_refund" | "ticket_order_stuck";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -890,7 +919,12 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // `{kind}:{stripeId}` doc-id discipline), so a sweep retry that reissues
   // the same idempotency key and gets back the same transfer never
   // double-counts the payout.
-  | "ticket_settlement";
+  | "ticket_settlement"
+  // SP10 hardening: a Stripe dispute (chargeback) was opened against a
+  // charge this platform made, and its two possible resolutions; and a
+  // refund issued outside the normal cancellation/refund flows (an operator
+  // acting directly in Stripe, reconciled back into the ledger).
+  | "dispute_opened" | "dispute_lost" | "dispute_won" | "external_refund";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute, direction (in vs out, curator vs musician) comes from `kind`, never from sign
@@ -901,7 +935,24 @@ export interface LedgerEntry {
   // equivalent, so every SP5 entry simply omits them). Optional so every
   // existing SP5 call site keeps compiling unchanged.
   eventId?: string | null; buyerUid?: string | null;
+  // SP10 hardening: true when this row's money was sourced from a specific
+  // upstream charge/transfer this platform can point to (as opposed to a
+  // manual/reconciliation entry). Optional so every pre-SP10 ledger row and
+  // write site stays valid; absent is treated as false.
+  sourced?: boolean;
 }
+
+export interface DisputeRecord {
+  chargeId: string; intentId: string;
+  purpose: "deposit" | "settlement" | "paydue" | "paydue_deposit" | "tickets";
+  bookingId?: string; gigId?: string; orderId?: string;
+  curatorProfileId: string | null;      // null for a ticket order (the fan paid)
+  amountCents: number; feeCents: number; reason: string;
+  status: "open" | "won" | "lost";
+  reversalTransferId?: string;
+  openedAt: number; closedAt?: number;
+}
+export interface PosterUploadDoc { path: string; createdAt: number; }
 
 // ---------- Sub-project 6: events & ticketing ----------
 
@@ -948,6 +999,11 @@ export interface EventDoc {
   curatorGenres?: string[];
   priceFromCents?: number | null;
   hasFreeTier?: boolean;
+  // SP10 hardening: epoch ms a settlement/takedown-adjacent claim was made
+  // against this event (distinct from settlementStartedAt's Stripe-transfer
+  // CAS above), used by the hardening sweep's own claim discipline. Optional;
+  // absent means "no claim in flight".
+  settlementClaimedAt?: number;
 }
 export interface TicketTierDoc {
   name: string; priceCents: number;        // 0 = free RSVP
@@ -972,6 +1028,11 @@ export interface TicketOrderDoc {
   // (100% of face value of paid, non-refunded tickets).
   refundedFaceCents: number;
   createdAt: number; expiresAt: number; paidAt?: number;
+  // SP10 hardening: set when a buyer disputes (charges back) this order's
+  // PaymentIntent; mirrors DisputeRecord's status for a quick read off the
+  // order itself. Optional; absent means "no dispute".
+  disputeId?: string;
+  disputeStatus?: "open" | "won" | "lost";
 }
 export type TicketStatus = "valid" | "checked_in" | "refunded" | "transferred";
 export interface TicketDoc {

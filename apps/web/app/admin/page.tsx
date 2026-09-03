@@ -1603,6 +1603,9 @@ const AUDIT_ACTION_LABEL: Record<AuditLogDoc["action"], string> = {
   booking_visibility_backfilled: "Booking visibility backfilled",
   booking_saga_released: "Booking saga released",
   show_post_removed: "Show post removed",
+  event_taken_down: "Event taken down",
+  account_deleted: "Account deleted",
+  profile_deleted_stripe_ids: "Profile deleted, Stripe ids cleared",
 };
 
 function AuditLog() {
@@ -1680,6 +1683,10 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   ticket_settlement_blocked: "Ticket settlement blocked, no payout account",
   ticket_settlement_failed: "Ticket settlement transfer failed",
   ticket_refund_convergence_failed: "Ticket refund could not converge with a transfer",
+  dispute_opened: "Dispute opened",
+  dispute_reversal_failed: "Dispute reversal failed",
+  external_refund: "External refund",
+  ticket_order_stuck: "Ticket order stuck",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on
