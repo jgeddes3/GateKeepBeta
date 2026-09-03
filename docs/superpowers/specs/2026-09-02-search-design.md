@@ -184,8 +184,11 @@ most 40 words. `words` is that list deduplicated. `tokens` is every prefix of le
 so short names always index fully). Query normalization is the same pipeline, then each word
 truncated to 12 chars, at most 10 words. A query with zero surviving words is "no text".
 
-`LAUNCH_TIMEZONE = "America/New_York"` lives in shared beside the token helpers; the owner
-confirms it before launch (section 10). Day keys come from `Intl.DateTimeFormat` with that zone.
+`LAUNCH_TIMEZONE` already exists in shared (`types.ts`, "America/New_York") and is what every
+gig and show time already displays in; the owner confirms it before launch (section 10). Day
+keys come from `Intl.DateTimeFormat` with that zone, and the day-start helper the web gig
+browse already carries (`launchTzDayStartMs` in `apps/web/src/bookings/BookingForms.tsx`) moves
+into shared so the callable, the alert matcher, and both clients bucket days identically.
 
 ### Musician home city (additive to sub-2)
 
@@ -276,11 +279,12 @@ export interface SearchOutput {
 ### Indexes (new composites)
 
 - `searchIndex`: `(kind asc, tokens array, startsAt asc)`, `(kind asc, tokens array,
-  followerCount desc)`, `(kind asc, startsAt asc)`, `(kind asc, followerCount desc)`.
+  followerCount desc)`, `(kind asc, startsAt asc)`, `(kind asc, followerCount desc)`, and
+  `(kind asc, endsAt asc)` for the expiry sweep.
 - `savedSearches`: `(kind asc, createdAt asc)` for the alert scan; `(uid asc, createdAt desc)`
   for the owner's list.
-- `bookings`: `(musicianProfileId asc, status asc)` if the artist busy-day rebuild's query has
-  no existing index that serves it (the implementer checks `firestore.indexes.json` first).
+- `bookings`: none. The busy-day rebuild's confirmed-bookings query is equality-only
+  (`musicianProfileId`, `status`), which Firestore serves by merging single-field indexes.
 
 ## 5. Backend (`functions/src`)
 
