@@ -957,14 +957,13 @@ needs a fresh dev-client build before any of this works
 
 ### Sub-project 7 launch checklist (fan discovery)
 
-- **New composite indexes deploy with `firebase deploy`**: sub-project 7 adds 9 composite indexes to
-  `firestore.indexes.json` (2 `events`, 5 `profiles`, 1 `follows`, 1 `posts`):
+- **New composite indexes deploy with `firebase deploy`**: sub-project 7 adds 8 composite indexes to
+  `firestore.indexes.json` (2 `events`, 4 `profiles`, 1 `follows`, 1 `posts`):
   - `events (status, genres ARRAY_CONTAINS, startsAt)`
   - `events (status, hasFreeTier, startsAt)`
   - `profiles (type, status, name)`
   - `profiles (type, status, portfolio.genres ARRAY_CONTAINS, name)`
   - `profiles (type, status, updatedAt desc)`
-  - `profiles (type, subtype, status)`
   - `profiles (type, subtype, status, updatedAt desc)`
   - `follows (uid, targetType, createdAt desc)`
   - `posts (status, createdAt desc)`

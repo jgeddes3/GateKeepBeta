@@ -192,7 +192,7 @@ type DeckPreview = { trackPath: string; startSec: number; durationSec: number; a
 type DeckCard =
   | { kind: "show"; id: string; eventId: string; title: string; startsAt: number; endsAt: number;
       venueName: string; neighborhood: string; distanceMeters: number | null; posterPath: string | null;
-      lineupNames: string[]; curatorProfileId: string; curatorHandle: string;
+      lineupNames: string[]; curatorProfileId: string; curatorHandle: string | null;
       priceFromCents: number | null; hasFreeTier: boolean; latestPost: { text: string; artistName: string } | null;
       genres: string[]; preview: DeckPreview }
   | { kind: "artist"; id: string; profileId: string; handle: string; name: string; subtype: MusicianSubtype;

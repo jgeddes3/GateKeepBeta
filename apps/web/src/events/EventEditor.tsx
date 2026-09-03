@@ -154,16 +154,26 @@ function LineupFields({ lineup, onChange }: { lineup: EventAct[]; onChange: (v: 
 // already use for the identical "pick up to 3 from GENRES" shape, so this
 // doesn't invent a fourth genre-picker treatment.
 function GenresFields({ selected, onChange }: { selected: string[]; onChange: (v: string[]) => void }) {
+  const atCap = selected.length >= 3;
   const toggle = (g: string) =>
     onChange(selected.includes(g) ? selected.filter((x) => x !== g) : selected.length < 3 ? [...selected, g] : selected);
   return (
     <div className="grid gap-2">
       <div className="flex flex-wrap gap-2">
-        {GENRES.map((g) => (
-          <Chip key={g} active={selected.includes(g)} onClick={() => toggle(g)}>
-            {formatChipLabel(g)}
-          </Chip>
-        ))}
+        {/* Once 3 are selected, an unselected chip disables rather than
+            accepting a silent no-op click (toggle's own `selected.length < 3`
+            guard already refuses the fourth pick; this makes that refusal
+            visible on the chip itself). An already-selected chip stays
+            enabled so it can still be deselected at the cap. Parity with the
+            RN twin, which took this in its own fix round. */}
+        {GENRES.map((g) => {
+          const active = selected.includes(g);
+          return (
+            <Chip key={g} active={active} disabled={atCap && !active} onClick={() => toggle(g)}>
+              {formatChipLabel(g)}
+            </Chip>
+          );
+        })}
       </div>
       <p className="font-sora text-xs text-gk-muted">Used when your acts have no GateKeep profile. Up to three.</p>
     </div>

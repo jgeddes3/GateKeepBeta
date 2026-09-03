@@ -64,7 +64,10 @@ export function DiscoverClient() {
   const { user, loading } = useAuth();
   const router = useRouter();
 
-  useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
+  // Carries `next` so a signed-out visitor arriving from the landing page's
+  // "Find a show" path lands back here after signing in, not on /dashboard.
+  // app/sign-in/page.tsx's own isSafeNext validates it server-side.
+  useEffect(() => { if (!loading && !user) router.replace("/sign-in?next=/discover"); }, [user, loading, router]);
 
   if (loading || !user) return <DiscoverSkeleton />;
 

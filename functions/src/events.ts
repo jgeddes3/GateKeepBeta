@@ -360,7 +360,13 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
     // A date change reaches every existing follower (venue/artist/genre) AND
     // every current valid/checked-in ticket holder, keyed per new date so a
     // second reschedule to a DIFFERENT date notifies again.
-    if (input.startsAt !== event.startsAt) {
+    // Compared at minute granularity, not raw milliseconds: the editor forms
+    // on both platforms bind a minute-precision datetime control, so an
+    // unchanged Save on an event whose stored startsAt carries seconds would
+    // otherwise read as a reschedule and tell every follower and ticket
+    // holder the show moved.
+    const rescheduled = Math.floor(input.startsAt / 60_000) !== Math.floor(event.startsAt / 60_000);
+    if (rescheduled) {
       // Best-effort, post-commit notification. A failure here must never
       // surface as an error on an already-committed reschedule.
       try {

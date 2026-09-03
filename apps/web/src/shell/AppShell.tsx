@@ -136,7 +136,11 @@ function navItemsFor(context: NavContext): NavItem[] {
       tickets,
     ];
   }
-  return [discover, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
+  // Dashboard stays in the generic array too: /dashboard is where the web
+  // notification inbox lives, so dropping it here would leave a profile-less
+  // fan (the one context that never reaches /dashboard by any other nav
+  // route) with no way to their own notifications.
+  return [discover, dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
 }
 
 // Which single nav item, if any, is "active" for the current route. A

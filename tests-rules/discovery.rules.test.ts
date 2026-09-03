@@ -75,6 +75,15 @@ describe("show posts", () => {
     await assertSucceeds(getDoc(doc(anon, "events/ev1/posts/p1")));
     await assertSucceeds(getDocs(query(collection(anon, "events/ev1/posts"), where("status", "==", "live"))));
   });
+  it("the per-act thread query (status plus musicianProfileId) lists anonymously", async () => {
+    // ShowPosts.tsx's own fetchLivePosts on both platforms: two equality
+    // clauses, no orderBy. The status pin the rules require is still in the
+    // query, so narrowing to one act does not cost the proof.
+    await seedEvent("ev1"); await seedPost("ev1", "p1");
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDocs(query(collection(anon, "events/ev1/posts"),
+      where("status", "==", "live"), where("musicianProfileId", "==", "mus1"))));
+  });
   it("a removed post is hidden from the public but visible to the author profile, curator members, and admin", async () => {
     await seedEvent("ev1"); await seedPost("ev1", "p1", "removed");
     await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "events/ev1/posts/p1")));

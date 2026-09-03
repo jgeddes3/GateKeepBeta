@@ -196,6 +196,9 @@ export function DeckScreen() {
   // card count, by the effect below, for the viewability callback that is
   // registered once and can never see a later render's values.
   const loadPageRef = useRef<((reset: boolean) => Promise<void>) | null>(null);
+  // Declared here, above loadPage, for the same reason loadPageRef is: the
+  // reset branch below reaches for it to clear the audio hook's silent set.
+  const audioRef = useRef(audio);
 
   const loadPage = useCallback(async (reset: boolean) => {
     if (inFlight.current) {
@@ -225,6 +228,10 @@ export function DeckScreen() {
         shownIds.current = [];
         exhausted.current = false;
         visibleCard.current = null;
+        // A fresh deck deserves a fresh try at every preview: a track that
+        // failed once for a transient reason should not stay silent across a
+        // refresh the fan asked for.
+        audioRef.current.clearSilent();
         knownIds.current = new Set(data.cards.map((c) => c.id));
         setCards(data.cards);
         if (data.cards.length === 0) exhausted.current = true;
@@ -260,7 +267,6 @@ export function DeckScreen() {
     }
   }, [location.location]);
 
-  const audioRef = useRef(audio);
   const cardCount = useRef(0);
   useEffect(() => {
     loadPageRef.current = loadPage;

@@ -107,9 +107,11 @@ interface CreateEventPayload {
 // override the event's discovery genres directly, for when its lineup is all
 // external acts with no GateKeep profile of their own to derive genres from
 // (EventDoc.genres' own doc comment: curatorGenres wins when set, else the
-// union of lineup booking acts' portfolio.genres). Byte-for-byte the web
-// twin's own GenresFields (apps/web/src/events/EventEditor.tsx), reusing the
-// same Chip primitive BioGenresForm's own genre picker already uses. ----------
+// union of lineup booking acts' portfolio.genres). The RN twin of web's own
+// GenresFields (apps/web/src/events/EventEditor.tsx): same GENRES list, same
+// 3-pick cap, same at-cap disabled state and same helper copy, built on this
+// app's Chip primitive (BioGenresForm's own genre picker already uses it)
+// rather than web's. ----------
 function GenresFields({ selected, onChange }: { selected: string[]; onChange: (v: string[]) => void }) {
   const atCap = selected.length >= 3;
   const toggle = (g: string) =>

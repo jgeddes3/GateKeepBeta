@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import {
   SHOW_POST_MAX_CHARS, SHOW_POST_LIMIT_MESSAGE, SHOW_POST_RATE_MESSAGE, SHOW_POST_EVENT_CLOSED_MESSAGE,
@@ -23,23 +23,24 @@ import { IconTrash, IconWarning } from "../ui/icons";
 
 type PostRow = { id: string } & ShowPostDoc;
 
-// events/{eventId}/posts, status=="live", orderBy(createdAt desc), limit 3:
-// the exact query firestore.indexes.json's (status, createdAt desc) posts
-// index covers. musicianProfileId is NOT a query clause (a second equality
-// clause here would need its own composite index this task doesn't add):
-// every live post across every act on the event is fetched, newest 3, then
-// narrowed to this one act client-side. On an event where several acts each
-// post, one act's own post can fall out of this top-3 window; an accepted
-// narrowing (each act's own 3-post-per-event lifetime cap keeps posts rare
-// and short-lived), not a bug.
+// events/{eventId}/posts, status=="live" AND musicianProfileId==id. Two
+// equality clauses and no orderBy, so Firestore serves this from the
+// single-field indexes it builds automatically: no composite needed, and the
+// status pin the rules require is still right there in the query. Ordering
+// and the 3-post cut happen client-side, over a result set the server caps
+// at 3 anyway (createShowPost enforces a 3-live-posts-per-act-per-event
+// limit). The earlier shape asked for the event's newest 3 live posts across
+// ALL acts and filtered afterward, which hid an act's own posts entirely
+// once another act on the same bill had posted three times.
 async function fetchLivePosts(eventId: string, musicianProfileId: string): Promise<PostRow[]> {
   const snap = await getDocs(query(
     collection(getFirebase().db, `events/${eventId}/posts`),
-    where("status", "==", "live"), orderBy("createdAt", "desc"), limit(3),
+    where("status", "==", "live"), where("musicianProfileId", "==", musicianProfileId),
   ));
   return snap.docs
     .map((d) => ({ id: d.id, ...(d.data() as ShowPostDoc) }))
-    .filter((p) => p.musicianProfileId === musicianProfileId);
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 3);
 }
 
 function showPostErrorMessage(e: unknown): string {

@@ -49,7 +49,16 @@ type BoundTrack = {
   // Set once the status listener has taken this track through seek + play,
   // so a status tick every half second does not restart it.
   started: boolean;
-  // When replace() was called for this track, for the stale-error window.
+  // Set only when replace() actually ran for this track. A card bound while
+  // the deck was blurred or the app backgrounded never gets that far (load()
+  // returns at its own canPlay gate), so the player still holds the PREVIOUS
+  // card's source: resume() has to reload rather than play().
+  replaced: boolean;
+  // When this track took over the player, for the stale-error window. Stamped
+  // at bind time as well as in load(), so a track that never reached
+  // replace() is not left at 0 (which would put it outside the window from
+  // the moment it binds, and let the previous source's queued error mark it
+  // silent forever).
   replacedAt: number;
 };
 
@@ -63,6 +72,7 @@ export interface DeckAudio {
   muted: boolean;
   toggleMute: () => void;
   stop: () => void;
+  clearSilent: () => void;
 }
 
 // expo-audio exposes mute as a property setter, and the React Compiler's
@@ -153,6 +163,7 @@ export function useDeckAudio(): DeckAudio {
     track.replacedAt = Date.now();
     try {
       player.replace({ uri: track.uri });
+      track.replaced = true;
     } catch (e) {
       markSilent(track, e);
     }
@@ -185,18 +196,21 @@ export function useDeckAudio(): DeckAudio {
       uri: publicStorageUrl(preview.trackPath),
       startSec: preview.startSec,
       started: false,
-      replacedAt: 0,
+      replaced: false,
+      replacedAt: Date.now(),
     };
     bound.current = track;
     load(track);
   }, [load, pause]);
 
   // Back from a blur or from the background. A track that already reached
-  // `started` only needs play(); one that never got that far is reloaded.
+  // `started` on its OWN source only needs play(); one that never got that
+  // far, and one that bound while the gate was shut (so `replaced` is still
+  // false and the player holds the previous card's source), is reloaded.
   const resume = useCallback(() => {
     const track = bound.current;
     if (!track || !canPlay()) return;
-    if (!track.started) {
+    if (!track.replaced || !track.started) {
       load(track);
       return;
     }
@@ -215,6 +229,15 @@ export function useDeckAudio(): DeckAudio {
     bound.current = null;
     pause();
   }, [pause]);
+
+  // Called on a deck reset (pull-to-refresh, or the re-rank once a position
+  // arrives), which hands back a fresh set of cards. Without this, a preview
+  // that failed once for a transient reason (a dropped connection, a card
+  // bound in the wrong moment) would stay silent for the whole life of the
+  // screen, even after the fan explicitly asked for a new deck.
+  const clearSilent = useCallback(() => {
+    silentIds.current.clear();
+  }, []);
 
   const toggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -241,5 +264,5 @@ export function useDeckAudio(): DeckAudio {
     return () => sub.remove();
   }, [resume, pause]);
 
-  return { bind, muted, toggleMute, stop };
+  return { bind, muted, toggleMute, stop, clearSilent };
 }
