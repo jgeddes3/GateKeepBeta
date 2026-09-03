@@ -29,8 +29,13 @@ service cloud.firestore {
       allow update: if isOwner(uid)
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['displayName', 'photoUrl', 'homeCity'])
-        && request.resource.data.get('displayName', '') is string
-        && request.resource.data.get('displayName', '').size() <= 80
+        // F7: displayName is required by UserDoc and copied into attendee
+        // rows and notification copy, so the owner may neither delete it
+        // (affectedKeys admits a FieldValue.delete) nor blank it.
+        && 'displayName' in request.resource.data
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 1
+        && request.resource.data.displayName.size() <= 80
         && (request.resource.data.get('photoUrl', null) == null
             || (request.resource.data.get('photoUrl', null) is string
                 && request.resource.data.get('photoUrl', null).matches('^https://.*')
@@ -43,18 +48,22 @@ service cloud.firestore {
       match /notifications/{noteId} {
         allow read: if isOwner(uid);
         allow update: if isOwner(uid)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+          && request.resource.data.read is bool;
         allow create, delete: if false;
       }
       match /pushTokens/{tokenId} {
         allow read: if isOwner(uid);
-        // Doc id must be a well-formed Expo push token, and the payload may
-        // only ever contain createdAt (matches push.ts's write shape),
-        // otherwise a client could write arbitrary token ids/fields into a
-        // collection a Cloud Function later fans push notifications out to.
-        allow write: if isOwner(uid)
-          && tokenId.matches('^ExponentPushToken\\[[A-Za-z0-9_-]+\\]$')
-          && request.resource.data.keys().hasOnly(['createdAt']);
+        // Doc id must be a well-formed Expo push token (bounded, F9), and the
+        // payload may only ever contain an int createdAt (push.ts's write
+        // shape; notifyUser orders by it). Split from a single `allow write`
+        // (F3): request.resource is null on a delete, so a keys() check
+        // there threw and the owner could never unregister a device.
+        allow create, update: if isOwner(uid)
+          && tokenId.matches('^ExponentPushToken\\[[A-Za-z0-9_-]{1,200}\\]$')
+          && request.resource.data.keys().hasOnly(['createdAt'])
+          && request.resource.data.createdAt is int;
+        allow delete: if isOwner(uid);
       }
     }
 
@@ -367,9 +376,11 @@ service cloud.firestore {
     }
 
     match /invites/{inviteId} {
+      // F15: admins read invites too (support: "I never got the invite").
       allow read: if signedIn()
         && (request.auth.uid == resource.data.invitedUid
-            || request.auth.uid == resource.data.invitedByUid);
+            || request.auth.uid == resource.data.invitedByUid
+            || isAdmin());
       allow write: if false; // Cloud Functions only
     }
 
@@ -379,6 +390,23 @@ service cloud.firestore {
     // stays world-readable.
     match /handles/{handle}   { allow get: if true; allow list: if false; allow write: if false; }
     match /auditLogs/{logId}  { allow read: if isAdmin(); allow write: if false; }
+
+    // ---------- Sub-project 10: hardening ----------
+    // Poster upload receipts: processPhoto writes one doc per upload nonce
+    // under the uploader's uid; the client watches it to learn the final
+    // processed path. Owner get/list only, server write only.
+    match /posterUploads/{uid}/uploads/{nonce} {
+      allow get, list: if isOwner(uid);
+      allow write: if false;
+    }
+    // Stripe dispute records (DisputeRecord): admin-read, server-write, like
+    // ledger and adminAlerts above.
+    match /disputes/{disputeId} { allow read: if isAdmin(); allow write: if false; }
+    // Events whose moderation cascade (cancel + refund) failed at the
+    // reject-from-approved touchpoint, queued for dailySweep step 9. Same
+    // internal-only shape as curatorAccessRetries.
+    match /eventCascadeRetries/{eventId} { allow read, write: if false; }
+
     match /{document=**}      { allow read, write: if false; }
   }
 }
