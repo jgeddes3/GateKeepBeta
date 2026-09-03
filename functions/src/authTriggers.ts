@@ -2,6 +2,7 @@ import * as functionsV1 from "firebase-functions/v1";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import { getFirestore } from "firebase-admin/firestore";
 import type { UserDoc } from "@gatekeep/shared";
+import { cascadeDeleteUser } from "./account.js";
 
 // v1 API: auth onCreate has no v2 equivalent yet.
 export const onUserCreated = functionsV1.auth.user().onCreate(async (user) => {
@@ -18,6 +19,15 @@ export const onUserCreated = functionsV1.auth.user().onCreate(async (user) => {
     createdAt: Date.now(),
   };
   await getFirestore().doc(`users/${user.uid}`).set(docData);
+});
+
+// SP10 Task 14 (cross #3): the console and the Admin SDK are a second
+// deletion path; without this only deleteAccount cascaded. Sole-admin is
+// logged inside cascadeDeleteUser rather than refused (nothing here can
+// refuse: the auth user is already gone). A thrown phase error is rethrown
+// so the trigger's own retry policy re-runs the idempotent cascade.
+export const onUserDeleted = functionsV1.auth.user().onDelete(async (user) => {
+  await cascadeDeleteUser(user.uid, { allowSoleAdmin: true });
 });
 
 // Task 8: the single consistency rule for users/{uid}.displayNameLower,

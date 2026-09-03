@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase-admin/app";
 initializeApp();
 
-export { onUserCreated, onUserDocWritten } from "./authTriggers.js";
+export { onUserCreated, onUserDeleted, onUserDocWritten } from "./authTriggers.js";
 export { createProfileDraft, submitProfileForReview, deleteProfile } from "./profiles.js";
 export { reviewProfile, grantAdmin } from "./review.js";
 export { inviteMember, respondToInvite, removeMember, transferAdmin, revokeInvite } from "./members.js";

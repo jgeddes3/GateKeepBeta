@@ -147,3 +147,17 @@ describe("deleteAccount refusals (SP10)", () => {
     expect(logs.docs[0].data().actorUid).toBe(fan.uid);
   });
 });
+
+describe("cascadeDeleteUser via deleteAccount (SP10)", () => {
+  it("revokes pending invites naming the uid", async () => {
+    const fan = await signUpTestUser(`cd1-${Date.now()}@test.com`);
+    const now = Date.now();
+    const ref = adb.collection("invites").doc();
+    await ref.set({
+      profileId: "p1", profileName: "Band", invitedUid: fan.uid, role: "member", label: "sax",
+      invitedByUid: "owner", status: "pending", createdAt: now,
+    });
+    await callFn("deleteAccount", {}, fan.user);
+    expect((await ref.get()).data()?.status).toBe("revoked");
+  });
+});

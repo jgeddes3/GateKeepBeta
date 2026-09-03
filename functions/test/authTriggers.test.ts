@@ -3,10 +3,12 @@ process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 
 import { describe, it, expect } from "vitest";
 import { doc, getDoc, updateDoc } from "firebase/firestore";
-import { signUpTestUser, db, wait } from "./helpers";
+import { signUpTestUser, db, wait, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getAuth as adminAuth } from "firebase-admin/auth";
 import { computeDisplayNameLowerFix } from "../src/authTriggers.js";
+import type { ProfileDraftInput } from "@gatekeep/shared";
 
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 
@@ -153,4 +155,54 @@ describe("onUserDocWritten", () => {
     },
     15_000,
   );
+});
+
+async function waitForUserDocGone(uid: string, deadline = Date.now() + 15_000) {
+  let snap = await adminFirestore(admin).doc(`users/${uid}`).get();
+  while (snap.exists && Date.now() < deadline) {
+    await wait(250);
+    snap = await adminFirestore(admin).doc(`users/${uid}`).get();
+  }
+  return snap;
+}
+
+describe("onUserDeleted", () => {
+  it("a console/Admin SDK deletion cascades: users tree, memberships, curatorAccess, pending invites revoked, offered transfers voided", async () => {
+    const { uid } = await signUpTestUser(`od1-${Date.now()}@test.com`);
+    await waitForUserDoc(uid);
+    const adb = adminFirestore(admin);
+    const now = Date.now();
+    await adb.doc(`curatorAccess/${uid}`).set({});
+    await adb.doc(`profiles/od1-profile-${now}/members/${uid}`).set({ uid, role: "member", label: "sax", joinedAt: now });
+    const inviteRef = adb.collection("invites").doc();
+    await inviteRef.set({
+      profileId: "p1", profileName: "Band", invitedUid: uid, role: "member", label: "sax",
+      invitedByUid: "owner", status: "pending", createdAt: now,
+    });
+    const transferRef = adb.collection("transfers").doc();
+    await transferRef.set({ ticketId: "t", eventId: "e", fromUid: "other", toUid: uid, status: "offered", createdAt: now, expiresAt: now + 86_400_000 });
+
+    await adminAuth(admin).deleteUser(uid);
+
+    const gone = await waitForUserDocGone(uid);
+    expect(gone.exists).toBe(false);
+    expect((await adb.doc(`curatorAccess/${uid}`).get()).exists).toBe(false);
+    expect((await adb.doc(`profiles/od1-profile-${now}/members/${uid}`).get()).exists).toBe(false);
+    expect((await inviteRef.get()).data()?.status).toBe("revoked");
+    const transfer = (await transferRef.get()).data();
+    expect(transfer?.status).toBe("voided");
+    expect(typeof transfer?.resolvedAt).toBe("number");
+  }, 30_000);
+
+  it("a sole admin deleted from the console is logged, not refused: the membership goes, the profile stays", async () => {
+    const owner = await signUpTestUser(`od2-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", { type: "musician", subtype: "solo", name: "Solo", handle: `od2_${Date.now()}` }, owner.user);
+    await adminAuth(admin).deleteUser(owner.uid);
+    const gone = await waitForUserDocGone(owner.uid);
+    expect(gone.exists).toBe(false);
+    const adb = adminFirestore(admin);
+    expect((await adb.doc(`profiles/${profileId}/members/${owner.uid}`).get()).exists).toBe(false);
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+  }, 30_000);
 });
