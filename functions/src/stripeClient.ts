@@ -168,6 +168,9 @@ export interface StripeLike {
   // other creation call.
   createIntent(params: {
     amountCents: number; idempotencyKey: string; meta: Record<string, string>;
+    // SP10 Task 21: Stripe emails a receipt in live mode when set. The buyer's
+    // verified account email, never client-supplied.
+    receiptEmail?: string;
   }): Promise<{ id: string; clientSecret: string }>;
   // SP6 Task 5: reads a PaymentIntent's CURRENT status straight from Stripe,
   // the server-side verification finalizeTicketOrder needs so it never
@@ -535,12 +538,13 @@ export class FakeStripe implements StripeLike {
       return { id, clientSecret: `${id}_secret_fake` };
     }, `${p.customerId}:${p.amountCents}`);
   }
-  async createIntent(p: { amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
+  async createIntent(p: { amountCents: number; idempotencyKey: string; meta: Record<string, string>; receiptEmail?: string }) {
     return this.idem(p.idempotencyKey, async () => {
       const id = this.newId("pi");
       await this.objRef(id).set({
         kind: "payment_intent", amountCents: p.amountCents, customerId: null,
         meta: p.meta, refundedCents: 0, status: "requires_confirmation",
+        receiptEmail: p.receiptEmail ?? null,
       });
       return { id, clientSecret: `${id}_secret_fake` };
     }, `${p.amountCents}`);
@@ -960,10 +964,11 @@ export class RealStripe implements StripeLike {
     }, { idempotencyKey: p.idempotencyKey });
     return { id: pi.id, clientSecret: pi.client_secret! };
   }
-  async createIntent(p: { amountCents: number; idempotencyKey: string; meta: Record<string, string> }) {
+  async createIntent(p: { amountCents: number; idempotencyKey: string; meta: Record<string, string>; receiptEmail?: string }) {
     const pi = await this.s.paymentIntents.create({
       amount: p.amountCents, currency: "usd", metadata: p.meta,
       automatic_payment_methods: { enabled: true },
+      ...(p.receiptEmail ? { receipt_email: p.receiptEmail } : {}),
     }, { idempotencyKey: p.idempotencyKey });
     return { id: pi.id, clientSecret: pi.client_secret! };
   }

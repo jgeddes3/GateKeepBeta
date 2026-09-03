@@ -35,6 +35,7 @@ import {
   EVENT_CANCELLED_MESSAGE, TICKET_NOT_REFUNDABLE_MESSAGE, TICKET_REFUND_WINDOW_CLOSED_MESSAGE,
   TICKET_NOT_VALID_MESSAGE, TICKET_ALREADY_CHECKED_IN_MESSAGE, TRANSFER_OFFER_SENT_MESSAGE,
   CHECK_IN_OPENS_BEFORE_MS, CHECK_IN_TOO_EARLY_MESSAGE,
+  PENDING_ORDERS_PER_USER_CAP, PENDING_ORDERS_CAP_MESSAGE,
   type EventDoc, type TicketTierDoc, type TicketOrderDoc, type TicketOrderStatus,
   type TicketIndexDoc, type TicketDoc, type TicketStatus, type AttendeeDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
@@ -107,14 +108,23 @@ export const createTicketOrder = onCall<CreateTicketOrderInput>(
     // orders for ONE event, which is small.
     const pendingOrdersQuery = db.collection("orders")
       .where("buyerUid", "==", uid).where("eventId", "==", eventId).where("status", "==", "pending");
+    // SP10 Task 21 (sp6 #15): a buyer may hold at most PENDING_ORDERS_PER_USER_CAP
+    // unpaid reservations across ALL events. Equality-only query, served by
+    // merged single-field indexes; limit() keeps the transactional read tiny.
+    const allPendingQuery = db.collection("orders")
+      .where("buyerUid", "==", uid).where("status", "==", "pending").limit(PENDING_ORDERS_PER_USER_CAP);
 
     let faceTotalCents = 0;
     let serviceFeeCents = 0;
 
     await db.runTransaction(async (tx) => {
-      const [tierSnaps, ticketIndexSnap, pendingOrdersSnap] = await Promise.all([
+      const [tierSnaps, ticketIndexSnap, pendingOrdersSnap, allPendingSnap] = await Promise.all([
         Promise.all(tierRefs.map((ref) => tx.get(ref))), tx.get(ticketIndexRef), tx.get(pendingOrdersQuery),
+        tx.get(allPendingQuery),
       ]);
+      if (allPendingSnap.size >= PENDING_ORDERS_PER_USER_CAP) {
+        throw new HttpsError("resource-exhausted", PENDING_ORDERS_CAP_MESSAGE);
+      }
       const tiers = new Map<string, TicketTierDoc>();
       tierSnaps.forEach((snap) => { if (snap.exists) tiers.set(snap.id, snap.data() as TicketTierDoc); });
 
@@ -171,10 +181,14 @@ export const createTicketOrder = onCall<CreateTicketOrderInput>(
       return { orderId: orderRef.id, clientSecret: null };
     }
 
+    // SP10 Task 21 (sp6 #7): the account email is verified (requireVerifiedEmail
+    // above), so it is safe to hand Stripe as the receipt address.
+    const receiptEmail = typeof req.auth?.token?.email === "string" ? req.auth.token.email : undefined;
     const intent = await getStripe().createIntent({
       amountCents: faceTotalCents + serviceFeeCents,
       idempotencyKey: `tickets:${orderRef.id}`,
       meta: { purpose: "tickets", orderId: orderRef.id },
+      receiptEmail,
     });
     await orderRef.update({ paymentIntentId: intent.id });
     return { orderId: orderRef.id, clientSecret: intent.clientSecret };
@@ -519,44 +533,42 @@ async function refundOrderForCancelledEvent(
   return "refunded";
 }
 
-// Cancels ONE "pending" order's PaymentIntent (if any) and expires it,
-// releasing its held tier inventory. Reuses the SP6 Task 5 expiry sweep's own
-// money-wins pattern (paymentsSweep.ts's expireOneTicketOrder) rather than
-// importing it: that step is keyed off `expiresAt` and carries its own
-// report-counter side effects, and duplicating its small, already-tested
-// shape here keeps this event-cancellation path independent of the sweep's
-// internals (and vice versa) per the "additive only" constraint on
-// paymentsSweep.ts. A pending order that goes on to PAY anyway despite the
-// event being cancelled (createTicketOrder's own known race, see events.ts's
-// cancelEvent) is caught by refundOrderForCancelledEvent above the next time
-// the sweep retries this event: this function only ever expires, never
-// refunds, a still-pending order.
-async function cancelPendingOrderForCancelledEvent(
-  db: Firestore, orderRef: FirebaseFirestore.DocumentReference,
-): Promise<"expired" | "deferred" | "skipped"> {
+// Cancels ONE "pending" order's PaymentIntent (if any) and releases its
+// held tier inventory, landing the order in `finalStatus`. Reuses the SP6
+// Task 5 expiry sweep's money-wins pattern (paymentsSweep.ts's
+// expireOneTicketOrder) rather than importing it: that step is keyed off
+// expiresAt and carries its own report counters. SP10 Task 21 lifted this
+// out of cancelPendingOrderForCancelledEvent so the buyer's own
+// cancelTicketOrder shares exactly one release transaction.
+//
+// "deferred" means the intent could not be confirmed cancelable (most
+// commonly: it already succeeded, money moved); the order is left pending
+// for finalizeTicketOrder / the webhook / refundOrderForCancelledEvent.
+async function releasePendingOrder(
+  db: Firestore, orderRef: FirebaseFirestore.DocumentReference, finalStatus: "expired" | "cancelled",
+): Promise<"released" | "deferred" | "skipped"> {
   const freshSnap = await orderRef.get();
   const order = freshSnap.data() as TicketOrderDoc | undefined;
-  if (!order || order.status !== "pending") return "skipped"; // resolved since the query ran
+  if (!order || order.status !== "pending") return "skipped"; // resolved since the caller's read
 
   if (order.paymentIntentId) {
     try {
       await getStripe().cancelIntent(order.paymentIntentId);
     } catch (e) {
       // Ambiguous throw (cancelIntent's own doc comment): either the intent
-      // already succeeded (money moved, defer to refundOrderForCancelledEvent
-      // on the next retry) or it was already canceled by a prior pass whose
-      // Firestore transaction below never committed. Only the second case is
-      // safe to proceed on.
+      // already succeeded, or it was already canceled by a prior pass whose
+      // Firestore transaction below never committed. Only the second case
+      // is safe to proceed on.
       let status: string | undefined;
       try {
         status = (await getStripe().retrieveIntentStatus(order.paymentIntentId)).status;
       } catch (statusError) {
         console.error(
-          `cancelPendingOrderForCancelledEvent: could not confirm intent ${order.paymentIntentId}'s status after a failed cancel for order ${orderRef.id}`, statusError);
+          `releasePendingOrder: could not confirm intent ${order.paymentIntentId}'s status after a failed cancel for order ${orderRef.id}`, statusError);
       }
       if (status !== "canceled") {
         console.info(
-          `cancelPendingOrderForCancelledEvent: order ${orderRef.id} left pending, intent ${order.paymentIntentId} could not be confirmed cancelable (status=${status ?? "unknown"})`, e);
+          `releasePendingOrder: order ${orderRef.id} left pending, intent ${order.paymentIntentId} could not be confirmed cancelable (status=${status ?? "unknown"})`, e);
         return "deferred";
       }
     }
@@ -569,10 +581,50 @@ async function cancelPendingOrderForCancelledEvent(
     for (const item of o.items) {
       tx.update(db.doc(`events/${o.eventId}/tiers/${item.tierId}`), { soldCount: FieldValue.increment(-item.quantity) });
     }
-    tx.update(orderRef, { status: "expired" });
+    tx.update(orderRef, { status: finalStatus });
   });
-  return "expired";
+  return "released";
 }
+
+async function cancelPendingOrderForCancelledEvent(
+  db: Firestore, orderRef: FirebaseFirestore.DocumentReference,
+): Promise<"expired" | "deferred" | "skipped"> {
+  const outcome = await releasePendingOrder(db, orderRef, "expired");
+  return outcome === "released" ? "expired" : outcome;
+}
+
+const ORDER_ALREADY_PAID_MESSAGE = "This order has already been paid. Check your tickets.";
+
+export interface CancelTicketOrderInput { orderId: string; }
+export interface CancelTicketOrderResult { orderStatus: TicketOrderStatus; }
+
+// SP10 Task 21 (sp6 #2): the buyer's own release. A dismissed PaymentSheet or
+// a web Cancel used to leave a 10 to 70 minute hold the fan could not undo,
+// which read as "Sold out" to them for their own seats. Pending only; a
+// resolved order just echoes its status (the client can call this freely
+// from any cancel path). Nothing here refunds: a pending order has never
+// been charged, and an intent that turns out to have succeeded is left for
+// finalizeTicketOrder, with a message that says so.
+export const cancelTicketOrder = onCall<CancelTicketOrderInput>(
+  { region: "us-central1", secrets: [stripeSecretKey] }, async (req): Promise<CancelTicketOrderResult> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const { orderId } = req.data ?? ({} as CancelTicketOrderInput);
+    if (!isValidDocId(orderId)) throw new HttpsError("invalid-argument", "An order id is required.");
+
+    const db = getFirestore();
+    const orderRef = db.doc(`orders/${orderId}`);
+    const order = (await orderRef.get()).data() as TicketOrderDoc | undefined;
+    // Same not-found for "no such order" and "someone else's order": an order
+    // id must never be an oracle for another buyer's activity.
+    if (!order || order.buyerUid !== uid) throw new HttpsError("not-found", "Order not found.");
+    if (order.status !== "pending") return { orderStatus: order.status };
+
+    const outcome = await releasePendingOrder(db, orderRef, "cancelled");
+    if (outcome === "deferred") throw new HttpsError("failed-precondition", ORDER_ALREADY_PAID_MESSAGE);
+    const fresh = (await orderRef.get()).data() as TicketOrderDoc;
+    return { orderStatus: fresh.status };
+  });
 
 export interface CancelledEventOrdersResult {
   ordersRefunded: number; pendingExpired: number; pendingDeferred: number; errors: number;

@@ -55,6 +55,8 @@ const STRIPE_REACHING: ReadonlyArray<{ name: string; file: string; why: string }
   { name: "dailySweep", file: "scheduled.ts", why: "SP10 Task 10, step 9: drainEventCascadeRetries -> cancelAndRefundEventForModeration -> refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent" },
   { name: "takedownEvent", file: "eventsAdmin.ts", why: "SP10 Task 11: admin takedown -> cancelAndRefundEventForModeration -> refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent" },
   { name: "deleteProfile", file: "profiles.ts", why: "SP10 Task 12: the money gate's assertNoMoneyOutstanding calls getStripe().getBalances on a connected account" },
+  { name: "cancelTicketOrder", file: "ticketing.ts", why: "SP10 Task 21: releasePendingOrder -> getStripe().cancelIntent / retrieveIntentStatus" },
+  { name: "ticketOrderExpiry", file: "paymentsSweep.ts", why: "SP10 Task 21: onSchedule every 5 minutes, runTicketOrderExpiry -> getStripe().cancelIntent" },
 ];
 
 const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");

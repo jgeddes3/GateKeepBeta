@@ -1018,7 +1018,9 @@ export interface TicketTierDoc {
   sortOrder: number;
 }
 export interface TicketFeePolicy { ticketFeePct: number; ticketFeeFixedCents: number; ticketFeeCapCents: number; }
-export type TicketOrderStatus = "pending" | "paid" | "expired" | "cancelled_refunded";
+// "cancelled": released by the buyer through cancelTicketOrder (SP10 Task 21);
+// nothing was charged. "expired": released by the expiry sweep.
+export type TicketOrderStatus = "pending" | "paid" | "expired" | "cancelled" | "cancelled_refunded";
 export interface TicketOrderItem { tierId: string; quantity: number; unitPriceCents: number; tierName: string; }
 export interface TicketOrderDoc {
   buyerUid: string; eventId: string; curatorProfileId: string;

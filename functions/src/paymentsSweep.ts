@@ -1347,6 +1347,35 @@ async function expireTicketOrders(
   }
 }
 
+export interface TicketOrderExpiryReport {
+  ticketOrdersExpired: number; ticketOrdersExpiryDeferred: number;
+  // SP10 Task 21 controller addition: the brief's own shape named only these
+  // two plus errors; Task 8/9's deferred-branch resolutions (a succeeded
+  // intent completed inline, or an intent stuck for hours) are load-bearing
+  // counters this five-minute clock must surface too, not just the hourly
+  // sweep, so they are carried through here rather than dropped.
+  ticketOrdersReconciled: number; ticketOrdersStuck: number;
+  errors: number;
+}
+
+// SP10 Task 21 (sp6 #2, #15): the expiry step on its own clock. Called every
+// 5 minutes by `ticketOrderExpiry` below so an abandoned hold lasts about
+// ORDER_TTL_MS + 5 min instead of up to 70 min, and by the hourly sweep's
+// step 8 as the backstop. Runs against a fresh PaymentsSweepReport so
+// expireOneTicketOrder's counters keep their shape.
+export async function runTicketOrderExpiry(now: number): Promise<TicketOrderExpiryReport> {
+  const db = getFirestore();
+  const report = emptyReport();
+  await expireTicketOrders(db, now, report);
+  return {
+    ticketOrdersExpired: report.ticketOrdersExpired,
+    ticketOrdersExpiryDeferred: report.ticketOrdersExpiryDeferred,
+    ticketOrdersReconciled: report.ticketOrdersReconciled,
+    ticketOrdersStuck: report.ticketOrdersStuck,
+    errors: report.errors.ticketOrderExpire ?? 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Step 9: RETRY cancelled-event ticket refunds (SP6 Task 6)
 // ---------------------------------------------------------------------------
@@ -1776,7 +1805,17 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
       }),
     },
     { name: "expiredRefunds", run: () => refundExpiredBookingDeposits(db, now, report) },
-    { name: "ticketOrderExpiry", run: () => expireTicketOrders(db, now, report) },
+    {
+      name: "ticketOrderExpiry",
+      run: async () => {
+        const r = await runTicketOrderExpiry(now);
+        report.ticketOrdersExpired += r.ticketOrdersExpired;
+        report.ticketOrdersExpiryDeferred += r.ticketOrdersExpiryDeferred;
+        report.ticketOrdersReconciled += r.ticketOrdersReconciled;
+        report.ticketOrdersStuck += r.ticketOrdersStuck;
+        if (r.errors > 0) report.errors.ticketOrderExpire = (report.errors.ticketOrderExpire ?? 0) + r.errors;
+      },
+    },
     { name: "cancelledEventRefunds", run: () => retryCancelledEventRefunds(db, now, report) },
     { name: "ticketSettlement", run: () => settleTicketRevenue(db, now, report) },
     { name: "ticketTransferExpiry", run: () => expireTicketTransfers(db, now, report) },
@@ -1805,4 +1844,16 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
 export const paymentsSweep = onSchedule(
   { schedule: "every 1 hours", region: "us-central1", timeoutSeconds: 540, memory: "512MiB", secrets: [stripeSecretKey] },
   async () => { await runPaymentsSweep(Date.now()); },
+);
+
+// SP10 Task 21: the five-minute order-expiry clock. retryCount 3 per the
+// scheduler ruling in Task 24 (a transient Firestore/Stripe failure must not
+// hold every stale reservation for another five minutes plus). Secrets are
+// mandatory: cancelIntent reaches getStripe(), which fails closed without it.
+export const ticketOrderExpiry = onSchedule(
+  {
+    schedule: "every 5 minutes", region: "us-central1", timeoutSeconds: 240, memory: "256MiB",
+    retryCount: 3, secrets: [stripeSecretKey],
+  },
+  async () => { await runTicketOrderExpiry(Date.now()); },
 );

@@ -5,7 +5,7 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder } from "../src/geocode.js";
-import { type ProfileDraftInput, type EventDoc, type GigDoc } from "@gatekeep/shared";
+import { type ProfileDraftInput, type EventDoc, type GigDoc, GIG_ALREADY_PROMOTED_MESSAGE } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -251,6 +251,15 @@ describe("createEvent", () => {
     await expect(callFn(
       "createEvent", { curatorProfileId: profileId, source: { kind: "gig", gigId }, ...eventContent() }, owner.user,
     )).rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("SP10 Task 21: refuses a second event for the same gig with GIG_ALREADY_PROMOTED_MESSAGE", async () => {
+    const { curator, gigId } = await makeFilledGig("ce2b");
+    await callFn("createEvent",
+      { curatorProfileId: curator.profileId, source: { kind: "gig", gigId }, ...eventContent() }, curator.owner.user);
+    await expect(callFn("createEvent",
+      { curatorProfileId: curator.profileId, source: { kind: "gig", gigId }, ...eventContent() }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: expect.stringContaining(GIG_ALREADY_PROMOTED_MESSAGE) });
   });
 
   it("rejects a gig that belongs to a different curator profile", async () => {

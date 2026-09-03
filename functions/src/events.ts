@@ -19,7 +19,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, deriveEventGenres, tierProjection, SETTLEMENT_CLAIM_STALE_MS,
+  isValidDocId, deriveEventGenres, tierProjection, SETTLEMENT_CLAIM_STALE_MS, GIG_ALREADY_PROMOTED_MESSAGE,
   type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
   type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
   type AttendeeDoc,
@@ -244,6 +244,13 @@ export const createEvent = onCall<CreateEventInput>(
       }
       if (gig.status !== "filled") {
         throw new HttpsError("failed-precondition", "Only a filled gig can be promoted to an event.");
+      }
+      // SP10 Task 21: a gig promotes to at most one live event. A cancelled
+      // event does not block a fresh promotion (the curator may be re-running
+      // the show); anything draft, published or completed does.
+      const priorEvents = await db.collection("events").where("gigId", "==", gigId).get();
+      if (priorEvents.docs.some((d) => (d.data() as EventDoc).status !== "cancelled")) {
+        throw new HttpsError("failed-precondition", GIG_ALREADY_PROMOTED_MESSAGE);
       }
       location = gig.location;
       const privLocSnap = await db.doc(`gigs/${gigId}/private/location`).get();

@@ -18,7 +18,7 @@ export { backfillBookingVisibility } from "./bookingVisibility.js";
 export { applyToGig, offerGig, counterBooking, declineBooking, withdrawBooking, acceptBooking } from "./bookings.js";
 export { cancelBooking, cancelOccurrence, reportNoShow, removeReliabilityMark } from "./bookingLifecycle.js";
 export { stripeWebhook } from "./paymentsWebhook.js";
-export { paymentsSweep } from "./paymentsSweep.js";
+export { paymentsSweep, ticketOrderExpiry } from "./paymentsSweep.js";
 export {
   createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus, releaseStuckSaga,
   confirmOccurrenceActuals, payPastDue,
@@ -29,7 +29,8 @@ export { requestPayout } from "./paymentsPayouts.js";
 export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } from "./events.js";
 export { takedownEvent } from "./eventsAdmin.js";
 export {
-  createTicketOrder, finalizeTicketOrder, refundTicket, checkInTicket, undoCheckIn, offerTransfer, respondToTransfer,
+  createTicketOrder, finalizeTicketOrder, cancelTicketOrder, refundTicket, checkInTicket, undoCheckIn,
+  offerTransfer, respondToTransfer,
 } from "./ticketing.js";
 export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js";
 export { createShowPost, removeShowPost } from "./showPosts.js";

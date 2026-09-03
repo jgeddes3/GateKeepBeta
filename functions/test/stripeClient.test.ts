@@ -124,6 +124,15 @@ describe("FakeStripe", () => {
     expect(clientSecret).toBe(`${id}_secret_fake`);
   });
 
+  it("createIntent records receiptEmail on the fake intent, null when omitted (SP10 Task 21)", async () => {
+    const withEmail = await fake.createIntent({
+      amountCents: 1500, idempotencyKey: `cir-${Date.now()}`, meta: {}, receiptEmail: "fan@test.com",
+    });
+    expect((await adb.doc(`stripeFake/state/objects/${withEmail.id}`).get()).data()?.receiptEmail).toBe("fan@test.com");
+    const without = await fake.createIntent({ amountCents: 1500, idempotencyKey: `cin-${Date.now()}`, meta: {} });
+    expect((await adb.doc(`stripeFake/state/objects/${without.id}`).get()).data()?.receiptEmail).toBeNull();
+  });
+
   it("retrieveIntentStatus reads back a created intent's status, and throws for an unknown id", async () => {
     const { id } = await fake.createIntent({ amountCents: 500, idempotencyKey: `ris-${Date.now()}`, meta: {} });
     expect(await fake.retrieveIntentStatus(id)).toEqual({ status: "requires_confirmation" });

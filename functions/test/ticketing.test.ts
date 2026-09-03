@@ -4,8 +4,9 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   type TicketOrderDoc, type TicketDoc, type AdminAlertDoc, TICKET_ORDER_STUCK_AFTER_MS, EVENT_NOT_ON_SALE_MESSAGE,
+  PENDING_ORDERS_PER_USER_CAP, PENDING_ORDERS_CAP_MESSAGE,
 } from "@gatekeep/shared";
-import { runPaymentsSweep } from "../src/paymentsSweep.js";
+import { runPaymentsSweep, runTicketOrderExpiry } from "../src/paymentsSweep.js";
 import { ticketOrderStuckAlertId } from "../src/eventsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -546,5 +547,125 @@ describe("ticket order expiry sweep", () => {
     expect(alert?.detail).toContain("completing it failed");
     // Untouched: the failed completion made no write of its own.
     expect(((await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc).status).toBe("pending");
+    // Cleanup (SP10 Task 21): this order is permanently corrupted (deleted
+    // `items`) and permanently "pending" with `expiresAt` in the past, so it
+    // would otherwise be picked up by EVERY later expiry pass in this same
+    // emulator run (expireTicketOrders' query is global, not scoped to one
+    // test) and keep re-throwing the exact same completion error forever,
+    // poisoning any later test's error count. Deleting it here is this
+    // test's own teardown, not a behavior assertion.
+    await adb.doc(`orders/${orderId}`).delete();
+  });
+});
+
+describe("cancelTicketOrder (SP10 Task 21)", () => {
+  it("releases a pending paid order: intent canceled, inventory returned, status cancelled, and the same seats can be held again", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cto1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 2, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cto1buyer");
+
+    const { orderId, clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user);
+    const intentId = clientSecret!.replace(/_secret_fake$/, "");
+    expect((await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data()?.soldCount).toBe(2);
+
+    const result = await callFn<Record<string, unknown>, { orderStatus: string }>("cancelTicketOrder", { orderId }, buyer.user);
+    expect(result.orderStatus).toBe("cancelled");
+    expect((await adb.doc(`orders/${orderId}`).get()).data()?.status).toBe("cancelled");
+    expect((await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data()?.soldCount).toBe(0);
+    expect((await adb.doc(`stripeFake/state/objects/${intentId}`).get()).data()?.status).toBe("canceled");
+
+    // The hold is gone: the buyer can take the last two seats again.
+    const again = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user);
+    expect(again.orderId).not.toBe(orderId);
+  });
+
+  it("is idempotent on a paid order: returns the current status and touches nothing", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cto2");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cto2buyer");
+    const { orderId, clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+    await confirmFakeIntent(clientSecret!);
+    await callFn("finalizeTicketOrder", { orderId }, buyer.user);
+
+    const result = await callFn<Record<string, unknown>, { orderStatus: string }>("cancelTicketOrder", { orderId }, buyer.user);
+    expect(result.orderStatus).toBe("paid");
+    expect((await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data()?.soldCount).toBe(1);
+  });
+
+  it("another account cannot cancel the buyer's order (not-found, no leak)", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cto3");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cto3buyer");
+    const { orderId } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+    const other = await makeBuyer("cto3other");
+    await expect(callFn("cancelTicketOrder", { orderId }, other.user))
+      .rejects.toMatchObject({ code: "functions/not-found" });
+    expect((await adb.doc(`orders/${orderId}`).get()).data()?.status).toBe("pending");
+  });
+});
+
+describe("createTicketOrder holds and receipts (SP10 Task 21)", () => {
+  it("caps a buyer at PENDING_ORDERS_PER_USER_CAP concurrent pending orders, and a cancel frees a slot", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("cap1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("cap1buyer");
+
+    const orderIds: string[] = [];
+    for (let i = 0; i < PENDING_ORDERS_PER_USER_CAP; i++) {
+      const { orderId } = await callFn<Record<string, unknown>, CreateOrderResult>(
+        "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+      orderIds.push(orderId);
+    }
+    await expect(callFn("createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted", message: expect.stringContaining(PENDING_ORDERS_CAP_MESSAGE) });
+
+    await callFn("cancelTicketOrder", { orderId: orderIds[0] }, buyer.user);
+    const { orderId: fourth } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+    expect(fourth).toBeTruthy();
+  });
+
+  it("stamps the buyer's verified email as receiptEmail on the PaymentIntent", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rcpt1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rcpt1buyer");
+    const { clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+    const intentId = clientSecret!.replace(/_secret_fake$/, "");
+    expect((await adb.doc(`stripeFake/state/objects/${intentId}`).get()).data()?.receiptEmail).toBe(buyer.user.email);
+  });
+});
+
+describe("runTicketOrderExpiry (SP10 Task 21)", () => {
+  it("expires a stale pending order on its own, without the hourly sweep", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("toe1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("toe1buyer");
+    const { orderId } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user);
+    await adb.doc(`orders/${orderId}`).update({ expiresAt: Date.now() - 1000 });
+
+    const report = await runTicketOrderExpiry(Date.now());
+
+    expect(report.ticketOrdersExpired).toBeGreaterThanOrEqual(1);
+    expect(report.errors).toBe(0);
+    expect((await adb.doc(`orders/${orderId}`).get()).data()?.status).toBe("expired");
+    expect((await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data()?.soldCount).toBe(0);
   });
 });
