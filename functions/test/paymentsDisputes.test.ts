@@ -432,6 +432,10 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
     const order = (await adb.doc(`orders/${a.orderId}`).get()).data() as TicketOrderDoc;
     expect(order.refundedFaceCents).toBe(2000);
+    // SP10 Task 6 fix round 1 (Important 2): refundedCents must move in step,
+    // so refundOrderForCancelledEvent's own "remaining" math (faceTotalCents
+    // + serviceFeeCents - refundedCents) stays consistent with this reduction.
+    expect(order.refundedCents).toBe(2000);
     expect(order.disputeStatus).toBe("lost");
     expect((await disputeDoc(disputeId))?.reversalTransferId).toBeUndefined();
 
@@ -439,6 +443,29 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - EVENT_SETTLE_DELAY_MS - HOUR_MS });
     await runPaymentsSweep(Date.now());
     expect(await accountBalanceCents(accountId)).toBe(3000); // only the undisputed order settles
+  });
+
+  // SP10 Task 6 fix round 1 (Important 2): the order read, the event's
+  // settlementStartedAt re-check, and the refundedFaceCents increment must be
+  // one atomic transaction. Simulates the race by pre-setting
+  // settlementStartedAt (as paymentsSweep.ts's claimSettlementStart would,
+  // mid-settlement) before ANY ticket_settlement transfer exists for this
+  // event: the reversal must never silently shrink refundedFaceCents once
+  // settlement has started, it must instead surface as a failed reversal.
+  it("lost ticket dispute race: settlement claims itself between the check and the reversal, so the basis is never silently reduced", async () => {
+    const { eventId, tierId } = await makePublishedEvent("dl7", 1000);
+    const a = await payOrder(eventId, tierId, 2, "dl7a");
+    const disputeId = await openDispute({ intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338 });
+    await adb.doc(`events/${eventId}`).update({ settlementStartedAt: Date.now() });
+
+    expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
+
+    const order = (await adb.doc(`orders/${a.orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.refundedFaceCents).toBe(0); // never silently reduced
+    expect(order.disputeStatus).toBe("lost");
+    const alert = await adminAlert(disputeReversalAlertId(disputeId));
+    expect(alert?.kind).toBe("dispute_reversal_failed");
+    expect(alert?.detail).toContain("no transfer");
   });
 
   it("won: ledger dispute_won, record closed, curator gate lifted, order stamped won", async () => {
@@ -467,22 +494,56 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
   });
 });
 
+// SP10 Task 6 fix round 1 (Important 3): nothing else in this codebase stops
+// refundedFaceCents from exceeding faceTotalCents on one order (a compounding
+// dispute/grace-refund edge); paymentsSweep.ts's per-order settlement term
+// must not let that go negative and drag down every OTHER order's payout in
+// the same event.
+describe("SP10 Task 6 fix round 1: paymentsSweep clamps a negative per-order settlement term", () => {
+  it("an over-refunded order contributes 0, not a negative amount, to the event's settlement", async () => {
+    const { owner, profileId, eventId, tierId } = await makePublishedEvent("cl1", 1000);
+    const a = await payOrder(eventId, tierId, 2, "cl1a"); // 2000c face
+    await payOrder(eventId, tierId, 3, "cl1b"); // 3000c face
+    // Direct admin write, simulating the over-refunded state a compounding
+    // dispute/grace-refund edge could otherwise reach: refundedFaceCents
+    // (3000) exceeds this order's own faceTotalCents (2000).
+    await adb.doc(`orders/${a.orderId}`).update({ refundedFaceCents: 3000 });
+
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - EVENT_SETTLE_DELAY_MS - HOUR_MS });
+    await runPaymentsSweep(Date.now());
+    // Order a's term clamps to 0 (not -1000); only order b's 3000c settles.
+    expect(await accountBalanceCents(accountId)).toBe(3000);
+  });
+});
+
 describe("SP10 Task 6: charge.refunded", () => {
-  function chargeObject(p: { chargeId: string; intentId: string; refunds: Array<{ id: string; amount: number; metadata?: Record<string, string> }> }) {
-    return {
-      id: p.chargeId, object: "charge", payment_intent: p.intentId,
-      amount_refunded: p.refunds.reduce((s, r) => s + r.amount, 0),
-      refunds: { object: "list", data: p.refunds.map((r) => ({ id: r.id, object: "refund", amount: r.amount, metadata: r.metadata ?? {} })) },
-    };
+  // SP10 Task 6 fix round 1 (Critical 1): a real Charge webhook payload never
+  // carries an expanded `refunds` list (and this client's pinned API version
+  // no longer attaches it by default even on a direct fetch), so the payload
+  // built here deliberately carries none; the handler must ask Stripe
+  // (FakeStripe, in these tests) for the refund list directly.
+  function chargeObject(p: { chargeId: string; intentId: string; amountRefundedCents: number }) {
+    return { id: p.chargeId, object: "charge", payment_intent: p.intentId, amount_refunded: p.amountRefundedCents };
+  }
+  // Seeds a refund object FakeStripe itself knows about, the way a real
+  // dashboard refund would exist in Stripe's own system regardless of whether
+  // this codebase issued it; `listRefunds` reads exactly this back.
+  async function fakeRefund(p: { chargeId: string; intentId: string; amountCents: number }): Promise<string> {
+    const refundId = `re_dash_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    await adb.doc(`stripeFake/state/objects/${refundId}`).set({
+      kind: "refund", intentId: p.intentId, chargeId: p.chargeId, amountCents: p.amountCents,
+    });
+    return refundId;
   }
 
-  it("a dashboard refund on a held deposit: external_refund ledger row and alert", async () => {
+  it("payload carries no refunds field; the handler lists refunds from Stripe directly", async () => {
     const { gigId, bookingId } = await makeConfirmedBooking("xr1");
     const p = await getPayment(bookingId, gigId);
-    const refundId = `re_dash_${Date.now()}`;
-    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
-      chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!, refunds: [{ id: refundId, amount: DEPOSIT_CHARGE_CENTS }],
-    })))).status).toBe(200);
+    const refundId = await fakeRefund({ chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!, amountCents: DEPOSIT_CHARGE_CENTS });
+    const payload = chargeObject({ chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!, amountRefundedCents: DEPOSIT_CHARGE_CENTS });
+    expect("refunds" in payload).toBe(false);
+    expect((await postWebhook(fakeEvent("charge.refunded", payload))).status).toBe(200);
     const row = await ledgerRow(`external_refund:${refundId}`);
     expect(row?.kind).toBe("external_refund");
     expect(row?.amountCents).toBe(DEPOSIT_CHARGE_CENTS);
@@ -492,7 +553,7 @@ describe("SP10 Task 6: charge.refunded", () => {
     expect(alert?.detail).toContain("still reads held");
   });
 
-  it("our own refund (metadata.purpose set, ledger row present) is not an external refund", async () => {
+  it("our own refund (ledger row present) is not an external refund", async () => {
     const { curator, gigId, bookingId } = await makeConfirmedBooking("xr2");
     await setGigStartsAt(gigId, 200);
     await ageConfirmedAt(bookingId);
@@ -501,9 +562,11 @@ describe("SP10 Task 6: charge.refunded", () => {
     expect(p.deposit.status).toBe("refunded");
     const refundRow = (await adb.collection("ledger").where("bookingId", "==", bookingId).get()).docs
       .map((d) => d.data() as LedgerEntry).find((r) => r.kind === "refund")!;
+    // cancelBooking's own refund call already created a real FakeStripe
+    // refund object (stamped with chargeId at creation time); no seeding
+    // needed, and the dedup must hold on the ledger row alone.
     expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
-      chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!,
-      refunds: [{ id: refundRow.stripeId!, amount: refundRow.amountCents, metadata: { bookingId, gigId, purpose: "deposit_refund" } }],
+      chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!, amountRefundedCents: refundRow.amountCents,
     })))).status).toBe(200);
     expect(await ledgerRow(`external_refund:${refundRow.stripeId}`)).toBeUndefined();
     expect(await adminAlert(externalRefundAlertId(refundRow.stripeId!))).toBeUndefined();
@@ -512,19 +575,30 @@ describe("SP10 Task 6: charge.refunded", () => {
   it("a dashboard refund on a paid ticket order alerts; on an already refunded order it only records", async () => {
     const { eventId, tierId } = await makePublishedEvent("xr3", 1000);
     const t = await payOrder(eventId, tierId, 1, "xr3a");
-    const refundId = `re_dash_${Date.now()}`;
+    const refundId = await fakeRefund({ chargeId: t.chargeId, intentId: t.intentId, amountCents: 1169 });
     expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
-      chargeId: t.chargeId, intentId: t.intentId, refunds: [{ id: refundId, amount: 1169 }],
+      chargeId: t.chargeId, intentId: t.intentId, amountRefundedCents: 1169,
     })))).status).toBe(200);
     expect((await ledgerRow(`external_refund:${refundId}`))?.buyerUid).toBe(t.buyer.uid);
     expect((await adminAlert(externalRefundAlertId(refundId)))?.detail).toContain("still reads paid");
 
     await adb.doc(`orders/${t.orderId}`).update({ status: "cancelled_refunded" });
-    const refund2 = `re_dash2_${Date.now()}`;
+    const refund2 = await fakeRefund({ chargeId: t.chargeId, intentId: t.intentId, amountCents: 1169 });
     expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
-      chargeId: t.chargeId, intentId: t.intentId, refunds: [{ id: refund2, amount: 1169 }],
+      chargeId: t.chargeId, intentId: t.intentId, amountRefundedCents: 1169 * 2,
     })))).status).toBe(200);
     expect((await ledgerRow(`external_refund:${refund2}`))?.kind).toBe("external_refund");
     expect(await adminAlert(externalRefundAlertId(refund2))).toBeUndefined();
+  });
+
+  it("amount_refunded positive but Stripe's own refund list comes back empty: alerts on the charge id itself", async () => {
+    const { gigId, bookingId } = await makeConfirmedBooking("xr4");
+    const p = await getPayment(bookingId, gigId);
+    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
+      chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!, amountRefundedCents: DEPOSIT_CHARGE_CENTS,
+    })))).status).toBe(200);
+    const alert = await adminAlert(externalRefundAlertId(p.deposit.chargeId!));
+    expect(alert?.kind).toBe("external_refund");
+    expect(alert?.detail).toContain("came back");
   });
 });

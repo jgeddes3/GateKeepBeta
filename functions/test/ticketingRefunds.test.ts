@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import { type TicketOrderDoc, type TicketDoc, type AttendeeDoc, type EventDoc } from "@gatekeep/shared";
+import { TICKET_NOT_REFUNDABLE_MESSAGE, type TicketOrderDoc, type TicketDoc, type AttendeeDoc, type EventDoc } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -546,6 +546,31 @@ describe("refundTicket", () => {
 
     await expect(callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: "This event has been cancelled." });
+
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("valid"); // untouched
+  });
+
+  // SP10 Task 6 fix round 1 (Important 3): a lost ticket dispute can already
+  // have reversed this order's ENTIRE face value (paymentsDisputes.ts's
+  // reverseForLostDispute), leaving nothing left to give back a second time.
+  it("is rejected once a dispute has already reversed the order's entire face value", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rt4");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rt4buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const ticketId = tickets[0].id;
+
+    // Simulates what a lost dispute's pre-settlement reversal already did to
+    // this order's face value (direct admin write, isolating this guard from
+    // the dispute handler's own end-to-end path).
+    await adb.doc(`orders/${orderId}`).update({ refundedFaceCents: 1000 });
+
+    await expect(callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: TICKET_NOT_REFUNDABLE_MESSAGE });
 
     const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
     expect(ticket.status).toBe("valid"); // untouched

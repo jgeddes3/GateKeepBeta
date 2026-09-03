@@ -205,23 +205,47 @@ async function reverseForLostDispute(
   const stripe = getStripe();
   if (target.purpose === "tickets") {
     const orderRef = db.doc(`orders/${target.orderId}`);
-    const order = (await orderRef.get()).data() as TicketOrderDoc | undefined;
-    if (!order) return { reversalIds: [], reason: "order missing" };
-    const faceCents = order.faceTotalCents - order.refundedFaceCents;
-    if (faceCents <= 0) return { reversalIds: [], reason: "order has no unrefunded face value" };
-    const event = (await db.doc(`events/${order.eventId}`).get()).data() as EventDoc | undefined;
-    if (event?.settlementStartedAt == null) {
-      // Not settled yet: shrink the basis settleOneEvent will sum. No transfer
-      // exists to reverse, and none is needed.
-      await orderRef.update({ refundedFaceCents: FieldValue.increment(faceCents) });
-      return { reversalIds: [], reason: null };
-    }
-    const settled = await db.collection("ledger")
-      .where("kind", "==", "ticket_settlement").where("eventId", "==", order.eventId).limit(1).get();
-    const transferId = settled.empty ? null : (settled.docs[0].data().stripeId as string | null);
-    if (!transferId) return { reversalIds: [], reason: "no transfer: the event is marked settled but no ticket_settlement row names its transfer" };
+    type TicketTxResult =
+      | { kind: "no-op"; reason: string }
+      | { kind: "reduced" }
+      | { kind: "settled"; faceCents: number; transferId: string | null };
+    // SP10 Task 6 fix round 1 (Important 2): the order read, the event's
+    // settlementStartedAt re-check, and (when not yet settled) the
+    // refundedFaceCents/refundedCents increment all happen inside ONE
+    // transaction, so a settlement that starts in the window since an
+    // earlier look can never be silently missed (which would otherwise shrink
+    // the pending basis for revenue that had already left as a transfer). The
+    // Stripe call for the SETTLED branch happens after this transaction
+    // returns, never inside it (money-path discipline: no Stripe call inside
+    // a Firestore transaction).
+    const result = await db.runTransaction<TicketTxResult>(async (tx) => {
+      const orderSnap = await tx.get(orderRef);
+      const order = orderSnap.data() as TicketOrderDoc | undefined;
+      if (!order) return { kind: "no-op", reason: "order missing" };
+      const faceCents = order.faceTotalCents - order.refundedFaceCents;
+      if (faceCents <= 0) return { kind: "no-op", reason: "order has no unrefunded face value" };
+      const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
+      const event = eventSnap.data() as EventDoc | undefined;
+      if (event?.settlementStartedAt == null) {
+        // Not settled yet: shrink the basis settleOneEvent will sum (and keep
+        // refundedCents in step, so refundOrderForCancelledEvent's own
+        // "remaining" math stays consistent with this reduction). No transfer
+        // exists to reverse, and none is needed.
+        tx.update(orderRef, {
+          refundedFaceCents: FieldValue.increment(faceCents), refundedCents: FieldValue.increment(faceCents),
+        });
+        return { kind: "reduced" };
+      }
+      const settledSnap = await tx.get(db.collection("ledger")
+        .where("kind", "==", "ticket_settlement").where("eventId", "==", order.eventId).limit(1));
+      const transferId = settledSnap.empty ? null : (settledSnap.docs[0].data().stripeId as string | null);
+      return { kind: "settled", faceCents, transferId };
+    });
+    if (result.kind === "no-op") return { reversalIds: [], reason: result.reason };
+    if (result.kind === "reduced") return { reversalIds: [], reason: null };
+    if (!result.transferId) return { reversalIds: [], reason: "no transfer: the event is marked settled but no ticket_settlement row names its transfer" };
     const r = await stripe.reverseTransfer({
-      transferId, amountCents: faceCents, idempotencyKey: `dispute_reverse:${disputeId}`,
+      transferId: result.transferId, amountCents: result.faceCents, idempotencyKey: `dispute_reverse:${disputeId}`,
     });
     return { reversalIds: [r.id], reason: null };
   }
@@ -240,8 +264,12 @@ async function reverseForLostDispute(
       .catch((e) => console.error(`charge.dispute.closed: summary recompute failed for ${target.bookingId}`, e));
     return { reversalIds: [r.id], reason: null };
   }
-  // deposit / paydue_deposit: every forfeit funded by this charge.
-  const forfeits = docs.filter(({ p }) => p.deposit.status === "forfeited" && p.deposit.forfeitTransferId);
+  // deposit / paydue_deposit: every forfeit funded by THIS charge (SP10 Task 6
+  // fix round 1, minor: the intentId check guards against a booking doc that
+  // was re-charged under a newer deposit intent since this one was disputed,
+  // so a stale disputed intent can never reverse a forfeit it did not fund).
+  const forfeits = docs.filter(({ p }) => p.deposit.status === "forfeited" && p.deposit.forfeitTransferId
+    && p.deposit.intentId === target.intentId);
   if (forfeits.length === 0) return { reversalIds: [], reason: "no transfer: the deposit was never forfeited to the musician" };
   const ids: string[] = [];
   for (const f of forfeits) {
@@ -299,10 +327,19 @@ export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
   };
 
   if (d.status === "won") {
+    // SP10 Task 6 fix round 1 (Important 4): the ONLY record that Stripe gave
+    // this money back, so a write failure must throw (500, Stripe retries)
+    // rather than be swallowed, same rule `disputeCreatedHandler`'s
+    // `dispute_opened` row already follows. The deterministic id
+    // (`dispute_won:{disputeId}`) makes a retry safely re-land on the same
+    // doc, and this write runs BEFORE the `disputes/{id}` status stamp below,
+    // so a retry after a failed write here is never blocked by the
+    // `existing.status !== "open"` redelivery guard at the top of this
+    // handler (which only trips once the record has actually moved to "won").
     await writeLedger({
       kind: "dispute_won", amountCents: d.amountCents, bookingId: target.bookingId ?? null, gigId: target.gigId ?? null,
       profileId: target.curatorProfileId, stripeId: d.disputeId, detail: `dispute won on ${scope}: ${d.amountCents}c returned`,
-    }).catch((e) => console.error(`charge.dispute.closed: dispute_won ledger row failed for ${d.disputeId}`, e));
+    });
     await recRef.set({ ...baseRecord, status: "won", closedAt: now }, { merge: true });
     if (target.purpose === "tickets" && target.orderId) {
       await db.doc(`orders/${target.orderId}`).update({ disputeId: d.disputeId, disputeStatus: "won" })
@@ -332,13 +369,15 @@ export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
   } catch (e) {
     failure = e instanceof Error ? e.message : String(e);
   }
+  // Same rule as the WON row above (Important 4): throws rather than
+  // swallows, and runs before the status stamp below.
   await writeLedger({
     kind: "dispute_lost", amountCents: d.amountCents, bookingId: target.bookingId ?? null, gigId: target.gigId ?? null,
     profileId: target.curatorProfileId, stripeId: d.disputeId,
     detail: reversalIds.length > 0
       ? `dispute lost on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c; transfer reversed (${reversalIds.join(", ")})`
       : `dispute lost on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c; ${failure ?? "settlement basis reduced, no transfer to reverse"}`,
-  }).catch((e) => console.error(`charge.dispute.closed: dispute_lost ledger row failed for ${d.disputeId}`, e));
+  });
   await recRef.set({
     ...baseRecord, status: "lost", closedAt: now,
     ...(reversalIds.length > 0 ? { reversalTransferId: reversalIds.join(",") } : {}),
@@ -367,27 +406,67 @@ export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
 // this codebase issues carries `metadata.purpose` (RealStripe.refund forwards
 // `meta`), and most also have a ledger row keyed on the refund id; a refund
 // with neither was issued by hand.
+//
+// SP10 Task 6 fix round 1 (Critical 1): a Charge webhook payload's `refunds`
+// list is NOT expanded on delivery, and this client's pinned API version
+// (2025-08-27.basil, well past the 2022-11-15 cutover) no longer attaches it
+// by default even on a direct fetch. Trusting `object.refunds` here would
+// silently do nothing for every real dashboard refund. `listRefunds` asks
+// Stripe (or the fake) directly, keyed on the charge id alone.
 export const chargeRefundedHandler: WebhookHandler = async (object, eventId) => {
   const chargeId = typeof object.id === "string" ? object.id : null;
   const intentId = typeof object.payment_intent === "string" ? object.payment_intent : null;
-  const list = (object.refunds as { data?: unknown } | undefined)?.data;
-  const refunds = Array.isArray(list)
-    ? list.filter((r): r is { id: string; amount?: unknown; metadata?: unknown } => typeof (r as { id?: unknown }).id === "string")
-    : [];
-  if (!chargeId || refunds.length === 0) {
-    console.info(`charge.refunded: no refund list on charge ${String(chargeId)} (event ${eventId})`);
+  const amountRefundedTotal = typeof object.amount_refunded === "number" ? object.amount_refunded : 0;
+  if (!chargeId || !isValidDocId(chargeId)) {
+    console.warn(`charge.refunded: payload carries no usable charge id (event ${eventId})`);
     return;
   }
   const now = Date.now();
   const db = getFirestore();
+
+  let refunds: Array<{ id: string; amountCents: number }>;
+  try {
+    refunds = await getStripe().listRefunds(chargeId);
+  } catch (e) {
+    // Cannot enumerate what Stripe actually refunded. A positive
+    // amount_refunded still means real money left, so escalate on the charge
+    // id itself (there is no refund id to key on) rather than return
+    // silently on what could be a live money event.
+    if (amountRefundedTotal > 0) {
+      const alertId = externalRefundAlertId(chargeId);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "external_refund",
+        detail: `charge ${chargeId} reports ${amountRefundedTotal}c refunded but its refund list could not be`
+          + ` retrieved from Stripe (${e instanceof Error ? e.message : String(e)}); reconcile by hand`,
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) console.error(`charge.refunded: listRefunds failed for charge ${chargeId} (see adminAlerts/${alertId})`);
+    } else {
+      console.warn(`charge.refunded: listRefunds failed for charge ${chargeId} (event ${eventId})`, e);
+    }
+    return;
+  }
+  if (refunds.length === 0) {
+    if (amountRefundedTotal > 0) {
+      const alertId = externalRefundAlertId(chargeId);
+      const shouldLog = await recordAdminAlert({
+        alertId, kind: "external_refund",
+        detail: `charge ${chargeId} reports ${amountRefundedTotal}c refunded but Stripe's refund list came back`
+          + " empty; reconcile by hand",
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) console.error(`charge.refunded: empty refund list for charge ${chargeId} despite a positive amount_refunded (see adminAlerts/${alertId})`);
+    } else {
+      console.info(`charge.refunded: no refunds on charge ${chargeId} (event ${eventId})`);
+    }
+    return;
+  }
   const target = intentId ? await resolveChargeTarget(intentId) : null;
   for (const refund of refunds) {
     if (!isValidDocId(refund.id)) continue;
-    const purpose = (refund.metadata as Record<string, unknown> | undefined)?.purpose;
-    if (typeof purpose === "string" && purpose.length > 0) continue; // ours
     const known = await db.collection("ledger").where("stripeId", "==", refund.id).limit(1).get();
     if (!known.empty) continue; // ours, keyed on the refund id
-    const amountCents = typeof refund.amount === "number" ? refund.amount : 0;
+    const amountCents = refund.amountCents;
 
     let stillPaid = false;
     let stateWord = "unknown";
@@ -410,12 +489,14 @@ export const chargeRefundedHandler: WebhookHandler = async (object, eventId) => 
     const scope = target
       ? (target.purpose === "tickets" ? `ticket order ${target.orderId}` : `${target.purpose} for booking ${target.bookingId}${target.gigId ? `/${target.gigId}` : ""}`)
       : `charge ${chargeId}`;
+    // SP10 Task 6 fix round 1 (Important 4): throws rather than swallows, same
+    // rule as the dispute ledger rows; deterministic id, redelivery-safe.
     await writeLedger({
       kind: "external_refund", amountCents, bookingId: target?.bookingId ?? null, gigId: target?.gigId ?? null,
       profileId: target?.curatorProfileId ?? null, stripeId: refund.id,
       detail: `refund ${refund.id} of ${amountCents}c on ${scope} was issued outside GateKeep (dashboard); doc state ${stateWord}`,
       ...(target?.purpose === "tickets" ? { eventId: null, buyerUid } : {}),
-    }).catch((e) => console.error(`charge.refunded: external_refund ledger row failed for ${refund.id}`, e));
+    });
     if (stillPaid) {
       const alertId = externalRefundAlertId(refund.id);
       const shouldLog = await recordAdminAlert({

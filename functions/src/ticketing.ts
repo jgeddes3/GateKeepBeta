@@ -726,6 +726,13 @@ export const refundTicket = onCall<RefundTicketInput>(
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) throw new HttpsError("internal", "This ticket's order could not be found.");
     const order = orderSnap.data() as TicketOrderDoc;
+    // SP10 Task 6 fix round 1 (Important 3): a lost dispute can already have
+    // reversed this order's ENTIRE face value (paymentsDisputes.ts's
+    // reverseForLostDispute), in which case there is no more curator revenue
+    // left on this order for a grace refund to give back a second time.
+    if (order.faceTotalCents - order.refundedFaceCents <= 0) {
+      throw new HttpsError("failed-precondition", TICKET_NOT_REFUNDABLE_MESSAGE);
+    }
     const item = order.items.find((it) => it.tierId === ticket.tierId);
     if (!item) throw new HttpsError("internal", "This ticket's order line item could not be found.");
 

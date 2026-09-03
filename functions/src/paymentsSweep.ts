@@ -1424,7 +1424,13 @@ async function settleOneEvent(
   let faceCents = 0;
   for (const orderDoc of ordersSnap.docs) {
     const order = orderDoc.data() as TicketOrderDoc;
-    faceCents += order.faceTotalCents - order.refundedFaceCents;
+    // SP10 Task 6 fix round 1 (Important 3): a lost ticket dispute settled
+    // BEFORE this event's own settlement can increment refundedFaceCents past
+    // faceTotalCents in a pathological ordering (a dispute reduces the basis
+    // for more than one order's remaining face, or a race with a grace
+    // refund); clamp so one bad order can never send the whole event's
+    // settlement basis negative.
+    faceCents += Math.max(0, order.faceTotalCents - order.refundedFaceCents);
   }
 
   if (faceCents > 0) {

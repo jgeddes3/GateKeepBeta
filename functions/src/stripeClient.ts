@@ -201,6 +201,12 @@ export interface StripeLike {
   // this call had just succeeded; anything else must stay deferred.
   cancelIntent(intentId: string): Promise<{ status: string }>;
   refund(params: { intentId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string> }): Promise<{ id: string }>;
+  // SP10 Task 6 fix round 1 (money review, Critical 1): the Charge object's
+  // `refunds` list is NOT expanded on a webhook payload, and this client's
+  // pinned API version (2025-08-27.basil, well past 2022-11-15) no longer
+  // even attaches it by default when the object IS fetched. `charge.refunded`
+  // must call this instead of reading `object.refunds` off the event.
+  listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number }>>;
   transferToAccount(params: {
     accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
     // The originating charge, when there is one. Forwarded to Stripe as
@@ -590,10 +596,20 @@ export class FakeStripe implements StripeLike {
           throw new Error("FakeStripe: refund exceeds charge");
         }
         tx.update(ref, { refundedCents });
-        tx.set(this.objRef(id), { kind: "refund", intentId: p.intentId, amountCents: p.amountCents });
+        tx.set(this.objRef(id), {
+          kind: "refund", intentId: p.intentId, amountCents: p.amountCents,
+          chargeId: typeof d.chargeId === "string" ? d.chargeId : null,
+        });
       });
       return { id };
     }, `${p.intentId}:${p.amountCents}`);
+  }
+  // SP10 Task 6 fix round 1: refund objects are stamped with the charge id at
+  // creation (above), so this is a direct query, no charge -> intent hop.
+  async listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number }>> {
+    const snap = await this.db.collection("stripeFake/state/objects")
+      .where("kind", "==", "refund").where("chargeId", "==", chargeId).get();
+    return snap.docs.map((d) => ({ id: d.id, amountCents: d.data().amountCents as number }));
   }
   async transferToAccount(p: { accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>; sourceChargeId?: string }) {
     return this.idem(p.idempotencyKey, async () => {
@@ -939,6 +955,10 @@ export class RealStripe implements StripeLike {
       { payment_intent: p.intentId, amount: p.amountCents, metadata: p.meta },
       { idempotencyKey: p.idempotencyKey });
     return { id: r.id };
+  }
+  async listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number }>> {
+    const list = await this.s.refunds.list({ charge: chargeId, limit: 100 });
+    return list.data.map((r) => ({ id: r.id, amountCents: r.amount }));
   }
   async transferToAccount(p: { accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>; sourceChargeId?: string }) {
     const t = await this.s.transfers.create(
