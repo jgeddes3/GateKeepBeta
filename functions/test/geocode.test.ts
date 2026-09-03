@@ -1,10 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
+import { HttpsError } from "firebase-functions/v2/https";
 import {
   StubGeocoder,
   GoogleGeocoder,
   getGeocoder,
   coarsen,
   parseGoogleResponse,
+  GOOGLE_GEOCODE_TIMEOUT_MS,
   type GeocodeResult,
 } from "../src/geocode.js";
 
@@ -114,22 +116,45 @@ describe("coarsen", () => {
 });
 
 describe("getGeocoder", () => {
-  it("returns StubGeocoder when GEOCODER_PROVIDER is unset", () => {
+  it("returns StubGeocoder inside the emulator when GEOCODER_PROVIDER is unset", () => {
+    vi.stubEnv("FUNCTIONS_EMULATOR", "true");
     vi.stubEnv("GEOCODER_PROVIDER", undefined);
     try {
-      const geocoder = getGeocoder();
-      expect(geocoder).toBeInstanceOf(StubGeocoder);
+      expect(getGeocoder()).toBeInstanceOf(StubGeocoder);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("returns GoogleGeocoder when GEOCODER_PROVIDER=google", () => {
+  it("fails closed outside the emulator when GEOCODER_PROVIDER is unset", () => {
+    vi.stubEnv("FUNCTIONS_EMULATOR", undefined);
+    vi.stubEnv("GEOCODER_PROVIDER", undefined);
+    try {
+      expect(() => getGeocoder()).toThrow("Geocoder is not configured.");
+      let code: string | undefined;
+      try { getGeocoder(); } catch (e) { code = (e as HttpsError).code; }
+      expect(code).toBe("failed-precondition");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("fails closed outside the emulator when GEOCODER_PROVIDER names anything other than google", () => {
+    vi.stubEnv("FUNCTIONS_EMULATOR", "false");
+    vi.stubEnv("GEOCODER_PROVIDER", "stub");
+    try {
+      expect(() => getGeocoder()).toThrow("Geocoder is not configured.");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("returns GoogleGeocoder when GEOCODER_PROVIDER=google, in or out of the emulator", () => {
+    vi.stubEnv("FUNCTIONS_EMULATOR", undefined);
     vi.stubEnv("GEOCODER_PROVIDER", "google");
     vi.stubEnv("GEOCODER_API_KEY", "test-key");
     try {
-      const geocoder = getGeocoder();
-      expect(geocoder).toBeInstanceOf(GoogleGeocoder);
+      expect(getGeocoder()).toBeInstanceOf(GoogleGeocoder);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -143,6 +168,52 @@ describe("getGeocoder", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe("GoogleGeocoder", () => {
+  const okBody = {
+    status: "OK",
+    results: [{
+      geometry: { location: { lat: 30.2672, lng: -97.7431 } },
+      address_components: [
+        { long_name: "Downtown", types: ["neighborhood"] },
+        { long_name: "Austin", types: ["locality"] },
+      ],
+    }],
+  };
+
+  it("passes a timeout AbortSignal to fetch and parses the body", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(JSON.stringify(okBody), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await new GoogleGeocoder("test-key").geocode("1 Main St, Austin, TX");
+      expect(result?.city).toBe("Austin");
+      expect(result?.neighborhood).toBe("Downtown");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("turns a hung upstream into a timeout Error after timeoutMs", async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(new GoogleGeocoder("test-key", 20).geocode("1 Main St, Austin, TX"))
+        .rejects.toThrow("Google Geocoding API timed out after 20ms");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("exposes the production timeout as 10 seconds", () => {
+    expect(GOOGLE_GEOCODE_TIMEOUT_MS).toBe(10_000);
   });
 });
 
@@ -202,5 +273,16 @@ describe("parseGoogleResponse", () => {
       status: "REQUEST_DENIED",
     };
     expect(() => parseGoogleResponse(response)).toThrow();
+  });
+
+  it("returns null (not a throw) when no locality or administrative_area_level_1 is present, e.g. a plus code", () => {
+    const response = {
+      status: "OK",
+      results: [{
+        geometry: { location: { lat: 30.2672, lng: -97.7431 } },
+        address_components: [{ long_name: "8FW4V75V+8Q", types: ["plus_code"] }],
+      }],
+    };
+    expect(parseGoogleResponse(response)).toBeNull();
   });
 });

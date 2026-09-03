@@ -58,15 +58,21 @@ export class StubGeocoder implements Geocoder {
   }
 }
 
+// SP10 Task 17: a hung upstream must not hold a callable open to its own 60 s
+// limit. AbortSignal.timeout is native on Node 22 (branch A's runtime).
+export const GOOGLE_GEOCODE_TIMEOUT_MS = 10_000;
+
 /**
- * Google Geocoding API adapter (skeleton).
- * Requires GEOCODER_API_KEY environment variable.
+ * Google Geocoding API adapter.
+ * Requires GEOCODER_API_KEY (Secret Manager in production, env locally).
  */
 export class GoogleGeocoder implements Geocoder {
   private apiKey: string;
+  private timeoutMs: number;
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, timeoutMs: number = GOOGLE_GEOCODE_TIMEOUT_MS) {
     this.apiKey = apiKey;
+    this.timeoutMs = timeoutMs;
   }
 
   async geocode(address: string): Promise<GeocodeResult | null> {
@@ -74,7 +80,16 @@ export class GoogleGeocoder implements Geocoder {
     url.searchParams.set("address", address);
     url.searchParams.set("key", this.apiKey);
 
-    const response = await fetch(url.toString());
+    let response: Response;
+    try {
+      response = await fetch(url.toString(), { signal: AbortSignal.timeout(this.timeoutMs) });
+    } catch (e) {
+      const name = (e as { name?: string } | null)?.name;
+      if (name === "TimeoutError" || name === "AbortError") {
+        throw new Error(`Google Geocoding API timed out after ${this.timeoutMs}ms`);
+      }
+      throw e;
+    }
     if (!response.ok) {
       throw new Error(`Google Geocoding API returned ${response.status}: ${response.statusText}`);
     }
@@ -154,8 +169,12 @@ export function parseGoogleResponse(json: unknown): GeocodeResult | null {
     }
   }
 
+  // SP10 Task 17 (sp3 #3): plus codes, rural and some non-US results carry
+  // neither a locality nor a level-1 area. Every caller already handles null
+  // as "could not locate" (GEOCODE_FAILURE_MESSAGE); a throw here surfaced as
+  // an opaque internal error instead.
   if (!city) {
-    throw new Error("parseGoogleResponse: could not extract city from address_components");
+    return null;
   }
 
   return { lat, lng, neighborhood, city };
@@ -163,8 +182,11 @@ export function parseGoogleResponse(json: unknown): GeocodeResult | null {
 
 /**
  * Returns a Geocoder instance based on environment configuration.
- * Uses StubGeocoder by default (dev/test); GoogleGeocoder when
- * GEOCODER_PROVIDER=google + GEOCODER_API_KEY is set.
+ * GEOCODER_PROVIDER=google + GEOCODER_API_KEY selects GoogleGeocoder.
+ * Anything else selects the deterministic stub, but ONLY inside the
+ * Functions emulator (SP10 Task 17, sp3 #2): a production deploy that
+ * forgets the provider must fail loudly rather than write hash-derived
+ * coordinates onto world-readable profile and gig docs.
  */
 export function getGeocoder(): Geocoder {
   if (process.env.GEOCODER_PROVIDER === "google") {
@@ -173,20 +195,28 @@ export function getGeocoder(): Geocoder {
     // declares `secrets: [geocoderApiKey]` (see curator.ts/gigs.ts/
     // gigSeries.ts's onCall options). The Functions emulator does not
     // provision Secret Manager secrets by default, so .value() legitimately
-    // resolves to "" there, the `|| process.env.GEOCODER_API_KEY` fallback
+    // resolves to "" there; the `|| process.env.GEOCODER_API_KEY` fallback
     // keeps GEOCODER_PROVIDER=google testable locally against a real key
     // (set via a functions/.env file or the shell) without requiring a
     // `.secret.local` file or a deploy. Both reads ultimately look at the
     // same underlying env var name, so this is deliberately redundant, not
-    // two different sources of truth, see README's geocoder setup section.
+    // two different sources of truth; see README's geocoder setup section.
     const apiKey = geocoderApiKey.value() || process.env.GEOCODER_API_KEY;
     if (!apiKey) {
       throw new Error("GEOCODER_PROVIDER=google requires GEOCODER_API_KEY");
     }
     return new GoogleGeocoder(apiKey);
   }
+  if (process.env.FUNCTIONS_EMULATOR !== "true") {
+    throw new HttpsError("failed-precondition", "Geocoder is not configured.");
+  }
   return new StubGeocoder();
 }
+
+// Logged once per cold start so a misconfigured deploy is visible in Cloud
+// Logging before the first geocode call fails.
+console.info(
+  `geocode: provider=${process.env.GEOCODER_PROVIDER === "google" ? "google" : "stub"} emulator=${process.env.FUNCTIONS_EMULATOR === "true"}`);
 
 // ---------- S2: per-uid daily geocode budget ----------
 
