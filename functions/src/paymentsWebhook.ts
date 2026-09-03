@@ -10,7 +10,7 @@ import {
 // this file stays the ONE place a reader finds the full purpose registry.
 import { completeOrderTicketsHandler } from "./ticketing.js";
 // SP10 Task 5 (sp5 #2): chargebacks.
-import { disputeCreatedHandler } from "./paymentsDisputes.js";
+import { disputeCreatedHandler, disputeClosedHandler, chargeRefundedHandler } from "./paymentsDisputes.js";
 
 // The codebase's ONLY non-callable HTTPS entry point. Contract:
 //  - raw-body signature verification (RealStripe.constructWebhookEvent throws
@@ -161,6 +161,10 @@ webhookHandlerScopes["payment_intent.payment_failed"] = "platform";
 // tickets purpose is: this file stays the one place the full registry lives.
 webhookHandlers["charge.dispute.created"] = disputeCreatedHandler;
 webhookHandlerScopes["charge.dispute.created"] = "platform";
+webhookHandlers["charge.dispute.closed"] = disputeClosedHandler;
+webhookHandlerScopes["charge.dispute.closed"] = "platform";
+webhookHandlers["charge.refunded"] = chargeRefundedHandler;
+webhookHandlerScopes["charge.refunded"] = "platform";
 
 // Test-only handlers, registered ONLY inside the Functions emulator
 // (FUNCTIONS_EMULATOR is set by the emulator's own runtime, never true in a

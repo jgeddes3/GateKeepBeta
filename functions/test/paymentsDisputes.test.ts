@@ -320,3 +320,211 @@ describe("SP10 Task 5: charge.dispute.created", () => {
     expect((await disputeDoc(disputeId))?.status).toBe("won");
   });
 });
+
+async function openDispute(p: { intentId: string; chargeId: string | null; amountCents: number }): Promise<string> {
+  const disputeId = newDisputeId();
+  expect((await postWebhook(fakeEvent("charge.dispute.created", disputeObject({
+    id: disputeId, intentId: p.intentId, chargeId: p.chargeId, amountCents: p.amountCents, status: "needs_response",
+  })))).status).toBe(200);
+  return disputeId;
+}
+async function closeDispute(p: { disputeId: string; intentId: string; chargeId: string | null; amountCents: number; status: "won" | "lost" }) {
+  return postWebhook(fakeEvent("charge.dispute.closed", disputeObject({
+    id: p.disputeId, intentId: p.intentId, chargeId: p.chargeId, amountCents: p.amountCents, status: p.status,
+  })));
+}
+
+describe("SP10 Task 6: charge.dispute.closed", () => {
+  it("lost settlement: the earnings transfer is reversed, the doc says so, the record closes", async () => {
+    const { musician, gigId, bookingId } = await makeConfirmedBooking("dl1", { pastStartHours: 5 });
+    const paid = await settleBooking(bookingId, gigId);
+    const accountId = (await getStripeDoc(musician.profileId))!.accountId!;
+    const before = await accountBalanceCents(accountId);
+    expect(before).toBe(paid.transfer.amountCents);
+    const chargeId = (await fakeObject(paid.settlement.intentId!))?.chargeId as string;
+    const disputeId = await openDispute({ intentId: paid.settlement.intentId!, chargeId, amountCents: 5000 });
+
+    const res = await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: 5000, status: "lost" });
+    expect(res.status).toBe(200);
+
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await fakeObject(paid.transfer.id!).then((t) => t?.reversed)).toBe(true);
+    const after = await getPayment(bookingId, gigId);
+    expect(after.transfer.status).toBe("reversed");
+    const rec = await disputeDoc(disputeId);
+    expect(rec?.status).toBe("lost");
+    expect(rec?.reversalTransferId).toBeTruthy();
+    expect(typeof rec?.closedAt).toBe("number");
+    const row = await ledgerRow(`dispute_lost:${disputeId}`);
+    expect(row?.amountCents).toBe(5000);
+    expect(row?.detail).toContain(rec!.reversalTransferId!);
+    expect(await adb.doc(`stripeFake/state/idem/${encodeURIComponent(`dispute_reverse:${disputeId}`)}`).get().then((s) => s.exists)).toBe(true);
+    // Redelivery: nothing moves twice.
+    expect((await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: 5000, status: "lost" })).status).toBe(200);
+    expect(await accountBalanceCents(accountId)).toBe(0);
+  });
+
+  it("lost deposit with a forfeit: the forfeit transfer is reversed", async () => {
+    const { curator, musician, gigId, bookingId } = await makeConfirmedBooking("dl2");
+    await setGigStartsAt(gigId, 10);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+    const p = await getPayment(bookingId, gigId);
+    expect(p.deposit.status).toBe("forfeited");
+    const accountId = (await getStripeDoc(musician.profileId))!.accountId!;
+    expect(await accountBalanceCents(accountId)).toBe(SLICE_CENTS);
+
+    const disputeId = await openDispute({ intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS });
+    expect((await closeDispute({ disputeId, intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS, status: "lost" })).status).toBe(200);
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await fakeObject(p.deposit.forfeitTransferId!).then((t) => t?.reversed)).toBe(true);
+    expect((await disputeDoc(disputeId))?.status).toBe("lost");
+  });
+
+  it("lost deposit with NO transfer (still held): dispute_reversal_failed, nothing moves", async () => {
+    const { gigId, bookingId } = await makeConfirmedBooking("dl3");
+    const p = await getPayment(bookingId, gigId);
+    const disputeId = await openDispute({ intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS });
+    expect((await closeDispute({ disputeId, intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS, status: "lost" })).status).toBe(200);
+    const alert = await adminAlert(disputeReversalAlertId(disputeId));
+    expect(alert?.kind).toBe("dispute_reversal_failed");
+    expect(alert?.detail).toContain("no transfer");
+    expect((await disputeDoc(disputeId))?.status).toBe("lost");
+    expect((await ledgerRow(`dispute_lost:${disputeId}`))?.kind).toBe("dispute_lost");
+  });
+
+  it("lost settlement whose reversal Stripe refuses: dispute_reversal_failed", async () => {
+    const { gigId, bookingId } = await makeConfirmedBooking("dl4", { pastStartHours: 5 });
+    const paid = await settleBooking(bookingId, gigId);
+    const chargeId = (await fakeObject(paid.settlement.intentId!))?.chargeId as string;
+    // Reverse it first by hand (a dashboard reversal): the dispute's reversal then throws "already reversed".
+    await adb.doc(`stripeFake/state/objects/${paid.transfer.id}`).update({ reversed: true });
+    const disputeId = await openDispute({ intentId: paid.settlement.intentId!, chargeId, amountCents: 1000 });
+    expect((await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: 1000, status: "lost" })).status).toBe(200);
+    const alert = await adminAlert(disputeReversalAlertId(disputeId));
+    expect(alert?.kind).toBe("dispute_reversal_failed");
+    expect(alert?.detail).toContain("already been reversed");
+  });
+
+  it("lost ticket dispute AFTER settlement: a partial reversal of the ticket_settlement transfer for the order's face value", async () => {
+    const { owner, profileId, eventId, tierId } = await makePublishedEvent("dl5", 1000);
+    const a = await payOrder(eventId, tierId, 2, "dl5a");
+    await payOrder(eventId, tierId, 3, "dl5b");
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - EVENT_SETTLE_DELAY_MS - HOUR_MS });
+    await runPaymentsSweep(Date.now());
+    expect(((await adb.doc(`events/${eventId}`).get()).data() as EventDoc).status).toBe("completed");
+    expect(await accountBalanceCents(accountId)).toBe(5000);
+
+    const disputeId = await openDispute({ intentId: a.intentId, chargeId: a.chargeId, amountCents: 2000 + 2 * 169 });
+    expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2000 + 2 * 169, status: "lost" })).status).toBe(200);
+    expect(await accountBalanceCents(accountId)).toBe(3000); // 5000 minus this order's 2000 face
+    const order = (await adb.doc(`orders/${a.orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.disputeStatus).toBe("lost");
+    expect((await disputeDoc(disputeId))?.reversalTransferId).toBeTruthy();
+  });
+
+  it("lost ticket dispute BEFORE settlement: the pending settlement basis shrinks by the order's face value", async () => {
+    const { owner, profileId, eventId, tierId } = await makePublishedEvent("dl6", 1000);
+    const a = await payOrder(eventId, tierId, 2, "dl6a");
+    await payOrder(eventId, tierId, 3, "dl6b");
+    const disputeId = await openDispute({ intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338 });
+    expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
+    const order = (await adb.doc(`orders/${a.orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.refundedFaceCents).toBe(2000);
+    expect(order.disputeStatus).toBe("lost");
+    expect((await disputeDoc(disputeId))?.reversalTransferId).toBeUndefined();
+
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - EVENT_SETTLE_DELAY_MS - HOUR_MS });
+    await runPaymentsSweep(Date.now());
+    expect(await accountBalanceCents(accountId)).toBe(3000); // only the undisputed order settles
+  });
+
+  it("won: ledger dispute_won, record closed, curator gate lifted, order stamped won", async () => {
+    const { curator, gigId, bookingId } = await makeConfirmedBooking("dw1");
+    const p = await getPayment(bookingId, gigId);
+    const disputeId = await openDispute({ intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS });
+    expect((await getStripeDoc(curator.profileId))?.delinquent).toBe(true);
+    expect((await closeDispute({ disputeId, intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS, status: "won" })).status).toBe(200);
+    expect((await ledgerRow(`dispute_won:${disputeId}`))?.kind).toBe("dispute_won");
+    expect((await disputeDoc(disputeId))?.status).toBe("won");
+    expect((await getStripeDoc(curator.profileId))?.delinquent).toBe(false);
+
+    const { eventId, tierId } = await makePublishedEvent("dw2", 1000);
+    const t = await payOrder(eventId, tierId, 1, "dw2a");
+    const ticketDispute = await openDispute({ intentId: t.intentId, chargeId: t.chargeId, amountCents: 1169 });
+    expect((await closeDispute({ disputeId: ticketDispute, intentId: t.intentId, chargeId: t.chargeId, amountCents: 1169, status: "won" })).status).toBe(200);
+    expect(((await adb.doc(`orders/${t.orderId}`).get()).data() as TicketOrderDoc).disputeStatus).toBe("won");
+  });
+
+  it("closed for a dispute `created` never saw resolves the target itself", async () => {
+    const { gigId, bookingId } = await makeConfirmedBooking("dw3");
+    const p = await getPayment(bookingId, gigId);
+    const disputeId = newDisputeId();
+    expect((await closeDispute({ disputeId, intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: 100, status: "won" })).status).toBe(200);
+    expect((await disputeDoc(disputeId))).toMatchObject({ purpose: "deposit", bookingId, status: "won" });
+  });
+});
+
+describe("SP10 Task 6: charge.refunded", () => {
+  function chargeObject(p: { chargeId: string; intentId: string; refunds: Array<{ id: string; amount: number; metadata?: Record<string, string> }> }) {
+    return {
+      id: p.chargeId, object: "charge", payment_intent: p.intentId,
+      amount_refunded: p.refunds.reduce((s, r) => s + r.amount, 0),
+      refunds: { object: "list", data: p.refunds.map((r) => ({ id: r.id, object: "refund", amount: r.amount, metadata: r.metadata ?? {} })) },
+    };
+  }
+
+  it("a dashboard refund on a held deposit: external_refund ledger row and alert", async () => {
+    const { gigId, bookingId } = await makeConfirmedBooking("xr1");
+    const p = await getPayment(bookingId, gigId);
+    const refundId = `re_dash_${Date.now()}`;
+    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
+      chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!, refunds: [{ id: refundId, amount: DEPOSIT_CHARGE_CENTS }],
+    })))).status).toBe(200);
+    const row = await ledgerRow(`external_refund:${refundId}`);
+    expect(row?.kind).toBe("external_refund");
+    expect(row?.amountCents).toBe(DEPOSIT_CHARGE_CENTS);
+    expect(row?.bookingId).toBe(bookingId);
+    const alert = await adminAlert(externalRefundAlertId(refundId));
+    expect(alert?.kind).toBe("external_refund");
+    expect(alert?.detail).toContain("still reads held");
+  });
+
+  it("our own refund (metadata.purpose set, ledger row present) is not an external refund", async () => {
+    const { curator, gigId, bookingId } = await makeConfirmedBooking("xr2");
+    await setGigStartsAt(gigId, 200);
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Plans changed." }, curator.owner.user);
+    const p = await getPayment(bookingId, gigId);
+    expect(p.deposit.status).toBe("refunded");
+    const refundRow = (await adb.collection("ledger").where("bookingId", "==", bookingId).get()).docs
+      .map((d) => d.data() as LedgerEntry).find((r) => r.kind === "refund")!;
+    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
+      chargeId: p.deposit.chargeId!, intentId: p.deposit.intentId!,
+      refunds: [{ id: refundRow.stripeId!, amount: refundRow.amountCents, metadata: { bookingId, gigId, purpose: "deposit_refund" } }],
+    })))).status).toBe(200);
+    expect(await ledgerRow(`external_refund:${refundRow.stripeId}`)).toBeUndefined();
+    expect(await adminAlert(externalRefundAlertId(refundRow.stripeId!))).toBeUndefined();
+  });
+
+  it("a dashboard refund on a paid ticket order alerts; on an already refunded order it only records", async () => {
+    const { eventId, tierId } = await makePublishedEvent("xr3", 1000);
+    const t = await payOrder(eventId, tierId, 1, "xr3a");
+    const refundId = `re_dash_${Date.now()}`;
+    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
+      chargeId: t.chargeId, intentId: t.intentId, refunds: [{ id: refundId, amount: 1169 }],
+    })))).status).toBe(200);
+    expect((await ledgerRow(`external_refund:${refundId}`))?.buyerUid).toBe(t.buyer.uid);
+    expect((await adminAlert(externalRefundAlertId(refundId)))?.detail).toContain("still reads paid");
+
+    await adb.doc(`orders/${t.orderId}`).update({ status: "cancelled_refunded" });
+    const refund2 = `re_dash2_${Date.now()}`;
+    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
+      chargeId: t.chargeId, intentId: t.intentId, refunds: [{ id: refund2, amount: 1169 }],
+    })))).status).toBe(200);
+    expect((await ledgerRow(`external_refund:${refund2}`))?.kind).toBe("external_refund");
+    expect(await adminAlert(externalRefundAlertId(refund2))).toBeUndefined();
+  });
+});

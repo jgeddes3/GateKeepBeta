@@ -210,7 +210,10 @@ export interface StripeLike {
     // fits (SP10 Task 3), and FakeStripe refuses the same way live Stripe does.
     sourceChargeId?: string;
   }): Promise<{ id: string }>;
-  reverseTransfer(params: { transferId: string; idempotencyKey: string }): Promise<{ id: string }>;
+  // `amountCents` (SP10 Task 6): a PARTIAL reversal. Omitted means the whole
+  // transfer, exactly as before. FakeStripe accumulates `reversedCents` and
+  // refuses a reversal that would exceed the transfer, as Stripe does.
+  reverseTransfer(params: { transferId: string; idempotencyKey: string; amountCents?: number }): Promise<{ id: string }>;
   // BOTH balance buckets in ONE call. `instantAvailableCents` is the
   // instant-payout-eligible slice, a subset of `availableCents` (funds still
   // settling are available but not instant-eligible). They come off the SAME
@@ -630,7 +633,7 @@ export class FakeStripe implements StripeLike {
       return { id };
     }, `${p.accountId}:${p.amountCents}:${p.sourceChargeId ?? ""}`);
   }
-  async reverseTransfer(p: { transferId: string; idempotencyKey: string }) {
+  async reverseTransfer(p: { transferId: string; idempotencyKey: string; amountCents?: number }) {
     return this.idem(p.idempotencyKey, async () => {
       const tRef = this.objRef(p.transferId);
       const id = this.newId("trr");
@@ -644,14 +647,20 @@ export class FakeStripe implements StripeLike {
         if (t.reversed === true) {
           throw new Error(`FakeStripe: transfer ${p.transferId} has already been reversed`);
         }
+        const total = t.amountCents as number;
+        const already = (t.reversedCents as number | undefined) ?? 0;
+        const amount = p.amountCents ?? (total - already);
+        if (amount <= 0 || already + amount > total) {
+          throw new Error(`FakeStripe: reversal of ${amount} exceeds what remains of transfer ${p.transferId} (${total - already})`);
+        }
         const acct = this.objRef(t.accountId as string);
         const s = await tx.get(acct);
-        tx.set(acct, { balanceCents: ((s.data()?.balanceCents as number | undefined) ?? 0) - (t.amountCents as number) }, { merge: true });
-        tx.update(tRef, { reversed: true });
-        tx.set(this.objRef(id), { kind: "transfer_reversal", transferId: p.transferId });
+        tx.set(acct, { balanceCents: ((s.data()?.balanceCents as number | undefined) ?? 0) - amount }, { merge: true });
+        tx.update(tRef, { reversedCents: already + amount, reversed: already + amount === total });
+        tx.set(this.objRef(id), { kind: "transfer_reversal", transferId: p.transferId, amountCents: amount });
       });
       return { id };
-    }, p.transferId);
+    }, `${p.transferId}:${p.amountCents ?? "full"}`);
   }
   async getBalances(accountId: string): Promise<StripeBalances> {
     const snap = await this.objRef(accountId).get();
@@ -940,8 +949,9 @@ export class RealStripe implements StripeLike {
       { idempotencyKey: p.idempotencyKey });
     return { id: t.id };
   }
-  async reverseTransfer(p: { transferId: string; idempotencyKey: string }) {
-    const r = await this.s.transfers.createReversal(p.transferId, {}, { idempotencyKey: p.idempotencyKey });
+  async reverseTransfer(p: { transferId: string; idempotencyKey: string; amountCents?: number }) {
+    const r = await this.s.transfers.createReversal(
+      p.transferId, p.amountCents != null ? { amount: p.amountCents } : {}, { idempotencyKey: p.idempotencyKey });
     return { id: r.id };
   }
   async getBalances(accountId: string): Promise<StripeBalances> {
