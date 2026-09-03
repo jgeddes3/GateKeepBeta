@@ -4,6 +4,7 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
 import type { ProfileDraftInput, MemberDoc } from "@gatekeep/shared";
+import { loadPushTokenIds, deadTokenIdsFromExpoResponse } from "../src/notifications.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_AUTH_EMULATOR_HOST = "localhost:9099";
@@ -110,5 +111,35 @@ describe("review notifications", () => {
       expect(notes.docs[0].data().kind).toBe("profile_review");
       expect(notes.docs[0].data().title).toMatch(/approved/i);
     }
+  });
+});
+
+describe("push token selection and pruning (SP10 Task 15)", () => {
+  it("loadPushTokenIds returns the 20 newest tokens by createdAt, newest first", async () => {
+    const { uid } = await signUpTestUser(`pt1-${Date.now()}@test.com`);
+    const batch = adb.batch();
+    for (let i = 1; i <= 22; i++) {
+      batch.set(adb.doc(`users/${uid}/pushTokens/ExponentPushToken[tok${i}]`), { createdAt: i });
+    }
+    await batch.commit();
+    const ids = await loadPushTokenIds(uid);
+    expect(ids).toHaveLength(20);
+    expect(ids[0]).toBe("ExponentPushToken[tok22]");
+    expect(ids[19]).toBe("ExponentPushToken[tok3]");
+    expect(ids).not.toContain("ExponentPushToken[tok1]");
+    expect(ids).not.toContain("ExponentPushToken[tok2]");
+  });
+
+  it("deadTokenIdsFromExpoResponse picks only DeviceNotRegistered tickets, aligned by index", () => {
+    const tokens = ["ExponentPushToken[a]", "ExponentPushToken[b]", "ExponentPushToken[c]"];
+    const body = { data: [
+      { status: "ok", id: "x" },
+      { status: "error", message: "gone", details: { error: "DeviceNotRegistered" } },
+      { status: "error", message: "big", details: { error: "MessageTooBig" } },
+    ] };
+    expect(deadTokenIdsFromExpoResponse(tokens, body)).toEqual(["ExponentPushToken[b]"]);
+    expect(deadTokenIdsFromExpoResponse(tokens, null)).toEqual([]);
+    expect(deadTokenIdsFromExpoResponse(tokens, { data: "nope" })).toEqual([]);
+    expect(deadTokenIdsFromExpoResponse(tokens, { errors: [{ code: "PUSH_TOO_MANY_EXPERIENCE_IDS" }] })).toEqual([]);
   });
 });
