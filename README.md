@@ -120,6 +120,26 @@ pnpm --filter @gatekeep/mobile lint   # ESLint (apps/mobile) — green as of sub
                                        # of the SP2 plan); first run scaffolds apps/mobile/eslint.config.js
 ```
 
+**Seed the emulator:** optional fixture scripts for UI/device testing, run against a live `pnpm emu`
+session in this order (each depends on the previous one's accounts). Data is wiped on every
+emulator restart, so re-run all three after each restart.
+
+```bash
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  pnpm tsx scripts/seed-test-accounts.ts
+# creates the three test logins (password GateKeep-Test1): test-fan (no profile),
+# test-musician (approved @testmusician), test-curator (approved @testvenue)
+
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  pnpm tsx scripts/seed-test-event.ts
+# publishes one standalone event (a free tier + a paid tier) for /e/[eventId] checks
+
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  FIREBASE_STORAGE_EMULATOR_HOST=localhost:9199 pnpm tsx scripts/seed-test-discovery.ts
+# gives @testmusician an approved demo track, fills a gig and promotes it to a second
+# published event with a real booking-lineup act, and follows genre:rock as test-fan
+```
+
 **Known issue:** the Expo **web** target (`expo start --web` / `apps/mobile` web output) is
 currently broken (tslib/SSR interop error in `react-native-web`). Use native targets (iOS/Android
 dev build) or the Next.js app (`apps/web`) for web.
@@ -938,7 +958,7 @@ needs a fresh dev-client build before any of this works
 ### Sub-project 7 launch checklist (fan discovery)
 
 - **New composite indexes deploy with `firebase deploy`**: sub-project 7 adds 9 composite indexes to
-  `firestore.indexes.json` (2 `events`, 6 `profiles`, 1 `follows`, 1 `posts`):
+  `firestore.indexes.json` (2 `events`, 5 `profiles`, 1 `follows`, 1 `posts`):
   - `events (status, genres ARRAY_CONTAINS, startsAt)`
   - `events (status, hasFreeTier, startsAt)`
   - `profiles (type, status, name)`
