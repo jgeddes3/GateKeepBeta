@@ -925,6 +925,46 @@ describe("settlement, a charge left processing", () => {
     expect(raced?.kind).toBe("settlement_raced");
     expect(raced?.resolvedAt).toBeNull();
   });
+
+  it("SP10 Task 7 (sp5 #5): a settlement webhook landing inside the synchronous charge window throws (Stripe redelivers) and raises NO settlement_raced alert", async () => {
+    const { musician, gigId, bookingId } = await makeEndedBooking("race1");
+    const accountId = await musicianAccountId(musician.profileId);
+    await scheduleSettlement(bookingId, gigId);
+    await makeSettlementDue(bookingId, gigId);
+
+    // The synchronous path's state between its claim write and its terminal
+    // write: chargingSince fresh, intentId still null, the card charged.
+    const paymentRef = adb.doc(`bookings/${bookingId}/payments/${gigId}`);
+    await paymentRef.update({ "settlement.chargingSince": Date.now() });
+    const intentId = `pi_race_${Date.now()}`;
+    const evt = fakeEvent("payment_intent.succeeded", {
+      id: intentId, amount: FLAT_CHARGE_CENTS, amount_received: FLAT_CHARGE_CENTS,
+      metadata: { bookingId, gigId, purpose: "settlement" },
+    });
+    const res = await postWebhook(evt);
+    expect(res.status).toBe(500); // the handler threw; the claim machine stamped failedAt
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).data()?.failedAt).toBeTypeOf("number");
+
+    const untouched = await getPayment(bookingId, gigId);
+    expect(untouched?.settlement.status).toBe("pending");
+    expect(untouched?.settlement.intentId).toBeNull();
+    expect(untouched?.settlement.chargingSince).toBeTypeOf("number"); // the sync path still owns it
+    expect(untouched?.transfer.status).toBe("none");
+    expect(await accountBalanceCents(accountId)).toBe(0);
+    expect(await adminAlert(`settlement-raced:${bookingId}:${gigId}`)).toBeUndefined();
+
+    // The sync path finishes (here: the sweep, on a clean claim), then the
+    // redelivery lands on a paid doc and is the existing no-op.
+    await paymentRef.update({ "settlement.chargingSince": null });
+    await runPaymentsSweep(Date.now());
+    const paid = await getPayment(bookingId, gigId);
+    expect(paid?.settlement.status).toBe("paid");
+    const redelivery = await postWebhook({ ...evt, data: { object: { ...evt.data.object, id: paid!.settlement.intentId } } });
+    expect(redelivery.status).toBe(200);
+    expect(await accountBalanceCents(accountId)).toBe(FLAT_EARNINGS_CENTS);
+    expect((await getPayment(bookingId, gigId))?.transfer.transferredAt).toBe(paid!.transfer.transferredAt);
+    expect(await adminAlert(`settlement-raced:${bookingId}:${gigId}`)).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

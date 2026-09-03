@@ -1444,8 +1444,22 @@ paymentIntentSucceededHandlers["deposit"] = async (object) => {
   // Not silently ignorable; it's precisely the stuck-money signal Task 9's
   // reconciliation (and an operator) needs.
   if (booking.depositChargeIntentId !== intentId) {
+    if (booking.depositChargeIntentId == null) {
+      // SP10 Task 7 (sp5 #5): the synchronous accept saga never records an
+      // intent id on the booking (only the `processing` route does), so on
+      // every ordinary accept whose webhook beats transaction B this branch is
+      // the expected shape, not an anomaly: the sync path owns this intent and
+      // its transaction B will commit (or refund) it.
+      console.info(
+        `payment_intent.succeeded (deposit): ${bookingId} is mid-accept with no recorded intent; the synchronous saga owns ${intentId}`);
+      return;
+    }
+    // An accept IS in flight on a DIFFERENT intent, and THIS intent just
+    // succeeded: two live charges exist for one booking, and this one will
+    // never be consumed. The stuck-money signal step 1's reconciliation (and an
+    // operator) needs.
     console.error(
-      `payment_intent.succeeded (deposit): ${bookingId} is awaiting intent ${String(booking.depositChargeIntentId)} but ${intentId} succeeded, unconsumed charge, needs reconciliation`);
+      `payment_intent.succeeded (deposit): ${bookingId} is awaiting intent ${booking.depositChargeIntentId} but ${intentId} succeeded; unconsumed charge, needs reconciliation`);
     return;
   }
 

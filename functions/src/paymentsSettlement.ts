@@ -53,7 +53,7 @@
 import { getFirestore } from "firebase-admin/firestore";
 import {
   computeEarningsCents, computeFeeShareCents, computeLateFeeSplit, computeSettlementBaseCents,
-  resolveFeePolicy, isValidDocId, SETTLEMENT_RETRY_OFFSETS_MS,
+  resolveFeePolicy, isValidDocId, SETTLEMENT_RETRY_OFFSETS_MS, WEBHOOK_SYNC_OWNER_WINDOW_MS,
 } from "@gatekeep/shared";
 import type { BookingRequestDoc, GigDoc, PaymentDoc } from "@gatekeep/shared";
 import { getStripe, StripeCardDeclinedError, StripePaymentPendingError } from "./stripeClient.js";
@@ -1712,6 +1712,22 @@ const settlementIntentSucceeded = async (object: Record<string, unknown>): Promi
     console.error(
       `payment_intent.succeeded (${purpose}): ${bookingId}/${gigId} is awaiting intent ${p.settlement.intentId} but ${intentId} succeeded, unconsumed charge, needs reconciliation`);
     return;
+  }
+  // SP10 Task 7 (sp5 #5): NO intent recorded yet and a FRESH pre-charge claim
+  // means chargeSettlement's synchronous path is between its Stripe call and
+  // its terminal write right now (live Stripe delivers this event within about
+  // a second). Finalizing here would transfer on the same earn:{attempts} key
+  // the sync path is using and then lose the terminal write's precondition,
+  // which is exactly the false settlement_raced alert the audit found. Throw
+  // instead: the claim machine stamps failedAt, Stripe redelivers, and the
+  // redelivery lands on a paid doc and takes the already_paid no-op below. A
+  // claim older than the window is an instance that died mid-charge, and the
+  // finalize path's own terminators handle that case.
+  const claimedAt = p.settlement.chargingSince;
+  if (p.settlement.intentId == null && claimedAt != null && Date.now() - claimedAt < WEBHOOK_SYNC_OWNER_WINDOW_MS) {
+    throw new Error(
+      `payment_intent.succeeded (${purpose}): ${bookingId}/${gigId} is owned by a synchronous settlement claim from `
+      + `${new Date(claimedAt).toISOString()}; deferring to redelivery`);
   }
   // `latest_charge` is the charge behind the intent, when Stripe sends it,
   // it makes the earnings transfer draw on those exact funds (contract #3).
