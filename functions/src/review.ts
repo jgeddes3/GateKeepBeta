@@ -262,6 +262,17 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       }
     }
 
+    // SP10 Task 16 (sp1 #7): the resubmit cooldown also lives on each admin's
+    // user doc, which deleteProfile cannot destroy. Merge-set: the user doc
+    // always exists (onUserCreated), and this field is outside the client's
+    // updatable key set, so it is server-only by construction.
+    if (decision === "rejected") {
+      const adminsSnap = await db.collection(`profiles/${profileId}/members`).where("role", "==", "admin").get();
+      for (const m of adminsSnap.docs) {
+        batch.set(db.doc(`users/${m.id}`), { lastProfileRejectedAt: now }, { merge: true });
+      }
+    }
+
     await batch.commit();
 
     // SP4 (Task 7): unwind every booking naming this profile as EITHER side

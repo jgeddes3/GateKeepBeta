@@ -96,10 +96,15 @@ describe("invites", () => {
     await callFn("inviteMember", { profileId, email, role: "member", label: "sax" }, owner.user);
     const first = await fetchPendingInviteId(adb, profileId, invitee.uid);
     await callFn("respondToInvite", { inviteId: first, accept: true }, invitee.user);
-    // A second, independent invite to the same (now-member) email, accepting
-    // it must not blindly .set() over the existing membership doc.
-    await callFn("inviteMember", { profileId, email, role: "admin", label: "sax2" }, owner.user);
-    const second = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    // A second invite to the same (now-member) uid can no longer be minted by
+    // inviteMember (SP10 Task 16 refuses it uniformly), so it is seeded
+    // directly: the subject here is respondToInvite's own transaction guard.
+    const secondRef = adb.collection("invites").doc();
+    await secondRef.set({
+      profileId, profileName: "Band", invitedUid: invitee.uid, role: "admin", label: "sax2",
+      invitedByUid: owner.uid, status: "pending", createdAt: Date.now(),
+    } satisfies InviteDoc);
+    const second = secondRef.id;
     await expect(callFn("respondToInvite", { inviteId: second, accept: true }, invitee.user))
       .rejects.toMatchObject({ code: "functions/already-exists" });
     const m = await adb.doc(`profiles/${profileId}/members/${invitee.uid}`).get();
@@ -236,6 +241,39 @@ describe("invites", () => {
     const invitee = await signUpTestUser(`ov-${Date.now()}@test.com`);
     await expect(callFn("respondToInvite", { inviteId: "x".repeat(80), accept: true }, invitee.user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+
+  // SP10 Task 16 (sp1 #16): a leading/trailing space or mismatched case from
+  // a mobile keyboard used to make getUserByEmail miss (Auth emails are
+  // stored lowercase-normalized), silently falling into the anti-enumeration
+  // { ok: true } branch for an invite that never existed.
+  it("trims and lowercases the invitee email", async () => {
+    const { owner, profileId } = await bandWithOwner("invcase");
+    const email = `case-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email: `  ${email.toUpperCase()}  `, role: "member", label: "keys" }, owner.user);
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    expect(inviteId).toBeTruthy();
+  });
+
+  it("a duplicate pending invite and an already-member invitee both get the uniform { ok: true } and create nothing", async () => {
+    const { owner, profileId } = await bandWithOwner("invdup");
+    const email = `dup-${Date.now()}@test.com`;
+    const invitee = await signUpTestUser(email);
+    await callFn("inviteMember", { profileId, email, role: "member", label: "bass" }, owner.user);
+    const dup = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "inviteMember", { profileId, email, role: "member", label: "bass again" }, owner.user);
+    expect(dup.ok).toBe(true);
+    const pending = await adb.collection("invites").where("invitedUid", "==", invitee.uid).get();
+    expect(pending.docs.filter((d) => d.data().profileId === profileId && d.data().status === "pending")).toHaveLength(1);
+
+    const inviteId = await fetchPendingInviteId(adb, profileId, invitee.uid);
+    await callFn("respondToInvite", { inviteId, accept: true }, invitee.user);
+    const again = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "inviteMember", { profileId, email, role: "admin", label: "bass" }, owner.user);
+    expect(again.ok).toBe(true);
+    const after = await adb.collection("invites").where("invitedUid", "==", invitee.uid).get();
+    expect(after.docs.filter((d) => d.data().profileId === profileId && d.data().status === "pending")).toHaveLength(0);
   });
 });
 

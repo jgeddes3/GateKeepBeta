@@ -127,7 +127,10 @@ describe("reviewProfile", () => {
     const { owner, profileId } = await pendingProfile("v8");
     const adminUser = await makeAdminUser("admin");
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Round 1" }, adminUser.user);
+    // SP10 Task 16: the cooldown also reads the user doc (deleteProfile
+    // cannot destroy it), so both backdates are needed here.
     await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await adb.doc(`users/${owner.uid}`).update({ lastProfileRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
     await callFn("submitProfileForReview", { profileId }, owner.user);
     const beforeApprove = (await adb.doc(`profiles/${profileId}`).get()).data();
     expect(typeof beforeApprove?.lastRejectedAt).toBe("number");

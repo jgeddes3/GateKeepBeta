@@ -19,6 +19,10 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     if (typeof email !== "string" || email.trim().length === 0) {
       throw new HttpsError("invalid-argument", "A valid email is required.");
     }
+    // SP10 Task 16 (sp1 #16): a leading space from a mobile keyboard used to
+    // make getUserByEmail miss and the anti-enumeration branch report
+    // success for an invite that never existed.
+    const normalizedEmail = email.trim().toLowerCase();
     if (role !== "admin" && role !== "member") {
       throw new HttpsError("invalid-argument", "Role must be \"admin\" or \"member\".");
     }
@@ -47,10 +51,20 @@ export const inviteMember = onCall<{ profileId: string; email: string; role: Mem
     // reveal via response shape/error code whether an account exists for
     // a given email.
     let invited;
-    try { invited = await getAuth().getUserByEmail(email); }
+    try { invited = await getAuth().getUserByEmail(normalizedEmail); }
     catch { return { ok: true as const }; }
     if (invited.uid === uid) {
       throw new HttpsError("failed-precondition", "You're already on this profile.");
+    }
+    // Uniform { ok: true } (never an error) for an invitee who is already a
+    // member or already has a pending invite here: an error would reveal
+    // that the email resolves, the same oracle the catch above closes. The
+    // pending snapshot already fetched for the cap check answers the second
+    // question without another query.
+    const existingMember = await db.doc(`profiles/${profileId}/members/${invited.uid}`).get();
+    if (existingMember.exists) return { ok: true as const };
+    if (pending.docs.some((d) => (d.data() as InviteDoc).invitedUid === invited.uid)) {
+      return { ok: true as const };
     }
     const profile = await db.doc(`profiles/${profileId}`).get();
     const invite: InviteDoc = {

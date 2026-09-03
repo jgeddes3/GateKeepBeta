@@ -7,6 +7,7 @@ import {
   DELETE_PROFILE_PAYMENTS_MESSAGE, DELETE_PROFILE_EVENTS_MESSAGE,
   type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
   type CuratorDetails, type CuratorSubtype, type PaymentDoc, type EventDoc, type StripeProfileDoc,
+  type UserDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { writeAudit } from "./review.js";
@@ -143,29 +144,28 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
 
   const db = getFirestore();
 
-  // Cap unsubmitted (draft/rejected) profiles per admin to prevent unlimited
-  // handle squatting via never-submitted drafts. Mirrors deleteAccount.ts's
-  // pattern: query the collection-group by uid (already index-enabled) and
-  // filter admin role / status in application code rather than adding a
-  // second equality clause that would need its own collection-group index.
-  const myMemberships = await db.collectionGroup("members").where("uid", "==", uid).get();
-  let unsubmittedCount = 0;
-  for (const m of myMemberships.docs) {
-    if (m.data().role !== "admin") continue;
-    const profileRef = m.ref.parent.parent;
-    if (!profileRef) continue;
-    const p = await profileRef.get();
-    if (UNSUBMITTED_STATUSES.has(p.data()?.status)) unsubmittedCount++;
-  }
-  if (unsubmittedCount >= MAX_UNSUBMITTED_PROFILES) {
-    throw new HttpsError("resource-exhausted",
-      "Too many unsubmitted profiles. Finish or delete an existing draft first.");
-  }
-
   const profileRef = db.collection("profiles").doc();
   const handleRef = db.doc(`handles/${input.handle}`);
 
   await db.runTransaction(async (tx) => {
+    // Cap unsubmitted (draft/rejected) profiles per admin to prevent unlimited
+    // handle squatting via never-submitted drafts. SP10 Task 16 (sp1 #19):
+    // counted INSIDE the transaction, so two concurrent creates cannot both
+    // read "2 drafts" and both commit a third and fourth. All reads precede
+    // the writes below, as Firestore transactions require.
+    const myMemberships = await tx.get(db.collectionGroup("members").where("uid", "==", uid));
+    let unsubmittedCount = 0;
+    for (const m of myMemberships.docs) {
+      if (m.data().role !== "admin") continue;
+      const memberProfileRef = m.ref.parent.parent;
+      if (!memberProfileRef) continue;
+      const p = await tx.get(memberProfileRef);
+      if (UNSUBMITTED_STATUSES.has(p.data()?.status)) unsubmittedCount++;
+    }
+    if (unsubmittedCount >= MAX_UNSUBMITTED_PROFILES) {
+      throw new HttpsError("resource-exhausted",
+        "Too many unsubmitted profiles. Finish or delete an existing draft first.");
+    }
     if ((await tx.get(handleRef)).exists) {
       throw new HttpsError("already-exists", "That handle is taken.");
     }
@@ -202,7 +202,13 @@ export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-centra
 
 export const submitProfileForReview = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
   const uid = requireAuthUid(req);
+  // SP10 Task 16 (sp1 #13): file-wide ordering, requireAuthUid ->
+  // requireVerifiedEmail -> input validation -> authz.
+  requireVerifiedEmail(req);
   const { profileId } = req.data;
+  if (!isValidDocId(profileId)) {
+    throw new HttpsError("invalid-argument", "A profile id is required.");
+  }
   await requireProfileAdmin(profileId, uid);
   const ref = getFirestore().doc(`profiles/${profileId}`);
   const snap = await ref.get();
@@ -213,10 +219,17 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
   }
 
   // Anti-spam: resubmitting too soon after a rejection is blocked regardless
-  // of profile type, reviewProfile stamps lastRejectedAt on every reject
-  // (routine "revise and resubmit" and retroactive-unpublish alike).
-  const lastRejectedAt = data?.lastRejectedAt;
-  if (lastRejectedAt !== undefined && Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS) {
+  // of profile type. reviewProfile stamps lastRejectedAt on the profile AND
+  // lastProfileRejectedAt on every admin's user doc (SP10 Task 16, sp1 #7):
+  // the profile field can be destroyed by deleteProfile, the user field
+  // cannot, so delete-and-recreate no longer resets the clock. The later of
+  // the two governs.
+  const userSnap = await getFirestore().doc(`users/${uid}`).get();
+  const lastRejectedAt = Math.max(
+    (data?.lastRejectedAt as number | undefined) ?? 0,
+    ((userSnap.data() as UserDoc | undefined)?.lastProfileRejectedAt) ?? 0,
+  );
+  if (lastRejectedAt > 0 && Date.now() - lastRejectedAt < RESUBMIT_COOLDOWN_MS) {
     throw new HttpsError("failed-precondition", "You can resubmit 24 hours after a rejection.");
   }
 
@@ -370,6 +383,17 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   // either way. These bookings deliberately SURVIVE as "expired" top-level
   // records that now reference a dead profile id, sub-5 must tolerate that.
   await unwindBookingsForModeration({ profileId });
+
+  // SP10 Task 16 (sp1 #15): pending invites to this profile are revoked
+  // now, not left for the 14-day sweep. Served by the (profileId, status)
+  // composite; bounded by MAX_PENDING_INVITES_PER_PROFILE.
+  const pendingInvites = await db.collection("invites")
+    .where("profileId", "==", profileId).where("status", "==", "pending").get();
+  if (!pendingInvites.empty) {
+    const inviteBatch = db.batch();
+    for (const inviteDoc of pendingInvites.docs) inviteBatch.update(inviteDoc.ref, { status: "revoked" });
+    await inviteBatch.commit();
+  }
 
   // SP4 (Task 13 item 5): handle delete moved to AFTER the gig/series/booking
   // cascade above (was: the first write this callable made). Freeing the

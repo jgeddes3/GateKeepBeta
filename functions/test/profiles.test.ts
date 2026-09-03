@@ -134,6 +134,23 @@ describe("createProfileDraft", () => {
     await expect(callFn("createProfileDraft", draft(`cap3_${Date.now()}`), user))
       .rejects.toMatchObject({ code: "functions/resource-exhausted" });
   });
+
+  // SP10 Task 16 (sp1 #19): the cap used to be counted OUTSIDE the
+  // transaction (a plain pre-transaction scan), so two concurrent creates
+  // could both read "2 drafts" and both commit, busting the cap. Counting
+  // inside the transaction closes that: only one of three concurrent calls
+  // at the cap boundary can win.
+  it("draft cap holds under concurrent creates: three parallel calls at two drafts yield exactly one success", async () => {
+    const { user } = await signUpTestUser(`ccon-${Date.now()}@test.com`);
+    await callFn("createProfileDraft", draft(`ccon1_${Date.now()}`), user);
+    await callFn("createProfileDraft", draft(`ccon2_${Date.now()}`), user);
+    const results = await Promise.allSettled([3, 4, 5].map((n) =>
+      callFn("createProfileDraft", draft(`ccon${n}_${Date.now()}`), user)));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const r of results) {
+      if (r.status === "rejected") expect(r.reason).toMatchObject({ code: "functions/resource-exhausted" });
+    }
+  });
 });
 
 describe("deleteProfile", () => {
@@ -258,6 +275,23 @@ describe("deleteProfile", () => {
     const { user } = await signUpTestUser(`del9-${Date.now()}@test.com`);
     await expect(callFn("deleteProfile", { profileId: "../etc" }, user))
       .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
+
+  // SP10 Task 16 (sp1 #15): pending invites used to be left for the 14-day
+  // sweep after the profile they pointed at was gone, deleteProfile now
+  // revokes them immediately.
+  it("revokes the profile's pending invites", async () => {
+    const { user } = await signUpTestUser(`delinv-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", draft(`delinv_${Date.now()}`), user);
+    const now = Date.now();
+    const ref = adb.collection("invites").doc();
+    await ref.set({
+      profileId, profileName: "The Midnight Owls", invitedUid: "someone", role: "member", label: "sax",
+      invitedByUid: user.uid, status: "pending", createdAt: now,
+    });
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await ref.get()).data()?.status).toBe("revoked");
   });
 });
 
@@ -611,7 +645,7 @@ describe("submitProfileForReview anti-spam", () => {
   }, 60_000);
 
   it("blocks resubmission within 24h of a rejection, and allows it again after 25h", async () => {
-    const { user } = await signUpTestUser(`ccool-${Date.now()}@test.com`);
+    const { user, uid } = await signUpTestUser(`ccool-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "curator", subtype: "venue", name: "Cooldown Room", handle: `ccool_${Date.now()}` }, user);
     await seedCuratorGateContent(adb, profileId);
@@ -619,8 +653,11 @@ describe("submitProfileForReview anti-spam", () => {
     const adminUser = await makeAdminUser("ccooladmin");
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Not yet" }, adminUser.user);
 
-    // +1h since rejection: still inside the 24h cooldown window.
+    // +1h since rejection: still inside the 24h cooldown window. The
+    // cooldown now also reads the user doc (SP10 Task 16), so both must be
+    // backdated together.
     await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 60 * 60 * 1000 });
+    await adb.doc(`users/${uid}`).update({ lastProfileRejectedAt: Date.now() - 60 * 60 * 1000 });
     await expect(callFn("submitProfileForReview", { profileId }, user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
     await expect(callFn("submitProfileForReview", { profileId }, user))
@@ -628,6 +665,7 @@ describe("submitProfileForReview anti-spam", () => {
 
     // +25h since rejection: past the cooldown, resubmission succeeds.
     await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await adb.doc(`users/${uid}`).update({ lastProfileRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
   });
@@ -637,7 +675,7 @@ describe("submitProfileForReview anti-spam", () => {
   // clear the 24h cooldown, so lastRejectedAt is stamped back via the admin
   // SDK the same way that test does.
   it("resubmitCount increments across reject-then-resubmit cycles, and stays unset after the first-ever submission", async () => {
-    const { user } = await signUpTestUser(`crsc-${Date.now()}@test.com`);
+    const { user, uid } = await signUpTestUser(`crsc-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "curator", subtype: "venue", name: "Resubmit Room", handle: `crsc_${Date.now()}` }, user);
     await seedCuratorGateContent(adb, profileId);
@@ -648,11 +686,13 @@ describe("submitProfileForReview anti-spam", () => {
     const adminUser = await makeAdminUser("crscadmin");
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Round 1" }, adminUser.user);
     await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await adb.doc(`users/${uid}`).update({ lastProfileRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.resubmitCount).toBe(1);
 
     await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Round 2" }, adminUser.user);
     await adb.doc(`profiles/${profileId}`).update({ lastRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await adb.doc(`users/${uid}`).update({ lastProfileRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.resubmitCount).toBe(2);
   });
@@ -672,7 +712,7 @@ describe("submitProfileForReview anti-spam", () => {
   });
 
   it("cooldown boundary: just under RESUBMIT_COOLDOWN_MS elapsed is still blocked, just at/over it is allowed", async () => {
-    const { user } = await signUpTestUser(`cbound-${Date.now()}@test.com`);
+    const { user, uid } = await signUpTestUser(`cbound-${Date.now()}@test.com`);
     const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
       { type: "curator", subtype: "venue", name: "Boundary Room", handle: `cbound_${Date.now()}` }, user);
     await seedCuratorGateContent(adb, profileId);
@@ -694,9 +734,15 @@ describe("submitProfileForReview anti-spam", () => {
 
     // Just under the cooldown: elapsed at call time is (COOLDOWN - margin) +
     // network jitter, which stays < COOLDOWN as long as that jitter is
-    // under the margin, still blocked.
+    // under the margin, still blocked. Both the profile and user doc
+    // backdates are needed (SP10 Task 16): the cooldown reads the later of
+    // the two, and the real reject above already stamped a fresh
+    // lastProfileRejectedAt on the user doc.
     await adb.doc(`profiles/${profileId}`).update({
       lastRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS - BOUNDARY_MARGIN_MS),
+    });
+    await adb.doc(`users/${uid}`).update({
+      lastProfileRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS - BOUNDARY_MARGIN_MS),
     });
     await expect(callFn("submitProfileForReview", { profileId }, user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -706,6 +752,9 @@ describe("submitProfileForReview anti-spam", () => {
     // allowed.
     await adb.doc(`profiles/${profileId}`).update({
       lastRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS + BOUNDARY_MARGIN_MS),
+    });
+    await adb.doc(`users/${uid}`).update({
+      lastProfileRejectedAt: Date.now() - (RESUBMIT_COOLDOWN_MS + BOUNDARY_MARGIN_MS),
     });
     await callFn("submitProfileForReview", { profileId }, user);
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.status).toBe("pending_review");
@@ -733,6 +782,42 @@ describe("submitProfileForReview anti-spam", () => {
     await expect(callFn("submitProfileForReview", { profileId }, user))
       .rejects.toThrow(/24 hours/i);
   }, 60_000);
+
+  // SP10 Task 16 (sp1 #7): the cooldown used to live only on the profile
+  // doc, so deleting the rejected profile and recreating a fresh one under
+  // a new handle reset the clock. It now also lives on the admin's user
+  // doc, which deleteProfile cannot touch, so the cooldown survives.
+  it("reject, delete, recreate: the 24h cooldown follows the uid, not the profile doc", async () => {
+    const { user, uid } = await signUpTestUser(`cuid-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Squat Room", handle: `cuid_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, profileId);
+    await callFn("submitProfileForReview", { profileId }, user);
+    const adminUser = await makeAdminUser("cuidadmin");
+    await callFn("reviewProfile", { profileId, decision: "rejected", reason: "Impersonation" }, adminUser.user);
+    expect(typeof (await adb.doc(`users/${uid}`).get()).data()?.lastProfileRejectedAt).toBe("number");
+
+    await callFn("deleteProfile", { profileId }, user);
+    const { profileId: again } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      { type: "curator", subtype: "venue", name: "Squat Room", handle: `cuid2_${Date.now()}` }, user);
+    await seedCuratorGateContent(adb, again);
+    await expect(callFn("submitProfileForReview", { profileId: again }, user))
+      .rejects.toThrow(/24 hours/i);
+    await adb.doc(`users/${uid}`).update({ lastProfileRejectedAt: Date.now() - 25 * 60 * 60 * 1000 });
+    await callFn("submitProfileForReview", { profileId: again }, user);
+    expect((await adb.doc(`profiles/${again}`).get()).data()?.status).toBe("pending_review");
+  });
+
+  it("submitProfileForReview requires a verified email and a well-formed profile id", async () => {
+    const { user } = await signUpTestUser(`csub-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft",
+      curatorDraft(`csub_${Date.now()}`), user);
+    const { user: unverified } = await signUpUnverifiedTestUser(`csubu-${Date.now()}@test.com`);
+    await expect(callFn("submitProfileForReview", { profileId }, unverified))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    await expect(callFn("submitProfileForReview", { profileId: "a/b" }, user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+  });
 });
 
 describe("deleteProfile storage cascade", () => {
