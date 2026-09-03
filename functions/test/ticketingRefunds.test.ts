@@ -575,4 +575,28 @@ describe("refundTicket", () => {
     const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
     expect(ticket.status).toBe("valid"); // untouched
   });
+
+  // SP10 Task 6 fix round 2 (Important 2): fix round 1's guard
+  // (`faceTotalCents - refundedFaceCents <= 0`) wrongly refused every free
+  // RSVP ticket, since a free order's remaining face is always 0. The guard
+  // must compare against THIS ticket's own unit price (0 for a free tier,
+  // which is never ">" anything it would need), not the order's absolute
+  // remaining balance.
+  it("a free RSVP ticket stays grace-refundable", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rt5");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "Free RSVP", priceCents: 0, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "Free RSVP");
+    const buyer = await makeBuyer("rt5buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const ticketId = tickets[0].id;
+
+    const result = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "refundTicket", { curatorProfileId: profileId, eventId, ticketId }, owner.user);
+    expect(result.ok).toBe(true);
+
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("refunded");
+  });
 });

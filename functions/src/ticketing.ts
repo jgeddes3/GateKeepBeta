@@ -726,17 +726,21 @@ export const refundTicket = onCall<RefundTicketInput>(
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) throw new HttpsError("internal", "This ticket's order could not be found.");
     const order = orderSnap.data() as TicketOrderDoc;
-    // SP10 Task 6 fix round 1 (Important 3): a lost dispute can already have
-    // reversed this order's ENTIRE face value (paymentsDisputes.ts's
-    // reverseForLostDispute), in which case there is no more curator revenue
-    // left on this order for a grace refund to give back a second time.
-    if (order.faceTotalCents - order.refundedFaceCents <= 0) {
-      throw new HttpsError("failed-precondition", TICKET_NOT_REFUNDABLE_MESSAGE);
-    }
     const item = order.items.find((it) => it.tierId === ticket.tierId);
     if (!item) throw new HttpsError("internal", "This ticket's order line item could not be found.");
 
     const unitPriceCents = item.unitPriceCents;
+    // SP10 Task 6 fix round 2 (Important 2): a lost dispute can already have
+    // reversed part or all of this order's face value (paymentsDisputes.ts's
+    // reverseForLostDispute), leaving less curator revenue on the order than
+    // this ticket's own face value to give back a second time. A FREE tier
+    // (unitPriceCents 0) has nothing to give back either way and must stay
+    // refundable regardless of the order's remaining face (fix round 1's
+    // `<= 0` check wrongly refused every free ticket, since a fully-paid
+    // order's remaining face is also 0).
+    if (unitPriceCents > 0 && order.faceTotalCents - order.refundedFaceCents < unitPriceCents) {
+      throw new HttpsError("failed-precondition", TICKET_NOT_REFUNDABLE_MESSAGE);
+    }
     const feeCents = ticketServiceFeeCents(unitPriceCents, order.feePolicy);
     const amountCents = unitPriceCents + feeCents;
 

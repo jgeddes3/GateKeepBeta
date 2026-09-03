@@ -424,7 +424,7 @@ export const chargeRefundedHandler: WebhookHandler = async (object, eventId) => 
   const now = Date.now();
   const db = getFirestore();
 
-  let refunds: Array<{ id: string; amountCents: number }>;
+  let refunds: Array<{ id: string; amountCents: number; metadata: Record<string, string> }>;
   try {
     refunds = await getStripe().listRefunds(chargeId);
   } catch (e) {
@@ -464,8 +464,20 @@ export const chargeRefundedHandler: WebhookHandler = async (object, eventId) => 
   const target = intentId ? await resolveChargeTarget(intentId) : null;
   for (const refund of refunds) {
     if (!isValidDocId(refund.id)) continue;
+    // SP10 Task 6 fix round 2 (Important 1): the FIRST check, not the ledger
+    // row. Every refund() call in this codebase stamps a non-empty
+    // metadata.purpose (deposit_refund, below_deposit_refund,
+    // noshow_clawback[_deposit], accept_abort, ticket_cancel_refund,
+    // ticket_grace_refund), so this alone is enough to know a refund is
+    // app-issued. It must not be dropped in favor of the ledger-row check
+    // alone: the two ticketing refund kinds key their ledger rows on the
+    // ticket/order id, not the Stripe refund id (ticketing.ts), so
+    // `stripeId == refund.id` never matches them and every curator grace
+    // refund or cancelled-event refund would otherwise misread as external.
+    const purpose = refund.metadata.purpose;
+    if (typeof purpose === "string" && purpose.length > 0) continue; // ours
     const known = await db.collection("ledger").where("stripeId", "==", refund.id).limit(1).get();
-    if (!known.empty) continue; // ours, keyed on the refund id
+    if (!known.empty) continue; // ours, keyed on the refund id (every other purpose)
     const amountCents = refund.amountCents;
 
     let stillPaid = false;

@@ -572,6 +572,31 @@ describe("SP10 Task 6: charge.refunded", () => {
     expect(await adminAlert(externalRefundAlertId(refundRow.stripeId!))).toBeUndefined();
   });
 
+  // SP10 Task 6 fix round 2 (Important 1): a curator grace refund's ledger
+  // row (`ticket_grace_refund`) is keyed on the TICKET id, not the Stripe
+  // refund id (ticketing.ts), so the `stripeId == refund.id` ledger-row check
+  // alone would never match it. The refund object's own `metadata.purpose`
+  // (ticketing.ts's refund() call sets it) must be checked FIRST.
+  it("a curator grace refund is not misread as an external refund", async () => {
+    const { owner, profileId, eventId, tierId } = await makePublishedEvent("xr5", 1000);
+    const t = await payOrder(eventId, tierId, 1, "xr5a");
+    const ticketSnap = await adb.collection(`users/${t.buyer.uid}/tickets`).where("orderId", "==", t.orderId).get();
+    const ticketId = ticketSnap.docs[0].id;
+    await callFn("refundTicket", { curatorProfileId: profileId, eventId, ticketId }, owner.user);
+    const grace = (await adb.collection("ledger").where("stripeId", "==", ticketId).get()).docs
+      .map((d) => d.data() as LedgerEntry).find((r) => r.kind === "ticket_grace_refund");
+    expect(grace).toBeTruthy();
+
+    expect((await postWebhook(fakeEvent("charge.refunded", chargeObject({
+      chargeId: t.chargeId, intentId: t.intentId, amountRefundedCents: 1169,
+    })))).status).toBe(200);
+    const refundDocs = await adb.collection("stripeFake/state/objects")
+      .where("kind", "==", "refund").where("chargeId", "==", t.chargeId).get();
+    const refundId = refundDocs.docs[0].id;
+    expect(await ledgerRow(`external_refund:${refundId}`)).toBeUndefined();
+    expect(await adminAlert(externalRefundAlertId(refundId))).toBeUndefined();
+  });
+
   it("a dashboard refund on a paid ticket order alerts; on an already refunded order it only records", async () => {
     const { eventId, tierId } = await makePublishedEvent("xr3", 1000);
     const t = await payOrder(eventId, tierId, 1, "xr3a");

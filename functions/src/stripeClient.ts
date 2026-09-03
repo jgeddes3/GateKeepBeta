@@ -206,7 +206,12 @@ export interface StripeLike {
   // pinned API version (2025-08-27.basil, well past 2022-11-15) no longer
   // even attaches it by default when the object IS fetched. `charge.refunded`
   // must call this instead of reading `object.refunds` off the event.
-  listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number }>>;
+  // SP10 Task 6 fix round 2 (Important 1): `metadata` travels with it, so the
+  // handler can tell an app-issued refund (every `refund()` call in this
+  // codebase sets `meta.purpose`) from a real dashboard refund WITHOUT relying
+  // solely on a ledger row keyed on the refund id (the ticketing refund kinds
+  // key their ledger rows on the ticket/order id instead, see ticketing.ts).
+  listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number; metadata: Record<string, string> }>>;
   transferToAccount(params: {
     accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
     // The originating charge, when there is one. Forwarded to Stripe as
@@ -599,6 +604,10 @@ export class FakeStripe implements StripeLike {
         tx.set(this.objRef(id), {
           kind: "refund", intentId: p.intentId, amountCents: p.amountCents,
           chargeId: typeof d.chargeId === "string" ? d.chargeId : null,
+          // SP10 Task 6 fix round 2 (Important 1): `meta` (real Stripe's
+          // Refund.metadata) travels with the refund object, so `listRefunds`
+          // can hand it back for the app-issued check.
+          meta: p.meta,
         });
       });
       return { id };
@@ -606,10 +615,13 @@ export class FakeStripe implements StripeLike {
   }
   // SP10 Task 6 fix round 1: refund objects are stamped with the charge id at
   // creation (above), so this is a direct query, no charge -> intent hop.
-  async listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number }>> {
+  async listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number; metadata: Record<string, string> }>> {
     const snap = await this.db.collection("stripeFake/state/objects")
       .where("kind", "==", "refund").where("chargeId", "==", chargeId).get();
-    return snap.docs.map((d) => ({ id: d.id, amountCents: d.data().amountCents as number }));
+    return snap.docs.map((d) => ({
+      id: d.id, amountCents: d.data().amountCents as number,
+      metadata: (d.data().meta as Record<string, string> | undefined) ?? {},
+    }));
   }
   async transferToAccount(p: { accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>; sourceChargeId?: string }) {
     return this.idem(p.idempotencyKey, async () => {
@@ -956,9 +968,9 @@ export class RealStripe implements StripeLike {
       { idempotencyKey: p.idempotencyKey });
     return { id: r.id };
   }
-  async listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number }>> {
+  async listRefunds(chargeId: string): Promise<Array<{ id: string; amountCents: number; metadata: Record<string, string> }>> {
     const list = await this.s.refunds.list({ charge: chargeId, limit: 100 });
-    return list.data.map((r) => ({ id: r.id, amountCents: r.amount }));
+    return list.data.map((r) => ({ id: r.id, amountCents: r.amount, metadata: r.metadata ?? {} }));
   }
   async transferToAccount(p: { accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>; sourceChargeId?: string }) {
     const t = await this.s.transfers.create(
