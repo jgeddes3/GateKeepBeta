@@ -854,6 +854,10 @@ export async function commitAcceptAfterCharge(params: {
     for (const doc of stagedDocs) {
       tx.update(doc.ref, {
         "deposit.status": "held", "deposit.intentId": intentId, "deposit.chargeId": chargeId,
+        // SP10 Task 3: the amount of the CHARGE (the whole accept batch, shared
+        // by every doc it paid for), not this doc's slice. finalizeSettlementSuccess
+        // decides whether a transfer fits inside it.
+        ...(intentId ? { "deposit.chargeAmountCents": expectedChargeCents } : {}),
         "deposit.chargedAt": now, updatedAt: now,
       });
     }

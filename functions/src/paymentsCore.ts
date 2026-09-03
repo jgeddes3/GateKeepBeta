@@ -490,7 +490,8 @@ export async function resolveDepositPending(
     });
     await writeLedger({
       kind: "forfeit_transfer", amountCents: p.deposit.sliceCents, bookingId, gigId,
-      profileId: p.musicianProfileId, stripeId: t.id, detail: "deposit forfeited to musician (100%)",
+      profileId: p.musicianProfileId, stripeId: t.id, sourced: p.deposit.chargeId != null,
+      detail: "deposit forfeited to musician (100%)",
     }).catch((e) => console.error(`resolveDepositPending: ledger write failed for forfeit ${bookingId}/${gigId}`, e));
     // Owner ruling (M3): a self-deal forfeit is card->cash to the same person,
     // hold INSTANT payout of these funds (standard-after-settle is unaffected).

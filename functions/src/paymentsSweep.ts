@@ -807,6 +807,7 @@ async function chargeOneBirthDeposit(
     try {
       await doc.ref.update({
         "deposit.status": "held", "deposit.intentId": r.id, "deposit.chargeId": r.chargeId,
+        "deposit.chargeAmountCents": amountCents,
         "deposit.chargedAt": now, "deposit.depositNextRetryAt": null, updatedAt: now,
       }, { lastUpdateTime: chargeBaseline });
     } catch (ue) {
@@ -822,7 +823,8 @@ async function chargeOneBirthDeposit(
         // `refund_pending` doc with a null intentId and resolve it to
         // `refunded` having sent nothing back.
         await doc.ref.update({
-          "deposit.intentId": r.id, "deposit.chargeId": r.chargeId, "deposit.chargedAt": now, updatedAt: now,
+          "deposit.intentId": r.id, "deposit.chargeId": r.chargeId, "deposit.chargeAmountCents": amountCents,
+          "deposit.chargedAt": now, updatedAt: now,
         });
         console.error(
           `paymentsSweep: birth deposit ${at.bookingId}/${at.gigId} was cancelled (${raced.deposit.status}) while charging intent ${r.id}, recorded the charge and left it for the pending executor`);

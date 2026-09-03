@@ -219,6 +219,42 @@ describe("FakeStripe", () => {
   it("getSetupIntentPaymentMethod returns null for an unknown setup intent id", async () => {
     expect(await fake.getSetupIntentPaymentMethod(`seti_never_existed_${Date.now()}`, "cus_x")).toBeNull();
   });
+
+  it("SP10 Task 3: a sourced transfer is capped at the source charge, cumulatively across transfers", async () => {
+    const customer = await fake.createCustomer({});
+    await fake.markCardSaved(customer.id);
+    const charge = await fake.chargeOffSession({
+      customerId: customer.id, amountCents: 10_000, idempotencyKey: `cap:charge:${Date.now()}`, meta: {},
+    });
+    expect(charge.chargeId).toBeTruthy();
+    const acct = await fake.createExpressAccount({});
+
+    await fake.transferToAccount({
+      accountId: acct.id, amountCents: 6_000, idempotencyKey: `cap:t1:${Date.now()}`, meta: {},
+      sourceChargeId: charge.chargeId!,
+    });
+    // 6,000 already drawn; another 5,000 against the same charge would exceed its 10,000.
+    const key2 = `cap:t2:${Date.now()}`;
+    await expect(fake.transferToAccount({
+      accountId: acct.id, amountCents: 5_000, idempotencyKey: key2, meta: {}, sourceChargeId: charge.chargeId!,
+    })).rejects.toMatchObject({ code: "balance_insufficient" });
+    // Same key, same modeled error, replayed WITH its code (real Stripe replays the 400 verbatim).
+    await expect(fake.transferToAccount({
+      accountId: acct.id, amountCents: 5_000, idempotencyKey: key2, meta: {}, sourceChargeId: charge.chargeId!,
+    })).rejects.toMatchObject({ code: "balance_insufficient" });
+    // 4,000 fits exactly; an UNSOURCED transfer is never capped by a charge.
+    await fake.transferToAccount({
+      accountId: acct.id, amountCents: 4_000, idempotencyKey: `cap:t3:${Date.now()}`, meta: {}, sourceChargeId: charge.chargeId!,
+    });
+    await fake.transferToAccount({
+      accountId: acct.id, amountCents: 50_000, idempotencyKey: `cap:t4:${Date.now()}`, meta: {},
+    });
+    expect(await balanceOf(acct.id)).toBe(60_000);
+    // An unknown source charge is refused outright (real Stripe 400s on an unknown source_transaction).
+    await expect(fake.transferToAccount({
+      accountId: acct.id, amountCents: 1, idempotencyKey: `cap:t5:${Date.now()}`, meta: {}, sourceChargeId: "ch_nope",
+    })).rejects.toThrow(/unknown source charge/);
+  });
 });
 
 // L8 (branch audit): getStripe()'s selection must FAIL CLOSED, a deployed

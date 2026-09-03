@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady, setGigStartsAt,
+  signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, makeMoneyReady, setGigStartsAt, ageConfirmedAt,
 } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
@@ -385,12 +385,13 @@ describe("settlement, the full T+3 pipeline", () => {
     expect(await idemUsed(`${bookingId}:${gigId}:settle:0`)).toBe(true);
     expect(await idemUsed(`${bookingId}:${gigId}:earn:0`)).toBe(true);
 
-    // The musician's balance actually moved, and the transfer is backed by
-    // the settlement charge (as-built contract #3's sourceChargeId).
+    // The musician's balance actually moved.
     expect(await accountBalanceCents(accountId)).toBe(EARNINGS_CENTS);
     const transferObj = await fakeObject(paid!.transfer.id!);
     expect(transferObj?.amountCents).toBe(EARNINGS_CENTS);
-    expect(transferObj?.sourceChargeId).toBe(await fakeObject(settleIntentId).then((i) => i?.chargeId));
+    // SP10 Task 3: the earnings transfer does not fit inside the settlement
+    // charge, so it draws on the platform balance.
+    expect(transferObj?.sourceChargeId).toBeNull();
 
     // Ledger: one row for each side of the move.
     const rows = await ledgerRows(bookingId);
@@ -623,9 +624,18 @@ describe("settlement, defenses", () => {
     const zeroDeposit = (await getPayment(zero.bookingId, zero.gigId))!;
     const belowDeposit = (await getPayment(below.bookingId, below.gigId))!;
 
-    // Exactly covered: due === 0, so nothing is charged at all.
+    // Exactly covered: due === 0, so nothing is charged at all. SP10 Task 3: a
+    // deposit slice that covers the whole date would, for real, have been
+    // charged for the whole date too, so BOTH the doc's own bookkeeping
+    // (chargeAmountCents) AND the underlying FakeStripe charge object it
+    // names are bumped to match (FULL_CHARGE_CENTS); FakeStripe's cap reads
+    // the real charge object, not the doc's field, so leaving the object at
+    // the small deposit-only amount would make an honestly-sourced transfer
+    // fail for the same reason live Stripe would.
     await adb.doc(`bookings/${zero.bookingId}/payments/${zero.gigId}`)
-      .update({ "deposit.sliceCents": BASE_CENTS });
+      .update({ "deposit.sliceCents": BASE_CENTS, "deposit.chargeAmountCents": FULL_CHARGE_CENTS });
+    await adb.doc(`stripeFake/state/objects/${zeroDeposit.deposit.intentId}`)
+      .update({ amountCents: FULL_CHARGE_CENTS });
     // Over-covered by 2500c: the difference comes BACK on the deposit intent.
     const excess = 2_500;
     await adb.doc(`bookings/${below.bookingId}/payments/${below.gigId}`)
@@ -914,6 +924,104 @@ describe("settlement, a charge left processing", () => {
     const raced = await adminAlert(`settlement-raced:${bookingId}:${gigId}`);
     expect(raced?.kind).toBe("settlement_raced");
     expect(raced?.resolvedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SP10 Task 3: transfer sourcing (sp5 #1). A transfer may draw on a charge only
+// when it fits inside that charge; otherwise it draws on the platform balance
+// and says so in its ledger row.
+// ---------------------------------------------------------------------------
+const FLAT_SET_CENTS = 100_000; // the audit's $1,000 gig
+const SET_DEPOSIT_CENTS = computeDepositCents(FLAT_SET_CENTS);
+const SET_DEPOSIT_CHARGE_CENTS = SET_DEPOSIT_CENTS + computeFeeShareCents(SET_DEPOSIT_CENTS, FEE.curatorFeePct);
+const SET_DUE_CENTS = FLAT_SET_CENTS - SET_DEPOSIT_CENTS;
+const SET_CHARGE_CENTS = SET_DUE_CENTS + computeFeeShareCents(SET_DUE_CENTS, FEE.curatorFeePct);
+const SET_EARNINGS_CENTS = computeEarningsCents(FLAT_SET_CENTS, FEE.musicianFeePct);
+
+describe("SP10 Task 3: transfer sourcing", () => {
+  it("the standard $1,000 settlement is NOT sourced from its $721.50 charge and still pays $980", async () => {
+    expect(SET_EARNINGS_CENTS).toBe(98_000);
+    expect(SET_EARNINGS_CENTS).toBeGreaterThan(SET_CHARGE_CENTS);
+    const { musician, gigId, bookingId } = await makeEndedBooking("src1", {
+      gig: { budget: { minCents: 50_000, maxCents: 150_000, structure: "perSet" } },
+      offer: offerPayload({ amountCents: FLAT_SET_CENTS }),
+    });
+    const accountId = await musicianAccountId(musician.profileId);
+    const held = await getPayment(bookingId, gigId);
+    // Every deposit charge site now records the charge amount beside the charge id.
+    expect(held?.deposit.chargeAmountCents).toBe(SET_DEPOSIT_CHARGE_CENTS);
+
+    await scheduleSettlement(bookingId, gigId);
+    await makeSettlementDue(bookingId, gigId);
+    await runPaymentsSweep(Date.now());
+
+    const paid = await getPayment(bookingId, gigId);
+    expect(paid?.settlement.status).toBe("paid");
+    expect(await fakeObject(paid!.settlement.intentId!).then((i) => i?.amountCents)).toBe(SET_CHARGE_CENTS);
+    expect(paid?.transfer.amountCents).toBe(SET_EARNINGS_CENTS);
+    expect(await accountBalanceCents(accountId)).toBe(SET_EARNINGS_CENTS);
+    // Unsourced: the transfer object carries no source charge, and the row says so.
+    expect(await fakeObject(paid!.transfer.id!).then((t) => t?.sourceChargeId)).toBeNull();
+    const earnRow = (await ledgerRows(bookingId)).find((r) => r.kind === "earnings_transfer");
+    expect(earnRow?.sourced).toBe(false);
+  });
+
+  it("a forfeit transfer stays sourced from the deposit charge", async () => {
+    const curator = await makeApprovedCuratorProfile("src2c");
+    const musician = await makeApprovedMusicianProfile("src2m");
+    await makeMoneyReady(curator, musician);
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await callFn("acceptBooking", { bookingId }, curator.owner.user);
+    const held = (await getPayment(bookingId, gigId))!;
+    expect(held.deposit.chargeAmountCents).toBe(DEPOSIT_CHARGE_CENTS);
+
+    await setGigStartsAt(gigId, 10); // inside CURATOR_FORFEIT_WINDOW_HOURS
+    await ageConfirmedAt(bookingId);
+    await callFn("cancelBooking", { bookingId, reason: "Venue flooded." }, curator.owner.user);
+
+    const p = (await getPayment(bookingId, gigId))!;
+    expect(p.deposit.status).toBe("forfeited");
+    expect(await fakeObject(p.deposit.forfeitTransferId!).then((t) => t?.sourceChargeId)).toBe(held.deposit.chargeId);
+    const row = (await ledgerRows(bookingId)).find((r) => r.kind === "forfeit_transfer");
+    expect(row?.sourced).toBe(true);
+  });
+
+  it("a zero-charge settlement is sourced from the deposit charge", async () => {
+    const zero = await makeEndedBooking("src3");
+    await scheduleSettlement(zero.bookingId, zero.gigId);
+    const deposit = (await getPayment(zero.bookingId, zero.gigId))!;
+    // A deposit slice that covers the whole date would, for real, have been
+    // charged for the whole date too, so BOTH the doc's own bookkeeping
+    // (chargeAmountCents) AND the underlying FakeStripe charge object it
+    // names are bumped to match (FULL_CHARGE_CENTS); FakeStripe's cap reads
+    // the real charge object, not the doc's field.
+    await adb.doc(`bookings/${zero.bookingId}/payments/${zero.gigId}`).update({
+      "deposit.sliceCents": BASE_CENTS, "deposit.chargeAmountCents": FULL_CHARGE_CENTS,
+    });
+    await adb.doc(`stripeFake/state/objects/${deposit.deposit.intentId}`)
+      .update({ amountCents: FULL_CHARGE_CENTS });
+    expect(await chargeSettlement({ bookingId: zero.bookingId, gigId: zero.gigId, now: Date.now() }))
+      .toEqual({ outcome: "charged", transferred: true });
+    const paid = (await getPayment(zero.bookingId, zero.gigId))!;
+    expect(await fakeObject(paid.transfer.id!).then((t) => t?.sourceChargeId)).toBe(deposit.deposit.chargeId);
+    const row = (await ledgerRows(zero.bookingId)).find((r) => r.kind === "earnings_transfer");
+    expect(row?.sourced).toBe(true);
+  });
+
+  it("a legacy deposit doc with no chargeAmountCents falls back to an unsourced zero-charge transfer", async () => {
+    const zero = await makeEndedBooking("src4");
+    await scheduleSettlement(zero.bookingId, zero.gigId);
+    await adb.doc(`bookings/${zero.bookingId}/payments/${zero.gigId}`).update({
+      "deposit.sliceCents": BASE_CENTS, "deposit.chargeAmountCents": FieldValue.delete(),
+    });
+    expect(await chargeSettlement({ bookingId: zero.bookingId, gigId: zero.gigId, now: Date.now() }))
+      .toEqual({ outcome: "charged", transferred: true });
+    const paid = (await getPayment(zero.bookingId, zero.gigId))!;
+    expect(await fakeObject(paid.transfer.id!).then((t) => t?.sourceChargeId)).toBeNull();
+    expect((await ledgerRows(zero.bookingId)).find((r) => r.kind === "earnings_transfer")?.sourced).toBe(false);
   });
 });
 

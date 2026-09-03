@@ -493,15 +493,22 @@ describe("the uncollected-fee escalation", () => {
 // self-deal forfeit's hold is set by production code, not by the test. `selfDeal`
 // is the only thing that changes between the two M3 cases.
 async function forfeitDepositTo(musicianProfileId: string, selfDeal: boolean): Promise<{ bookingId: string; gigId: string }> {
-  const bookingId = `bk_m3_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const unique = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const bookingId = `bk_m3_${unique}`;
   const gigId = "g1";
+  // Unique per call (as-built contract #6 style, review round 2): FakeStripe's
+  // Task 3 cap tracks draws CUMULATIVELY per charge, so two calls sharing one
+  // literal charge id would see the second forfeit's slice stacked on the
+  // first's and refused as balance_insufficient.
+  const intentId = `pi_sd_${unique}`;
+  const chargeId = `ch_sd_${unique}`;
   const now = Date.now();
   const doc: PaymentDoc = {
     bookingId, gigId, occurrenceStartsAt: now,
     curatorProfileId: "cur_selfdeal", musicianProfileId, selfDeal,
     baseCents: 10_000,
     deposit: {
-      sliceCents: 3_500, feeShareCents: 385, intentId: "pi_sd", chargeId: "ch_sd",
+      sliceCents: 3_500, feeShareCents: 385, intentId, chargeId,
       status: "forfeit_pending", chargedAt: now, resolvedAt: null, forfeitTransferId: null,
     },
     settlement: {
@@ -513,6 +520,14 @@ async function forfeitDepositTo(musicianProfileId: string, selfDeal: boolean): P
     createdAt: now, updatedAt: now,
   };
   await adb.doc(`bookings/${bookingId}/payments/${gigId}`).set(doc);
+  // SP10 Task 3: FakeStripe now validates a sourced transfer against a REAL
+  // charge (it resolves sourceChargeId through the charge's own payment_intent
+  // object), so the deposit's stub chargeId needs a backing object, the exact
+  // shape chargeOffSession itself would have written.
+  await adb.doc(`stripeFake/state/objects/${intentId}`).set({
+    kind: "payment_intent", amountCents: 3_885, customerId: "cus_sd",
+    meta: {}, refundedCents: 0, status: "succeeded", chargeId,
+  });
   await resolveDepositPending(bookingId, gigId);
   return { bookingId, gigId };
 }

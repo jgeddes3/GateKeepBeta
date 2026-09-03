@@ -698,13 +698,22 @@ export async function finalizeSettlementSuccess(args: {
     return ran("skipped", false, "no_account");
   }
 
-  // As-built contract #3: a transfer backed by a FRESH charge passes that
-  // charge's id so it draws on those funds instead of the platform's aggregate
-  // available balance (a not-yet-settled charge would otherwise fail
-  // `balance_insufficient` in live mode). A zero-charge settlement, the
-  // deposit covered the whole date, has no fresh charge, so it falls back to
-  // the DEPOSIT's charge, which is the money it is actually consuming.
-  const sourceChargeId = args.chargeId ?? (math.chargeTotal > 0 ? null : p.deposit.chargeId);
+  // SP10 Task 3 (sp5 #1): a transfer may draw on a charge (source_transaction)
+  // ONLY when it fits inside that charge. Stripe caps a sourced transfer at
+  // the source charge's amount, cumulatively with every earlier transfer
+  // sourced from it. The earnings transfer (98% of the FULL base) never fits
+  // inside the settlement charge (65% of the base plus its fee share), so the
+  // standard settlement draws on the platform balance; the deposit charge is
+  // days old and available by T+3, which is what makes the unsourced transfer
+  // safe. A zero-charge settlement (the deposit covered the whole date) draws
+  // on the deposit's charge when the doc knows that charge's amount; a legacy
+  // doc that does not falls back to the unsourced transfer.
+  const sourceCandidate: { id: string; amountCents: number } | null = args.chargeId
+    ? { id: args.chargeId, amountCents: args.chargedCents ?? math.chargeTotal }
+    : (math.chargeTotal === 0 && p.deposit.chargeId && p.deposit.chargeAmountCents != null)
+      ? { id: p.deposit.chargeId, amountCents: p.deposit.chargeAmountCents }
+      : null;
+  const sourceChargeId = sourceCandidate && math.earnings <= sourceCandidate.amountCents ? sourceCandidate.id : null;
   const transfer = math.earnings > 0
     ? await getStripe().transferToAccount({
       accountId: musicianStripe!.accountId!, amountCents: math.earnings,
@@ -817,7 +826,10 @@ export async function finalizeSettlementSuccess(args: {
     await writeLedger({
       kind: "earnings_transfer", amountCents: math.earnings, bookingId, gigId,
       profileId: p.musicianProfileId, stripeId: transfer.id,
-      detail: "earnings transfer (net of the musician fee, incl. any late-fee share)",
+      sourced: sourceChargeId != null,
+      detail: sourceChargeId
+        ? "earnings transfer (net of the musician fee, incl. any late-fee share), sourced from the charge"
+        : "earnings transfer (net of the musician fee, incl. any late-fee share), drawn on the platform balance",
     }).catch((e) => console.error(`finalizeSettlementSuccess: earnings_transfer ledger row failed for ${bookingId}/${gigId}`, e));
     // Owner ruling (M3): a self-deal settlement is card->cash to the same person
     //, hold INSTANT payout of the earnings just transferred (standard payout
@@ -1624,6 +1636,7 @@ export async function finalizeDepositPayDue(args: {
     await ref.update({
       "deposit.status": "held", "deposit.intentId": intentId,
       "deposit.chargeId": args.chargeId ?? p.deposit.chargeId ?? null,
+      "deposit.chargeAmountCents": amountCents,
       "deposit.chargedAt": now,
       // The retry clock is already null (exhaustion cleared it); written again
       // so a doc rescued from ANY rung of the ladder lands in the same shape.
@@ -1644,6 +1657,7 @@ export async function finalizeDepositPayDue(args: {
       // dropping it here would make that transfer draw on the platform's
       // aggregate balance instead of the money this very charge produced.
       "deposit.chargeId": args.chargeId ?? p.deposit.chargeId ?? null,
+      "deposit.chargeAmountCents": amountCents,
       "deposit.chargedAt": now, updatedAt: now,
     }).catch((we) => console.error(`finalizeDepositPayDue: failed to record intent ${intentId} on ${bookingId}/${gigId}`, we));
   }

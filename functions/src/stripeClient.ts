@@ -182,9 +182,10 @@ export interface StripeLike {
   transferToAccount(params: {
     accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>;
     // The originating charge, when there is one. Forwarded to Stripe as
-    // source_transaction so the transfer draws against that charge's funds
-    // directly instead of the platform's overall available balance,
-    // avoids balance_insufficient against a charge that hasn't settled yet.
+    // source_transaction so the transfer draws against that charge's funds.
+    // Stripe caps a sourced transfer at the charge's amount, cumulatively
+    // with earlier sourced transfers; callers pass it only when the transfer
+    // fits (SP10 Task 3), and FakeStripe refuses the same way live Stripe does.
     sourceChargeId?: string;
   }): Promise<{ id: string }>;
   reverseTransfer(params: { transferId: string; idempotencyKey: string }): Promise<{ id: string }>;
@@ -287,8 +288,9 @@ export class FakeStripe implements StripeLike {
   private reconstructError(stored: StoredError): Error {
     if (stored.name === "StripeCardDeclinedError") return new StripeCardDeclinedError(stored.message, stored.code);
     if (stored.name === "StripePaymentPendingError") return new StripePaymentPendingError(stored.intentId ?? "", stored.message);
-    const err = new Error(stored.message);
+    const err = new Error(stored.message) as Error & { code?: string };
     err.name = stored.name;
+    if (stored.code) err.code = stored.code;
     return err;
   }
 
@@ -558,17 +560,35 @@ export class FakeStripe implements StripeLike {
     return this.idem(p.idempotencyKey, async () => {
       const id = this.newId("tr");
       const acct = this.objRef(p.accountId);
-      // Both writes, the transfer object AND the running balance it
-      // depends on, happen in one transaction: no world where the object
-      // exists but the balance never moved (or vice versa), including if
-      // idem() decides NOT to cache a later failure and this whole make()
-      // reruns.
+      const objects = this.db.collection("stripeFake/state/objects");
+      // Both writes (the transfer object AND the running balance it depends
+      // on) happen in one transaction: no world where the object exists but
+      // the balance never moved (or vice versa), including if idem() decides
+      // NOT to cache a later failure and this whole make() reruns.
       await this.db.runTransaction(async (tx) => {
+        if (p.sourceChargeId) {
+          // SP10 Task 3 (sp5 #1): Stripe caps a source_transaction transfer at
+          // the source charge's amount, cumulatively across every transfer
+          // sourced from it. Modeled here so the suite fails the way live mode
+          // would. The charge lives on its payment_intent object (chargeId).
+          const intentSnap = await tx.get(objects.where("chargeId", "==", p.sourceChargeId).limit(1));
+          if (intentSnap.empty) throw new Error(`FakeStripe: unknown source charge ${p.sourceChargeId}`);
+          const chargeAmount = intentSnap.docs[0].data().amountCents as number;
+          const priorSnap = await tx.get(objects.where("kind", "==", "transfer").where("sourceChargeId", "==", p.sourceChargeId));
+          const drawn = priorSnap.docs
+            .filter((d) => d.data().reversed !== true)
+            .reduce((sum, d) => sum + ((d.data().amountCents as number) - ((d.data().reversedCents as number | undefined) ?? 0)), 0);
+          if (drawn + p.amountCents > chargeAmount) {
+            throw Object.assign(
+              new Error(`FakeStripe: transfer exceeds source charge (balance_insufficient): ${drawn} already drawn + ${p.amountCents} > ${chargeAmount}`),
+              { code: "balance_insufficient" });
+          }
+        }
         const s = await tx.get(acct);
         tx.set(acct, { balanceCents: ((s.data()?.balanceCents as number | undefined) ?? 0) + p.amountCents }, { merge: true });
         tx.set(this.objRef(id), {
           kind: "transfer", accountId: p.accountId, amountCents: p.amountCents, meta: p.meta,
-          sourceChargeId: p.sourceChargeId ?? null, reversed: false,
+          sourceChargeId: p.sourceChargeId ?? null, reversed: false, reversedCents: 0,
         });
       });
       return { id };
