@@ -117,12 +117,16 @@ export const disputeCreatedHandler: WebhookHandler = async (object, eventId) => 
     : `${target.purpose} for booking ${target.bookingId}${target.gigId ? `/${target.gigId}` : ""}`;
 
   // 1. The ledger row, keyed on the dispute id: what Stripe took, and why.
+  // Review round 1 (Important 3): the ONLY record of the money Stripe pulled,
+  // so a write failure must throw (500, Stripe retries) rather than be
+  // swallowed; the row id is deterministic (`dispute_opened:{disputeId}`), so
+  // a retry safely re-lands on the same doc instead of double-writing.
   await writeLedger({
     kind: "dispute_opened", amountCents: d.amountCents, bookingId: target.bookingId ?? null,
     gigId: target.gigId ?? null, profileId: target.curatorProfileId, stripeId: d.disputeId,
     detail: `dispute opened on ${scope}: ${d.amountCents}c withdrawn plus fee ${d.feeCents}c, reason ${d.reason}`,
     ...(target.purpose === "tickets" ? { eventId: null, buyerUid: null } : {}),
-  }).catch((e) => console.error(`charge.dispute.created: ledger row failed for ${d.disputeId}`, e));
+  });
 
   // 2. The resolution state `closed` reads back. Merge-set, so a redelivery
   // after `closed` already ran cannot reopen a decided dispute.
@@ -141,7 +145,9 @@ export const disputeCreatedHandler: WebhookHandler = async (object, eventId) => 
 
   // 3. The durable escalation. Evidence is submitted by hand in Stripe; the
   // ledger and the booking thread are the evidence, and this row is what tells
-  // an operator to go and assemble it.
+  // an operator to go and assemble it. Kept ABOVE the redelivery guard below:
+  // a `created` that arrives after the dispute is already decided is still a
+  // real (if late) delivery worth recording a recurrence of.
   const alertId = disputeAlertId(d.disputeId);
   const shouldLog = await recordAdminAlert({
     alertId, kind: "dispute_opened",
@@ -151,22 +157,37 @@ export const disputeCreatedHandler: WebhookHandler = async (object, eventId) => 
   });
   if (shouldLog) console.error(`charge.dispute.created: ${scope} disputed (see adminAlerts/${alertId})`);
 
+  // Review round 1 (Important 1): a redelivered `created` (fresh event id,
+  // same dispute) must not re-run steps 4/5 once the dispute is DECIDED
+  // (Task 6's `closed` handler set status to "won"/"lost"). Only a still-open
+  // (or brand-new, `!existing`) dispute may re-flag the curator or reopen the
+  // order; a late `created` behind a `closed` is a stale echo, not new news.
+  const stillOpen = !existing || existing.status === "open";
+
   // 4. The gate and the word to the curator, for a curator charge.
-  if (target.curatorProfileId) {
-    await declareCuratorDelinquent(target.curatorProfileId, now)
-      .catch((e) => console.error(`charge.dispute.created: delinquency flag failed for ${target.curatorProfileId}`, e));
+  if (stillOpen && target.curatorProfileId) {
+    // Review round 1 (Important 2): notify only when this call newly declared
+    // delinquency (the pattern paymentsSettlement.ts/paymentsSweep.ts use),
+    // so a redelivery of an ALREADY-flagged dispute does not re-notify.
+    const newlyDeclared = await declareCuratorDelinquent(target.curatorProfileId, now)
+      .catch((e) => {
+        console.error(`charge.dispute.created: delinquency flag failed for ${target.curatorProfileId}`, e);
+        return false;
+      });
     if (target.bookingId) {
       await recomputePaymentSummary(target.bookingId)
         .catch((e) => console.error(`charge.dispute.created: summary recompute failed for ${target.bookingId}`, e));
     }
-    await notifyProfileMembers(target.curatorProfileId, {
-      kind: "booking", refId: target.bookingId, title: "A payment was disputed",
-      body: "Your bank has disputed a GateKeep charge. Booking is paused until the dispute is resolved.",
-    }).catch((e) => console.error(`charge.dispute.created: notification failed for ${target.curatorProfileId}`, e));
+    if (newlyDeclared) {
+      await notifyProfileMembers(target.curatorProfileId, {
+        kind: "booking", refId: target.bookingId, title: "A payment was disputed",
+        body: "Your bank has disputed a GateKeep charge. Booking is paused until the dispute is resolved.",
+      }).catch((e) => console.error(`charge.dispute.created: notification failed for ${target.curatorProfileId}`, e));
+    }
   }
 
   // 5. The order stamp, for a ticket charge.
-  if (target.purpose === "tickets" && target.orderId) {
+  if (stillOpen && target.purpose === "tickets" && target.orderId) {
     await db.doc(`orders/${target.orderId}`).update({ disputeId: d.disputeId, disputeStatus: "open" })
       .catch((e) => console.error(`charge.dispute.created: order stamp failed for ${target.orderId}`, e));
   }

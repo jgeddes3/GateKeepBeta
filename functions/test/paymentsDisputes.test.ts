@@ -274,4 +274,49 @@ describe("SP10 Task 5: charge.dispute.created", () => {
     expect(alert?.detail).toContain("could not be resolved");
     expect(await disputeDoc(disputeId)).toBeUndefined();
   });
+
+  it("review round 1 (Important 1/2): a redelivered dispute (two event ids) declares delinquency and notifies the curator exactly once", async () => {
+    const { curator, gigId, bookingId } = await makeConfirmedBooking("dc5");
+    const p = await getPayment(bookingId, gigId);
+    const disputeId = newDisputeId();
+    const object = disputeObject({
+      id: disputeId, intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS, status: "needs_response",
+    });
+    expect((await postWebhook(fakeEvent("charge.dispute.created", object))).status).toBe(200);
+    expect((await getStripeDoc(curator.profileId))?.delinquent).toBe(true);
+    const firstDelinquentSince = (await getStripeDoc(curator.profileId))?.delinquentSince;
+
+    // A fresh event id for the SAME dispute: the redelivery must not
+    // re-declare delinquency (declareCuratorDelinquent's own idempotent
+    // no-write when already delinquent) or send a second notification.
+    expect((await postWebhook(fakeEvent("charge.dispute.created", object))).status).toBe(200);
+    expect((await getStripeDoc(curator.profileId))?.delinquentSince).toBe(firstDelinquentSince);
+
+    const notes = (await notificationsFor(curator.owner.uid)).filter((n) => n.title === "A payment was disputed");
+    expect(notes.length).toBe(1);
+  });
+
+  it("review round 1 (Important 1): a late created behind an already-decided dispute does not re-flag the curator or reopen the order", async () => {
+    const { profileId, eventId, tierId } = await makePublishedEvent("dc6", 1000);
+    const { orderId, intentId, chargeId } = await payOrder(eventId, tierId, 2, "dc6buyer");
+    const disputeId = newDisputeId();
+    // Pre-seed a DECIDED dispute record, as if Task 6's charge.dispute.closed
+    // handler already resolved it and this "created" arrived late, behind
+    // the resolution (a redelivery, or an out-of-order webhook delivery).
+    const wonRecord: DisputeRecord = {
+      chargeId, intentId, purpose: "tickets", orderId, curatorProfileId: null,
+      amountCents: 2000, feeCents: 1500, reason: "fraudulent", status: "won",
+      openedAt: Date.now() - 10_000, closedAt: Date.now(),
+    };
+    await adb.doc(`disputes/${disputeId}`).set(wonRecord);
+
+    expect((await postWebhook(fakeEvent("charge.dispute.created", disputeObject({
+      id: disputeId, intentId, chargeId, amountCents: 2000, status: "needs_response",
+    })))).status).toBe(200);
+
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.disputeStatus).toBeUndefined();
+    expect((await getStripeDoc(profileId))?.delinquent).not.toBe(true);
+    expect((await disputeDoc(disputeId))?.status).toBe("won");
+  });
 });
