@@ -79,7 +79,7 @@ NEXT: **8 Search**. Deferred: 5c band payout splits.
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (167), `pnpm emu:test` (736,
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (167), `pnpm emu:test` (735,
   single blocking call), `pnpm emu:rules` (113), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
