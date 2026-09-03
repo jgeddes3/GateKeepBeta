@@ -1,6 +1,6 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-08-31, after the 6
+Read this first in any new session or on a new machine. Last updated 2026-09-02, after the 7
 merge. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
@@ -35,8 +35,18 @@ Done and merged (each has a rulings doc that is the authority for its area):
    themes; the paid-ticket path needs real Stripe test keys, and the door scanner needs the new EAS
    dev build and is this sub-project's single highest on-device priority since it's entirely
    unverified off a real camera.
+7. Fan discovery (`sp7-rulings.md`): a ranked discover deck and searchable lists on mobile, a
+   filterable `/discover` grid on web, follow/unfollow on musician, curator, and genre targets, show
+   posts from lineup members with anti-spam caps, and the notification fan-out tying it together
+   (show announced, show rescheduled, a lineup post, new music from someone followed). A fixture
+   script (`scripts/seed-test-discovery.ts`) gives the seeded test accounts a real followable track,
+   a filled gig, and a booking-lineup event for the whole surface. Owner smoke owed: the sub-7
+   checklist in README, both web and mobile, both themes; mobile needs a new EAS dev build
+   (`expo-location` joined the native deps for the deck's distance sort) and is entirely unverified
+   off device, same posture as sub-6's door scanner before it. The Discover-page marketing capture
+   for the landing page's fan section is also still owed (it currently reuses artist-page.jpg).
 
-NEXT: **7 Fan discovery**, then 8 Search. Deferred: 5c band payout splits.
+NEXT: **8 Search**. Deferred: 5c band payout splits.
 
 ## Binding rules for ALL work
 
@@ -58,13 +68,19 @@ NEXT: **7 Fan discovery**, then 8 Search. Deferred: 5c band payout splits.
   machine); any Java 11+ works. Set `FUNCTIONS_DISCOVERY_TIMEOUT=60` on Windows.
 - Start: `pnpm emu` (UI :4000), then seed test accounts (wiped on every emulator restart):
   `FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 pnpm tsx scripts/seed-test-accounts.ts`
+- Two optional fixture scripts layer on top of the seeded accounts, same env vars, run after
+  `seed-test-accounts.ts`: `pnpm tsx scripts/seed-test-event.ts` (one published standalone event
+  for `/e/[eventId]` checks) and `pnpm tsx scripts/seed-test-discovery.ts` (also needs
+  `FIREBASE_STORAGE_EMULATOR_HOST=localhost:9199`; gives `@testmusician` an approved demo track,
+  fills a gig and promotes it to a second published event with a real booking-kind lineup act, and
+  follows `genre:rock` as test-fan, for the fan-discovery deck/list/follow smoke).
 - Test logins (password `GateKeep-Test1` for all): test-fan@gatekeep.dev,
   test-musician@gatekeep.dev (approved @testmusician), test-curator@gatekeep.dev (approved
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (158), `pnpm emu:test` (704,
-  single blocking call), `pnpm emu:rules` (103), web lint + build, mobile lint.
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (167), `pnpm emu:test` (736,
+  single blocking call), `pnpm emu:rules` (113), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
   locally; EAS cloud is unaffected).
@@ -80,3 +96,11 @@ NEXT: **7 Fan discovery**, then 8 Search. Deferred: 5c band payout splits.
 - Real concert photos into `apps/web/public/hero/` (2560x1440 JPG) replacing placeholders.
 - Stripe go-live checklist (`sp5-rulings.md`), sp5b device-testing steps (merchant id, EAS env
   key, dev build), Firebase console items and legal-page review (README launch checklist).
+- New EAS dev build for `expo-location` (joined the native deps in sub-project 7, for the deck's
+  distance sort and "near me" labels): the mobile discover deck cannot be exercised on device
+  without it.
+- The Discover-page marketing capture for the landing page's fan section (`FanStorySection` in
+  `apps/web/src/marketing/LandingSections.tsx`): it currently reuses `artist-page.jpg` rather than
+  a real screenshot of the deck or the `/discover` list.
+- Device smoke of the discover deck (checklist in README, "Sub-project 7 smoke checklist"): entirely
+  unverified off a real device, same posture as sub-6's door scanner before it.

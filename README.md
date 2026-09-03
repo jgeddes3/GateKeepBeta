@@ -935,6 +935,66 @@ needs a fresh dev-client build before any of this works
   (not a dead button).
 - Attendee list tap-to-check-in fallback.
 
+### Sub-project 7 launch checklist (fan discovery)
+
+- **New composite indexes deploy with `firebase deploy`**: sub-project 7 adds 9 composite indexes to
+  `firestore.indexes.json` (2 `events`, 6 `profiles`, 1 `follows`, 1 `posts`):
+  - `events (status, genres ARRAY_CONTAINS, startsAt)`
+  - `events (status, hasFreeTier, startsAt)`
+  - `profiles (type, status, name)`
+  - `profiles (type, status, portfolio.genres ARRAY_CONTAINS, name)`
+  - `profiles (type, status, updatedAt desc)`
+  - `profiles (type, subtype, status)`
+  - `profiles (type, subtype, status, updatedAt desc)`
+  - `follows (uid, targetType, createdAt desc)`
+  - `posts (status, createdAt desc)`
+
+  Same caveat as every prior sub-project's indexes: the emulator does not enforce composite
+  indexes, so a green `pnpm emu:test`/`pnpm emu:rules` proves nothing about them, confirm they
+  build on the real project (Firebase console → Firestore → Indexes) after the first deploy before
+  the discover deck, list, and follow queries that depend on them will work in production.
+- **New EAS dev build needed.** `expo-location` joined the native dependency list this
+  sub-project (the deck's distance sort and "near me" labels), so device testing needs a fresh
+  dev-client build before any of this works (`npx eas-cli build --profile development --platform
+  all`), same as the sub-6 camera/QR dependencies before it.
+- **Marketing image owed.** The landing page's fan-story section (`apps/web/src/marketing/LandingSections.tsx`'s
+  `FanStorySection`) reuses `artist-page.jpg` rather than a real Discover-page capture; a proper
+  screenshot of the deck or the `/discover` list is still owed.
+
+### Sub-project 7 smoke checklist (fan discovery)
+
+Sub-project 7 opens fan discovery: a swipeable deck and searchable lists on mobile, a filterable
+`/discover` grid on web, follow/unfollow on musician, curator, and genre targets, show posts from
+lineup members, and the notification fan-out that ties it together (new show announced, show
+rescheduled, a lineup post, new music from someone followed).
+
+**Web, both themes:**
+- `/discover` lists events and artists, and the filters (genre, free-tier, distance) narrow the
+  results.
+- Follow and unfollow from a musician/curator page (`/u/[handle]`) and from an event page (`/e/[eventId]`).
+- The genre picker appears once for a signed-in fan with no genre follows yet, and not again after.
+- The post-purchase follow prompt appears after a free order for a fan with no genre follows.
+- Posts by a lineup member render on the event page (`/e/[eventId]`).
+- Admin can Remove a post from the moderation queue.
+- The landing page's fan-story section renders correctly in both themes.
+- A signed-in user with no profile hitting a profile-only route redirects correctly.
+
+**Mobile, both themes, needs a new EAS dev-client build** (`expo-location` joined the native
+dependency list, see the launch checklist above):
+- The deck opens on the Discover tab and swiping advances cards.
+- Audio swaps to the new card's preview on swipe.
+- Mute persists across an app relaunch.
+- Location permission Allow shows distances on cards; Not now leaves them off.
+- A permanently-denied location permission opens the Settings app from the deck's empty state
+  (not a dead button).
+- The List toggle flips between Shows and Artists and back.
+- Follow works from every card kind (deck card, Shows list row, Artists list row).
+- Unfollowing from the Following screen removes the target immediately.
+- The venue screen renders a curator profile correctly.
+- Each notification kind deep-links to the right place on tap: show announced, show rescheduled,
+  a new post, and new music from someone followed.
+- The show-post composer's caps hold: 3 posts per event, one post per 10 minutes.
+
 ### Sub-project 2 polish follow-ups (non-blocking)
 
 Smaller items from the sub-project 2 quality-review rounds — recorded in full in
