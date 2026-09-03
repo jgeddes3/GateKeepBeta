@@ -1687,6 +1687,7 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   dispute_reversal_failed: "Lost dispute, transfer not reversed",
   external_refund: "Refund issued from the Stripe dashboard",
   ticket_order_stuck: "Ticket order stuck with a pending charge",
+  event_cascade_stuck: "Event cascade stuck",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on

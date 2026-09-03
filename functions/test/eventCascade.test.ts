@@ -2,14 +2,20 @@ import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import type { TicketOrderDoc, EventDoc } from "@gatekeep/shared";
+import type { TicketOrderDoc, EventDoc, AdminAlertDoc } from "@gatekeep/shared";
 import { runDailySweep } from "../src/scheduled.js";
 import { ORGANIZER_INACTIVE_REASON, type EventCascadeRetryDoc } from "../src/events.js";
+import { eventCascadeStuckAlertId } from "../src/eventsCore.js";
+import { cascadeEventsForUnpublishedProfile } from "../src/review.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
 const adb = adminFirestore(admin);
 vi.setConfig({ testTimeout: 30_000 });
+
+async function adminAlert(alertId: string): Promise<AdminAlertDoc | undefined> {
+  return (await adb.doc(`adminAlerts/${alertId}`).get()).data() as AdminAlertDoc | undefined;
+}
 
 // Fixtures copied from ticketingRefunds.test.ts lines 15-88.
 
@@ -171,5 +177,83 @@ describe("dailySweep step 9: drainEventCascadeRetries", () => {
     const stuck = (await adb.doc(`eventCascadeRetries/${poisonId}`).get()).data() as EventCascadeRetryDoc;
     expect(stuck.attempts).toBe(2);
     expect(stuck.lastError).toMatch(/settlement/i);
+  });
+});
+
+describe("fix round 1: a permanently poisoned retry doc escalates", () => {
+  it("alerts event_cascade_stuck once attempts reach the max, and keeps alerting on later runs", async () => {
+    const eventId = `evc-ghost-${Date.now()}`;
+    const seed: EventCascadeRetryDoc = {
+      profileId: "ghost-profile", reason: ORGANIZER_INACTIVE_REASON, attempts: 2,
+      lastError: "seeded", createdAt: Date.now(),
+    };
+    await adb.doc(`eventCascadeRetries/${eventId}`).set(seed);
+
+    await runDailySweep(Date.now());
+
+    const afterFirst = (await adb.doc(`eventCascadeRetries/${eventId}`).get()).data() as EventCascadeRetryDoc;
+    expect(afterFirst.attempts).toBe(3);
+    const alertId = eventCascadeStuckAlertId(eventId);
+    const alert = await adminAlert(alertId);
+    expect(alert).toBeDefined();
+    expect(alert!.kind).toBe("event_cascade_stuck");
+    expect(alert!.runCount).toBe(1);
+
+    await runDailySweep(Date.now());
+
+    const afterSecond = (await adb.doc(`eventCascadeRetries/${eventId}`).get()).data() as EventCascadeRetryDoc;
+    expect(afterSecond.attempts).toBe(4);
+    const alertAfterSecond = await adminAlert(alertId);
+    expect(alertAfterSecond!.kind).toBe("event_cascade_stuck");
+    expect(alertAfterSecond!.runCount).toBe(2);
+  });
+});
+
+describe("fix round 1: a re-queued event keeps its attempts count", () => {
+  it("increments attempts instead of resetting to 1 when the retry doc already exists", async () => {
+    const { profileId, eventId } = await makeDraftEvent("evc3");
+    // Simulate the event already having failed cascade once before (e.g. a
+    // prior reject-from-approved cycle for the same profile): pre-seed a
+    // retry doc with an old createdAt and attempts already at 1.
+    const oldCreatedAt = Date.now() - 999_000;
+    await adb.doc(`eventCascadeRetries/${eventId}`).set({
+      profileId, reason: ORGANIZER_INACTIVE_REASON, attempts: 1,
+      lastError: "first failure", createdAt: oldCreatedAt,
+    });
+    // Poison the event so a fresh cascade attempt fails again the same way
+    // the brief's poisoned-event fixture does.
+    await adb.doc(`events/${eventId}`).update({ status: "published", settlementStartedAt: Date.now() });
+
+    const now = Date.now();
+    const result = await cascadeEventsForUnpublishedProfile(adb as unknown as FirebaseFirestore.Firestore, profileId, now);
+    expect(result.queued).toBeGreaterThanOrEqual(1);
+
+    const retry = (await adb.doc(`eventCascadeRetries/${eventId}`).get()).data() as EventCascadeRetryDoc;
+    expect(retry.attempts).toBe(2);
+    expect(retry.createdAt).toBe(oldCreatedAt);
+    expect(retry.lastError).toMatch(/settlement/i);
+  });
+});
+
+describe("fix round 1: the cascade recovers if its listing queries throw", () => {
+  it("returns an empty summary instead of throwing, and alerts event_cascade_stuck for the profile", async () => {
+    function throwingCollection(): FirebaseFirestore.Query {
+      const chain = {
+        where: () => chain,
+        get: () => Promise.reject(new Error("firestore listing boom")),
+      };
+      return chain as unknown as FirebaseFirestore.Query;
+    }
+    const throwingDb = { collection: () => throwingCollection() } as unknown as FirebaseFirestore.Firestore;
+    const profileId = `evc-throw-profile-${Date.now()}`;
+
+    const result = await cascadeEventsForUnpublishedProfile(throwingDb, profileId, Date.now());
+    expect(result).toEqual({ cancelled: 0, queued: 0 });
+
+    const alertId = `event_cascade_stuck:profile:${profileId}`;
+    const alert = await adminAlert(alertId);
+    expect(alert).toBeDefined();
+    expect(alert!.kind).toBe("event_cascade_stuck");
+    expect(alert!.detail).toContain(profileId);
   });
 });

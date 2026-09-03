@@ -9,10 +9,16 @@ import { INVITE_MAX_AGE_MS } from "./members.js";
 import { syncCuratorAccess } from "./curator.js";
 import { recomputeReliability } from "./bookingLifecycle.js";
 import { notifyProfileMembers, notifyUser } from "./notifications.js";
-import { buildPaymentDoc } from "./paymentsCore.js";
-import { EVENT_REMINDER_WINDOW_MS } from "./eventsCore.js";
+import { buildPaymentDoc, recordAdminAlert } from "./paymentsCore.js";
+import { EVENT_REMINDER_WINDOW_MS, eventCascadeStuckAlertId } from "./eventsCore.js";
 import { cancelAndRefundEventForModeration, type EventCascadeRetryDoc } from "./events.js";
 import { stripeSecretKey } from "./stripeClient.js";
+
+// SP10 Task 10 fix round 1 (durability review, Important 1): a retry doc
+// this poisoned, this many times in a row, never resolves itself. Kept
+// retrying daily either way (the alert only escalates, it never gives up),
+// but an operator needs to know a specific event has crossed this line.
+const EVENT_CASCADE_MAX_ATTEMPTS = 3;
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -963,12 +969,14 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // 9) Event cascade retry (SP10 Task 10): re-runs cancel + refund for any
   // event review.ts's reject-from-approved cascade could not resolve (see
   // eventCascadeRetries). Mirrors step 5's per-doc isolate-log-continue.
-  await drainEventCascadeRetries(db, report);
+  await drainEventCascadeRetries(db, report, now);
 
   return report;
 }
 
-async function drainEventCascadeRetries(db: FirebaseFirestore.Firestore, report: SweepReport): Promise<void> {
+async function drainEventCascadeRetries(
+  db: FirebaseFirestore.Firestore, report: SweepReport, now: number,
+): Promise<void> {
   try {
     const retryQuery = db.collection("eventCascadeRetries").orderBy(FieldPath.documentId());
     for await (const page of paginate(retryQuery, SWEEP_PAGE_SIZE)) {
@@ -979,11 +987,36 @@ async function drainEventCascadeRetries(db: FirebaseFirestore.Firestore, report:
           await doc.ref.delete();
           report.eventCascadeRetried++;
         } catch (e) {
+          const lastError = e instanceof Error ? e.message : String(e);
           console.error(`dailySweep: event cascade retry failed for event ${doc.id}`, e);
           report.errors.eventCascadeRetries++;
-          await doc.ref.update({
-            attempts: FieldValue.increment(1), lastError: e instanceof Error ? e.message : String(e),
-          }).catch((writeError) => console.error(`dailySweep: eventCascadeRetries update failed for ${doc.id}`, writeError));
+          try {
+            await doc.ref.update({ attempts: FieldValue.increment(1), lastError });
+            // SP10 Task 10 fix round 1 (durability review, Important 1): a
+            // permanently poisoned retry doc never resolves on its own, so
+            // once it crosses EVENT_CASCADE_MAX_ATTEMPTS it escalates to an
+            // operator. Kept retrying daily either way (the doc is never
+            // deleted here), the alert's runCount is the recurrence signal.
+            // Re-read rather than trust FieldValue.increment's local guess,
+            // so the comparison is against the stored value.
+            const after = (await doc.ref.get()).data() as EventCascadeRetryDoc | undefined;
+            const attempts = after?.attempts ?? retry.attempts + 1;
+            if (attempts >= EVENT_CASCADE_MAX_ATTEMPTS) {
+              const alertId = eventCascadeStuckAlertId(doc.id);
+              const shouldLog = await recordAdminAlert({
+                alertId, kind: "event_cascade_stuck",
+                detail: `event ${doc.id} (profile ${retry.profileId}) has failed moderation `
+                  + `cancel-and-refund ${attempts} times; last error: ${lastError}; ticket `
+                  + `holders may still be unrefunded, resolve manually`,
+                bookingId: null, gigId: null, now,
+              });
+              if (shouldLog) {
+                console.error(`dailySweep: event ${doc.id} cascade retry stuck at ${attempts} attempts (see adminAlerts/${alertId})`);
+              }
+            }
+          } catch (writeError) {
+            console.error(`dailySweep: eventCascadeRetries update failed for ${doc.id}`, writeError);
+          }
         }
       }
     }

@@ -5,8 +5,9 @@ import { isValidDocId, type AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
 import { syncCuratorAccess } from "./curator.js";
 import { unwindBookingsForModeration } from "./bookingLifecycle.js";
-import { cancelAndRefundEventForModeration, ORGANIZER_INACTIVE_REASON, type EventCascadeRetryDoc } from "./events.js";
+import { cancelAndRefundEventForModeration, ORGANIZER_INACTIVE_REASON } from "./events.js";
 import { stripeSecretKey } from "./stripeClient.js";
+import { recordAdminAlert } from "./paymentsCore.js";
 
 export function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
@@ -21,15 +22,42 @@ export async function writeAudit(entry: Omit<AuditLogDoc, "at">) {
   await getFirestore().collection("auditLogs").add(log);
 }
 
-async function cascadeEventsForUnpublishedProfile(
+// Exported (not just for review.ts's own reviewProfile) so a fix-round-1 unit
+// test can drive it directly with an injected db, including a throwing one,
+// without needing a real Firestore failure to exercise the catch below.
+export async function cascadeEventsForUnpublishedProfile(
   db: FirebaseFirestore.Firestore, profileId: string, now: number,
 ): Promise<{ cancelled: number; queued: number }> {
-  // Served by the existing events (curatorProfileId, status, startsAt) composite.
-  const [publishedSnap, draftSnap] = await Promise.all([
-    db.collection("events").where("curatorProfileId", "==", profileId)
-      .where("status", "==", "published").where("startsAt", ">", now).get(),
-    db.collection("events").where("curatorProfileId", "==", profileId).where("status", "==", "draft").get(),
-  ]);
+  // SP10 Task 10 fix round 1 (durability review, Important 2): either
+  // listing query can itself throw (a transient Firestore error, a missing
+  // index after a schema change), which used to propagate straight out of
+  // reviewProfile and abort the whole review decision, including the batch
+  // that had ALREADY committed the profile's rejected status. Isolated here
+  // instead: log, alert, and return an empty summary so the caller's
+  // writeAudit and profile_review notification still run unconditionally.
+  let publishedSnap: FirebaseFirestore.QuerySnapshot;
+  let draftSnap: FirebaseFirestore.QuerySnapshot;
+  try {
+    // Served by the existing events (curatorProfileId, status, startsAt) composite.
+    [publishedSnap, draftSnap] = await Promise.all([
+      db.collection("events").where("curatorProfileId", "==", profileId)
+        .where("status", "==", "published").where("startsAt", ">", now).get(),
+      db.collection("events").where("curatorProfileId", "==", profileId).where("status", "==", "draft").get(),
+    ]);
+  } catch (e) {
+    console.error("event cascade listing failed; profile's events could not be enumerated for cancel-and-refund", { profileId }, e);
+    const alertId = `event_cascade_stuck:profile:${profileId}`;
+    const shouldLog = await recordAdminAlert({
+      alertId, kind: "event_cascade_stuck",
+      detail: `profile ${profileId} was rejected but its events could not be listed for `
+        + `cancel-and-refund: ${e instanceof Error ? e.message : String(e)}; resolve manually`,
+      bookingId: null, gigId: null, now,
+    });
+    if (shouldLog) {
+      console.error(`event cascade listing failed for profile ${profileId} (see adminAlerts/${alertId})`);
+    }
+    return { cancelled: 0, queued: 0 };
+  }
   let cancelled = 0;
   let queued = 0;
   for (const doc of [...publishedSnap.docs, ...draftSnap.docs]) {
@@ -39,13 +67,23 @@ async function cascadeEventsForUnpublishedProfile(
       if (result.outcome === "cancelled") cancelled++;
     } catch (e) {
       queued++;
+      const lastError = e instanceof Error ? e.message : String(e);
       console.error("event cascade failed; queued for dailySweep step 9", { profileId, eventId: doc.id }, e);
-      const retry: EventCascadeRetryDoc = {
-        profileId, reason: ORGANIZER_INACTIVE_REASON, attempts: 1,
-        lastError: e instanceof Error ? e.message : String(e), createdAt: now,
-      };
       try {
-        await db.doc(`eventCascadeRetries/${doc.id}`).set(retry);
+        // SP10 Task 10 fix round 1 (durability review, Minor 3): an
+        // unconditional set({..., attempts: 1}) reset the count every time
+        // this profile's cascade re-hit an already-queued event (e.g. a
+        // resubmit-then-reject-again cycle), erasing how long it had been
+        // stuck. Merge-increment attempts instead, and only stamp createdAt
+        // when the doc did not already exist, so the episode's start time
+        // (and its true attempt count) survives a re-queue.
+        const retryRef = db.doc(`eventCascadeRetries/${doc.id}`);
+        const existed = (await retryRef.get()).exists;
+        await retryRef.set(
+          { profileId, reason: ORGANIZER_INACTIVE_REASON, lastError, attempts: FieldValue.increment(1) },
+          { merge: true },
+        );
+        if (!existed) await retryRef.set({ createdAt: now }, { merge: true });
       } catch (writeError) {
         console.error("eventCascadeRetries write failed", { eventId: doc.id }, writeError);
       }
@@ -68,7 +106,11 @@ function cascadeSummary(isCurator: boolean, closedGigs: number, pausedSeries: nu
 }
 
 export const reviewProfile = onCall<{ profileId: string; decision: "approved" | "rejected"; reason?: string }>(
-  { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
+  // timeoutSeconds: 540 (SP10 Task 10 fix round 1, Important 2): the events
+  // cascade below refunds every affected order INLINE, one Stripe call per
+  // order, before this callable returns; the default 60s ceiling is not
+  // enough headroom for a curator with many live ticketed events.
+  { region: "us-central1", secrets: [stripeSecretKey], timeoutSeconds: 540 }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, decision, reason } = req.data;
     // P2: enum-guard `decision` and shape-guard `profileId`, untrusted

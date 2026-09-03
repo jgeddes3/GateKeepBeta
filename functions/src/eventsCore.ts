@@ -54,6 +54,14 @@ export function ticketSettlementFailedAlertId(eventId: string): string {
   return `ticket-settlement-failed:${eventId}`;
 }
 
+// SP10 Task 10 fix round 1 (durability review, Important 1): the adminAlerts
+// id for a retry doc in eventCascadeRetries that has failed moderation
+// cancel-and-refund EVENT_CASCADE_MAX_ATTEMPTS times in a row. The retry
+// itself keeps running daily; this only escalates it to an operator.
+export function eventCascadeStuckAlertId(eventId: string): string {
+  return `event_cascade_stuck:${eventId}`;
+}
+
 // SP10 Task 8 (sp6 #5): a pending ticket order past its TTL whose PaymentIntent
 // is neither canceled nor succeeded (typically `processing`, or a status read
 // that keeps failing) for longer than TICKET_ORDER_STUCK_AFTER_MS. Scoped to

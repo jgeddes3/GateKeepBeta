@@ -863,7 +863,10 @@ export type AdminAlertKind =
   // reversing the money for a lost dispute failed and needs an operator; a
   // refund was issued outside the normal flows and needs reconciling; a
   // ticket order has sat unresolved (pending, unpaid) past its stuck window.
-  | "dispute_opened" | "dispute_reversal_failed" | "external_refund" | "ticket_order_stuck";
+  | "dispute_opened" | "dispute_reversal_failed" | "external_refund" | "ticket_order_stuck"
+  // SP10 Task 10 fix round 1: an event whose moderation cancel-and-refund
+  // keeps failing; ticket holders may be unrefunded, resolve manually.
+  | "event_cascade_stuck";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
