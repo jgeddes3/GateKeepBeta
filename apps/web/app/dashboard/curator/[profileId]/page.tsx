@@ -72,6 +72,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   // A single onSnapshot subscription, re-run when profileId changes: no
@@ -138,11 +139,12 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
       `and releases the handle @${profile.handle}. This can't be undone.`);
     if (!ok) return;
     setDeleteBusy(true);
+    setDeleteError(null);
     try {
       await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
       router.push("/dashboard");
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not delete this profile.");
+      setDeleteError(e instanceof Error ? e.message : "Could not delete this profile.");
       setDeleteBusy(false);
     }
   };
@@ -281,6 +283,12 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
             >
               {deleteBusy ? "Deleting…" : "Delete this profile"}
             </Button>
+            {deleteError && (
+              <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                {deleteError}
+              </p>
+            )}
           </section>
         )}
       </div>

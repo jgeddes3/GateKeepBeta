@@ -60,6 +60,7 @@ export default function CuratorDashboard() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Identity check for the effect below, closing the same sub-frame race
   // (musician)/portfolio.tsx's activeIdRef closes: React runs effect cleanup
@@ -155,6 +156,7 @@ export default function CuratorDashboard() {
 
   const doDelete = async () => {
     setDeleteBusy(true);
+    setDeleteError(null);
     try {
       await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
       // Nothing here nulls activeContext itself, fall back to "fan" (same
@@ -163,7 +165,7 @@ export default function CuratorDashboard() {
       switchTo("fan");
       router.replace("/(fan)");
     } catch (e) {
-      Alert.alert("Could not delete", e instanceof Error ? e.message : "Try again.");
+      setDeleteError(e instanceof Error ? e.message : "Couldn't delete this profile. Try again.");
       setDeleteBusy(false);
     }
   };
@@ -250,6 +252,7 @@ export default function CuratorDashboard() {
               style={{ alignSelf: "flex-start" }}
               title={deleteBusy ? "Deleting…" : "Delete this profile"}
             />
+            <ErrorBanner message={deleteError} />
           </View>
         )}
       </ScrollView>

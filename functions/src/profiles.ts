@@ -3,14 +3,18 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   validateProfileDraft, isValidDocId, validateLookingFor,
   MAX_PENDING_CURATOR_PROFILES, RESUBMIT_COOLDOWN_MS,
+  DELETE_PROFILE_BALANCE_MESSAGE, DELETE_PROFILE_DELINQUENT_MESSAGE,
+  DELETE_PROFILE_PAYMENTS_MESSAGE, DELETE_PROFILE_EVENTS_MESSAGE,
   type ProfileDraftInput, type ProfileDoc, type MemberDoc, type PortfolioData,
-  type CuratorDetails, type CuratorSubtype,
+  type CuratorDetails, type CuratorSubtype, type PaymentDoc, type EventDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { writeAudit } from "./review.js";
 import { bucket, logDeleteFailure } from "./storage.js";
 import { syncCuratorAccess } from "./curator.js";
 import { unwindBookingsForModeration } from "./bookingLifecycle.js";
+import { getStripe, stripeSecretKey } from "./stripeClient.js";
+import { getStripeProfileDoc } from "./paymentsCore.js";
 
 const MAX_UNSUBMITTED_PROFILES = 3;
 const UNSUBMITTED_STATUSES: ReadonlySet<string> = new Set(["draft", "rejected"]);
@@ -60,6 +64,74 @@ async function deleteSeriesForProfile(db: FirebaseFirestore.Firestore, profileId
     await batch.commit();
     if (snap.docs.length < DELETE_CASCADE_PAGE_SIZE) return;
   }
+}
+
+// SP10 Task 12 (spec section 5.3): deleteProfile refuses while money is
+// outstanding, in this order, each with its own client-keyed message.
+const OPEN_DEPOSIT_STATUSES: PaymentDoc["deposit"]["status"][] = ["held", "refund_pending", "forfeit_pending", "unpaid"];
+const OPEN_SETTLEMENT_STATUSES: PaymentDoc["settlement"]["status"][] = ["pending", "past_due"];
+
+// Any payments doc naming the profile on either side with a deposit still
+// held or resolving, an unpaid deposit that dunning has already attempted,
+// or a settlement pending or past due. Indexes: curator side rides the SP5
+// (curatorProfileId, settlement.status) and (curatorProfileId,
+// deposit.status, deposit.depositAttempts) composites; musician side uses
+// the two (musicianProfileId, ...) twins added with this task.
+async function hasPaymentsInFlight(db: FirebaseFirestore.Firestore, profileId: string): Promise<boolean> {
+  for (const side of ["curatorProfileId", "musicianProfileId"] as const) {
+    const settlements = await db.collectionGroup("payments")
+      .where(side, "==", profileId).where("settlement.status", "in", OPEN_SETTLEMENT_STATUSES).limit(1).get();
+    if (!settlements.empty) return true;
+    const deposits = await db.collectionGroup("payments")
+      .where(side, "==", profileId).where("deposit.status", "in", OPEN_DEPOSIT_STATUSES).get();
+    for (const doc of deposits.docs) {
+      const p = doc.data() as PaymentDoc;
+      if (p.deposit.status !== "unpaid" || (p.deposit.depositAttempts ?? 0) > 0) return true;
+    }
+  }
+  return false;
+}
+
+// Any event still published, or any event (cancelled or draft included)
+// with a paid order and no settlement started: a cancelled event whose
+// refund loop has not converged still holds buyer money.
+async function hasEventsOutstanding(db: FirebaseFirestore.Firestore, profileId: string): Promise<boolean> {
+  const events = await db.collection("events").where("curatorProfileId", "==", profileId).get();
+  for (const doc of events.docs) {
+    const event = doc.data() as EventDoc;
+    if (event.status === "published") return true;
+    if (event.status === "completed" || event.settlementStartedAt != null) continue;
+    const paid = await db.collection("orders")
+      .where("eventId", "==", doc.id).where("status", "==", "paid").limit(1).get();
+    if (!paid.empty) return true;
+  }
+  return false;
+}
+
+// Returns the private/stripe doc (or null) so the caller can record its ids
+// in the audit trail before recursiveDelete removes the only copy.
+async function assertNoMoneyOutstanding(
+  db: FirebaseFirestore.Firestore, profileId: string, isCurator: boolean,
+): Promise<StripeProfileDoc | null> {
+  const stripe = await getStripeProfileDoc(profileId);
+  if (stripe?.accountId) {
+    // Live read, never the cached doc: the balance changes without any
+    // Firestore write (a payout landing, a transfer arriving).
+    const balances = await getStripe().getBalances(stripe.accountId);
+    if (balances.availableCents !== 0) {
+      throw new HttpsError("failed-precondition", DELETE_PROFILE_BALANCE_MESSAGE);
+    }
+  }
+  if (stripe?.delinquent === true) {
+    throw new HttpsError("failed-precondition", DELETE_PROFILE_DELINQUENT_MESSAGE);
+  }
+  if (await hasPaymentsInFlight(db, profileId)) {
+    throw new HttpsError("failed-precondition", DELETE_PROFILE_PAYMENTS_MESSAGE);
+  }
+  if (isCurator && await hasEventsOutstanding(db, profileId)) {
+    throw new HttpsError("failed-precondition", DELETE_PROFILE_EVENTS_MESSAGE);
+  }
+  return stripe;
 }
 
 export const createProfileDraft = onCall<ProfileDraftInput>({ region: "us-central1" }, async (req) => {
@@ -226,7 +298,7 @@ export const submitProfileForReview = onCall<{ profileId: string }>({ region: "u
 // that, a sole admin of an unwanted/never-submitted profile had no path to
 // give up the handle and then delete their account. Also gives admins a way
 // to remediate handle-squatting drafts.
-export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central1" }, async (req) => {
+export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const { profileId } = req.data;
@@ -238,6 +310,10 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   const profileRef = db.doc(`profiles/${profileId}`);
   const snap = await profileRef.get();
   if (!snap.exists) throw new HttpsError("not-found", "Profile not found.");
+  const isCurator = snap.data()?.type === "curator";
+  // SP10 Task 12: the money gate runs BEFORE the status gate, so a rejected
+  // profile with money outstanding hears about the money, not the status.
+  const stripe = await assertNoMoneyOutstanding(db, profileId, isCurator);
   // Finding 3: this used to be enforced client-side only, a co-admin could
   // call deleteProfile directly on a LIVE approved profile and immediately
   // free its handle for takeover. draft/rejected are the only statuses with
@@ -251,7 +327,6 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
   }
   const handle = snap.data()?.handle as string | undefined;
   const name = snap.data()?.name as string | undefined;
-  const isCurator = snap.data()?.type === "curator";
 
   // S6: collect member uids BEFORE the profile's own recursiveDelete removes
   // the members subcollection, syncCuratorAccess (post-delete, below) needs
@@ -322,6 +397,16 @@ export const deleteProfile = onCall<{ profileId: string }>({ region: "us-central
     if (handleSnap.data()?.profileId === profileId) {
       await handleRef.delete();
     }
+  }
+
+  // SP10 Task 12 (cross #23): private/stripe is the only Firestore record of
+  // the Stripe customer and connected account; recursiveDelete is about to
+  // remove it, so the ids go into the audit trail first.
+  if (stripe) {
+    await writeAudit({
+      actorUid: uid, action: "profile_deleted_stripe_ids", targetId: profileId,
+      detail: `customerId=${stripe.customerId ?? "none"} accountId=${stripe.accountId ?? "none"}`,
+    });
   }
 
   await db.recursiveDelete(profileRef); // deletes the profile doc + its members, tracks, and private/booking subcollections

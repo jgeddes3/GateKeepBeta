@@ -77,6 +77,7 @@ export default function Portfolio() {
   const [tracks, setTracks] = useState<TrackRow[]>([]);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Identity check for the effects below, closing a sub-frame race the
   // render-time reset alone doesn't: React runs effect CLEANUP at the
@@ -241,6 +242,7 @@ export default function Portfolio() {
 
   const doDelete = async () => {
     setDeleteBusy(true);
+    setDeleteError(null);
     try {
       await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
       // Nothing here nulls activeContext itself, fall back to "fan" (the
@@ -249,7 +251,7 @@ export default function Portfolio() {
       switchTo("fan");
       router.replace("/(fan)");
     } catch (e) {
-      Alert.alert("Could not delete", e instanceof Error ? e.message : "Try again.");
+      setDeleteError(e instanceof Error ? e.message : "Couldn't delete this profile. Try again.");
       setDeleteBusy(false);
     }
   };
@@ -333,6 +335,7 @@ export default function Portfolio() {
               style={{ alignSelf: "flex-start" }}
               title={deleteBusy ? "Deleting…" : "Delete this profile"}
             />
+            <ErrorBanner message={deleteError} />
           </View>
         )}
       </ScrollView>

@@ -54,6 +54,7 @@ const STRIPE_REACHING: ReadonlyArray<{ name: string; file: string; why: string }
   { name: "reviewProfile", file: "review.ts", why: "SP10 Task 10: reject-from-approved cascades to cancelAndRefundEventForModeration -> refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent" },
   { name: "dailySweep", file: "scheduled.ts", why: "SP10 Task 10, step 9: drainEventCascadeRetries -> cancelAndRefundEventForModeration -> refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent" },
   { name: "takedownEvent", file: "eventsAdmin.ts", why: "SP10 Task 11: admin takedown -> cancelAndRefundEventForModeration -> refundOrdersForCancelledEvent -> getStripe().refund / cancelIntent" },
+  { name: "deleteProfile", file: "profiles.ts", why: "SP10 Task 12: the money gate's assertNoMoneyOutstanding calls getStripe().getBalances on a connected account" },
 ];
 
 const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");

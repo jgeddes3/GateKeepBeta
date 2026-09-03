@@ -88,6 +88,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const [tracks, setTracks] = useState<TrackRow[]>([]);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Resets `booking` back to "loading" the instant profileId changes: an
   // in-app navigation from profile A's editor to profile B's (same
@@ -189,11 +190,12 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       `and releases the handle @${profile.handle}. This can't be undone.`);
     if (!ok) return;
     setDeleteBusy(true);
+    setDeleteError(null);
     try {
       await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
       router.push("/dashboard");
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not delete this profile.");
+      setDeleteError(e instanceof Error ? e.message : "Could not delete this profile.");
       setDeleteBusy(false);
     }
   };
@@ -304,6 +306,12 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
             >
               {deleteBusy ? "Deleting…" : "Delete this profile"}
             </Button>
+            {deleteError && (
+              <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                {deleteError}
+              </p>
+            )}
           </section>
         )}
       </div>

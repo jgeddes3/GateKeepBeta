@@ -8,6 +8,8 @@ import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getStorage as adminStorage } from "firebase-admin/storage";
 import {
   RESUBMIT_COOLDOWN_MS, type ProfileDraftInput, type CreateTrackInput, type GigDoc, type BookingRequestDoc,
+  DELETE_PROFILE_BALANCE_MESSAGE, DELETE_PROFILE_DELINQUENT_MESSAGE, DELETE_PROFILE_PAYMENTS_MESSAGE,
+  DELETE_PROFILE_EVENTS_MESSAGE, type PaymentDoc, type StripeProfileDoc,
 } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -358,6 +360,13 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     // an earlier step of the normal review-then-delete flow. This also
     // satisfies deleteProfile's own draft/rejected-only gate.
     await adb.doc(`profiles/${curatorProfileId}`).update({ status: "rejected" });
+    // SP10 Task 12: the accept saga charged this occurrence's deposit
+    // (status "held"), which the new money gate correctly refuses to let a
+    // deleteProfile silently orphan. This test's subject is the UNWIND
+    // cascade (booking expiry, notifications), not deposit resolution, so
+    // the fixture resolves the deposit directly, standing in for the
+    // refund a real cancellation would have already issued by this point.
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({ "deposit.status": "refunded" });
 
     await callFn("deleteProfile", { profileId: curatorProfileId }, curatorUser);
 
@@ -402,6 +411,10 @@ describe("deleteProfile gig/series cascade (S6)", () => {
     // OWN reject-from-approved cascade entirely, isolating deleteProfile's
     // own unwind, mirrors the curator-side cascade test above).
     await adb.doc(`profiles/${musicianProfileId}`).update({ status: "rejected" });
+    // SP10 Task 12: see the identical note on the curator-side cascade test
+    // above, resolve the held deposit so the money gate isn't the thing
+    // under test here.
+    await adb.doc(`bookings/${bookingId}/payments/${gigId}`).update({ "deposit.status": "refunded" });
 
     await callFn("deleteProfile", { profileId: musicianProfileId }, musician.user);
 
@@ -751,4 +764,138 @@ describe("deleteProfile storage cascade", () => {
     const [exists] = await abucket.file(survivor).exists();
     expect(exists).toBe(true);
   }, 60_000);
+});
+
+// SP10 Task 12 fixtures: the money gate reads private/stripe, the payments
+// collection group, and the profile's events. All seeded directly via the
+// admin SDK: the subject is the gate, not the Stripe onboarding or booking
+// flows that ordinarily produce these docs.
+function stripeDoc(overrides: Partial<StripeProfileDoc> = {}): StripeProfileDoc {
+  return {
+    customerId: null, defaultPaymentMethodId: null, cardBrand: null, cardLast4: null,
+    accountId: null, transfersEnabled: false, payoutsEnabled: false, instantEligible: false,
+    onboardingStartedAt: null, onboardedAt: null, delinquent: false, delinquentSince: null,
+    updatedAt: Date.now(), ...overrides,
+  };
+}
+
+function paymentDoc(curatorProfileId: string, musicianProfileId: string, overrides: {
+  depositStatus?: PaymentDoc["deposit"]["status"]; depositAttempts?: number;
+  settlementStatus?: PaymentDoc["settlement"]["status"];
+} = {}): PaymentDoc {
+  const now = Date.now();
+  return {
+    bookingId: "seed-booking", gigId: "seed-gig", occurrenceStartsAt: now + 86_400_000,
+    curatorProfileId, musicianProfileId, selfDeal: false, baseCents: 10_000,
+    deposit: {
+      sliceCents: 2_500, feeShareCents: 250, intentId: "pi_seed", chargeId: null,
+      status: overrides.depositStatus ?? "applied", chargedAt: now, resolvedAt: null, forfeitTransferId: null,
+      depositAttempts: overrides.depositAttempts ?? 0,
+    },
+    settlement: {
+      status: overrides.settlementStatus ?? "not_due", settleAfter: null, computedCents: null, feeShareCents: null,
+      trueUp: null, intentId: null, attempts: 0, nextRetryAt: null,
+      lateFeeCents: null, lateFeeMusicianCents: null, delinquentAt: null,
+    },
+    transfer: { status: "none", id: null, amountCents: null, transferredAt: null },
+    createdAt: now, updatedAt: now,
+  };
+}
+
+async function draftMusician(prefix: string) {
+  const { user, uid } = await signUpTestUser(`${prefix}-${Date.now()}@test.com`);
+  const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+    "createProfileDraft", draft(`${prefix}_${Date.now()}`), user);
+  return { user, uid, profileId };
+}
+
+describe("deleteProfile money gate (SP10)", () => {
+  it("refuses while the connected account holds a balance, and allows once it is zero", async () => {
+    const { user, profileId } = await draftMusician("gate1");
+    await adb.doc(`profiles/${profileId}/private/stripe`).set(stripeDoc({ accountId: "acct_gate1" }));
+    await adb.doc(`stripeFake/state/objects/acct_gate1`).set({ balanceCents: 500 }, { merge: true });
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: DELETE_PROFILE_BALANCE_MESSAGE });
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+    await adb.doc(`stripeFake/state/objects/acct_gate1`).set({ balanceCents: 0 }, { merge: true });
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(false);
+  });
+
+  it("refuses a delinquent profile; balance is checked first when both apply", async () => {
+    const { user, profileId } = await draftMusician("gate2");
+    await adb.doc(`profiles/${profileId}/private/stripe`).set(stripeDoc({ delinquent: true, delinquentSince: Date.now() }));
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_DELINQUENT_MESSAGE });
+    await adb.doc(`profiles/${profileId}/private/stripe`).set(
+      stripeDoc({ accountId: "acct_gate2", delinquent: true, delinquentSince: Date.now() }));
+    await adb.doc(`stripeFake/state/objects/acct_gate2`).set({ balanceCents: 100 }, { merge: true });
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_BALANCE_MESSAGE });
+  });
+
+  it("refuses while a payments doc names the profile on either side with money moving", async () => {
+    const { user, profileId } = await draftMusician("gate3");
+    const paymentRef = adb.doc(`bookings/gate3-${Date.now()}/payments/seed-gig`);
+    // Musician side, deposit held.
+    await paymentRef.set(paymentDoc("some-curator", profileId, { depositStatus: "held" }));
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_PAYMENTS_MESSAGE });
+    // Unpaid with an attempt IS moving (dunning in flight).
+    await paymentRef.set(paymentDoc("some-curator", profileId, { depositStatus: "unpaid", depositAttempts: 1 }));
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_PAYMENTS_MESSAGE });
+    // Curator side, settlement past_due.
+    await paymentRef.set(paymentDoc(profileId, "some-musician", { settlementStatus: "past_due" }));
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_PAYMENTS_MESSAGE });
+    // Unpaid with no attempts (never charged, never dunned) is not "moving": allowed.
+    await paymentRef.set(paymentDoc(profileId, "some-musician", { depositStatus: "unpaid", depositAttempts: 0, settlementStatus: "not_due" }));
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(false);
+  });
+
+  it("refuses a curator with a published event, or a cancelled event still holding a paid order; allows once settled", async () => {
+    const { user } = await signUpTestUser(`gate4-${Date.now()}@test.com`);
+    const { profileId } = await callFn<ProfileDraftInput, { profileId: string }>(
+      "createProfileDraft", curatorDraft(`gate4_${Date.now()}`), user);
+    // Seeded directly (a draft curator cannot publish through the callables).
+    const eventRef = adb.collection("events").doc();
+    const now = Date.now();
+    await eventRef.set({
+      curatorProfileId: profileId, title: "Seeded", description: "", status: "published",
+      location: { venueName: null, neighborhood: null, city: "Austin", geo: null, addressVisibility: "neighborhood", address: null },
+      startsAt: now + 86_400_000, endsAt: now + 90_000_000, posterPath: null, maxTicketsPerBuyer: 8,
+      lineup: [], lineupMusicianProfileIds: [], gigId: null, createdAt: now, updatedAt: now,
+    });
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_EVENTS_MESSAGE });
+
+    await eventRef.update({ status: "cancelled", cancelledAt: now });
+    const orderRef = adb.collection("orders").doc();
+    await orderRef.set({
+      buyerUid: "someone", eventId: eventRef.id, curatorProfileId: profileId,
+      items: [{ tierId: "t", quantity: 1, unitPriceCents: 1000, tierName: "General" }],
+      faceTotalCents: 1000, serviceFeeCents: 169, feePolicy: { ticketFeePct: 7, ticketFeeFixedCents: 99, ticketFeeCapCents: 399 },
+      paymentIntentId: "pi_x", status: "paid", refundedTicketIds: [], refundedCents: 0, refundedFaceCents: 0,
+      createdAt: now, expiresAt: now + 600_000, paidAt: now,
+    });
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ message: DELETE_PROFILE_EVENTS_MESSAGE });
+
+    await orderRef.update({ status: "cancelled_refunded" });
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(false);
+  });
+
+  it("records the Stripe customer and account ids in an audit entry before the private/stripe doc is deleted", async () => {
+    const { user, uid, profileId } = await draftMusician("gate5");
+    await adb.doc(`profiles/${profileId}/private/stripe`).set(stripeDoc({ customerId: "cus_gate5", accountId: "acct_gate5" }));
+    await callFn("deleteProfile", { profileId }, user);
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", profileId).where("action", "==", "profile_deleted_stripe_ids").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().actorUid).toBe(uid);
+    expect(logs.docs[0].data().detail).toBe("customerId=cus_gate5 accountId=acct_gate5");
+  });
 });

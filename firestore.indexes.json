@@ -155,6 +155,16 @@
       { "fieldPath": "deposit.status", "order": "ASCENDING" },
       { "fieldPath": "deposit.depositAttempts", "order": "ASCENDING" }
     ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "musicianProfileId", "order": "ASCENDING" },
+      { "fieldPath": "settlement.status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "payments", "queryScope": "COLLECTION_GROUP",
+    "fields": [
+      { "fieldPath": "musicianProfileId", "order": "ASCENDING" },
+      { "fieldPath": "deposit.status", "order": "ASCENDING" }
+    ] },
   { "collectionGroup": "orders", "queryScope": "COLLECTION",
     "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
