@@ -54,6 +54,14 @@ export function ticketSettlementFailedAlertId(eventId: string): string {
   return `ticket-settlement-failed:${eventId}`;
 }
 
+// SP10 Task 8 (sp6 #5): a pending ticket order past its TTL whose PaymentIntent
+// is neither canceled nor succeeded (typically `processing`, or a status read
+// that keeps failing) for longer than TICKET_ORDER_STUCK_AFTER_MS. Scoped to
+// the order: the fan's money may be in flight and nothing else will say so.
+export function ticketOrderStuckAlertId(orderId: string): string {
+  return `ticket-order-stuck:${orderId}`;
+}
+
 // Server-minted ticket QR payload. Possession of this string is door proof
 // (see TicketDoc.qrSecret): 32 random bytes, hex-encoded, so it is both
 // unguessable and a plain string a QR code can carry.

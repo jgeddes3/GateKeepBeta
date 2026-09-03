@@ -51,7 +51,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS,
+  SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS, TICKET_ORDER_STUCK_AFTER_MS,
   type BookingRequestDoc, type EventDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
 import {
@@ -73,9 +73,9 @@ import {
 } from "./bookings.js";
 import { notifyProfileMembers } from "./notifications.js";
 import { paginate } from "./scheduled.js";
-import { refundOrdersForCancelledEvent } from "./ticketing.js";
+import { completeOrderTx, refundOrdersForCancelledEvent } from "./ticketing.js";
 import {
-  EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId,
+  EVENT_SETTLE_DELAY_MS, ticketOrderStuckAlertId, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId,
 } from "./eventsCore.js";
 
 const PAGE_SIZE = 200;
@@ -190,6 +190,13 @@ export interface PaymentsSweepReport {
   // or the webhook to complete normally. Not an error: this is the expected
   // shape of "money always wins over expiry".
   ticketOrdersExpiryDeferred: number;
+  // SP10 Task 8 (sp6 #5): the deferred branch's two resolutions. Reconciled: the
+  // intent had SUCCEEDED, so the sweep ran completeOrderTx itself (the fan was
+  // charged; they get their tickets from this pass instead of from a finalize
+  // call that never came). Stuck: neither canceled nor succeeded for longer
+  // than TICKET_ORDER_STUCK_AFTER_MS, escalated to adminAlerts.
+  ticketOrdersReconciled: number;
+  ticketOrdersStuck: number;
   // --- step 9: retry cancelled-event ticket refunds (SP6 Task 6) ---
   // Orders resolved by THIS retry pass only. cancelEvent's own inline call
   // already resolved the common case, so these are ordinarily 0 and only
@@ -231,7 +238,7 @@ function emptyReport(): PaymentsSweepReport {
     settlementsCharged: 0, settlementsDeclined: 0, settlementsPending: 0, settlementsRaced: 0,
     transfersMade: 0, retriesAttempted: 0,
     delinquenciesDeclared: 0, expiredRefunds: 0,
-    ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0,
+    ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0, ticketOrdersReconciled: 0, ticketOrdersStuck: 0,
     cancelledEventOrdersRefunded: 0, cancelledEventOrdersPendingExpired: 0,
     ticketSettlementsCompleted: 0, ticketSettlementsTransferred: 0, ticketSettlementsBlocked: 0,
     ticketTransfersExpired: 0,
@@ -1217,7 +1224,7 @@ async function refundExpiredBookingDeposits(
 
 async function expireOneTicketOrder(
   db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
-  report: PaymentsSweepReport,
+  now: number, report: PaymentsSweepReport,
 ): Promise<void> {
   // FRESH read: this step may cancel a Stripe intent off what it reads here,
   // and the paginated page it arrived in can be minutes (and hundreds of
@@ -1245,10 +1252,33 @@ async function expireOneTicketOrder(
         console.error(
           `paymentsSweep: ticket order ${doc.id} could not confirm intent ${order.paymentIntentId}'s status after a failed cancel, left pending`, statusError);
       }
+      if (status === "succeeded") {
+        // SP10 Task 8 (sp6 #5): money moved and nobody finished the order (the
+        // app was killed before finalizeTicketOrder, the webhook never landed).
+        // completeOrderTx is the same idempotent transaction finalize and the
+        // webhook run; the order flips to paid, the tickets are minted, the
+        // buyer is told. A throw here propagates to the per-order catch below.
+        await completeOrderTx(doc.id);
+        report.ticketOrdersReconciled++;
+        return;
+      }
       if (status !== "canceled") {
         console.info(
           `paymentsSweep: ticket order ${doc.id} expiry deferred, intent ${order.paymentIntentId} could not be confirmed cancelable (status=${status ?? "unknown"}), left pending for finalize/webhook`, e);
         report.ticketOrdersExpiryDeferred++;
+        if (order.createdAt < now - TICKET_ORDER_STUCK_AFTER_MS) {
+          // Deferred for hours, not minutes: a human has to look at the intent.
+          const alertId = ticketOrderStuckAlertId(doc.id);
+          const shouldLog = await recordAdminAlert({
+            alertId, kind: "ticket_order_stuck",
+            detail: `ticket order ${doc.id} (event ${order.eventId}, buyer ${order.buyerUid}) has been pending since `
+              + `${new Date(order.createdAt).toISOString()} with intent ${order.paymentIntentId} in status ${status ?? "unknown"};`
+              + " neither cancelable nor succeeded, so it can be neither expired nor completed; resolve the intent in Stripe",
+            bookingId: null, gigId: null, now,
+          });
+          if (shouldLog) console.error(`paymentsSweep: ticket order ${doc.id} is stuck (see adminAlerts/${alertId})`);
+          report.ticketOrdersStuck++;
+        }
         return;
       }
       // Confirmed already canceled: fall through to the same expiry
@@ -1285,7 +1315,7 @@ async function expireTicketOrders(
   for await (const page of paginate(q, PAGE_SIZE)) {
     for (const doc of page) {
       try {
-        await expireOneTicketOrder(db, doc, report);
+        await expireOneTicketOrder(db, doc, now, report);
       } catch (e) {
         console.error(`paymentsSweep: ticket order expiry failed for ${doc.id}`, e);
         bumpError(report, "ticketOrderExpire");

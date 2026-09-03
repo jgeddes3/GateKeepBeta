@@ -581,6 +581,11 @@ export class FakeStripe implements StripeLike {
         // doc comment on StripeLike).
         throw new Error(`FakeStripe: cannot cancel payment intent ${intentId}, it is already canceled`);
       }
+      if (status === "processing") {
+        // Real Stripe cannot cancel an intent that is settling (only in rare
+        // payment-method cases). The sweep must defer, not expire, such an order.
+        throw new Error(`FakeStripe: cannot cancel payment intent ${intentId}, it is processing`);
+      }
       tx.update(ref, { status: "canceled" });
       return { status: "canceled" };
     });

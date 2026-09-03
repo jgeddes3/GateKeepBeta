@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
-import { type TicketOrderDoc, type TicketDoc } from "@gatekeep/shared";
+import { type TicketOrderDoc, type TicketDoc, type AdminAlertDoc, TICKET_ORDER_STUCK_AFTER_MS } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -420,7 +420,7 @@ describe("ticket order expiry sweep", () => {
     expect(tierAfter?.soldCount).toBe(1);
   });
 
-  it("money always wins over expiry: an already-succeeded PaymentIntent leaves the order pending, not expired, and finalize still completes it", async () => {
+  it("money always wins over expiry: an already-succeeded PaymentIntent is completed by the sweep, never expired, and finalize is then a no-op", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("exp2");
     await addTiersAndPublish(profileId, eventId, owner.user,
       [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
@@ -433,15 +433,72 @@ describe("ticket order expiry sweep", () => {
     await adb.doc(`orders/${orderId}`).update({ expiresAt: Date.now() - 1000 });
 
     const report = await runPaymentsSweep(Date.now());
-    expect(report.ticketOrdersExpiryDeferred).toBeGreaterThanOrEqual(1);
+    expect(report.ticketOrdersReconciled).toBeGreaterThanOrEqual(1);
 
     const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
-    expect(order.status).toBe("pending"); // untouched
+    expect(order.status).toBe("paid");
     const tierAfter = (await adb.doc(`events/${eventId}/tiers/${tierId}`).get()).data();
-    expect(tierAfter?.soldCount).toBe(1); // inventory NOT released
+    expect(tierAfter?.soldCount).toBe(1);
 
     const { orderStatus } = await callFn<Record<string, unknown>, FinalizeResult>(
       "finalizeTicketOrder", { orderId }, buyer.user);
     expect(orderStatus).toBe("paid");
+  });
+
+  it("SP10 Task 8 (sp6 #5): an expired order whose intent already succeeded is COMPLETED by the sweep: ticket minted, buyer notified", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rec1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("rec1buyer");
+    const { orderId, clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 2 }] }, buyer.user);
+    await confirmFakeIntent(clientSecret!);
+    await adb.doc(`orders/${orderId}`).update({ expiresAt: Date.now() - 1000 });
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.ticketOrdersReconciled).toBeGreaterThanOrEqual(1);
+
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.status).toBe("paid");
+    const tickets = await adb.collection(`users/${buyer.uid}/tickets`).where("orderId", "==", orderId).get();
+    expect(tickets.size).toBe(2);
+    const notes = await adb.collection(`users/${buyer.uid}/notifications`).get();
+    expect(notes.docs.some((d) => d.data().title === "Tickets confirmed")).toBe(true);
+    expect((await adb.doc(`ledger/ticket_sale:${orderId}`).get()).exists).toBe(true);
+    // A later finalize is the ordinary no-op.
+    const { orderStatus } = await callFn<Record<string, unknown>, FinalizeResult>("finalizeTicketOrder", { orderId }, buyer.user);
+    expect(orderStatus).toBe("paid");
+    expect((await adb.collection(`users/${buyer.uid}/tickets`).where("orderId", "==", orderId).get()).size).toBe(2);
+  });
+
+  it("SP10 Task 8 (sp6 #5): a pending order whose intent is neither canceled nor succeeded, older than two hours, raises ticket_order_stuck", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("stk1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("stk1buyer");
+    const { orderId, clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+    const intentId = clientSecret!.replace(/_secret_fake$/, "");
+    // An intent Stripe cannot cancel and has not settled: `processing`.
+    await adb.doc(`stripeFake/state/objects/${intentId}`).update({ status: "processing" });
+
+    // Fresh: deferred, no alert yet.
+    await adb.doc(`orders/${orderId}`).update({ expiresAt: Date.now() - 1000 });
+    const first = await runPaymentsSweep(Date.now());
+    expect(first.ticketOrdersExpiryDeferred).toBeGreaterThanOrEqual(1);
+    expect((await adb.doc(`adminAlerts/ticket-order-stuck:${orderId}`).get()).exists).toBe(false);
+
+    // Two hours old: still deferred, and now escalated.
+    await adb.doc(`orders/${orderId}`).update({ createdAt: Date.now() - TICKET_ORDER_STUCK_AFTER_MS - 60_000 });
+    const second = await runPaymentsSweep(Date.now());
+    expect(second.ticketOrdersStuck).toBeGreaterThanOrEqual(1);
+    const alert = (await adb.doc(`adminAlerts/ticket-order-stuck:${orderId}`).get()).data() as AdminAlertDoc;
+    expect(alert.kind).toBe("ticket_order_stuck");
+    expect(alert.bookingId).toBeNull();
+    expect(alert.detail).toContain(orderId);
+    expect(alert.detail).toContain("processing");
+    expect(((await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc).status).toBe("pending");
   });
 });
