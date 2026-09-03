@@ -6,7 +6,7 @@ import {
   type GigSeriesDoc, type GigDoc, type InviteDoc, type TrackDoc, type SeriesCadence, type BookingRequestDoc,
   type CuratorBookingDoc,
 } from "@gatekeep/shared";
-import { runDailySweep } from "../src/scheduled.js";
+import { runDailySweep, formatEventReminder } from "../src/scheduled.js";
 import { wait } from "./helpers";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -1183,6 +1183,32 @@ describe("runDailySweep, SP4 Task 8: double-run idempotency across the new steps
       await adb.doc(`gigSeries/${seriesC}`).update({ status: "ended" });
       await adb.doc(`gigSeries/${seriesD}`).update({ status: "ended" });
     }
+  });
+});
+
+describe("formatEventReminder (SP10 Task 20)", () => {
+  // Friday, September 4, 2026, 8:00 PM EDT (00:00 UTC on September 5).
+  const startsAt = Date.UTC(2026, 8, 5, 0, 0, 0);
+
+  it("renders the launch-zone weekday, date, time and zone, and titles a same-day event Tonight", () => {
+    const copy = formatEventReminder("Friday Night Jazz Showcase", startsAt, Date.UTC(2026, 8, 4, 13, 0, 0)); // 9:00 AM EDT that day
+    expect(copy.title).toBe("Tonight");
+    expect(copy.body).toBe("\"Friday Night Jazz Showcase\" starts Friday, September 4 at 8:00 PM EDT.");
+  });
+
+  it("uses the launch-zone calendar day, not UTC: 7:00 PM EDT on the day of the show is still Tonight", () => {
+    const copy = formatEventReminder("Friday Night Jazz Showcase", startsAt, Date.UTC(2026, 8, 4, 23, 0, 0));
+    expect(copy.title).toBe("Tonight"); // UTC already says September 4 vs September 5
+  });
+
+  it("titles a next-day event Tomorrow", () => {
+    const copy = formatEventReminder("Friday Night Jazz Showcase", startsAt, Date.UTC(2026, 8, 4, 2, 0, 0)); // 10:00 PM EDT on September 3
+    expect(copy.title).toBe("Tomorrow");
+  });
+
+  it("renders standard time in winter", () => {
+    const copy = formatEventReminder("Winter Set", Date.UTC(2027, 0, 16, 1, 0, 0), Date.UTC(2027, 0, 15, 15, 0, 0));
+    expect(copy.body).toBe("\"Winter Set\" starts Friday, January 15 at 8:00 PM EST.");
   });
 });
 

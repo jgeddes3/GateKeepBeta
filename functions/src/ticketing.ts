@@ -34,6 +34,7 @@ import {
   EVENT_NOT_ON_SALE_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_SOLD_OUT_MESSAGE, EVENT_BUYER_CAP_MESSAGE,
   EVENT_CANCELLED_MESSAGE, TICKET_NOT_REFUNDABLE_MESSAGE, TICKET_REFUND_WINDOW_CLOSED_MESSAGE,
   TICKET_NOT_VALID_MESSAGE, TICKET_ALREADY_CHECKED_IN_MESSAGE, TRANSFER_OFFER_SENT_MESSAGE,
+  CHECK_IN_OPENS_BEFORE_MS, CHECK_IN_TOO_EARLY_MESSAGE,
   type EventDoc, type TicketTierDoc, type TicketOrderDoc, type TicketOrderStatus,
   type TicketIndexDoc, type TicketDoc, type TicketStatus, type AttendeeDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
@@ -1020,6 +1021,12 @@ export const checkInTicket = onCall<CheckInTicketInput>(
     if (event.status !== "published") {
       throw new HttpsError("failed-precondition", CHECK_IN_NOT_PUBLISHED_MESSAGE);
     }
+    // SP10 Task 20 (sp6 #12): a curator browsing the attendee list days early
+    // must not be able to mark someone in by a mistaken tap. 12h covers a
+    // matinee-to-late-show door and an early soundcheck.
+    if (event.startsAt - Date.now() > CHECK_IN_OPENS_BEFORE_MS) {
+      throw new HttpsError("failed-precondition", CHECK_IN_TOO_EARLY_MESSAGE);
+    }
 
     const attendeeRef = eventRef.collection("attendees").doc(input.ticketId);
     const attendeeSnap = await attendeeRef.get();
@@ -1056,6 +1063,55 @@ export const checkInTicket = onCall<CheckInTicketInput>(
       tx.update(attendeeRef, { status: "checked_in", checkedInAt: now });
       return { ownerName: attendee.ownerName, tierName: ticket.tierName, checkedInAt: now };
     });
+  });
+
+const TICKET_NOT_CHECKED_IN_MESSAGE = "This ticket is not checked in.";
+
+export interface UndoCheckInInput { eventId: string; ticketId: string; }
+
+// SP10 Task 20 (sp6 #12): the door's undo. Same attendee -> ownerUid ->
+// ticket resolution as checkInTicket, no qrSecret (the curator already has
+// the ticket in front of them on the list); the only state it accepts is
+// "checked_in", and it puts both docs back exactly as a fresh ticket looks
+// (status "valid", no checkedInAt) so a re-scan behaves like a first scan.
+export const undoCheckIn = onCall<UndoCheckInInput>(
+  { region: "us-central1" }, async (req): Promise<{ ok: true }> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = req.data;
+    if (!isValidDocId(input?.eventId)) throw new HttpsError("invalid-argument", "An event id is required.");
+    if (!isValidDocId(input?.ticketId)) throw new HttpsError("invalid-argument", "A ticket id is required.");
+
+    const db = getFirestore();
+    const eventRef = db.doc(`events/${input.eventId}`);
+    const eventSnap = await eventRef.get();
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = eventSnap.data() as EventDoc;
+    await requireProfileMember(event.curatorProfileId, uid);
+    await requireApprovedCuratorProfile(event.curatorProfileId);
+    if (event.status !== "published") {
+      throw new HttpsError("failed-precondition", CHECK_IN_NOT_PUBLISHED_MESSAGE);
+    }
+
+    const attendeeRef = eventRef.collection("attendees").doc(input.ticketId);
+    const attendeeSnap = await attendeeRef.get();
+    if (!attendeeSnap.exists) throw new HttpsError("not-found", "Ticket not found.");
+    const attendee = attendeeSnap.data() as AttendeeDoc;
+    const ticketRef = db.doc(`users/${attendee.ownerUid}/tickets/${input.ticketId}`);
+
+    await db.runTransaction(async (tx) => {
+      const ticketSnap = await tx.get(ticketRef);
+      const ticket = ticketSnap.data() as TicketDoc | undefined;
+      if (!ticket || ticket.eventId !== input.eventId || ticket.curatorProfileId !== event.curatorProfileId) {
+        throw new HttpsError("not-found", "Ticket not found.");
+      }
+      if (ticket.status !== "checked_in") {
+        throw new HttpsError("failed-precondition", TICKET_NOT_CHECKED_IN_MESSAGE);
+      }
+      tx.update(ticketRef, { status: "valid", checkedInAt: FieldValue.delete() });
+      tx.update(attendeeRef, { status: "valid", checkedInAt: FieldValue.delete() });
+    });
+    return { ok: true };
   });
 
 export interface OfferTransferInput { ticketId: string; target: string; }

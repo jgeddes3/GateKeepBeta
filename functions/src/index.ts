@@ -29,7 +29,7 @@ export { requestPayout } from "./paymentsPayouts.js";
 export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } from "./events.js";
 export { takedownEvent } from "./eventsAdmin.js";
 export {
-  createTicketOrder, finalizeTicketOrder, refundTicket, checkInTicket, offerTransfer, respondToTransfer,
+  createTicketOrder, finalizeTicketOrder, refundTicket, checkInTicket, undoCheckIn, offerTransfer, respondToTransfer,
 } from "./ticketing.js";
 export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js";
 export { createShowPost, removeShowPost } from "./showPosts.js";

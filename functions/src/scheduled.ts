@@ -1,7 +1,7 @@
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import {
-  SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE, POSTER_UPLOAD_TTL_MS,
+  SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE, POSTER_UPLOAD_TTL_MS, LAUNCH_TIMEZONE,
   type GigSeriesDoc, type GigDoc, type SeriesCadence, type BookingRequestDoc, type ReliabilityDoc,
   type EventDoc, type AttendeeDoc,
 } from "@gatekeep/shared";
@@ -30,24 +30,30 @@ const PROCESSING_STALE_MS = 24 * 60 * 60 * 1000;
 // event-tomorrow reminder step below) now lives in eventsCore.ts (imported
 // above), so Task 5's updateEvent reschedule hook can re-arm a reminder
 // using the same constant.
-// Months spelled out by hand (rather than a locale-dependent Intl call) so a
-// reminder's date is stable across every server locale and never risks a
-// formatter substituting a dash character this codebase's copy rules forbid.
-const REMINDER_MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-// The event-tomorrow reminder body's date clause, e.g. "September 5, 2026 at
-// 8:00 PM UTC". UTC throughout, matching this codebase's existing v1 gap
-// (see the timezone note just below): the event's own startsAt has no
-// per-curator timezone attached to interpret it against.
-function formatEventReminderDate(ms: number): string {
-  const d = new Date(ms);
-  const hour24 = d.getUTCHours();
-  const period = hour24 >= 12 ? "PM" : "AM";
-  const hour12 = ((hour24 + 11) % 12) + 1;
-  const minute = d.getUTCMinutes().toString().padStart(2, "0");
-  return `${REMINDER_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} at ${hour12}:${minute} ${period} UTC`;
+
+// SP10 Task 20 (sp6 #4): the reminder renders in LAUNCH_TIMEZONE like every
+// client surface (eventDisplay.ts on both platforms), and its title comes
+// from the launch-zone calendar day. Parts are assembled by hand from
+// formatToParts so the rendered string is fixed regardless of ICU's own
+// joiner choices ("at", comma placement), which tests pin exactly.
+const REMINDER_DAY_FORMAT = new Intl.DateTimeFormat("en-US", {
+  timeZone: LAUNCH_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit",
+});
+const REMINDER_WHEN_FORMAT = new Intl.DateTimeFormat("en-US", {
+  timeZone: LAUNCH_TIMEZONE, weekday: "long", month: "long", day: "numeric",
+  hour: "numeric", minute: "2-digit", timeZoneName: "short",
+});
+
+export interface EventReminderCopy { title: "Tonight" | "Tomorrow"; body: string; }
+
+export function formatEventReminder(title: string, startsAt: number, now: number): EventReminderCopy {
+  const p: Record<string, string> = {};
+  for (const part of REMINDER_WHEN_FORMAT.formatToParts(new Date(startsAt))) {
+    if (part.type !== "literal") p[part.type] = part.value;
+  }
+  const when = `${p.weekday}, ${p.month} ${p.day} at ${p.hour}:${p.minute} ${p.dayPeriod} ${p.timeZoneName}`;
+  const sameDay = REMINDER_DAY_FORMAT.format(new Date(startsAt)) === REMINDER_DAY_FORMAT.format(new Date(now));
+  return { title: sameDay ? "Tonight" : "Tomorrow", body: `"${title}" starts ${when}.` };
 }
 
 // v1 stores every timestamp as epoch ms with no per-profile timezone, so the
@@ -975,10 +981,10 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
           const ownerUids = new Set<string>();
           for (const a of attendeesSnap.docs) ownerUids.add((a.data() as AttendeeDoc).ownerUid);
 
-          const body = `"${event.title}" starts ${formatEventReminderDate(event.startsAt)}.`;
+          const copy = formatEventReminder(event.title, event.startsAt, now);
           for (const uid of ownerUids) {
             try {
-              await notifyUser(uid, { kind: "ticket", refId: doc.id, title: "Event tomorrow", body });
+              await notifyUser(uid, { kind: "ticket", refId: doc.id, title: copy.title, body: copy.body });
             } catch (e) {
               console.error(`dailySweep: reminder notify failed for event ${doc.id}, user ${uid}`, e);
             }

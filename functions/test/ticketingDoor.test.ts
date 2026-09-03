@@ -6,6 +6,7 @@ import {
   type TicketOrderDoc, type TicketDoc, type AttendeeDoc, type TicketIndexDoc, type TicketTransferDoc,
   type AdminAlertDoc, ticketServiceFeeCents,
   TICKET_ALREADY_CHECKED_IN_MESSAGE, TICKET_NOT_VALID_MESSAGE, TRANSFER_OFFER_SENT_MESSAGE, EVENT_BUYER_CAP_MESSAGE,
+  CHECK_IN_TOO_EARLY_MESSAGE,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
 import { applyTicketRefund } from "../src/ticketing.js";
@@ -106,6 +107,15 @@ async function openOfferIdFor(ticketId: string): Promise<string> {
   return snap.docs[0].id;
 }
 
+// SP10 Task 20: checkInTicket refuses a scan more than CHECK_IN_OPENS_BEFORE_MS
+// (12h) before startsAt. Every fixture event starts 7 days out (eventContent),
+// so a door test moves the event to 6h out right before scanning. Admin-SDK
+// flip, same precedent as the "flip status directly" cases below.
+async function openDoors(eventId: string): Promise<void> {
+  const startsAt = Date.now() + 6 * 3_600_000;
+  await adb.doc(`events/${eventId}`).update({ startsAt, endsAt: startsAt + 3 * 3_600_000, updatedAt: Date.now() });
+}
+
 describe("checkInTicket", () => {
   it("happy path: checks a valid ticket in and mirrors the attendee doc", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("ci1");
@@ -118,6 +128,7 @@ describe("checkInTicket", () => {
     const ticketId = tickets[0].id;
     const qrSecret = tickets[0].data.qrSecret;
 
+    await openDoors(eventId);
     const result = await callFn<Record<string, unknown>, { ownerName: string; tierName: string; checkedInAt: number }>(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, owner.user);
     expect(result.tierName).toBe("General");
@@ -143,6 +154,7 @@ describe("checkInTicket", () => {
     const ticketId = tickets[0].id;
     const qrSecret = tickets[0].data.qrSecret;
 
+    await openDoors(eventId);
     const first = await callFn<Record<string, unknown>, { checkedInAt: number }>(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, owner.user);
 
@@ -163,6 +175,7 @@ describe("checkInTicket", () => {
     const tickets = await ticketsForOrder(buyer.uid, orderId);
     const ticketId = tickets[0].id;
 
+    await openDoors(eventId);
     await expect(callFn(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret: "not-the-real-secret" }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition", message: TICKET_NOT_VALID_MESSAGE });
@@ -181,6 +194,7 @@ describe("checkInTicket", () => {
     const tickets = await ticketsForOrder(buyer.uid, orderId);
     const ticketId = tickets[0].id;
 
+    await openDoors(eventId);
     const result = await callFn<Record<string, unknown>, { checkedInAt: number }>(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, override: true }, owner.user);
     expect(result.checkedInAt).toBeTypeOf("number");
@@ -201,6 +215,7 @@ describe("checkInTicket", () => {
     const qrSecret = tickets[0].data.qrSecret;
 
     const stranger = await makeBuyer("ci5stranger");
+    await openDoors(eventId);
     await expect(callFn(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, stranger.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -220,6 +235,7 @@ describe("checkInTicket", () => {
     const ticketId = tickets[0].id;
     const qrSecret = tickets[0].data.qrSecret;
 
+    await openDoors(eventId);
     // Direct admin flip, same "flip status directly" precedent
     // ticketingRefunds.test.ts uses.
     await adb.doc(`events/${eventId}`).update({ status: "cancelled", cancelledAt: Date.now(), updatedAt: Date.now() });
@@ -227,6 +243,79 @@ describe("checkInTicket", () => {
     await expect(callFn(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("SP10 Task 20: refuses a scan more than 12h before startsAt with CHECK_IN_TOO_EARLY_MESSAGE and leaves the ticket valid", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("ci7");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("ci7buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const ticketId = tickets[0].id;
+    const qrSecret = tickets[0].data.qrSecret;
+
+    // No openDoors: the event still starts 7 days out.
+    await expect(callFn("checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: expect.stringContaining(CHECK_IN_TOO_EARLY_MESSAGE) });
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("valid");
+  });
+});
+
+describe("undoCheckIn (SP10 Task 20)", () => {
+  it("flips a checked-in ticket back to valid on both docs, clears checkedInAt, and the ticket scans again", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("uc1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("uc1buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const tickets = await ticketsForOrder(buyer.uid, orderId);
+    const ticketId = tickets[0].id;
+    const qrSecret = tickets[0].data.qrSecret;
+    await openDoors(eventId);
+    await callFn("checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, owner.user);
+
+    const result = await callFn<Record<string, unknown>, { ok: true }>("undoCheckIn", { eventId, ticketId }, owner.user);
+    expect(result.ok).toBe(true);
+
+    const ticket = (await adb.doc(`users/${buyer.uid}/tickets/${ticketId}`).get()).data() as TicketDoc;
+    expect(ticket.status).toBe("valid");
+    expect(ticket.checkedInAt).toBeUndefined();
+    const attendee = (await adb.doc(`events/${eventId}/attendees/${ticketId}`).get()).data() as AttendeeDoc;
+    expect(attendee.status).toBe("valid");
+    expect(attendee.checkedInAt).toBeUndefined();
+
+    const again = await callFn<Record<string, unknown>, { checkedInAt: number }>(
+      "checkInTicket", { curatorProfileId: profileId, eventId, ticketId, qrSecret }, owner.user);
+    expect(again.checkedInAt).toBeTypeOf("number");
+  });
+
+  it("refuses a ticket that is not checked in", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("uc2");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("uc2buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const ticketId = (await ticketsForOrder(buyer.uid, orderId))[0].id;
+    await expect(callFn("undoCheckIn", { eventId, ticketId }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+  });
+
+  it("denies a caller who is not a member of the event's curator profile", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("uc3");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("uc3buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    const ticketId = (await ticketsForOrder(buyer.uid, orderId))[0].id;
+    const stranger = await makeBuyer("uc3stranger");
+    await expect(callFn("undoCheckIn", { eventId, ticketId }, stranger.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
   });
 });
 
@@ -295,6 +384,7 @@ describe("offerTransfer + respondToTransfer", () => {
     const senderNotifs = await adb.collection(`users/${sender.uid}/notifications`).get();
     expect(senderNotifs.docs.some((d) => d.data().title === "Ticket transfer accepted")).toBe(true);
 
+    await openDoors(eventId);
     // The old QR is dead: the attendee doc it resolved through no longer exists.
     await expect(callFn(
       "checkInTicket", { curatorProfileId: profileId, eventId, ticketId: oldTicketId, qrSecret: oldSecret }, owner.user))
@@ -663,6 +753,7 @@ describe("refundTicket vs transfer race (security review fix round 1)", () => {
     // The recipient's live descendant is already checked in by the time the
     // (simulated) raced refund tries to resolve.
     const liveTicketBefore = (await adb.doc(`users/${recipient.uid}/tickets/${liveTicketId}`).get()).data() as TicketDoc;
+    await openDoors(eventId);
     await callFn("checkInTicket",
       { curatorProfileId: profileId, eventId, ticketId: liveTicketId, qrSecret: liveTicketBefore.qrSecret }, owner.user);
 
@@ -699,6 +790,7 @@ describe("refundTicket vs transfer race (security review fix round 1)", () => {
     const tickets = await ticketsForOrder(buyer.uid, orderId);
     const ticketId = tickets[0].id;
 
+    await openDoors(eventId);
     await expect(callFn(
       "checkInTicket",
       { curatorProfileId: profileId, eventId, ticketId, qrSecret: "definitely-wrong", override: "not-literally-true" },

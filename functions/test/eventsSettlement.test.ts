@@ -7,7 +7,7 @@ import {
   TICKET_REFUND_WINDOW_CLOSED_MESSAGE, SETTLEMENT_CLAIM_STALE_MS,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
-import { runDailySweep } from "../src/scheduled.js";
+import { runDailySweep, formatEventReminder } from "../src/scheduled.js";
 import { EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId } from "../src/eventsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -581,9 +581,8 @@ describe("refundTicket: settlement freeze window", () => {
 
 describe("dailySweep: event-tomorrow reminders", () => {
   it("notifies each distinct ticket-holder once and stamps reminderSentAt; a second run sends nothing new", async () => {
-    const { owner, profileId, eventId } = await makeDraftEvent("rem1", {
-      startsAt: Date.now() + 20 * HOUR_MS, endsAt: Date.now() + 23 * HOUR_MS,
-    });
+    const startsAt = Date.now() + 20 * HOUR_MS;
+    const { owner, profileId, eventId } = await makeDraftEvent("rem1", { startsAt, endsAt: startsAt + 3 * HOUR_MS });
     await addTiersAndPublish(profileId, eventId, owner.user,
       [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
     const tierId = await tierIdByName(eventId, "General");
@@ -606,8 +605,9 @@ describe("dailySweep: event-tomorrow reminders", () => {
     for (const buyer of [buyerA, buyerB]) {
       const notifSnap = await adb.collection(`users/${buyer.uid}/notifications`).get();
       const reminders = notifSnap.docs.filter((d) => d.data().kind === "ticket" && d.data().refId === eventId
-        && d.data().title === "Event tomorrow");
+        && (d.data().title === "Tonight" || d.data().title === "Tomorrow"));
       expect(reminders).toHaveLength(1);
+      expect(reminders[0].data().body).toBe(formatEventReminder("Friday Night Jazz Showcase", startsAt, 0).body);
     }
 
     // Second run: reminderSentAt is already set, so nothing new is sent.
@@ -615,7 +615,7 @@ describe("dailySweep: event-tomorrow reminders", () => {
     for (const buyer of [buyerA, buyerB]) {
       const notifSnap = await adb.collection(`users/${buyer.uid}/notifications`).get();
       const reminders = notifSnap.docs.filter((d) => d.data().kind === "ticket" && d.data().refId === eventId
-        && d.data().title === "Event tomorrow");
+        && (d.data().title === "Tonight" || d.data().title === "Tomorrow"));
       expect(reminders).toHaveLength(1); // still just the one
     }
   });
@@ -638,7 +638,7 @@ describe("dailySweep: event-tomorrow reminders", () => {
     // refId=eventId) legitimately exists from payOrder; only the reminder's
     // own exact title tells the two apart.
     const notifSnap = await adb.collection(`users/${buyer.uid}/notifications`).get();
-    expect(notifSnap.docs.some((d) => d.data().title === "Event tomorrow")).toBe(false);
+    expect(notifSnap.docs.some((d) => (d.data().title === "Tonight" || d.data().title === "Tomorrow"))).toBe(false);
   });
 
   it("does not remind an event with only refunded attendees", async () => {
@@ -663,6 +663,6 @@ describe("dailySweep: event-tomorrow reminders", () => {
     const attendeesSnap = await adb.collection(`events/${eventId}/attendees`).get();
     expect(attendeesSnap.docs.every((d) => (d.data() as AttendeeDoc).status === "refunded")).toBe(true);
     const notifSnap = await adb.collection(`users/${buyer.uid}/notifications`).get();
-    expect(notifSnap.docs.some((d) => d.data().title === "Event tomorrow")).toBe(false);
+    expect(notifSnap.docs.some((d) => (d.data().title === "Tonight" || d.data().title === "Tomorrow"))).toBe(false);
   });
 });
