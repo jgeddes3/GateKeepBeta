@@ -34,7 +34,7 @@ import {
 import { resolveGigLocation, validateLocationInput, type GigLocationInput } from "./gigs.js";
 import { geocoderApiKey } from "./geocode.js";
 import { stripeSecretKey } from "./stripeClient.js";
-import { refundOrdersForCancelledEvent } from "./ticketing.js";
+import { refundOrdersForCancelledEvent, type CancelledEventOrdersResult } from "./ticketing.js";
 import { notifyFollowers } from "./follows.js";
 import { announceTargets, showAnnouncedNote, onTheBillNote, showRescheduledNote, notifyLineupMembers } from "./announce.js";
 
@@ -645,3 +645,59 @@ export const cancelEvent = onCall<CancelEventInput>(
 
     return { ok: true };
   });
+
+// ---------------------------------------------------------------------------
+// SP10 Task 10: moderation cancel + refund (events follow the profile)
+// ---------------------------------------------------------------------------
+// Copy holders see in the cancellation notification when a curator is
+// unpublished (spec section 5.1). Fixed here so review.ts's cascade and
+// scheduled.ts's retry step send the same words.
+export const ORGANIZER_INACTIVE_REASON = "The organizer's account is no longer active";
+
+export type ModerationActor =
+  | { kind: "admin"; uid: string }
+  | { kind: "system"; cause: "profile_unpublished" };
+
+export interface ModerationCancelResult {
+  outcome: "cancelled" | "already_cancelled" | "skipped_completed";
+  orders: CancelledEventOrdersResult;
+}
+
+// eventCascadeRetries/{eventId}: written by review.ts when one event of the
+// cascade throws, drained by dailySweep step 9. Server-only (firestore.rules).
+export interface EventCascadeRetryDoc {
+  profileId: string; reason: string; attempts: number; lastError: string; createdAt: number;
+}
+
+// The moderation twin of cancelEvent: no guard chain (the caller is an admin
+// callable, the reject cascade, or the daily sweep), no curator-approval
+// requirement (the whole point is that the curator is no longer approved),
+// same two helpers in the same order. A completed event is untouched: its
+// settlement has run and the show happened. Idempotent at the event level
+// exactly like cancelEvent: an already-cancelled event skips the status flip
+// and re-drives the refund loop. Per-order failures are escalated to
+// adminAlerts inside refundOrdersForCancelledEvent and retried hourly by
+// paymentsSweep's retryCancelledEventRefunds, so they do NOT throw here;
+// only cancelEventCore's own refusal (settlement claimed, malformed doc)
+// propagates, which is what lands an event in eventCascadeRetries.
+export async function cancelAndRefundEventForModeration(
+  eventId: string, reason: string, actor: ModerationActor,
+): Promise<ModerationCancelResult> {
+  const db = getFirestore();
+  const snap = await db.doc(`events/${eventId}`).get();
+  if (!snap.exists) throw new HttpsError("not-found", "Event not found.");
+  const event = snap.data() as EventDoc;
+  const now = Date.now();
+  const empty: CancelledEventOrdersResult = { ordersRefunded: 0, pendingExpired: 0, pendingDeferred: 0, errors: 0 };
+  if (event.status === "completed") return { outcome: "skipped_completed", orders: empty };
+
+  let outcome: ModerationCancelResult["outcome"] = "already_cancelled";
+  if (event.status !== "cancelled") {
+    await cancelEventCore(eventId, now);
+    outcome = "cancelled";
+  }
+  const by = actor.kind === "admin" ? `admin ${actor.uid}` : actor.cause;
+  console.info(`cancelAndRefundEventForModeration: event ${eventId} ${outcome} (${by})`);
+  const orders = await refundOrdersForCancelledEvent(eventId, event.title, now, reason);
+  return { outcome, orders };
+}

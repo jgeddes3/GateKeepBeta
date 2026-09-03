@@ -341,6 +341,30 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     const failedAlert = await adb.doc(`adminAlerts/ticket-settlement-failed:${eventId}`).get();
     expect(failedAlert.exists).toBe(false);
   });
+
+  it("withholds settlement and completion when the curator profile is not approved, raising ticket_settlement_blocked", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("setunappr");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("set_unapproved_buyer");
+    await payOrder(eventId, tierId, 1, buyer.user);
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await adb.doc(`profiles/${profileId}`).update({ status: "rejected" });
+    await pushEventPastSettleWindow(eventId);
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.ticketSettlementsBlocked).toBeGreaterThanOrEqual(1);
+
+    const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(event.status).toBe("published");
+    expect(event.settlementStartedAt).toBeUndefined();
+    const acct = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+    expect(acct?.balanceCents ?? 0).toBe(0);
+    const alert = (await adb.doc(`adminAlerts/${ticketSettlementBlockedAlertId(eventId)}`).get()).data() as AdminAlertDoc;
+    expect(alert.kind).toBe("ticket_settlement_blocked");
+    expect(alert.detail).toMatch(/not approved/);
+  });
 });
 
 describe("cancelEvent: blocked once ticket settlement has started", () => {

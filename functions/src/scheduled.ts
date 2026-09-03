@@ -1,5 +1,5 @@
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { getFirestore, FieldPath } from "firebase-admin/firestore";
+import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import {
   SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE,
   type GigSeriesDoc, type GigDoc, type SeriesCadence, type BookingRequestDoc, type ReliabilityDoc,
@@ -11,6 +11,8 @@ import { recomputeReliability } from "./bookingLifecycle.js";
 import { notifyProfileMembers, notifyUser } from "./notifications.js";
 import { buildPaymentDoc } from "./paymentsCore.js";
 import { EVENT_REMINDER_WINDOW_MS } from "./eventsCore.js";
+import { cancelAndRefundEventForModeration, type EventCascadeRetryDoc } from "./events.js";
+import { stripeSecretKey } from "./stripeClient.js";
 
 const DAY_MS = 86_400_000;
 // SP2 debt (tracks.ts's ACTIVE_TRACK_STATUSES comment): a track stuck in
@@ -273,6 +275,9 @@ export interface SweepReport {
   // EVENT, not the notification: an event with several distinct ticket
   // holders still counts once here.
   eventRemindersSent: number;
+  // SP10 Task 10, step 9: eventCascadeRetries entries whose cancel + refund
+  // succeeded this run (retry doc deleted).
+  eventCascadeRetried: number;
   // S3: per-step failure counts, a step that throws is caught, logged, and
   // counted here rather than aborting the remaining steps.
   errors: {
@@ -292,6 +297,10 @@ export interface SweepReport {
     // doc, a Firestore hiccup on the attendees read). Per-event isolated,
     // same S3 philosophy as every other step here.
     eventReminders: number;
+    // SP10 Task 10, step 9: the retry step's own query/pagination failed, or
+    // a single retry doc's cancel + refund attempt failed (per-doc isolated,
+    // same S3 philosophy as every other step here).
+    eventCascadeRetries: number;
   };
 }
 
@@ -315,9 +324,11 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     occurrencesBornFilled: 0, seriesSelfHealed: 0,
     bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
     eventRemindersSent: 0,
+    eventCascadeRetried: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
       bookingExpiry: 0, bookingCompletion: 0, seriesMaterialize: 0, eventReminders: 0,
+      eventCascadeRetries: 0,
     },
   };
 
@@ -949,7 +960,37 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     report.errors.eventReminders++;
   }
 
+  // 9) Event cascade retry (SP10 Task 10): re-runs cancel + refund for any
+  // event review.ts's reject-from-approved cascade could not resolve (see
+  // eventCascadeRetries). Mirrors step 5's per-doc isolate-log-continue.
+  await drainEventCascadeRetries(db, report);
+
   return report;
+}
+
+async function drainEventCascadeRetries(db: FirebaseFirestore.Firestore, report: SweepReport): Promise<void> {
+  try {
+    const retryQuery = db.collection("eventCascadeRetries").orderBy(FieldPath.documentId());
+    for await (const page of paginate(retryQuery, SWEEP_PAGE_SIZE)) {
+      for (const doc of page) {
+        const retry = doc.data() as EventCascadeRetryDoc;
+        try {
+          await cancelAndRefundEventForModeration(doc.id, retry.reason, { kind: "system", cause: "profile_unpublished" });
+          await doc.ref.delete();
+          report.eventCascadeRetried++;
+        } catch (e) {
+          console.error(`dailySweep: event cascade retry failed for event ${doc.id}`, e);
+          report.errors.eventCascadeRetries++;
+          await doc.ref.update({
+            attempts: FieldValue.increment(1), lastError: e instanceof Error ? e.message : String(e),
+          }).catch((writeError) => console.error(`dailySweep: eventCascadeRetries update failed for ${doc.id}`, writeError));
+        }
+      }
+    }
+  } catch (e) {
+    console.error("dailySweep: event cascade retry step failed", e);
+    report.errors.eventCascadeRetries++;
+  }
 }
 
 // Thin wrapper, all logic lives in runDailySweep above so it's directly
@@ -965,6 +1006,6 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
 // collections; the default 60s/256MiB was sized for the original four-step,
 // unbounded-`.get()` implementation and was already a latent risk at scale.
 export const dailySweep = onSchedule(
-  { schedule: "every day 09:00", region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
+  { schedule: "every day 09:00", region: "us-central1", timeoutSeconds: 540, memory: "512MiB", secrets: [stripeSecretKey] },
   async () => { await runDailySweep(Date.now()); },
 );

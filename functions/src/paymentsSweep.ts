@@ -1540,13 +1540,39 @@ function isDefiniteStripeRefusal(e: unknown): boolean {
 
 async function settleOneEvent(
   db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
-  now: number, report: PaymentsSweepReport,
+  now: number, report: PaymentsSweepReport, curatorStatusCache: Map<string, string>,
 ): Promise<void> {
   // FRESH read: the paginated page this doc arrived in can be minutes (and
   // hundreds of docs) old, and every decision below is made off this read.
   const freshSnap = await doc.ref.get();
   const event = freshSnap.data() as EventDoc | undefined;
   if (!event || event.status !== "published") return; // resolved since the page was read
+
+  // SP10 Task 10: never pay a curator who is no longer approved. Cached per
+  // sweep run (one get per curator, not per event); the alert reuses the
+  // blocked-settlement id so an operator sees one row per event, and the
+  // remedy is takedownEvent (cancel + refund), which cancelEventCore still
+  // permits because settlementStartedAt is not claimed on this path.
+  let curatorStatus = curatorStatusCache.get(event.curatorProfileId);
+  if (curatorStatus === undefined) {
+    const profileSnap = await db.doc(`profiles/${event.curatorProfileId}`).get();
+    curatorStatus = (profileSnap.data()?.status as string | undefined) ?? "missing";
+    curatorStatusCache.set(event.curatorProfileId, curatorStatus);
+  }
+  if (curatorStatus !== "approved") {
+    const alertId = ticketSettlementBlockedAlertId(doc.id);
+    const shouldLog = await recordAdminAlert({
+      alertId, kind: "ticket_settlement_blocked",
+      detail: `event ${doc.id} ("${event.title}") is due for ticket settlement, but curator `
+        + `${event.curatorProfileId} is "${curatorStatus}", not approved; settlement withheld, use takedownEvent to refund`,
+      bookingId: null, gigId: null, now,
+    });
+    if (shouldLog) {
+      console.error(`paymentsSweep: event ${doc.id} ticket settlement withheld, curator not approved (see adminAlerts/${alertId})`);
+    }
+    report.ticketSettlementsBlocked++;
+    return;
+  }
 
   const ordersSnap = await db.collection("orders")
     .where("eventId", "==", doc.id).where("status", "==", "paid").get();
@@ -1664,10 +1690,11 @@ async function settleTicketRevenue(
     .where("status", "==", "published")
     .where("endsAt", "<", now - EVENT_SETTLE_DELAY_MS)
     .orderBy("endsAt");
+  const curatorStatusCache = new Map<string, string>();
   for await (const page of paginate(q, PAGE_SIZE)) {
     for (const doc of page) {
       try {
-        await settleOneEvent(db, doc, now, report);
+        await settleOneEvent(db, doc, now, report, curatorStatusCache);
       } catch (e) {
         console.error(`paymentsSweep: ticket settlement failed for event ${doc.id}`, e);
         bumpError(report, "ticketSettlement");

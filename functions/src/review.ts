@@ -5,6 +5,8 @@ import { isValidDocId, type AuditLogDoc } from "@gatekeep/shared";
 import { notifyProfileMembers } from "./notifications.js";
 import { syncCuratorAccess } from "./curator.js";
 import { unwindBookingsForModeration } from "./bookingLifecycle.js";
+import { cancelAndRefundEventForModeration, ORGANIZER_INACTIVE_REASON, type EventCascadeRetryDoc } from "./events.js";
+import { stripeSecretKey } from "./stripeClient.js";
 
 export function requireAdmin(req: { auth?: { uid?: string; token?: Record<string, unknown> } }): string {
   const uid = req.auth?.uid;
@@ -19,8 +21,54 @@ export async function writeAudit(entry: Omit<AuditLogDoc, "at">) {
   await getFirestore().collection("auditLogs").add(log);
 }
 
+async function cascadeEventsForUnpublishedProfile(
+  db: FirebaseFirestore.Firestore, profileId: string, now: number,
+): Promise<{ cancelled: number; queued: number }> {
+  // Served by the existing events (curatorProfileId, status, startsAt) composite.
+  const [publishedSnap, draftSnap] = await Promise.all([
+    db.collection("events").where("curatorProfileId", "==", profileId)
+      .where("status", "==", "published").where("startsAt", ">", now).get(),
+    db.collection("events").where("curatorProfileId", "==", profileId).where("status", "==", "draft").get(),
+  ]);
+  let cancelled = 0;
+  let queued = 0;
+  for (const doc of [...publishedSnap.docs, ...draftSnap.docs]) {
+    try {
+      const result = await cancelAndRefundEventForModeration(
+        doc.id, ORGANIZER_INACTIVE_REASON, { kind: "system", cause: "profile_unpublished" });
+      if (result.outcome === "cancelled") cancelled++;
+    } catch (e) {
+      queued++;
+      console.error("event cascade failed; queued for dailySweep step 9", { profileId, eventId: doc.id }, e);
+      const retry: EventCascadeRetryDoc = {
+        profileId, reason: ORGANIZER_INACTIVE_REASON, attempts: 1,
+        lastError: e instanceof Error ? e.message : String(e), createdAt: now,
+      };
+      try {
+        await db.doc(`eventCascadeRetries/${doc.id}`).set(retry);
+      } catch (writeError) {
+        console.error("eventCascadeRetries write failed", { eventId: doc.id }, writeError);
+      }
+    }
+  }
+  return { cancelled, queued };
+}
+
+// The pre-SP10 "(closed N gigs, paused M series)" suffix is preserved
+// byte-for-byte when no events were touched (review.test.ts:307 asserts it);
+// event counts are appended only when the cascade actually cancelled or
+// queued something.
+function cascadeSummary(isCurator: boolean, closedGigs: number, pausedSeries: number, eventsCancelled: number, eventsQueued: number): string {
+  if (!isCurator) return "";
+  const parts: string[] = [];
+  if (closedGigs > 0 || pausedSeries > 0) parts.push(`closed ${closedGigs} gigs, paused ${pausedSeries} series`);
+  if (eventsCancelled > 0) parts.push(`cancelled ${eventsCancelled} events`);
+  if (eventsQueued > 0) parts.push(`${eventsQueued} events queued for retry`);
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+}
+
 export const reviewProfile = onCall<{ profileId: string; decision: "approved" | "rejected"; reason?: string }>(
-  { region: "us-central1" }, async (req) => {
+  { region: "us-central1", secrets: [stripeSecretKey] }, async (req) => {
     const actorUid = requireAdmin(req);
     const { profileId, decision, reason } = req.data;
     // P2: enum-guard `decision` and shape-guard `profileId`, untrusted
@@ -182,6 +230,19 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       await unwindBookingsForModeration({ profileId });
     }
 
+    // SP10 Task 10 (spec section 5.1): events follow the profile. Every
+    // published future event is cancelled and refunded in full, drafts are
+    // cancelled, completed and already-cancelled events are untouched. Each
+    // event is its own try/catch: one poisoned event lands in
+    // eventCascadeRetries for the daily sweep's step 9, never blocks the rest.
+    let eventsCancelled = 0;
+    let eventsQueued = 0;
+    if (isCurator && decision === "rejected" && wasApproved) {
+      const cascade = await cascadeEventsForUnpublishedProfile(db, profileId, now);
+      eventsCancelled = cascade.cancelled;
+      eventsQueued = cascade.queued;
+    }
+
     // curatorAccess recompute for reject-from-approved runs AFTER the batch
     // commits: syncCuratorAccess re-reads each member's profiles live, and
     // needs this profile's just-flipped "rejected" status to be visible so
@@ -228,9 +289,7 @@ export const reviewProfile = onCall<{ profileId: string; decision: "approved" | 
       // series)" text.
       detail: decision === "rejected"
         ? (wasApproved
-            ? `[was approved] ${reason!.trim()}${
-                isCurator && (closedGigs > 0 || pausedSeries > 0)
-                  ? ` (closed ${closedGigs} gigs, paused ${pausedSeries} series)` : ""}`
+            ? `[was approved] ${reason!.trim()}${cascadeSummary(isCurator, closedGigs, pausedSeries, eventsCancelled, eventsQueued)}`
             : reason!.trim())
         : snap.data()?.name ?? "",
     });

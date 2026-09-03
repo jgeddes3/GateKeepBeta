@@ -83,6 +83,14 @@ export const createTicketOrder = onCall<CreateTicketOrderInput>(
     if (event.status !== "published" || event.startsAt <= Date.now()) {
       throw new HttpsError("failed-precondition", EVENT_NOT_ON_SALE_MESSAGE);
     }
+    // SP10 Task 10: the curator must still be approved. Closes the window
+    // between a reject-from-approved and its cascade (and any event the
+    // cascade missed): the public event page may still render, but nothing
+    // sells. One get per invocation; same message the client already keys on.
+    const curatorSnap = await db.doc(`profiles/${event.curatorProfileId}`).get();
+    if (curatorSnap.data()?.status !== "approved") {
+      throw new HttpsError("failed-precondition", EVENT_NOT_ON_SALE_MESSAGE);
+    }
 
     const now = Date.now();
     const orderRef = db.collection("orders").doc();

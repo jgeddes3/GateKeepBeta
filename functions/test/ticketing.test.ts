@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
-import { type TicketOrderDoc, type TicketDoc, type AdminAlertDoc, TICKET_ORDER_STUCK_AFTER_MS } from "@gatekeep/shared";
+import {
+  type TicketOrderDoc, type TicketDoc, type AdminAlertDoc, TICKET_ORDER_STUCK_AFTER_MS, EVENT_NOT_ON_SALE_MESSAGE,
+} from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
 import { ticketOrderStuckAlertId } from "../src/eventsCore.js";
 
@@ -294,6 +296,19 @@ describe("createTicketOrder + finalizeTicketOrder", () => {
 
     await expect(callFn("finalizeTicketOrder", { orderId }, stranger.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("refuses to sell when the curator profile is no longer approved (EVENT_NOT_ON_SALE_MESSAGE)", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("ctounappr");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    // Flipped directly: the reviewProfile cascade would cancel the event, and
+    // this test's subject is the sale-time gate for an event the cascade missed.
+    await adb.doc(`profiles/${profileId}`).update({ status: "rejected" });
+    const buyer = await makeBuyer("cto_unapproved_buyer");
+    await expect(callFn("createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: EVENT_NOT_ON_SALE_MESSAGE });
   });
 });
 
