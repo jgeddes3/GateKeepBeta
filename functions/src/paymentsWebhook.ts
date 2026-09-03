@@ -3,16 +3,20 @@ import { getFirestore } from "firebase-admin/firestore";
 import { isValidDocId } from "@gatekeep/shared";
 import {
   getStripe, stripeSecretKey, stripeWebhookSecret, stripeConnectWebhookSecret, StripeWebhookSecretMissingError,
-  type VerifiedWebhookEvent,
+  type VerifiedWebhookEvent, type WebhookScope,
 } from "./stripeClient.js";
 // SP6 Task 5: registered directly below (not self-registered from
 // ticketing.ts, unlike the SP5 handlers this file's own header describes) so
 // this file stays the ONE place a reader finds the full purpose registry.
 import { completeOrderTicketsHandler } from "./ticketing.js";
+// SP10 Task 5 (sp5 #2): chargebacks.
+import { disputeCreatedHandler } from "./paymentsDisputes.js";
 
 // The codebase's ONLY non-callable HTTPS entry point. Contract:
 //  - raw-body signature verification (RealStripe.constructWebhookEvent throws
-//    on a bad signature; FakeStripe accepts anything, emulator only);
+//    on a bad signature; FakeStripe accepts only its three modeled signatures,
+//    "fake"/"fake:platform" for the platform secret, "fake:connect" for the
+//    Connect secret, emulator only);
 //  - stripeEvents/{eventId} status-field claim machine (see STALE_CLAIM_MS
 //    below) = exactly-once processing per event id, self-healing against a
 //    claim that never finished instead of leaving that event id stuck
@@ -33,6 +37,7 @@ import { completeOrderTicketsHandler } from "./ticketing.js";
 //  - transfer.reversed      -> Task 12, registered in paymentsSettlement.ts
 //    beside the clawback whose reversals it dedupes against (ledger only,
 //    it writes no document state)
+//  - charge.dispute.created / charge.dispute.closed / charge.refunded -> paymentsDisputes.ts (SP10)
 // Unknown/unhandled types: record the event doc, 200 OK (Stripe requires 2xx
 // or it retries forever).
 //
@@ -42,6 +47,18 @@ import { completeOrderTicketsHandler } from "./ticketing.js";
 // or account-pinned (account.updated / payout.*) read it; the rest ignore it.
 export type WebhookHandler = (object: Record<string, unknown>, eventId: string, account?: string) => Promise<void>;
 export const webhookHandlers: Record<string, WebhookHandler> = {};
+// SP10 Task 5 review addition (Task 4's review, folded in as a ruling): a
+// per-handler scope allowlist, defense in depth alongside the event-level
+// boundary check inside stripeWebhook below. That check only catches an
+// event whose OWN `scope` and `account` disagree with each other (e.g. a
+// platform-signed event that still carries `account`); this one catches an
+// internally-CONSISTENT delivery routed to the wrong secret's handler, e.g. a
+// genuinely Connect-signed transfer.reversed (transfer.reversed is a platform
+// event; nothing should ever verify it against the Connect secret). Every
+// webhookHandlers[type] registration below also registers its scope here;
+// the dispatcher refuses (400, no claim written) a delivery whose verified
+// scope disagrees with its matched handler's declared scope.
+export const webhookHandlerScopes: Record<string, WebhookScope> = {};
 
 // payment_intent.succeeded is the ONE event type several unrelated SP5 sagas
 // all listen for (Task 6's accept deposit, Task 10's settlement, Task 11's
@@ -119,6 +136,7 @@ webhookHandlers["payment_intent.succeeded"] = async (object, eventId, account) =
   }
   await handler(object, eventId);
 };
+webhookHandlerScopes["payment_intent.succeeded"] = "platform";
 
 // RECORDED NO-OP, on purpose. Every decline SP5 cares about is handled
 // synchronously where it happens, chargeOffSession throws
@@ -137,6 +155,12 @@ webhookHandlers["payment_intent.payment_failed"] = async (object, eventId) => {
   console.info(
     `payment_intent.payment_failed: recorded, no action, intent=${String(object.id)}, purpose=${JSON.stringify(meta?.purpose ?? null)} (event ${eventId})`);
 };
+webhookHandlerScopes["payment_intent.payment_failed"] = "platform";
+
+// SP10 Task 5 (sp5 #2): chargebacks. Registered here for the same reason the
+// tickets purpose is: this file stays the one place the full registry lives.
+webhookHandlers["charge.dispute.created"] = disputeCreatedHandler;
+webhookHandlerScopes["charge.dispute.created"] = "platform";
 
 // Test-only handlers, registered ONLY inside the Functions emulator
 // (FUNCTIONS_EMULATOR is set by the emulator's own runtime, never true in a
@@ -147,7 +171,9 @@ if (process.env.FUNCTIONS_EMULATOR === "true") {
   webhookHandlers["gatekeep.test.throw"] = async () => {
     throw new Error("gatekeep.test.throw: intentional test failure");
   };
+  webhookHandlerScopes["gatekeep.test.throw"] = "platform";
   webhookHandlers["gatekeep.test.ok"] = async () => {};
+  webhookHandlerScopes["gatekeep.test.ok"] = "platform";
 }
 
 // A claim (stripeEvents/{id} with processed:false) that never resolves, the
@@ -217,6 +243,23 @@ export const stripeWebhook = onRequest(
     }
     if (event.scope === "connect" && !event.account) {
       console.warn(`stripeWebhook: connect-signed event ${event.id} (${event.type}) carries no account; refusing`);
+      res.status(400).send("scope mismatch");
+      return;
+    }
+    // SP10 Task 5 review addition (Task 4 review, folded in as a ruling): a
+    // per-handler scope allowlist. The two checks above only catch an event
+    // whose OWN scope and account disagree with each other; this catches an
+    // internally-consistent delivery routed to the wrong secret's handler
+    // (e.g. a genuinely Connect-signed transfer.reversed, or a genuinely
+    // platform-signed account.updated). An event whose type has no registered
+    // handler carries no declared scope and is unaffected, matching the
+    // existing "unknown type, record and 200" behavior. Refused BEFORE the
+    // claim machine below ever writes anything.
+    const matchedScope = Object.prototype.hasOwnProperty.call(webhookHandlerScopes, event.type)
+      ? webhookHandlerScopes[event.type] : undefined;
+    if (matchedScope && matchedScope !== event.scope) {
+      console.warn(
+        `stripeWebhook: ${event.scope}-signed event ${event.id} (${event.type}) does not match its handler's ${matchedScope} scope; refusing`);
       res.status(400).send("scope mismatch");
       return;
     }

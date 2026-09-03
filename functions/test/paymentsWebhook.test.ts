@@ -150,4 +150,30 @@ describe("stripeWebhook", () => {
   it("a signature that matches neither secret is a flat 400", async () => {
     expect((await post(fakeEvent("some.unknown.type", {}), { "stripe-signature": "forged" })).status).toBe(400);
   });
+
+  // SP10 Task 5 review addition: a per-handler scope allowlist, defense in
+  // depth alongside the boundary check above. That check only catches an
+  // event whose OWN `scope`/`account` disagree with each other; this one
+  // catches an internally-consistent Connect delivery of an event whose
+  // registered handler is platform-only (or vice versa).
+  it("a Connect-signed transfer.reversed (declared platform-scope) is refused and never claimed", async () => {
+    const evt = { ...fakeEvent("transfer.reversed", { id: "tr_scope_test" }), account: "acct_fake_scope_1" };
+    const res = await post(evt, { "stripe-signature": "fake:connect" });
+    expect(res.status).toBe(400);
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).exists).toBe(false);
+  });
+
+  it("a platform-signed charge.dispute.created (declared platform-scope) is dispatched", async () => {
+    const evt = fakeEvent("charge.dispute.created", {
+      id: "dp_scope_test", object: "dispute", amount: 500, charge: "ch_scope_test",
+      payment_intent: "pi_unknown_scope_test", reason: "fraudulent", status: "needs_response", currency: "usd",
+      balance_transactions: [{ id: "txn_scope_test", fee: 0, amount: -500 }],
+    });
+    const res = await post(evt, { "stripe-signature": "fake" });
+    expect(res.status).toBe(200);
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).data()?.processed).toBe(true);
+    // The unknown intent proves the handler actually RAN (escalated) rather
+    // than the type simply falling through the "no handler" branch.
+    expect((await adb.doc("adminAlerts/dispute:dp_scope_test").get()).data()?.kind).toBe("dispute_opened");
+  });
 });

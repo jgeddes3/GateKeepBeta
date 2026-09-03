@@ -397,11 +397,15 @@ describe("payout webhooks", () => {
 
   it("payout.failed with unusable metadata still records the money, and notifies nobody", async () => {
     const payoutId = `po_orphan_${Date.now()}`;
-    const res = await postWebhook(fakeEvent("payout.failed", {
+    // SP10 Task 5 review addition: payout.* is a Connect-endpoint event in real
+    // Stripe (always carries the top-level `account`), model that here too;
+    // the case exercises the handler's own unusable-metadata fallback, not the
+    // boundary scope check.
+    const res = await postWebhook({ ...fakeEvent("payout.failed", {
       id: payoutId, amount: 500, currency: "usd", status: "failed",
       // A doc-id-shaped path segment is never accepted from event metadata.
       metadata: { profileId: "not/a/valid/id" },
-    }));
+    }), account: "acct_orphan" });
     expect(res.status).toBe(200);
     const row = await adb.doc(`ledger/payout_failed:${payoutId}`).get();
     expect(row.exists).toBe(true);

@@ -681,7 +681,7 @@ export async function declareCuratorDelinquent(profileId: string, now: number): 
 // ladder and the birth-deposit dunning ladder, so the one that LIFTS it has to
 // ask about both kinds of debt or the gate becomes one-way.
 //
-// TWO QUESTIONS, both `limit(1)`, "does ANY debt remain?", never "list it":
+// THREE QUESTIONS, all `limit(1)`, "does ANY debt remain?", never "list it":
 //  1. SETTLEMENT debt: any payment doc of any booking of this profile still
 //     `past_due` (rungs 1-3 of the ladder count, not just delinquency itself,
 //     an unpaid debt is an unpaid debt).
@@ -689,6 +689,7 @@ export async function declareCuratorDelinquent(profileId: string, now: number): 
 //     retry schedule ran out, DEPOSIT_EXHAUSTED_ATTEMPTS, the same terminator
 //     every other site uses, asked of Firestore as a range filter rather than
 //     through isDepositScheduleExhausted (a query cannot call a predicate).
+//  3. DISPUTE debt: any `disputes` record naming this profile still `open`.
 //
 // THE RANGE FILTER IS LOAD-BEARING, not a convenience: Firestore indexes only
 // documents that HAVE the field, so `depositAttempts >= n` cannot match a doc
@@ -727,6 +728,15 @@ export async function clearDelinquencyIfSettled(curatorProfileId: string, now: n
     .where("deposit.depositAttempts", ">=", DEPOSIT_EXHAUSTED_ATTEMPTS)
     .limit(1).get();
   if (!openDeposit.empty) return;
+  // SP10 Task 5 (sp5 #2): an OPEN dispute on one of this curator's charges is
+  // a debt too. Without this, the next ordinary settlement would lift the gate
+  // the dispute handler just closed. Two equality filters on `disputes`, served
+  // by merged single-field indexes; no composite needed.
+  const openDispute = await db.collection("disputes")
+    .where("curatorProfileId", "==", curatorProfileId)
+    .where("status", "==", "open")
+    .limit(1).get();
+  if (!openDispute.empty) return;
   await db.doc(`profiles/${curatorProfileId}/private/stripe`).set(
     { delinquent: false, delinquentSince: null, updatedAt: now }, { merge: true });
 }
@@ -827,6 +837,17 @@ export function clawbackAlertId(bookingId: string, gigId: string): string {
 export function payoutFeeAlertId(profileId: string, requestId: string): string {
   return `payout-fee:${profileId}:${requestId}`;
 }
+// SP10 Task 5 (sp5 #2): a chargeback. Scoped to the DISPUTE, not the
+// occurrence: one dispute is one operator conversation with Stripe, whatever
+// it lands on, and `closed` updates the same row `created` opened.
+export function disputeAlertId(disputeId: string): string { return `dispute:${disputeId}`; }
+// SP10 Task 6: a lost dispute whose matching transfer could not be reversed
+// (the reversal threw, or no transfer exists to reverse). Its own row: the
+// dispute row records the chargeback, this one records the unfinished unwind.
+export function disputeReversalAlertId(disputeId: string): string { return `dispute-reversal:${disputeId}`; }
+// SP10 Task 6: a refund issued from the Stripe dashboard against a charge the
+// system still reads as paid. Scoped to the refund.
+export function externalRefundAlertId(refundId: string): string { return `external-refund:${refundId}`; }
 
 // The durable "a human has to look at this" queue (adminAlerts/{alertId}).
 // Every SP5 path that deliberately REFUSES to move money, because moving it

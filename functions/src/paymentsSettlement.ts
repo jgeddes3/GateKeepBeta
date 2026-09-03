@@ -58,7 +58,7 @@ import {
 import type { BookingRequestDoc, GigDoc, PaymentDoc } from "@gatekeep/shared";
 import { getStripe, StripeCardDeclinedError, StripePaymentPendingError } from "./stripeClient.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { paymentIntentSucceededHandlers, webhookHandlers } from "./paymentsWebhook.js";
+import { paymentIntentSucceededHandlers, webhookHandlers, webhookHandlerScopes } from "./paymentsWebhook.js";
 import {
   clearDelinquencyIfSettled, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
   isUnconfirmedPayDueDeposit, recomputePaymentSummary, recordAdminAlert, resolveDepositPending,
@@ -1879,3 +1879,7 @@ webhookHandlers["transfer.reversed"] = async (object, eventId) => {
       + " occurrence is untouched and needs a decision");
   }
 };
+// SP10 Task 5 review addition: transfer.reversed is a platform-endpoint event
+// (see stripeClient.ts's WebhookScope comment), the dispatcher refuses a
+// Connect-signed delivery of it.
+webhookHandlerScopes["transfer.reversed"] = "platform";

@@ -267,7 +267,12 @@ describe("account.updated webhook", () => {
     await adb.doc(`stripeFake/state/objects/${otherSp!.accountId}`).set(
       { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
 
-    const mismatchEvt = fakeEvent("account.updated", { id: accountId, metadata: { profileId: other.profileId } });
+    // SP10 Task 5 review addition: account.updated is a Connect-endpoint event
+    // in real Stripe (it always carries the top-level `account`), so a
+    // realistically-modeled test delivery carries one too, distinct from the
+    // in-handler mismatch this case actually exercises (metadata.profileId
+    // naming a DIFFERENT profile than the one this Stripe account belongs to).
+    const mismatchEvt = { ...fakeEvent("account.updated", { id: accountId, metadata: { profileId: other.profileId } }), account: accountId };
     const mismatchRes = await postWebhook(mismatchEvt);
     expect(mismatchRes.status).toBe(200);
 
@@ -302,7 +307,11 @@ describe("account.updated webhook", () => {
   });
 
   it("an event with no metadata.profileId is a 200 no-op (nothing to write)", async () => {
-    const evt = fakeEvent("account.updated", { id: `acct_stray_${Date.now()}` });
+    const accountId = `acct_stray_${Date.now()}`;
+    // SP10 Task 5 review addition: account.updated is Connect-scoped in real
+    // Stripe, model that here too; the no-op this case exercises is the
+    // handler's own missing-profileId bail, not the boundary scope check.
+    const evt = { ...fakeEvent("account.updated", { id: accountId }), account: accountId };
     const res = await postWebhook(evt);
     expect(res.status).toBe(200);
   });

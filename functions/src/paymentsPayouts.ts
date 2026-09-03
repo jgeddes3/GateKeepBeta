@@ -39,7 +39,7 @@ import { requireProfileAdmin } from "./profiles.js";
 import { getStripe, stripeSecretKey } from "./stripeClient.js";
 import { getStripeProfileDoc, payoutFeeAlertId, recordAdminAlert, writeLedger } from "./paymentsCore.js";
 import { notifyProfileMembers } from "./notifications.js";
-import { webhookHandlers } from "./paymentsWebhook.js";
+import { webhookHandlers, webhookHandlerScopes } from "./paymentsWebhook.js";
 
 // The same ceiling money.ts's assertCents enforces, mirrored here so a
 // malformed amount is refused as invalid-argument by the callable rather than
@@ -391,6 +391,10 @@ webhookHandlers["payout.paid"] = async (object, eventId, account) => {
   console.info(
     `payout.paid: payout ${String(payoutId)} (${amountCents}c) for profile ${String(profileId)} completed, already recorded at request time (event ${eventId})`);
 };
+// SP10 Task 5 review addition: payout.* is a Connect-endpoint event (see
+// stripeClient.ts's WebhookScope comment), the dispatcher refuses a
+// platform-signed delivery of it.
+webhookHandlerScopes["payout.paid"] = "connect";
 
 // THE ONE THAT WRITES. A failed payout means Stripe could not deliver the money
 // (a closed bank account, a debit card that rejected the push) and has returned
@@ -454,3 +458,4 @@ webhookHandlers["payout.failed"] = async (object, eventId, account) => {
     console.error(`payout.failed: notification failed for profile ${profileId} (event ${eventId})`, e);
   }
 };
+webhookHandlerScopes["payout.failed"] = "connect";

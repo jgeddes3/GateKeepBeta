@@ -27,8 +27,10 @@ import { defineSecret } from "firebase-functions/params";
 import Stripe from "stripe";
 
 // P5 pattern (see geocode.ts): Secret Manager-backed params. Every handler
-// that can reach getStripe() MUST list `secrets: [stripeSecretKey]` (and the
-// webhook additionally stripeWebhookSecret) in its options.
+// that can reach getStripe() MUST list `secrets: [stripeSecretKey]`, and the
+// webhook additionally lists BOTH `stripeWebhookSecret` and
+// `stripeConnectWebhookSecret` (SP10 Task 4, sp5 #3, split the single signing
+// secret into two, one per Stripe endpoint) in its options.
 export const stripeSecretKey = defineSecret("STRIPE_SECRET_KEY");
 export const stripeWebhookSecret = defineSecret("STRIPE_WEBHOOK_SECRET");
 // SP10 Task 4 (sp5 #3): a Stripe endpoint listens EITHER to events on your own
@@ -171,6 +173,14 @@ export interface StripeLike {
   // the server-side verification finalizeTicketOrder needs so it never
   // simply trusts a client's own claim that a charge succeeded.
   retrieveIntentStatus(intentId: string): Promise<{ status: string }>;
+  // SP10 Task 5: the whole PaymentIntent a dispute or refund event points at,
+  // metadata included. The dispute handlers resolve a charge to its intent and
+  // then to a payment doc or ticket order through `metadata.purpose`, exactly
+  // the vocabulary paymentsWebhook.ts dispatches on. null when Stripe has no
+  // such intent (a dispute on a charge this platform never created).
+  retrieveIntent(intentId: string): Promise<{
+    status: string; amountCents: number; chargeId: string | null; metadata: Record<string, string>;
+  } | null>;
   // SP6 Task 5: cancels a PaymentIntent, used by the ticket-order expiry sweep
   // to release a card hold when a pending order's TTL elapses before payment.
   // Throws if the intent is no longer cancelable: it already succeeded (real
@@ -526,6 +536,16 @@ export class FakeStripe implements StripeLike {
       throw new Error(`FakeStripe: unknown payment intent ${intentId}`);
     }
     return { status: snap.data()!.status as string };
+  }
+  async retrieveIntent(intentId: string) {
+    const snap = await this.objRef(intentId).get();
+    if (!snap.exists || snap.data()?.kind !== "payment_intent") return null;
+    const d = snap.data()!;
+    return {
+      status: d.status as string, amountCents: d.amountCents as number,
+      chargeId: typeof d.chargeId === "string" ? d.chargeId : null,
+      metadata: (d.meta as Record<string, string> | undefined) ?? {},
+    };
   }
   async cancelIntent(intentId: string): Promise<{ status: string }> {
     const ref = this.objRef(intentId);
@@ -887,6 +907,19 @@ export class RealStripe implements StripeLike {
   async retrieveIntentStatus(intentId: string): Promise<{ status: string }> {
     const pi = await this.s.paymentIntents.retrieve(intentId);
     return { status: pi.status };
+  }
+  async retrieveIntent(intentId: string) {
+    let pi: Stripe.PaymentIntent;
+    try {
+      pi = await this.s.paymentIntents.retrieve(intentId);
+    } catch (e) {
+      if ((e as { code?: unknown } | null)?.code === "resource_missing") return null;
+      throw e;
+    }
+    const chargeId = typeof pi.latest_charge === "string" ? pi.latest_charge : (pi.latest_charge?.id ?? null);
+    const metadata: Record<string, string> = {};
+    for (const [k, v] of Object.entries(pi.metadata ?? {})) if (typeof v === "string") metadata[k] = v;
+    return { status: pi.status, amountCents: pi.amount, chargeId, metadata };
   }
   async cancelIntent(intentId: string): Promise<{ status: string }> {
     const pi = await this.s.paymentIntents.cancel(intentId);

@@ -28,7 +28,7 @@ import {
   finalizeDepositPayDue, finalizeSettlementSuccess, settlementMath, PAYDUE_CONFIRM_WINDOW_MS,
 } from "./paymentsSettlement.js";
 import { resolveBookingSideStrict } from "./bookingLifecycle.js";
-import { webhookHandlers } from "./paymentsWebhook.js";
+import { webhookHandlers, webhookHandlerScopes } from "./paymentsWebhook.js";
 // Task 13's balance surface. One-way edge: paymentsPayouts.ts owns the payout
 // callable and the payout webhooks and knows nothing about this file.
 import { readPayoutBalances } from "./paymentsPayouts.js";
@@ -343,6 +343,10 @@ webhookHandlers["account.updated"] = async (object, eventId, account) => {
   }
   await syncStripeAccountFlags(profileId, Date.now());
 };
+// SP10 Task 5 review addition: account.updated is a Connect-endpoint event
+// (see stripeClient.ts's WebhookScope comment), the dispatcher refuses a
+// platform-signed delivery of it.
+webhookHandlerScopes["account.updated"] = "connect";
 
 // ---------- SP5 Task 9: operator release valve ----------
 
