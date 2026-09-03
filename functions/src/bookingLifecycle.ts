@@ -5,10 +5,12 @@ import {
   MAX_RELIABILITY_MARKS, NO_SHOW_REPORT_WINDOW_DAYS, MAX_OCCURRENCE_CANCELLATIONS, CANCEL_GRACE_MS,
   type BookingRequestDoc, type BookingSide, type GigDoc, type GigSeriesDoc,
   type ReliabilityDoc, type ReliabilityMark, type OccurrenceCancellation, type PaymentDoc,
+  type CuratorBookingDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireAdmin, writeAudit } from "./review.js";
 import { notifyProfileMembers } from "./notifications.js";
+import { EMPTY_BOOKING_RATES } from "./bookingVisibility.js";
 // H1 (branch audit): cancelBooking / cancelOccurrence / reportNoShow all
 // transitively reach getStripe(), via resolveDepositPending (the deposit
 // refund/forfeit executor) and, for reportNoShow, additionally
@@ -111,21 +113,35 @@ function appendMarkCapped(marks: ReliabilityMark[], mark: ReliabilityMark): Reli
 // marks are excluded from noShowCount (audit-preserving: the mark itself is
 // never deleted, only excluded from the count a curator shops by),
 // mirrors rebuildBookingProjections' own `marks.filter((m) =>
-// !m.removedByAdmin)` idiom exactly.
+// !m.removedByAdmin)` idiom exactly. When the projection does not exist yet
+// (no booking info has ever been saved for this profile), this seeds the
+// full doc shape (null rates, null preferences, live reliability) instead of
+// creating a summary-only doc (SP10 Task 18).
 export async function recomputeReliability(musicianProfileId: string): Promise<void> {
   const db = getFirestore();
-  const reliabilitySnap = await db.doc(`profiles/${musicianProfileId}/private/reliability`).get();
-  const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
-  const marks = reliability?.marks ?? [];
-  const noShowCount = marks.filter((m) => !m.removedByAdmin).length;
-  const completedCount = reliability?.completedCount ?? 0;
-  // merge:true, the projection may not exist yet (no booking info has ever
-  // been saved for this profile); this creates a summary-only doc in that
-  // case rather than requiring rebuildBookingProjections to have run first.
-  await db.doc(`profiles/${musicianProfileId}/private/curatorBooking`).set(
-    { reliability: { noShowCount, completedCount }, updatedAt: Date.now() },
-    { merge: true },
-  );
+  const reliabilityRef = db.doc(`profiles/${musicianProfileId}/private/reliability`);
+  const curatorBookingRef = db.doc(`profiles/${musicianProfileId}/private/curatorBooking`);
+  await db.runTransaction(async (tx) => {
+    const [reliabilitySnap, projectionSnap] = await Promise.all([tx.get(reliabilityRef), tx.get(curatorBookingRef)]);
+    const reliability = reliabilitySnap.data() as ReliabilityDoc | undefined;
+    const marks = reliability?.marks ?? [];
+    const summary = {
+      noShowCount: marks.filter((m) => !m.removedByAdmin).length,
+      completedCount: reliability?.completedCount ?? 0,
+    };
+    if (projectionSnap.exists) {
+      // Existing projection: touch ONLY reliability + updatedAt, never the
+      // rates/preferences rebuildBookingProjections owns.
+      tx.set(curatorBookingRef, { reliability: summary, updatedAt: Date.now() }, { merge: true });
+      return;
+    }
+    // SP10 Task 18 (sp4 #1): no booking info was ever saved for this profile.
+    // Seed the full doc shape so browse grids never meet a summary-only doc.
+    const seeded: CuratorBookingDoc = {
+      rates: EMPTY_BOOKING_RATES, preferences: null, reliability: summary, updatedAt: Date.now(),
+    };
+    tx.set(curatorBookingRef, seeded);
+  });
 }
 
 // Every FUTURE, currently-filled occurrence of a whole-run series that is

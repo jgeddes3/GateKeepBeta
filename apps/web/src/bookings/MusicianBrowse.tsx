@@ -70,7 +70,7 @@ function MusicianGridItem({ curatorProfileId, musician }: { curatorProfileId: st
   // fetched above (the same curatorBooking doc the old card used for its
   // rates summary), never a price. Rates are private by SP4 rule and the
   // locked card spec is explicit: NEVER a price on this card.
-  const availabilityLabel = booking && booking !== "loading" && booking.preferences.availabilityPattern
+  const availabilityLabel = booking && booking !== "loading" && booking.preferences?.availabilityPattern
     ? formatChipLabel(booking.preferences.availabilityPattern)
     : null;
   const reliabilityLine = booking && booking !== "loading"

@@ -3,7 +3,8 @@ import { signUpTestUser, makeAdminUser, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { rebuildBookingProjections } from "../src/bookingVisibility.js";
-import type { ProfileDraftInput, BookingVisibility, RateVisibility } from "@gatekeep/shared";
+import { recomputeReliability } from "../src/bookingLifecycle.js";
+import type { ProfileDraftInput, BookingVisibility, RateVisibility, CuratorBookingDoc } from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -106,7 +107,14 @@ describe("updateBookingInfo -> rebuildBookingProjections", () => {
 });
 
 describe("rebuildBookingProjections (direct)", () => {
-  it("clears the curatorBooking projection and nulls publicBooking when the source booking doc is missing", async () => {
+  // SP10 Task 18: a missing source doc now seeds a full-shape (null
+  // rates/preferences) projection rather than deleting it, so a reliability
+  // summary already written by recomputeReliability for this profile
+  // survives a rebuild that finds no private/booking doc. See the dedicated
+  // "rebuildBookingProjections with no source doc (SP10 Task 18)" describe
+  // below for the reliability-preserving case; this one only re-asserts the
+  // seeded shape when there was never a reliability doc either.
+  it("seeds a full-shape projection (null rates, null preferences) and nulls publicBooking when the source booking doc is missing", async () => {
     const { user, profileId } = await makeMusicianProfile("rbp4");
     await callFn("updateBookingInfo", {
       profileId, rates: fullRates(), preferences: fullPreferences(),
@@ -118,7 +126,9 @@ describe("rebuildBookingProjections (direct)", () => {
     await adb.doc(`profiles/${profileId}/private/booking`).delete();
     await rebuildBookingProjections(profileId);
 
-    expect((await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).exists).toBe(false);
+    const projection = (await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).data() as CuratorBookingDoc;
+    expect(projection.rates).toEqual({ perHour: null, perSong: null, perSet: null });
+    expect(projection.preferences).toBeNull();
     expect((await adb.doc(`profiles/${profileId}`).get()).data()?.publicBooking).toBeNull();
   });
 
@@ -224,5 +234,27 @@ describe("backfillBookingVisibility", () => {
     const stranger = await signUpTestUser(`bfv-na-${Date.now()}@test.com`);
     await expect(callFn("backfillBookingVisibility", {}, stranger.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+});
+
+describe("rebuildBookingProjections with no source doc (SP10 Task 18)", () => {
+  it("seeds a full-shape projection and keeps the reliability summary instead of deleting the doc", async () => {
+    const { profileId } = await makeMusicianProfile("rbpnosrc");
+    await adb.doc(`profiles/${profileId}/private/reliability`).set({
+      marks: [{ bookingId: "b1", gigId: "g1", kind: "late_cancel", at: Date.now(), reportedByProfileId: null, removedByAdmin: false }],
+      completedCount: 2, updatedAt: Date.now(),
+    });
+    await recomputeReliability(profileId); // the projection a sweep completion or a mark would have created
+    const seeded = (await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).data() as CuratorBookingDoc;
+    expect(seeded.rates).toEqual({ perHour: null, perSong: null, perSet: null });
+    expect(seeded.preferences).toBeNull();
+
+    await rebuildBookingProjections(profileId); // still no private/booking doc
+
+    const projection = (await adb.doc(`profiles/${profileId}/private/curatorBooking`).get()).data() as CuratorBookingDoc;
+    expect(projection.rates).toEqual({ perHour: null, perSong: null, perSet: null });
+    expect(projection.preferences).toBeNull();
+    expect(projection.reliability).toEqual({ noShowCount: 1, completedCount: 2 });
+    expect((await adb.doc(`profiles/${profileId}`).get()).data()?.publicBooking).toBeNull();
   });
 });

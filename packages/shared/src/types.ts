@@ -452,7 +452,10 @@ export interface BookingVisibility {
 export interface ReliabilitySummary { noShowCount: number; completedCount: number; }
 export interface CuratorBookingDoc {                     // profiles/{id}/private/curatorBooking
   rates: BookingRates;                                   // structures marked "private" are null here even if set in the source
-  preferences: BookingPreferences; reliability: ReliabilitySummary; updatedAt: number;
+  // null when the projection was seeded by a reliability event (a completion
+  // or a mark) before the musician ever saved booking info (SP10 Task 18).
+  preferences: BookingPreferences | null;
+  reliability: ReliabilitySummary; updatedAt: number;
 }
 export interface ReliabilityMark {
   bookingId: string; gigId: string; kind: "late_cancel" | "reported_no_show";

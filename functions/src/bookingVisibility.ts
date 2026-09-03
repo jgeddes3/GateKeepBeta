@@ -16,6 +16,11 @@ export const DEFAULT_BOOKING_VISIBILITY: BookingVisibility = {
   perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
 };
 
+// SP10 Task 18: the rates block of a projection that exists only because a
+// reliability event (sweep completion, late-cancel mark) needed somewhere to
+// live. Every client renders these as "No public rates." (sp4 #1).
+export const EMPTY_BOOKING_RATES: BookingRates = { perHour: null, perSong: null, perSet: null };
+
 // Rebuilds both booking-visibility projections for a profile from its
 // current source docs: profiles/{id}/private/curatorBooking (the
 // curator-shopping surface, rates with any "private"-marked structure
@@ -57,9 +62,21 @@ export async function rebuildBookingProjections(profileId: string, source?: Book
   } else {
     const [bookingSnap, relSnap] = await Promise.all([bookingRef.get(), reliabilityRef.get()]);
     if (!bookingSnap.exists) {
-      // No source doc (never set, or deleted out from under a stale caller),
-      // both projections must reflect "nothing to show", not stale leftovers.
-      batch.delete(curatorBookingRef);
+      // No source doc (never set, or deleted out from under a stale caller).
+      // SP10 Task 18 (sp4 #20): merge-set a seeded projection rather than
+      // deleting the doc, so a reliability summary recomputeReliability has
+      // already written for a musician with no booking info survives.
+      const rel = relSnap.data() as ReliabilityDoc | undefined;
+      const relMarks = rel?.marks ?? [];
+      const seeded: CuratorBookingDoc = {
+        rates: EMPTY_BOOKING_RATES, preferences: null,
+        reliability: {
+          noShowCount: relMarks.filter((m) => !m.removedByAdmin).length,
+          completedCount: rel?.completedCount ?? 0,
+        },
+        updatedAt: Date.now(),
+      };
+      batch.set(curatorBookingRef, seeded, { merge: true });
       batch.set(profileRef, { publicBooking: null }, { merge: true });
       await batch.commit();
       return;

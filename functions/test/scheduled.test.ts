@@ -4,6 +4,7 @@ import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
   MAX_OPEN_GIGS_PER_PROFILE,
   type GigSeriesDoc, type GigDoc, type InviteDoc, type TrackDoc, type SeriesCadence, type BookingRequestDoc,
+  type CuratorBookingDoc,
 } from "@gatekeep/shared";
 import { runDailySweep } from "../src/scheduled.js";
 import { wait } from "./helpers";
@@ -696,6 +697,29 @@ describe("runDailySweep, SP4 Task 8: booking completion sweep (step 7)", () => {
     expect(reliability?.completedCount).toBe(1);
     const projection = (await adb.doc(`profiles/${musicianProfileId}/private/curatorBooking`).get()).data();
     expect(projection?.reliability?.completedCount).toBe(1);
+  });
+
+  it("SP10 Task 18: completing a booking for a musician with NO private/booking doc seeds a full-shape projection (null rates, null preferences, live reliability)", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const { bookingId } = await seedBooking({
+      gigId: "pending", seriesId: null, curatorProfileId, musicianProfileId, status: "confirmed",
+    });
+    const gigId = await seedOccurrence("not-a-real-series", curatorProfileId, {
+      status: "filled", startsAt: now - 2 * 3600_000, durationMinutes: 60,
+      bookingId, bookedMusicianProfileId: musicianProfileId,
+    });
+    await adb.doc(`bookings/${bookingId}`).update({ gigId });
+    expect((await adb.doc(`profiles/${musicianProfileId}/private/booking`).get()).exists).toBe(false);
+
+    await runDailySweep(now);
+
+    const projection = (await adb.doc(`profiles/${musicianProfileId}/private/curatorBooking`).get()).data() as CuratorBookingDoc;
+    expect(projection.rates).toEqual({ perHour: null, perSong: null, perSet: null });
+    expect(projection.preferences).toBeNull();
+    expect(projection.reliability).toEqual({ noShowCount: 0, completedCount: 1 });
+    expect(typeof projection.updatedAt).toBe("number");
   });
 
   // F5 (security audit wave, ruling: allow but exclude from trust metric):
