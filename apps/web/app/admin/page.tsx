@@ -1683,10 +1683,10 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   ticket_settlement_blocked: "Ticket settlement blocked, no payout account",
   ticket_settlement_failed: "Ticket settlement transfer failed",
   ticket_refund_convergence_failed: "Ticket refund could not converge with a transfer",
-  dispute_opened: "Dispute opened",
-  dispute_reversal_failed: "Dispute reversal failed",
-  external_refund: "External refund",
-  ticket_order_stuck: "Ticket order stuck",
+  dispute_opened: "Chargeback opened",
+  dispute_reversal_failed: "Lost dispute, transfer not reversed",
+  external_refund: "Refund issued from the Stripe dashboard",
+  ticket_order_stuck: "Ticket order stuck with a pending charge",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on
