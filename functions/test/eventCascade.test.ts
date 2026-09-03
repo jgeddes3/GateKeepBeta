@@ -257,3 +257,52 @@ describe("fix round 1: the cascade recovers if its listing queries throw", () =>
     expect(alert!.detail).toContain(profileId);
   });
 });
+
+describe("takedownEvent (admin)", () => {
+  it("cancels and refunds one event regardless of curator status, audits it, and notifies the curator", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("tde1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1500, capacity: 20, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("tde1buyer");
+    const orderId = await payOrder(eventId, tierId, 2, buyer.user);
+    // The curator is already unpublished: cancelEvent would refuse them
+    // (requireApprovedCuratorProfile); the admin path must not care.
+    await adb.doc(`profiles/${profileId}`).update({ status: "rejected" });
+
+    const reviewer = await makeAdminUser("tde1r");
+    const result = await callFn<Record<string, unknown>, { ok: boolean; outcome: string; ordersRefunded: number }>(
+      "takedownEvent", { eventId, reason: "Fraudulent listing." }, reviewer.user);
+    expect(result.outcome).toBe("cancelled");
+    expect(result.ordersRefunded).toBe(1);
+
+    expect((await adb.doc(`events/${eventId}`).get()).data()?.status).toBe("cancelled");
+    const order = (await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.status).toBe("cancelled_refunded");
+
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", eventId).where("action", "==", "event_taken_down").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().actorUid).toBe(reviewer.uid);
+    expect(logs.docs[0].data().detail).toBe("[was published] Fraudulent listing. (refunded 1 orders, expired 0 pending)");
+
+    const note = await pollNotifications(owner.uid, (d) => d.kind === "gig_moderation" && /taken down/.test(d.title));
+    expect(note).toBeDefined();
+    expect(note!.data().body).toContain("Fraudulent listing.");
+  });
+
+  it("non-admin is denied; a completed event, a missing reason, and a bad id are refused", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("tde2");
+    await expect(callFn("takedownEvent", { eventId, reason: "x" }, owner.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    const reviewer = await makeAdminUser("tde2r");
+    await expect(callFn("takedownEvent", { eventId, reason: "   " }, reviewer.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await expect(callFn("takedownEvent", { eventId: "../x", reason: "r" }, reviewer.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument" });
+    await adb.doc(`events/${eventId}`).update({ status: "completed", completedAt: Date.now() });
+    await expect(callFn("takedownEvent", { eventId, reason: "Too late." }, reviewer.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect(profileId).toBeTruthy();
+  });
+});

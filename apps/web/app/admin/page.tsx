@@ -24,7 +24,7 @@ import {
   GIG_STATUSES,
   type ProfileDoc, type ProfileStatus, type AuditLogDoc, type UserDoc, type TrackDoc, type GigDoc, type GigStatus,
   type CuratorSubtype, type AdminNoteDoc, type ReliabilityMark, type ReliabilityDoc, type BookingRequestDoc,
-  type AdminAlertDoc, type AdminAlertKind, type EventDoc, type ShowPostDoc,
+  type AdminAlertDoc, type AdminAlertKind, type EventDoc, type EventStatus, type TicketOrderDoc, type ShowPostDoc,
 } from "@gatekeep/shared";
 
 // Task 12: full-polish restyle of the admin dashboard, per antislop-ui's App
@@ -1119,6 +1119,175 @@ function LiveTrackRow({ profileId, track, onRemoved }: {
 // uses, and handles are stored lowercase there too. SP4 Task 11 additionally
 // mounts a reliability panel (musician profiles only) and a bookings list
 // (either type) inside this same lookup result area.
+const EVENT_STATUS_BADGE: Record<EventStatus, { variant: BadgeVariant; label: string }> = {
+  draft: { variant: "secondary", label: "Draft" },
+  published: { variant: "success", label: "Published" },
+  completed: { variant: "outline", label: "Completed" },
+  cancelled: { variant: "destructive", label: "Cancelled" },
+};
+
+type EventCounts = { tiers: number; paidOrders: number; validTickets: number; refundedTickets: number };
+
+// Read-only figures for the takedown decision. Every query is admin-provable
+// under firestore.rules (tiers and attendees via isAdmin(), orders via the
+// signedIn() && isAdmin() disjunct) and served by single-field indexes.
+async function loadEventCounts(eventId: string): Promise<EventCounts> {
+  const { db } = getFirebase();
+  const [tiers, orders, valid] = await Promise.all([
+    getDocs(collection(db, `events/${eventId}/tiers`)),
+    getDocs(query(collection(db, "orders"), where("eventId", "==", eventId))),
+    getDocs(query(collection(db, `events/${eventId}/attendees`), where("status", "==", "valid"))),
+  ]);
+  let paidOrders = 0;
+  let refundedTickets = 0;
+  for (const o of orders.docs) {
+    const order = o.data() as TicketOrderDoc;
+    if (order.status === "paid") paidOrders++;
+    refundedTickets += order.refundedTicketIds.length;
+  }
+  return { tiers: tiers.size, paidOrders, validTickets: valid.size, refundedTickets };
+}
+
+// SP10 Task 11: the Events block of the Takedowns panel. Lookup by event id
+// or @handle (up to 50 of that curator's events, newest first, sorted
+// client-side: the events index that pins curatorProfileId also pins status,
+// and this list deliberately spans statuses). Cancel-and-refund goes through
+// the takedownEvent callable via ReasonCard, the same control the profile
+// unpublish above uses.
+function EventsTakedown() {
+  const [term, setTerm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [events, setEvents] = useState<Row<EventDoc>[]>([]);
+  const [counts, setCounts] = useState<Record<string, EventCounts>>({});
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const [takedownBusy, setTakedownBusy] = useState(false);
+  const [takedownError, setTakedownError] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  const lookup = async () => {
+    const raw = term.trim();
+    if (!raw) return;
+    const mySeq = ++seq.current;
+    setBusy(true); setError(null); setEvents([]); setCounts({}); setOpenId(null);
+    try {
+      const { db } = getFirebase();
+      let rows: Row<EventDoc>[] = [];
+      if (raw.startsWith("@")) {
+        const handleDoc = await getDoc(doc(db, "handles", raw.slice(1).toLowerCase()));
+        if (mySeq !== seq.current) return;
+        if (!handleDoc.exists()) { setError("No profile with that handle."); return; }
+        const pid = (handleDoc.data() as { profileId: string }).profileId;
+        const snap = await getDocs(query(collection(db, "events"), where("curatorProfileId", "==", pid), limit(50)));
+        rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as EventDoc) }))
+          .sort((a, b) => b.startsAt - a.startsAt);
+      } else {
+        const eventDoc = await getDoc(doc(db, "events", raw));
+        if (mySeq !== seq.current) return;
+        if (!eventDoc.exists()) { setError("No event with that id."); return; }
+        rows = [{ id: eventDoc.id, ...(eventDoc.data() as EventDoc) }];
+      }
+      const entries = await Promise.all(rows.map(async (ev) => [ev.id, await loadEventCounts(ev.id)] as const));
+      if (mySeq !== seq.current) return;
+      setEvents(rows);
+      setCounts(Object.fromEntries(entries));
+      if (rows.length === 0) setError("That curator has no events.");
+    } catch (e) {
+      if (mySeq === seq.current) setError(e instanceof Error ? e.message : "Could not look up events, try again.");
+    } finally {
+      if (mySeq === seq.current) setBusy(false);
+    }
+  };
+
+  const takedown = async (eventId: string) => {
+    const trimmed = reason.trim();
+    if (trimmed.length < 1 || trimmed.length > 500) { setTakedownError("Reason must be 1-500 characters."); return; }
+    setTakedownBusy(true); setTakedownError(null);
+    try {
+      await httpsCallable(getFirebase().functions, "takedownEvent")({ eventId, reason: trimmed });
+      const fresh = await loadEventCounts(eventId);
+      setEvents((rows) => rows.map((r) => (r.id === eventId ? { ...r, status: "cancelled" } : r)));
+      setCounts((c) => ({ ...c, [eventId]: fresh }));
+      setOpenId(null); setReason("");
+    } catch (e) {
+      setTakedownError(e instanceof Error ? e.message : "Could not take down the event, try again.");
+    } finally {
+      setTakedownBusy(false);
+    }
+  };
+
+  return (
+    <div className="grid gap-3">
+      <h3 className="font-syne text-base font-semibold text-gk-text">Events</h3>
+      <p className="font-sora text-sm text-gk-muted">Cancel and refund one event, whatever the curator&apos;s status.</p>
+      <div className="flex flex-wrap gap-2">
+        <Input
+          placeholder="Event id or @handle"
+          value={term}
+          className="w-72"
+          onChange={(e) => setTerm(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !busy) void lookup(); }}
+        />
+        <Button variant="secondary" disabled={busy} onClick={lookup}>{busy ? "Looking up…" : "Look up"}</Button>
+      </div>
+      {error && (
+        <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          {error}
+        </p>
+      )}
+      {events.map((ev) => {
+        const c = counts[ev.id];
+        const canTakeDown = ev.status === "published" || ev.status === "draft";
+        return (
+          <Card key={ev.id}>
+            <CardContent className="grid gap-3 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-syne text-base font-semibold text-gk-text">{ev.title}</p>
+                <Badge variant={EVENT_STATUS_BADGE[ev.status].variant}>{EVENT_STATUS_BADGE[ev.status].label}</Badge>
+                <span className="font-sora text-sm text-gk-muted">{formatGigDateTime(ev.startsAt)}</span>
+              </div>
+              <p className="font-mono text-xs text-gk-muted">{ev.id}</p>
+              {c && (
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-sora text-sm sm:grid-cols-4">
+                  <div><dt className="text-gk-muted">Tiers</dt><dd className="text-gk-text">{c.tiers}</dd></div>
+                  <div><dt className="text-gk-muted">Paid orders</dt><dd className="text-gk-text">{c.paidOrders}</dd></div>
+                  <div><dt className="text-gk-muted">Valid tickets</dt><dd className="text-gk-text">{c.validTickets}</dd></div>
+                  <div><dt className="text-gk-muted">Refunded tickets</dt><dd className="text-gk-text">{c.refundedTickets}</dd></div>
+                </dl>
+              )}
+              {canTakeDown ? (
+                <div>
+                  <Button size="sm" variant="secondary" className="text-gk-destructive" disabled={takedownBusy}
+                    onClick={() => { setOpenId((id) => (id === ev.id ? null : ev.id)); setTakedownError(null); setReason(""); }}>
+                    Cancel and refund
+                  </Button>
+                </div>
+              ) : (
+                <p className="font-sora text-sm text-gk-muted">
+                  {ev.status === "completed" ? "Completed and settled. Refunds for it are a Stripe dashboard action." : "Already cancelled."}
+                </p>
+              )}
+              {openId === ev.id && (
+                <ReasonCard
+                  title="Cancel and refund this event"
+                  warning="Every paid order is refunded in full, including the service fee, and ticket holders are told why."
+                  placeholder="Takedown reason (shown to the curator and to ticket holders)"
+                  reason={reason} onReasonChange={setReason}
+                  busy={takedownBusy} error={takedownError}
+                  onSubmit={() => void takedown(ev.id)} onCancel={() => { setOpenId(null); setTakedownError(null); }}
+                  submitLabel="Confirm cancel and refund" busyLabel="Cancelling…"
+                />
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
 function TakedownsPanel() {
   const [handle, setHandle] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
@@ -1204,7 +1373,7 @@ function TakedownsPanel() {
   return (
     <section className="grid gap-3">
       <h2 className="font-syne text-lg font-semibold text-gk-text">Takedowns</h2>
-      <p className="font-sora text-sm text-gk-muted">Retroactively remove a live profile or track (spec §6).</p>
+      <p className="font-sora text-sm text-gk-muted">Retroactively remove a live profile, track, or event (spec section 6).</p>
       <div className="flex flex-wrap gap-2">
         <Input
           placeholder="@handle"
@@ -1274,6 +1443,7 @@ function TakedownsPanel() {
         </div>
       )}
       {profileId && tracks.length === 0 && <p className="font-sora text-sm text-gk-muted">No approved tracks.</p>}
+      <EventsTakedown />
     </section>
   );
 }
