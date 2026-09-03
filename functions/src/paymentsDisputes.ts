@@ -20,7 +20,7 @@
  */
 
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { isValidDocId } from "@gatekeep/shared";
+import { isValidDocId, SETTLEMENT_CLAIM_STALE_MS } from "@gatekeep/shared";
 import type {
   BookingRequestDoc, DisputeRecord, EventDoc, PaymentDoc, TicketOrderDoc,
 } from "@gatekeep/shared";
@@ -227,6 +227,28 @@ async function reverseForLostDispute(
       const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
       const event = eventSnap.data() as EventDoc | undefined;
       if (event?.settlementStartedAt == null) {
+        // SP10 Task 9 fix round 1 (Critical 1): a FRESH `settlementClaimedAt`
+        // with no `settlementStartedAt` is the window between the sweep's claim
+        // write and its post-transfer stamp. The transfer may be in flight, or
+        // may already have landed with only the stamp outstanding, so this is
+        // NOT a pre-settlement order. Reducing the basis here would change the
+        // faceCents the next sweep pass replays under the STATIC
+        // `ticket_settlement:{eventId}` key (real Stripe answers a changed
+        // amount under a used key with `idempotency_error`), and would shrink
+        // revenue that may already have reached the curator. Same predicate and
+        // same 24h window `cancelEventCore` refuses a cancel on: touch nothing
+        // and hand back a reason, so `dispute_reversal_failed` fires and an
+        // operator finishes the unwind in Stripe. A STALE claim belongs to a
+        // settlement that kept failing and falls through to the pre-settlement
+        // reduction below.
+        const claimedAt = event?.settlementClaimedAt;
+        if (claimedAt != null && now - claimedAt < SETTLEMENT_CLAIM_STALE_MS) {
+          return {
+            kind: "no-op",
+            reason: "settlement in progress: the event's ticket settlement is claimed but not yet recorded;"
+              + " reverse manually once it lands",
+          };
+        }
         // Not settled yet: shrink the basis settleOneEvent will sum (and keep
         // refundedCents in step, so refundOrderForCancelledEvent's own
         // "remaining" math stays consistent with this reduction). No transfer

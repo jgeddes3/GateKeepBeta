@@ -5,7 +5,7 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
-  computeDepositCents, computeExpectedTotalCents, computeFeeShareCents, DEFAULT_FEE_POLICY,
+  computeDepositCents, computeExpectedTotalCents, computeFeeShareCents, DEFAULT_FEE_POLICY, SETTLEMENT_CLAIM_STALE_MS,
   type AdminAlertDoc, type DisputeRecord, type LedgerEntry, type NotificationDoc, type PaymentDoc,
   type ProfileDraftInput, type StripeProfileDoc, type TicketOrderDoc, type EventDoc,
 } from "@gatekeep/shared";
@@ -466,6 +466,49 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     const alert = await adminAlert(disputeReversalAlertId(disputeId));
     expect(alert?.kind).toBe("dispute_reversal_failed");
     expect(alert?.detail).toContain("no transfer");
+  });
+
+  // SP10 Task 9 fix round 1 (Critical 1): between claimSettlementStart's write
+  // and settleOneEvent's post-transfer stamp, the event carries a FRESH
+  // settlementClaimedAt and NO settlementStartedAt. The transfer may be in
+  // flight, or may already have landed with only the stamp write outstanding,
+  // so reducing the face basis here would drift the amount the static
+  // `ticket_settlement:{eventId}` key is replayed with (real Stripe answers a
+  // changed amount under a used key with idempotency_error). The reversal must
+  // fail loudly instead, so an operator finishes it in Stripe.
+  it("lost ticket dispute during a fresh settlement claim: the basis is not reduced and the reversal is flagged", async () => {
+    const { eventId, tierId } = await makePublishedEvent("dl8", 1000);
+    const a = await payOrder(eventId, tierId, 2, "dl8a");
+    const disputeId = await openDispute({ intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338 });
+    await adb.doc(`events/${eventId}`).update({ settlementClaimedAt: Date.now() });
+
+    expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
+
+    const order = (await adb.doc(`orders/${a.orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.refundedFaceCents).toBe(0);
+    expect(order.refundedCents).toBe(0);
+    expect(order.disputeStatus).toBe("lost");
+    expect((await disputeDoc(disputeId))?.status).toBe("lost");
+    expect((await ledgerRow(`dispute_lost:${disputeId}`))?.kind).toBe("dispute_lost");
+    const alert = await adminAlert(disputeReversalAlertId(disputeId));
+    expect(alert?.kind).toBe("dispute_reversal_failed");
+    expect(alert?.detail).toContain("settlement in progress");
+  });
+
+  it("lost ticket dispute under a STALE settlement claim: the pre-settlement basis reduction still applies", async () => {
+    const { eventId, tierId } = await makePublishedEvent("dl9", 1000);
+    const a = await payOrder(eventId, tierId, 2, "dl9a");
+    const disputeId = await openDispute({ intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338 });
+    // A claim this old belongs to a settlement that kept failing: the sweep
+    // will re-claim it, and cancelEventCore already lets a cancel through.
+    await adb.doc(`events/${eventId}`).update({ settlementClaimedAt: Date.now() - SETTLEMENT_CLAIM_STALE_MS - 1000 });
+
+    expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
+
+    const order = (await adb.doc(`orders/${a.orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.refundedFaceCents).toBe(2000);
+    expect(order.refundedCents).toBe(2000);
+    expect(await adminAlert(disputeReversalAlertId(disputeId))).toBeUndefined();
   });
 
   it("won: ledger dispute_won, record closed, curator gate lifted, order stamped won", async () => {

@@ -398,6 +398,13 @@ async function setTransferKnob(accountId: string, on: boolean): Promise<void> {
     { failTransferAccountIds: on ? FieldValue.arrayUnion(accountId) : FieldValue.arrayRemove(accountId) }, { merge: true });
 }
 
+// SP10 Task 9 fix round 1: the sibling knob whose throw carries NO `code`, the
+// shape of a dropped connection rather than a Stripe refusal.
+async function setAmbiguousTransferKnob(accountId: string, on: boolean): Promise<void> {
+  await adb.doc("stripeFake/config").set(
+    { ambiguousTransferAccountIds: on ? FieldValue.arrayUnion(accountId) : FieldValue.arrayRemove(accountId) }, { merge: true });
+}
+
 describe("SP10 Task 9 (sp6 #14): settlement claim and wedge recovery", () => {
   it("a refused transfer leaves settlementClaimedAt set, settlementStartedAt unset, alerts, and the next pass settles once Stripe accepts", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("wdg1");
@@ -478,6 +485,51 @@ describe("SP10 Task 9 (sp6 #14): settlement claim and wedge recovery", () => {
     expect(settled.status).toBe("completed");
     expect(settled.settlementClaimedAt).toBeGreaterThan(staleClaim); // re-claimed
     expect((await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data()?.balanceCents).toBe(1000);
+  });
+
+  // SP10 Task 9 fix round 1 (Important 4): the branch the definite/ambiguous
+  // split exists for. An error Stripe never answered with a code (a dropped
+  // connection, a timeout) leaves the transfer's fate unknown, so the claim
+  // must survive the pass and hold the cancel shut until it ages out.
+  it("an ambiguous transfer failure (no Stripe code) keeps the claim standing, refuses cancel, and settles on the next pass", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("wdg4");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("wdg4buyer");
+    await payOrder(eventId, tierId, 1, buyer.user);
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await pushEventPastSettleWindow(eventId);
+
+    let report;
+    try {
+      await setAmbiguousTransferKnob(accountId, true);
+      report = await runPaymentsSweep(Date.now());
+    } finally {
+      await setAmbiguousTransferKnob(accountId, false);
+    }
+    expect(report.errors.ticketSettlementTransfer).toBeGreaterThanOrEqual(1);
+    const held = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(held.status).toBe("published");
+    expect(held.settlementStartedAt).toBeUndefined();
+    expect(held.settlementClaimedAt).toBeTypeOf("number"); // ambiguous: the claim stands
+    const alert = (await adb.doc(`adminAlerts/${ticketSettlementFailedAlertId(eventId)}`).get()).data() as AdminAlertDoc | undefined;
+    expect(alert?.kind).toBe("ticket_settlement_failed");
+    expect(alert?.detail).toContain("reopens once the claim is 24h old");
+    await expect(callFn("cancelEvent", { curatorProfileId: profileId, eventId }, owner.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition",
+        message: "This event's ticket settlement is in progress and it cannot be cancelled right now.",
+      });
+
+    // The condition clears: the same key re-executes, the stamp lands, and the
+    // ledger row exists exactly once.
+    await runPaymentsSweep(Date.now());
+    const settled = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(settled.status).toBe("completed");
+    expect(settled.settlementStartedAt).toBeTypeOf("number");
+    expect((await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data()?.balanceCents).toBe(1000);
+    expect(await ledgerRowsForEvent(eventId, "ticket_settlement")).toHaveLength(1);
   });
 });
 

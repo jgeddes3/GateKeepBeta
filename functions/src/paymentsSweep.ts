@@ -1431,6 +1431,16 @@ async function retryCancelledEventRefunds(
 // PERMANENT refusal (Important 2): once it is set, a cancel can never refund
 // buyers on top of a transfer the curator already received.
 //
+// RESIDUAL EXPOSURE, accepted (SP10 Task 9 fix round 1, minor): if the
+// transfer succeeds but the `settlementStartedAt` write keeps failing for
+// longer than SETTLEMENT_CLAIM_STALE_MS, the claim ages out and a cancel
+// reopens on a settlement the curator has already been paid. The hourly retry
+// bounds that in practice: every pass replays the same key and re-attempts the
+// stamp, so reaching the window takes 24 consecutive failures of a single
+// one-field write, each one logged and counted under `ticketSettlement`. An
+// accepted tradeoff, and the cheaper side of it: the alternative, a claim that
+// never expires, wedges a genuinely failing settlement shut forever.
+//
 // A curator with no payout-ready Stripe account gets an escalated adminAlert
 // (throttled) and a notification to finish onboarding, GATED ON THE SAME
 // throttle signal (Important 3, so a slow onboarder is nudged once a day, not
@@ -1459,29 +1469,73 @@ type SettlementClaim = "claimed" | "already_started" | "not_published";
 // Returns already_started when the transfer succeeded on an earlier pass whose
 // completion write then failed: the caller replays the same key (a no-op) and
 // goes straight to the completion write.
+//
+// `claimedAt` (fix round 1) is the claim value this pass is operating under:
+// the one it wrote, or the still-fresh one it inherited from an earlier pass.
+// The release below compares against it, so a re-claim in the meantime is left
+// alone. Null when no claim was taken (already_started, not_published).
 async function claimSettlementStart(
   db: FirebaseFirestore.Firestore, eventRef: FirebaseFirestore.DocumentReference, now: number,
-): Promise<SettlementClaim> {
+): Promise<{ claim: SettlementClaim; claimedAt: number | null }> {
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const event = snap.data() as EventDoc | undefined;
-    if (!event || event.status !== "published") return "not_published";
-    if (event.settlementStartedAt != null) return "already_started";
+    if (!event || event.status !== "published") return { claim: "not_published", claimedAt: null };
+    if (event.settlementStartedAt != null) return { claim: "already_started", claimedAt: null };
     const claimedAt = event.settlementClaimedAt;
     if (claimedAt == null || now - claimedAt >= SETTLEMENT_CLAIM_STALE_MS) {
       tx.update(eventRef, { settlementClaimedAt: now, updatedAt: now });
+      return { claim: "claimed", claimedAt: now };
     }
-    return "claimed";
+    return { claim: "claimed", claimedAt };
   });
 }
 
-// A refusal Stripe answered with a code (balance_insufficient, an invalid
-// destination) moved no money, so the claim can be released at once and cancel
-// stays possible between passes. An error WITHOUT a code (a timeout, a dropped
-// connection) is ambiguous: the transfer may have gone through, so the claim
-// stands until it goes stale.
+// SP10 Task 9 fix round 1 (Important 3): a compare-and-delete, not a blind
+// one. A blind `FieldValue.delete()` here would drop a claim a LATER pass had
+// already taken (this pass's Stripe call can outlive the stale window, and the
+// hourly sweep overlaps), reopening cancel while that pass's transfer is in
+// flight. Deleting only when the stored value is still the one this pass is
+// operating under leaves a re-claim alone.
+async function releaseSettlementClaim(
+  db: FirebaseFirestore.Firestore, eventRef: FirebaseFirestore.DocumentReference,
+  claimedAt: number | null, now: number,
+): Promise<void> {
+  if (claimedAt == null) return;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(eventRef);
+    const event = snap.data() as EventDoc | undefined;
+    if (!event || event.settlementClaimedAt !== claimedAt) return; // re-claimed since, leave it alone
+    tx.update(eventRef, { settlementClaimedAt: FieldValue.delete(), updatedAt: now });
+  });
+}
+
+// SP10 Task 9 fix round 1 (Important 2): an ALLOWLIST, not "has a string
+// code". Every code below is one Stripe only returns when it validated the
+// request and declined to create the transfer, so no money moved: the claim
+// can be released at once and a cancel stays possible between passes.
+// Deliberately absent, because they do NOT prove that: `idempotency_error`
+// (the key was already used, so a transfer may well exist), `lock_timeout` and
+// `rate_limit` (Stripe may still have started the work), `api_connection_error`
+// and any error with no code at all (a timeout, a dropped socket). Those are
+// ambiguous, the claim stands, and it ages out of the 24h window instead.
+const DEFINITE_STRIPE_REFUSAL_CODES = new Set([
+  "balance_insufficient",
+  "account_invalid",
+  "amount_too_small",
+  "amount_too_large",
+  "parameter_invalid_integer",
+  "parameter_invalid_empty",
+  "parameter_missing",
+  "parameter_unknown",
+  "resource_missing",
+  "transfers_not_allowed",
+  "account_country_invalid_address",
+]);
+
 function isDefiniteStripeRefusal(e: unknown): boolean {
-  return typeof (e as { code?: unknown } | null)?.code === "string";
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && DEFINITE_STRIPE_REFUSAL_CODES.has(code);
 }
 
 async function settleOneEvent(
@@ -1538,7 +1592,7 @@ async function settleOneEvent(
       return;
     }
 
-    const claim = await claimSettlementStart(db, doc.ref, now);
+    const { claim, claimedAt } = await claimSettlementStart(db, doc.ref, now);
     if (claim === "not_published") return; // raced (cancelled, or resolved) since the read above
 
     let transfer: { id: string };
@@ -1556,7 +1610,7 @@ async function settleOneEvent(
       // bare error count; the per-event try/catch in settleTicketRevenue still
       // lets every OTHER due event settle this run.
       if (isDefiniteStripeRefusal(e)) {
-        await doc.ref.update({ settlementClaimedAt: FieldValue.delete(), updatedAt: now })
+        await releaseSettlementClaim(db, doc.ref, claimedAt, now)
           .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
       }
       const alertId = ticketSettlementFailedAlertId(doc.id);

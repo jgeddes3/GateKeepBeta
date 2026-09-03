@@ -293,7 +293,8 @@ interface StoredError { name: string; message: string; code?: string; intentId?:
 // even segment count (collection/doc/collection/doc) while still reading as
 // "objects", "idem", "cards" collections:
 //   stripeFake/config               { declineCharges?, declineCustomerIds?,  (test knob, admin-SDK-written)
-//                                      pendingCustomerIds?, failTransferAccountIds? }
+//                                      pendingCustomerIds?, failTransferAccountIds?,
+//                                      ambiguousTransferAccountIds? }
 //   stripeFake/state/idem/{key}     { result } | { error }, fingerprint      (idempotency replay)
 //   stripeFake/state/objects/{id}   { kind, ... }                            (created objects, incl. account state)
 //   stripeFake/state/cards/{custId} { saved: true }                          (markCardSaved marker)
@@ -639,6 +640,15 @@ export class FakeStripe implements StripeLike {
       const cfg = (await this.db.doc("stripeFake/config").get()).data();
       if (((cfg?.failTransferAccountIds as string[] | undefined) ?? []).includes(p.accountId)) {
         throw Object.assign(new Error("balance_insufficient"), { code: "balance_insufficient" });
+      }
+      // SP10 Task 9 fix round 1 sibling knob
+      // (stripeFake/config.ambiguousTransferAccountIds): the call dies WITHOUT
+      // an answer, so there is no `code` and the transfer's fate is unknown.
+      // This is the shape the sweep must NOT release its claim on. Uncached for
+      // the same reason as the knob above (no "FakeStripe:" prefix), so the
+      // retry after the knob clears re-executes.
+      if (((cfg?.ambiguousTransferAccountIds as string[] | undefined) ?? []).includes(p.accountId)) {
+        throw new Error("connection to Stripe was lost before the transfer was answered");
       }
 
       const id = this.newId("tr");
