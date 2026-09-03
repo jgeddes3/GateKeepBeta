@@ -1,7 +1,7 @@
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import {
-  SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE,
+  SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE, POSTER_UPLOAD_TTL_MS,
   type GigSeriesDoc, type GigDoc, type SeriesCadence, type BookingRequestDoc, type ReliabilityDoc,
   type EventDoc, type AttendeeDoc,
 } from "@gatekeep/shared";
@@ -284,6 +284,9 @@ export interface SweepReport {
   // SP10 Task 10, step 9: eventCascadeRetries entries whose cancel + refund
   // succeeded this run (retry doc deleted).
   eventCascadeRetried: number;
+  // SP10 Task 19, step 3b: posterUploads/{uid}/uploads/{nonce} docs older
+  // than POSTER_UPLOAD_TTL_MS deleted this run.
+  posterUploadsReaped: number;
   // S3: per-step failure counts, a step that throws is caught, logged, and
   // counted here rather than aborting the remaining steps.
   errors: {
@@ -307,6 +310,9 @@ export interface SweepReport {
     // a single retry doc's cancel + refund attempt failed (per-doc isolated,
     // same S3 philosophy as every other step here).
     eventCascadeRetries: number;
+    // SP10 Task 19, step 3b: the poster upload reaper's own query/pagination
+    // failed, or the writer's commit failed.
+    posterUploads: number;
   };
 }
 
@@ -331,10 +337,11 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
     eventRemindersSent: 0,
     eventCascadeRetried: 0,
+    posterUploadsReaped: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
       bookingExpiry: 0, bookingCompletion: 0, seriesMaterialize: 0, eventReminders: 0,
-      eventCascadeRetries: 0,
+      eventCascadeRetries: 0, posterUploads: 0,
     },
   };
 
@@ -627,6 +634,30 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   } catch (e) {
     console.error("dailySweep: track reaper step failed", e);
     report.errors.tracks++;
+  }
+
+  // 3b) Poster upload reaper (SP10 Task 19): a posterUploads doc is a
+  // pointer the client consumes within seconds of the upload; one older than
+  // POSTER_UPLOAD_TTL_MS belongs to an abandoned picker. Only the doc goes:
+  // the processed object may already be an event's posterPath. Owner docs
+  // (posterUploads/{uid}) are never written, so listDocuments() is the only
+  // way to enumerate them; each owner's stale set is tiny, so a plain get per
+  // owner replaces pagination here.
+  try {
+    const writer = createChunkedWriter(db);
+    const posterCutoff = now - POSTER_UPLOAD_TTL_MS;
+    const ownerRefs = await db.collection("posterUploads").listDocuments();
+    for (const ownerRef of ownerRefs) {
+      const staleSnap = await ownerRef.collection("uploads").where("createdAt", "<", posterCutoff).get();
+      for (const doc of staleSnap.docs) {
+        await writer.delete(doc.ref);
+        report.posterUploadsReaped++;
+      }
+    }
+    await writer.commit();
+  } catch (e) {
+    console.error("dailySweep: poster upload reaper step failed", e);
+    report.errors.posterUploads++;
   }
 
   // 4) Invite sweep (SP2 debt): a pending invite past its expiry is revoked

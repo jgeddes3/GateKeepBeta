@@ -459,9 +459,10 @@ describe("processUpload: curator poster photos", () => {
     "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
     "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="), (c) => c.charCodeAt(0));
 
-  it("processes a poster into public/photos with no profile-doc write", async () => {
+  it("processes a poster into public/photos, writes posterUploads/{uid}/uploads/{nonce}, and touches no profile field", async () => {
     const { user, uid, profileId } = await makeCurator("p1");
-    const path = `staging/photos/${uid}/${profileId}/poster-${Date.now()}`;
+    const nonce = `${Date.now()}`;
+    const path = `staging/photos/${uid}/${profileId}/poster-${nonce}`;
     await uploadTestAudio(path, tinyJpeg(), "image/jpeg", user);
     const deadline = Date.now() + 30_000;
     let files: { name: string }[] = [];
@@ -470,7 +471,18 @@ describe("processUpload: curator poster photos", () => {
       if (files.length === 0) await new Promise((r) => setTimeout(r, 500));
     }
     expect(files).toHaveLength(1);
-    // No gallery/portfolio field was touched by a poster upload.
+
+    // SP10 Task 19: the processed path is handed to the client through a
+    // doc it can watch (rules: owner read only).
+    const uploadRef = adb.doc(`posterUploads/${uid}/uploads/${nonce}`);
+    let uploadDoc = (await uploadRef.get()).data();
+    while (Date.now() < deadline && !uploadDoc) {
+      await new Promise((r) => setTimeout(r, 500));
+      uploadDoc = (await uploadRef.get()).data();
+    }
+    expect(uploadDoc?.path).toBe(files[0].name);
+    expect(uploadDoc?.createdAt).toBeTypeOf("number");
+
     const p = await adb.doc(`profiles/${profileId}`).get();
     expect(p.data()?.curator?.photoPaths ?? []).toHaveLength(0);
     expect(p.data()?.portfolio?.avatarPhotoPath ?? null).toBeNull();

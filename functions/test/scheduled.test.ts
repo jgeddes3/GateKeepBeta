@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
-  MAX_OPEN_GIGS_PER_PROFILE,
+  MAX_OPEN_GIGS_PER_PROFILE, POSTER_UPLOAD_TTL_MS,
   type GigSeriesDoc, type GigDoc, type InviteDoc, type TrackDoc, type SeriesCadence, type BookingRequestDoc,
   type CuratorBookingDoc,
 } from "@gatekeep/shared";
@@ -369,6 +369,25 @@ describe("runDailySweep, track reaper", () => {
     expect(stale?.failureReason).toBe("Upload abandoned");
     expect((await adb.doc(`profiles/${profileId}/tracks/${freshId}`).get()).data()?.status).toBe("processing");
     expect((await adb.doc(`profiles/${profileId}/tracks/${oldApprovedId}`).get()).data()?.status).toBe("approved");
+  });
+});
+
+describe("runDailySweep, poster upload reaper (SP10 Task 19)", () => {
+  it("deletes a posterUploads doc older than POSTER_UPLOAD_TTL_MS and leaves a fresh one", async () => {
+    const now = Date.now();
+    const uid = fakeUid();
+    await adb.doc(`posterUploads/${uid}/uploads/stale`).set({
+      path: "public/photos/seed/poster-stale.jpg", createdAt: now - POSTER_UPLOAD_TTL_MS - 60_000,
+    });
+    await adb.doc(`posterUploads/${uid}/uploads/fresh`).set({
+      path: "public/photos/seed/poster-fresh.jpg", createdAt: now - 60_000,
+    });
+
+    const report = await runDailySweep(now);
+
+    expect(report.posterUploadsReaped).toBeGreaterThanOrEqual(1);
+    expect((await adb.doc(`posterUploads/${uid}/uploads/stale`).get()).exists).toBe(false);
+    expect((await adb.doc(`posterUploads/${uid}/uploads/fresh`).get()).exists).toBe(true);
   });
 });
 

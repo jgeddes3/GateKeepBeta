@@ -11,6 +11,7 @@ import ffprobe from "ffprobe-static";
 import sharp from "sharp";
 import {
   reviewTrackPath, publicPhotoPath, isValidDocId, MAX_CLIP_SECONDS, MAX_CURATOR_PHOTOS,
+  type PosterUploadDoc,
 } from "@gatekeep/shared";
 import { STORAGE_BUCKET, bucket, logDeleteFailure } from "./storage.js";
 
@@ -222,7 +223,7 @@ async function processAudio(objectName: string, generation: string | number): Pr
 // slot on an EventDoc rather than an array/field on the profile itself, so
 // it's processed like gallery but has no profile-doc write of its own (see
 // the kind === "poster" branch below).
-const PHOTO_FILENAME_RE = /^(avatar|cover|gallery|poster)-[A-Za-z0-9-]{1,80}$/;
+const PHOTO_FILENAME_RE = /^(avatar|cover|gallery|poster)-([A-Za-z0-9-]{1,80})$/;
 
 async function processPhoto(objectName: string, generation: string | number): Promise<void> {
   // pin the generation: retry overwrites must not race an in-flight transcode of older bytes
@@ -237,6 +238,7 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     return;
   }
   const kind = nameMatch[1] as "avatar" | "cover" | "gallery" | "poster";
+  const nonce = nameMatch[2];
   const db = getFirestore();
   const profileRef = db.doc(`profiles/${profileId}`);
 
@@ -358,12 +360,21 @@ async function processPhoto(objectName: string, generation: string | number): Pr
     }
 
     if (kind === "poster") {
-      // No Firestore write here at all: a poster has no destination field
-      // on the profile doc (it isn't the profile's own photo). The curator
-      // passes this processed destPath straight back to createEvent/
-      // updateEvent as posterPath once the upload finishes; those callables
-      // are the ones that persist it, on an EventDoc, after their own
-      // string-prefix ownership check against it.
+      // SP10 Task 19 (sp6 #16): the profile doc has no poster field, so the
+      // processed path is published to a per-owner doc the uploading client
+      // watches (posterUploads/{uid}/uploads/{nonce}, owner read only). The
+      // client then saves it as posterPath through createEvent/updateEvent,
+      // which re-check the public/photos/{profileId}/poster- prefix. The
+      // daily sweep deletes these docs after POSTER_UPLOAD_TTL_MS.
+      const uploadDoc: PosterUploadDoc = { path: destPath, createdAt: Date.now() };
+      try {
+        await db.doc(`posterUploads/${uid}/uploads/${nonce}`).set(uploadDoc);
+      } catch (err) {
+        // Nothing can ever reach this object if the pointer never landed.
+        await bucket().file(destPath).delete()
+          .catch(logDeleteFailure("processUpload", "orphaned poster (posterUploads write failed)", destPath));
+        console.error("processUpload: posterUploads write failed", objectName, err);
+      }
       return;
     }
 
