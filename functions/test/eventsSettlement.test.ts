@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
-import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   type TicketOrderDoc, type EventDoc, type AdminAlertDoc, type AttendeeDoc, type TicketDoc,
-  TICKET_REFUND_WINDOW_CLOSED_MESSAGE,
+  TICKET_REFUND_WINDOW_CLOSED_MESSAGE, SETTLEMENT_CLAIM_STALE_MS,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
 import { runDailySweep } from "../src/scheduled.js";
-import { EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId } from "../src/eventsCore.js";
+import { EVENT_SETTLE_DELAY_MS, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId } from "../src/eventsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -390,6 +390,94 @@ describe("cancelEvent: blocked once ticket settlement has started", () => {
     expect(result.ok).toBe(true);
     const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
     expect(event.status).toBe("cancelled");
+  });
+});
+
+async function setTransferKnob(accountId: string, on: boolean): Promise<void> {
+  await adb.doc("stripeFake/config").set(
+    { failTransferAccountIds: on ? FieldValue.arrayUnion(accountId) : FieldValue.arrayRemove(accountId) }, { merge: true });
+}
+
+describe("SP10 Task 9 (sp6 #14): settlement claim and wedge recovery", () => {
+  it("a refused transfer leaves settlementClaimedAt set, settlementStartedAt unset, alerts, and the next pass settles once Stripe accepts", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("wdg1");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("wdg1buyer");
+    await payOrder(eventId, tierId, 2, buyer.user);
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await pushEventPastSettleWindow(eventId);
+
+    let report;
+    try {
+      await setTransferKnob(accountId, true);
+      report = await runPaymentsSweep(Date.now());
+    } finally {
+      await setTransferKnob(accountId, false);
+    }
+    expect(report.errors.ticketSettlementTransfer).toBeGreaterThanOrEqual(1);
+    const wedged = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(wedged.status).toBe("published");
+    expect(wedged.settlementStartedAt).toBeUndefined();
+    expect(wedged.settlementClaimedAt).toBeUndefined(); // a definite refusal releases the claim
+    expect((await adb.doc(`adminAlerts/${ticketSettlementFailedAlertId(eventId)}`).get()).data()?.kind).toBe("ticket_settlement_failed");
+    expect((await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data()?.balanceCents ?? 0).toBe(0);
+
+    // Stripe accepts on the next pass: claimed, transferred, started, completed.
+    await runPaymentsSweep(Date.now());
+    const settled = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(settled.status).toBe("completed");
+    expect(settled.settlementStartedAt).toBeTypeOf("number");
+    expect(settled.settlementClaimedAt).toBeTypeOf("number");
+    expect(settled.settlementStartedAt).toBeGreaterThanOrEqual(settled.settlementClaimedAt!);
+    expect((await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data()?.balanceCents).toBe(2000);
+    expect(await ledgerRowsForEvent(eventId, "ticket_settlement")).toHaveLength(1);
+  });
+
+  it("cancelEvent is refused on a fresh claim and allowed again once the claim is stale", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("wdg2");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("wdg2buyer");
+    const orderId = await payOrder(eventId, tierId, 1, buyer.user);
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - HOUR_MS });
+
+    // The shape between the claim write and the transfer returning (an
+    // ambiguous failure leaves it this way too): claimed, not started.
+    await adb.doc(`events/${eventId}`).update({ settlementClaimedAt: Date.now() });
+    await expect(callFn("cancelEvent", { curatorProfileId: profileId, eventId }, owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition" });
+    expect(((await adb.doc(`events/${eventId}`).get()).data() as EventDoc).status).toBe("published");
+
+    await adb.doc(`events/${eventId}`).update({ settlementClaimedAt: Date.now() - SETTLEMENT_CLAIM_STALE_MS - 1000 });
+    const result = await callFn<Record<string, unknown>, { ok: boolean }>(
+      "cancelEvent", { curatorProfileId: profileId, eventId }, owner.user);
+    expect(result.ok).toBe(true);
+    const event = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(event.status).toBe("cancelled");
+    expect(((await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc).status).toBe("cancelled_refunded");
+  });
+
+  it("an ambiguous transfer failure keeps the claim (cancel refused) and a stale claim is re-claimable by the sweep", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("wdg3");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("wdg3buyer");
+    await payOrder(eventId, tierId, 1, buyer.user);
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await pushEventPastSettleWindow(eventId);
+
+    // Seed a stale claim from a pass whose transfer call died without an answer.
+    const staleClaim = Date.now() - SETTLEMENT_CLAIM_STALE_MS - 1000;
+    await adb.doc(`events/${eventId}`).update({ settlementClaimedAt: staleClaim });
+    await runPaymentsSweep(Date.now());
+    const settled = (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+    expect(settled.status).toBe("completed");
+    expect(settled.settlementClaimedAt).toBeGreaterThan(staleClaim); // re-claimed
+    expect((await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data()?.balanceCents).toBe(1000);
   });
 });
 

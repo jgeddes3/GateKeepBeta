@@ -51,7 +51,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS, TICKET_ORDER_STUCK_AFTER_MS,
+  SETTLEMENT_CLAIM_STALE_MS, SETTLEMENT_DELAY_MS, SETTLEMENT_RETRY_OFFSETS_MS, TICKET_ORDER_STUCK_AFTER_MS,
   type BookingRequestDoc, type EventDoc, type GigDoc, type PaymentDoc, type TicketOrderDoc, type TicketTransferDoc,
 } from "@gatekeep/shared";
 import {
@@ -1257,8 +1257,31 @@ async function expireOneTicketOrder(
         // app was killed before finalizeTicketOrder, the webhook never landed).
         // completeOrderTx is the same idempotent transaction finalize and the
         // webhook run; the order flips to paid, the tickets are minted, the
-        // buyer is told. A throw here propagates to the per-order catch below.
-        await completeOrderTx(doc.id);
+        // buyer is told.
+        try {
+          await completeOrderTx(doc.id);
+        } catch (completionError) {
+          // SP10 Task 9 controller addition: the fan was already charged, so
+          // silently bumping a counter here would leave a paid order with no
+          // tickets and no operator signal. Escalate durably (same discipline
+          // as every other money-moved-but-stuck path in this file) and still
+          // count the failure, rather than only counting it.
+          const alertId = ticketOrderStuckAlertId(doc.id);
+          const shouldLog = await recordAdminAlert({
+            alertId, kind: "ticket_order_stuck",
+            detail: `ticket order ${doc.id} (event ${order.eventId}, buyer ${order.buyerUid}) had its intent `
+              + `${order.paymentIntentId} succeed, but completing it failed: `
+              + `${completionError instanceof Error ? completionError.message : String(completionError)}; resolve manually`,
+            bookingId: null, gigId: null, now,
+          });
+          if (shouldLog) {
+            console.error(
+              `paymentsSweep: ticket order ${doc.id} completion failed after intent success (see adminAlerts/${alertId})`,
+              completionError);
+          }
+          bumpError(report, "ticketOrderExpire");
+          return;
+        }
         report.ticketOrdersReconciled++;
         return;
       }
@@ -1393,13 +1416,20 @@ async function retryCancelledEventRefunds(
 // Mirrors SP5's settlement discipline (paymentsSettlement.ts): the Stripe
 // transfer happens OUTSIDE any Firestore transaction, then the event flips to
 // "completed" and the ledger row is written. `claimSettlementStart` below is
-// the CAS a retry re-enters: it transactionally stamps `settlementStartedAt`
-// on the event iff unset, immediately before the transfer call, and a retry
-// whose transfer succeeded but whose completion write then failed finds the
-// field ALREADY set on its next pass and proceeds straight to replaying the
-// SAME idempotency key. That same field is also what cancelEventCore now
-// refuses to cancel through (Important 2): once it is set, a cancel can never
-// refund buyers on top of a transfer the curator already received.
+// the CAS a retry re-enters, and it now owns two separate fields (SP10 Task 9,
+// sp6 #14): `settlementStartedAt` is stamped only after the transfer
+// succeeds, never before it; `settlementClaimedAt` is the pre-transfer claim,
+// stamped transactionally immediately before the Stripe call (24h stale
+// window, SETTLEMENT_CLAIM_STALE_MS, same idiom as chargingSince), so a
+// transfer that throws no longer wedges the event: a definite Stripe refusal
+// releases the claim at once, and an ambiguous one ages out in 24h either
+// way. A retry whose transfer succeeded but whose completion write then
+// failed finds `settlementStartedAt` ALREADY set on its next pass and
+// proceeds straight to replaying the SAME idempotency key. `settlementClaimedAt`
+// is also what cancelEventCore now refuses a cancel through while fresh (see
+// claimSettlementStart's own comment); `settlementStartedAt` remains the
+// PERMANENT refusal (Important 2): once it is set, a cancel can never refund
+// buyers on top of a transfer the curator already received.
 //
 // A curator with no payout-ready Stripe account gets an escalated adminAlert
 // (throttled) and a notification to finish onboarding, GATED ON THE SAME
@@ -1415,28 +1445,43 @@ async function retryCancelledEventRefunds(
 // and settlementStartedAt is never stamped for it (see claimSettlementStart's
 // own comment for why that is safe).
 
-// Transactionally stamps `settlementStartedAt` on the event iff unset, and
-// re-confirms "published" in the SAME read. Two jobs, one CAS:
-//  - it is the re-check immediately before the Stripe call this step's retry
-//    contract needs (see this step's header comment): a retry lands on this
-//    exact transaction again and finds the field already set, so it proceeds
-//    rather than skipping or re-deriving a fresh key;
-//  - it is the field cancelEventCore now refuses to cancel through, closing
-//    the cancel-vs-settle double-spend window (Important 2).
-// Returns false when the event is no longer "published" (raced by a cancel,
-// or already resolved by a concurrent run); the caller must not transfer.
+type SettlementClaim = "claimed" | "already_started" | "not_published";
+
+// SP10 Task 9 (sp6 #14). Two fields, two jobs:
+//  - `settlementClaimedAt` is stamped HERE, before the Stripe call, and is the
+//    cancel guard while a transfer may be in flight (24h stale window, the
+//    chargingSince idiom). A fresh claim from an earlier pass is left alone
+//    (the ticket_settlement:{id} key replays inside Stripe's window); a stale
+//    one is re-stamped, a genuine re-claim.
+//  - `settlementStartedAt` is stamped by settleOneEvent ONLY after the
+//    transfer succeeds, and is the permanent cancel refusal: money reached the
+//    curator, so a cancel can never refund buyers on top of it.
+// Returns already_started when the transfer succeeded on an earlier pass whose
+// completion write then failed: the caller replays the same key (a no-op) and
+// goes straight to the completion write.
 async function claimSettlementStart(
   db: FirebaseFirestore.Firestore, eventRef: FirebaseFirestore.DocumentReference, now: number,
-): Promise<boolean> {
+): Promise<SettlementClaim> {
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const event = snap.data() as EventDoc | undefined;
-    if (!event || event.status !== "published") return false;
-    if (event.settlementStartedAt == null) {
-      tx.update(eventRef, { settlementStartedAt: now, updatedAt: now });
+    if (!event || event.status !== "published") return "not_published";
+    if (event.settlementStartedAt != null) return "already_started";
+    const claimedAt = event.settlementClaimedAt;
+    if (claimedAt == null || now - claimedAt >= SETTLEMENT_CLAIM_STALE_MS) {
+      tx.update(eventRef, { settlementClaimedAt: now, updatedAt: now });
     }
-    return true;
+    return "claimed";
   });
+}
+
+// A refusal Stripe answered with a code (balance_insufficient, an invalid
+// destination) moved no money, so the claim can be released at once and cancel
+// stays possible between passes. An error WITHOUT a code (a timeout, a dropped
+// connection) is ambiguous: the transfer may have gone through, so the claim
+// stands until it goes stale.
+function isDefiniteStripeRefusal(e: unknown): boolean {
+  return typeof (e as { code?: unknown } | null)?.code === "string";
 }
 
 async function settleOneEvent(
@@ -1493,8 +1538,8 @@ async function settleOneEvent(
       return;
     }
 
-    const claimed = await claimSettlementStart(db, doc.ref, now);
-    if (!claimed) return; // raced (cancelled, or resolved) since the read above
+    const claim = await claimSettlementStart(db, doc.ref, now);
+    if (claim === "not_published") return; // raced (cancelled, or resolved) since the read above
 
     let transfer: { id: string };
     try {
@@ -1504,17 +1549,22 @@ async function settleOneEvent(
         meta: { purpose: "ticket_settlement", eventId: doc.id },
       });
     } catch (e) {
-      // The event is now wedged: settlementStartedAt is set (so it can never
-      // be cancelled either), and every future pass will hit this same catch
-      // until the underlying Stripe problem is fixed. Escalated durably
-      // (Critical 1d) rather than left as a bare error count nobody reads;
-      // the per-event try/catch in settleTicketRevenue still lets every OTHER
-      // due event settle this run.
+      // NOT wedged any more (SP10 Task 9): settlementStartedAt was never
+      // stamped, so cancelEventCore can still refund buyers once the claim is
+      // stale (or at once, on a definite refusal). Every hourly pass retries
+      // the same key. Escalated durably (Critical 1d) rather than left as a
+      // bare error count; the per-event try/catch in settleTicketRevenue still
+      // lets every OTHER due event settle this run.
+      if (isDefiniteStripeRefusal(e)) {
+        await doc.ref.update({ settlementClaimedAt: FieldValue.delete(), updatedAt: now })
+          .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
+      }
       const alertId = ticketSettlementFailedAlertId(doc.id);
       const shouldLog = await recordAdminAlert({
         alertId, kind: "ticket_settlement_failed",
         detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${faceCents}c to curator `
-          + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}`,
+          + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}; retried hourly, `
+          + `cancel ${isDefiniteStripeRefusal(e) ? "stays possible" : "reopens once the claim is 24h old"}`,
         bookingId: null, gigId: null, now,
       });
       if (shouldLog) {
@@ -1523,6 +1573,11 @@ async function settleOneEvent(
       }
       bumpError(report, "ticketSettlementTransfer");
       return;
+    }
+
+    if (claim === "claimed") {
+      // The transfer succeeded: from here a cancel can never be allowed.
+      await doc.ref.update({ settlementStartedAt: now, updatedAt: now });
     }
 
     await writeLedger({

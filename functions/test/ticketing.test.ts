@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
-import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import { type TicketOrderDoc, type TicketDoc, type AdminAlertDoc, TICKET_ORDER_STUCK_AFTER_MS } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
+import { ticketOrderStuckAlertId } from "../src/eventsCore.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -499,6 +500,36 @@ describe("ticket order expiry sweep", () => {
     expect(alert.bookingId).toBeNull();
     expect(alert.detail).toContain(orderId);
     expect(alert.detail).toContain("processing");
+    expect(((await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc).status).toBe("pending");
+  });
+
+  it("SP10 Task 9 controller addition: a reconcile whose completeOrderTx cannot complete still alerts and counts as an error", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("stk2");
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "General", priceCents: 1000, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
+    const tierId = await tierIdByName(eventId, "General");
+    const buyer = await makeBuyer("stk2buyer");
+    const { orderId, clientSecret } = await callFn<Record<string, unknown>, CreateOrderResult>(
+      "createTicketOrder", { eventId, items: [{ tierId, quantity: 1 }] }, buyer.user);
+    await confirmFakeIntent(clientSecret!);
+    // Money already moved (the intent succeeded), but completeOrderTx's own
+    // transaction can never finish this time: corrupt the order's `items` so
+    // the for-loop it iterates over throws instead of minting a ticket.
+    // completeOrderTx never reads the tier doc at all (it only writes new
+    // ticket/attendee docs off order.items, already captured at order
+    // creation), so deleting the tier does not reach this transaction; this
+    // reproduces the same "money moved, completion cannot finish" shape
+    // directly on the order it fans out from.
+    await adb.doc(`orders/${orderId}`).update({ items: FieldValue.delete() });
+    await adb.doc(`orders/${orderId}`).update({ expiresAt: Date.now() - 1000 });
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.errors.ticketOrderExpire ?? 0).toBeGreaterThanOrEqual(1);
+    const alert = (await adb.doc(`adminAlerts/${ticketOrderStuckAlertId(orderId)}`).get()).data() as AdminAlertDoc | undefined;
+    expect(alert?.kind).toBe("ticket_order_stuck");
+    expect(alert?.detail).toContain(orderId);
+    expect(alert?.detail).toContain("completing it failed");
+    // Untouched: the failed completion made no write of its own.
     expect(((await adb.doc(`orders/${orderId}`).get()).data() as TicketOrderDoc).status).toBe("pending");
   });
 });

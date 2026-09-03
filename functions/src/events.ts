@@ -19,7 +19,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, deriveEventGenres, tierProjection,
+  isValidDocId, deriveEventGenres, tierProjection, SETTLEMENT_CLAIM_STALE_MS,
   type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
   type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
   type AttendeeDoc,
@@ -556,6 +556,9 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
 // (settlementStartedAt still unset, whether or not it is even T+1 yet) is
 // still cancellable, matching the "the show never happened" case this
 // callable exists for.
+//
+// Also refused on a fresh `settlementClaimedAt` (SP10 Task 9); see
+// paymentsSweep.ts's claimSettlementStart.
 export async function cancelEventCore(eventId: string, now: number): Promise<void> {
   const db = getFirestore();
   const eventRef = db.doc(`events/${eventId}`);
@@ -569,6 +572,16 @@ export async function cancelEventCore(eventId: string, now: number): Promise<voi
     if (event.settlementStartedAt != null) {
       throw new HttpsError("failed-precondition",
         "This event's ticket settlement has already started and can no longer be cancelled.");
+    }
+    // SP10 Task 9 (sp6 #14): a FRESH settlement claim means a transfer may be
+    // in flight right now (or an ambiguous failure left its fate unknown); a
+    // cancel that refunded buyers under it could double-spend against a
+    // transfer that then lands. A stale claim (24h with no settlementStartedAt)
+    // is a settlement that keeps failing, and the show is cancellable again.
+    const claimedAt = event.settlementClaimedAt;
+    if (claimedAt != null && now - claimedAt < SETTLEMENT_CLAIM_STALE_MS) {
+      throw new HttpsError("failed-precondition",
+        "This event's ticket settlement is in progress and it cannot be cancelled right now.");
     }
     tx.update(eventRef, { status: "cancelled", cancelledAt: now, updatedAt: now });
   });

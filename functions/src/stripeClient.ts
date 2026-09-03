@@ -293,7 +293,7 @@ interface StoredError { name: string; message: string; code?: string; intentId?:
 // even segment count (collection/doc/collection/doc) while still reading as
 // "objects", "idem", "cards" collections:
 //   stripeFake/config               { declineCharges?, declineCustomerIds?,  (test knob, admin-SDK-written)
-//                                      pendingCustomerIds? }
+//                                      pendingCustomerIds?, failTransferAccountIds? }
 //   stripeFake/state/idem/{key}     { result } | { error }, fingerprint      (idempotency replay)
 //   stripeFake/state/objects/{id}   { kind, ... }                            (created objects, incl. account state)
 //   stripeFake/state/cards/{custId} { saved: true }                          (markCardSaved marker)
@@ -630,6 +630,17 @@ export class FakeStripe implements StripeLike {
   }
   async transferToAccount(p: { accountId: string; amountCents: number; idempotencyKey: string; meta: Record<string, string>; sourceChargeId?: string }) {
     return this.idem(p.idempotencyKey, async () => {
+      // SP10 Task 9 test knob (stripeFake/config.failTransferAccountIds): Stripe
+      // refuses the transfer. Shaped like a live balance_insufficient (a string
+      // `code`), and deliberately NOT a "FakeStripe:" message so idem() does not
+      // cache it: the retry the sweep makes after the condition clears must
+      // re-execute. Real Stripe replays a refusal under the same key for 24h;
+      // the launch checklist's platform-float decision is what shortens that.
+      const cfg = (await this.db.doc("stripeFake/config").get()).data();
+      if (((cfg?.failTransferAccountIds as string[] | undefined) ?? []).includes(p.accountId)) {
+        throw Object.assign(new Error("balance_insufficient"), { code: "balance_insufficient" });
+      }
+
       const id = this.newId("tr");
       const acct = this.objRef(p.accountId);
       const objects = this.db.collection("stripeFake/state/objects");
