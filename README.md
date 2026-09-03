@@ -676,19 +676,23 @@ before a real launch:
 
 ### Sub-project 5 launch checklist (payments)
 
-- **Register the webhook endpoint in the Stripe dashboard** (Developers → Webhooks → Add endpoint).
-  The URL is the deployed `stripeWebhook` function's HTTPS trigger URL (`firebase deploy` prints it;
-  it also appears in the Firebase console under Functions). Subscribe at minimum to
-  `payment_intent.succeeded`, `payment_intent.payment_failed`, `transfer.reversed`, `account.updated`,
-  `payout.paid` and `payout.failed`, every type `webhookHandlers` actually registers a handler for.
-  `transfer.reversed` matters more than its quiet name suggests: it is the **only** way the platform
-  learns about an earnings transfer reversed from the Stripe dashboard rather than by our own
-  clawback path. Then copy the endpoint's **signing secret** and store it with
-  `firebase functions:secrets:set STRIPE_WEBHOOK_SECRET`, **the endpoint is useless until this is
-  done**: `stripeWebhook` verifies every request's signature and rejects all of them against an
-  empty secret, which silently breaks the recovery path for charges Stripe leaves `processing`
-  (they are finalized by `payment_intent.succeeded`, not by the callable that started them). Register
-  a **separate** endpoint with its own signing secret when flipping to live mode.
+- **Register TWO webhook endpoints in the Stripe dashboard** (Developers, Webhooks, Add endpoint),
+  both pointing at the deployed `stripeWebhook` function's HTTPS trigger URL (`firebase deploy`
+  prints it; it also appears in the Firebase console under Functions):
+  1. scope **"Events on your account"**, subscribed to `payment_intent.succeeded`,
+     `payment_intent.payment_failed`, `transfer.reversed`, `charge.dispute.created`,
+     `charge.dispute.closed` and `charge.refunded`; store its signing secret with
+     `firebase functions:secrets:set STRIPE_WEBHOOK_SECRET`;
+  2. scope **"Events on Connected accounts"**, subscribed to `account.updated`, `payout.paid` and
+     `payout.failed`; store its signing secret with
+     `firebase functions:secrets:set STRIPE_CONNECT_WEBHOOK_SECRET`.
+  `stripeWebhook` verifies every delivery against the platform secret first, then the Connect secret,
+  and refuses a delivery whose proven scope does not match the event (a platform-signed event carrying
+  `account`, or a Connect-signed event without one). **Both secrets must be set**: the endpoint fails
+  closed (HTTP 500, which Stripe retries) until they are. `transfer.reversed` is the only way the
+  platform learns about an earnings transfer reversed from the dashboard; the two dispute events and
+  `charge.refunded` are what record chargebacks and dashboard refunds (sub-project 10). Register a
+  separate pair of endpoints with their own secrets when flipping to live mode.
 - **Enable a Firestore TTL policy on `stripeEvents.expireAt`** (Firebase console → Firestore → TTL,
   or `gcloud firestore fields ttls update expireAt --collection-group=stripeEvents`). Every webhook
   claim document is stamped with a 30-day `expireAt`, but **the field alone expires nothing**, the

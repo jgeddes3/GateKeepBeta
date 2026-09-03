@@ -113,8 +113,12 @@ function fakeEvent(type: string, object: Record<string, unknown>) {
 }
 
 async function postWebhook(body: unknown): Promise<{ status: number; text: string }> {
+  // SP10 Task 4: a connected-account event (top-level `account`) is signed by
+  // the Connect endpoint's secret; FakeStripe models that as "fake:connect".
+  const isConnect = typeof (body as { account?: unknown } | null)?.account === "string";
   const res = await fetch(WEBHOOK_URL, {
-    method: "POST", headers: { "Content-Type": "application/json", "stripe-signature": "fake" },
+    method: "POST",
+    headers: { "Content-Type": "application/json", "stripe-signature": isConnect ? "fake:connect" : "fake" },
     body: JSON.stringify(body),
   });
   return { status: res.status, text: await res.text() };

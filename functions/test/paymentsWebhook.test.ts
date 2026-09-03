@@ -123,4 +123,31 @@ describe("stripeWebhook", () => {
     expect(doc.data()?.receivedAt).toBeGreaterThan(staleReceivedAt);
     expect(doc.data()?.attempts).toBe(2);
   });
+
+  // SP10 Task 4 (sp5 #3): two endpoints, two secrets, and an event may only be
+  // acted on under the scope its secret belongs to.
+  it("a Connect-signed event that carries no account is refused (400) and never recorded", async () => {
+    const evt = fakeEvent("some.unknown.type", {});
+    const res = await post(evt, { "stripe-signature": "fake:connect" });
+    expect(res.status).toBe(400);
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).exists).toBe(false);
+  });
+
+  it("a platform-signed event that carries an account is refused (400) and never recorded", async () => {
+    const evt = { ...fakeEvent("some.unknown.type", {}), account: "acct_fake_1" };
+    const res = await post(evt, { "stripe-signature": "fake" });
+    expect(res.status).toBe(400);
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).exists).toBe(false);
+  });
+
+  it("a Connect-signed event WITH an account is accepted and recorded", async () => {
+    const evt = { ...fakeEvent("some.unknown.type", {}), account: "acct_fake_2" };
+    const res = await post(evt, { "stripe-signature": "fake:connect" });
+    expect(res.status).toBe(200);
+    expect((await adb.doc(`stripeEvents/${evt.id}`).get()).data()?.processed).toBe(true);
+  });
+
+  it("a signature that matches neither secret is a flat 400", async () => {
+    expect((await post(fakeEvent("some.unknown.type", {}), { "stripe-signature": "forged" })).status).toBe(400);
+  });
 });

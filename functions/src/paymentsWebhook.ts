@@ -1,7 +1,10 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import { isValidDocId } from "@gatekeep/shared";
-import { getStripe, stripeSecretKey, stripeWebhookSecret, StripeWebhookSecretMissingError } from "./stripeClient.js";
+import {
+  getStripe, stripeSecretKey, stripeWebhookSecret, stripeConnectWebhookSecret, StripeWebhookSecretMissingError,
+  type VerifiedWebhookEvent,
+} from "./stripeClient.js";
 // SP6 Task 5: registered directly below (not self-registered from
 // ticketing.ts, unlike the SP5 handlers this file's own header describes) so
 // this file stays the ONE place a reader finds the full purpose registry.
@@ -167,7 +170,7 @@ export const STALE_CLAIM_MS = 10 * 60 * 1000;
 const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const stripeWebhook = onRequest(
-  { region: "us-central1", secrets: [stripeSecretKey, stripeWebhookSecret] },
+  { region: "us-central1", secrets: [stripeSecretKey, stripeWebhookSecret, stripeConnectWebhookSecret] },
   async (req, res) => {
     if (req.method !== "POST") { res.status(405).end(); return; }
     if (req.rawBody == null) { res.status(400).send("missing body"); return; }
@@ -175,7 +178,7 @@ export const stripeWebhook = onRequest(
     if (typeof sigHeader !== "string") { res.status(400).send("missing signature"); return; }
 
     const stripe = getStripe();
-    let event: { id: string; type: string; account?: string; data: { object: Record<string, unknown> } };
+    let event: VerifiedWebhookEvent;
     try {
       event = stripe.constructWebhookEvent(req.rawBody, sigHeader);
     } catch (e) {
@@ -185,7 +188,7 @@ export const stripeWebhook = onRequest(
       // forged request. Stripe retries a 500, so a genuine delivery is not lost
       // once the secret is fixed; a forged one still gets the flat 400 below.
       if (e instanceof StripeWebhookSecretMissingError) {
-        console.error("stripeWebhook: STRIPE_WEBHOOK_SECRET is not configured, cannot verify signatures; refusing", e);
+        console.error(`stripeWebhook: ${e.secretName} is not configured, cannot verify signatures; refusing`, e);
         res.status(500).send("webhook misconfigured");
         return;
       }
@@ -198,6 +201,23 @@ export const stripeWebhook = onRequest(
     // target an arbitrary stripeEvents/{...} path instead of a single doc.
     if (!isValidDocId(event?.id) || typeof event?.type !== "string" || event?.data?.object == null) {
       res.status(400).send("bad event");
+      return;
+    }
+    // SP10 Task 4 (sp5 #3): the scope the SIGNATURE proved must match the scope
+    // the EVENT claims. A platform-secret delivery carrying a connected-account
+    // marker, or a Connect-secret delivery without one, is either a
+    // misregistered endpoint or a forgery, and either way nothing downstream
+    // may act on it. Refused at the boundary, before the claim machine records
+    // anything, with the same flat 400 a bad signature gets; the per-handler
+    // M1 guard below stays as defense in depth.
+    if (event.scope === "platform" && event.account) {
+      console.warn(`stripeWebhook: platform-signed event ${event.id} (${event.type}) carries account ${event.account}; refusing`);
+      res.status(400).send("scope mismatch");
+      return;
+    }
+    if (event.scope === "connect" && !event.account) {
+      console.warn(`stripeWebhook: connect-signed event ${event.id} (${event.type}) carries no account; refusing`);
+      res.status(400).send("scope mismatch");
       return;
     }
 

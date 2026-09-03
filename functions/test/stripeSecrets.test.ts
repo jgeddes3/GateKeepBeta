@@ -114,3 +114,23 @@ describe("H1, stripe secret declarations (branch audit regression guard)", () =>
     expect(declaring).toEqual(expected);
   });
 });
+
+// SP10 Task 4 (sp5 #3): the webhook verifies against TWO signing secrets, one
+// per Stripe endpoint scope ("Your account" and "Connected accounts"). Both
+// must be declared on stripeWebhook or a deployed function cannot resolve them.
+describe("SP10 Task 4: stripeWebhook declares both webhook signing secrets", () => {
+  it("stripeWebhook lists stripeWebhookSecret AND stripeConnectWebhookSecret", () => {
+    const src = readFileSync(path.join(SRC_DIR, "paymentsWebhook.ts"), "utf8");
+    const decl = src.search(/export const stripeWebhook\s*=\s*onRequest\b/);
+    expect(decl).toBeGreaterThanOrEqual(0);
+    const opts = optionsSlice(src, decl);
+    expect(opts).not.toBeNull();
+    expect(/\bstripeWebhookSecret\b/.test(opts!)).toBe(true);
+    expect(/\bstripeConnectWebhookSecret\b/.test(opts!)).toBe(true);
+  });
+
+  it("stripeClient.ts defines the Connect secret with the fixed name", () => {
+    const src = readFileSync(path.join(SRC_DIR, "stripeClient.ts"), "utf8");
+    expect(src).toContain('export const stripeConnectWebhookSecret = defineSecret("STRIPE_CONNECT_WEBHOOK_SECRET")');
+  });
+});

@@ -31,6 +31,16 @@ import Stripe from "stripe";
 // webhook additionally stripeWebhookSecret) in its options.
 export const stripeSecretKey = defineSecret("STRIPE_SECRET_KEY");
 export const stripeWebhookSecret = defineSecret("STRIPE_WEBHOOK_SECRET");
+// SP10 Task 4 (sp5 #3): a Stripe endpoint listens EITHER to events on your own
+// account OR to events on Connected accounts, and the two are separate
+// endpoint objects with separate signing secrets. payment_intent.* and
+// transfer.reversed are platform events; account.updated and payout.* are
+// connected-account events. The webhook verifies against both.
+export const stripeConnectWebhookSecret = defineSecret("STRIPE_CONNECT_WEBHOOK_SECRET");
+export type WebhookScope = "platform" | "connect";
+export interface VerifiedWebhookEvent {
+  id: string; type: string; account?: string; scope: WebhookScope; data: { object: Record<string, unknown> };
+}
 
 export interface ChargeResult { id: string; chargeId: string | null; }
 // A connected account's two payout buckets, read together (see getBalances).
@@ -101,9 +111,11 @@ export class StripeSetupIntentMismatchError extends Error {
 // secret) apart from a genuine forged/bad signature (respond 400). Never let a
 // missing secret degrade into an empty-string signature check.
 export class StripeWebhookSecretMissingError extends Error {
-  constructor() {
-    super("STRIPE_WEBHOOK_SECRET is not configured, refusing to verify webhook signatures.");
+  secretName: "STRIPE_WEBHOOK_SECRET" | "STRIPE_CONNECT_WEBHOOK_SECRET";
+  constructor(secretName: "STRIPE_WEBHOOK_SECRET" | "STRIPE_CONNECT_WEBHOOK_SECRET" = "STRIPE_WEBHOOK_SECRET") {
+    super(`${secretName} is not configured: refusing to verify webhook signatures.`);
     this.name = "StripeWebhookSecretMissingError";
+    this.secretName = secretName;
   }
 }
 
@@ -217,7 +229,11 @@ export interface StripeLike {
   // refuse to finalize a connected account's PaymentIntent as if it were the
   // platform's, and to pin account.updated/payout.* to the profile's cached
   // account.
-  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; account?: string; data: { object: Record<string, unknown> } };
+  //
+  // `scope` (SP10 Task 4, sp5 #3) says which secret verified the delivery; the
+  // dispatcher refuses a platform-scoped event that carries `account` and a
+  // connect-scoped event that does not.
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): VerifiedWebhookEvent;
 }
 
 function isAlreadyExists(e: unknown): boolean {
@@ -657,8 +673,15 @@ export class FakeStripe implements StripeLike {
       return { id };
     }, `${p.accountId}:${p.amountCents}`);
   }
-  constructWebhookEvent(rawBody: string | Buffer, signature: string): { id: string; type: string; account?: string; data: { object: Record<string, unknown> } } {
-    void signature; // Signature verification is a RealStripe-only concern, the emulator's fake webhook calls are same-process and already trusted.
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): VerifiedWebhookEvent {
+    // The fake models the TWO endpoint secrets as two header values. "fake"
+    // stays the platform alias so every existing test keeps posting platform
+    // events unchanged; a test posting a connected-account event signs it
+    // "fake:connect". Anything else is a bad signature, as it would be live.
+    let scope: WebhookScope;
+    if (signature === "fake" || signature === "fake:platform") scope = "platform";
+    else if (signature === "fake:connect") scope = "connect";
+    else throw new Error("FakeStripe: bad signature");
     const evt = JSON.parse(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8")) as
       { id: string; type: string; account?: unknown; data: { object: Record<string, unknown> } };
     // M1 (branch audit): mirror the real SDK's top-level connected-account
@@ -666,7 +689,7 @@ export class FakeStripe implements StripeLike {
     // exactly as a platform delivery arrives from Stripe; a test that needs a
     // connected-account event sets `account` on the event JSON it posts.
     return {
-      id: evt.id, type: evt.type, data: evt.data,
+      id: evt.id, type: evt.type, data: evt.data, scope,
       account: typeof evt.account === "string" ? evt.account : undefined,
     };
   }
@@ -921,26 +944,39 @@ export class RealStripe implements StripeLike {
       { idempotencyKey: p.idempotencyKey });
     return { id: c.id };
   }
-  constructWebhookEvent(rawBody: string | Buffer, signature: string) {
-    // H3 (branch audit): resolve the signing secret and FAIL CLOSED when it is
-    // absent. Passing `|| ""` to constructEvent (the old behavior) turns a
-    // MISCONFIGURED endpoint, no STRIPE_WEBHOOK_SECRET provisioned, into a
-    // signature check against the empty string. That is not a bad-signature
-    // rejection: it is verification silently degraded to a constant an attacker
-    // knows, so it must throw its OWN configuration error BEFORE constructEvent
-    // is ever called. The webhook handler distinguishes this (a loud 500) from a
-    // genuine forged signature (a 400).
-    const secret = stripeWebhookSecret.value() || process.env.STRIPE_WEBHOOK_SECRET;
-    if (!secret) {
-      throw new StripeWebhookSecretMissingError();
+  constructWebhookEvent(rawBody: string | Buffer, signature: string): VerifiedWebhookEvent {
+    // H3 (branch audit): resolve BOTH signing secrets and FAIL CLOSED when
+    // either is absent. A missing secret is a misconfigured endpoint, not a bad
+    // signature, and must throw its own configuration error BEFORE
+    // constructEvent is ever called; the webhook handler turns it into a loud
+    // 500 rather than the flat 400 a forged signature gets.
+    const platformSecret = stripeWebhookSecret.value() || process.env.STRIPE_WEBHOOK_SECRET;
+    if (!platformSecret) throw new StripeWebhookSecretMissingError("STRIPE_WEBHOOK_SECRET");
+    const connectSecret = stripeConnectWebhookSecret.value() || process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+    if (!connectSecret) throw new StripeWebhookSecretMissingError("STRIPE_CONNECT_WEBHOOK_SECRET");
+    // SP10 Task 4 (sp5 #3): the event's `account` cannot be read before
+    // verification, so try the platform secret first, then the Connect secret.
+    // The FIRST failure is what surfaces when both refuse: a genuine forgery
+    // fails both identically, and the platform endpoint is the busier one.
+    let evt: Stripe.Event;
+    let scope: WebhookScope;
+    try {
+      evt = this.s.webhooks.constructEvent(rawBody, signature, platformSecret);
+      scope = "platform";
+    } catch (platformError) {
+      try {
+        evt = this.s.webhooks.constructEvent(rawBody, signature, connectSecret);
+        scope = "connect";
+      } catch {
+        throw platformError;
+      }
     }
-    const evt = this.s.webhooks.constructEvent(rawBody, signature, secret);
     // M1 (branch audit): carry the event's top-level connected-account marker
-    // (`evt.account`) through to the dispatcher, present on a Connect event,
+    // (`evt.account`) through to the dispatcher, present on a Connect event and
     // absent on a platform event.
     const e = evt as unknown as { id: string; type: string; account?: unknown; data: { object: Record<string, unknown> } };
     return {
-      id: e.id, type: e.type, data: e.data,
+      id: e.id, type: e.type, data: e.data, scope,
       account: typeof e.account === "string" ? e.account : undefined,
     };
   }
