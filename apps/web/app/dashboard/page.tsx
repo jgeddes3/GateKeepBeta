@@ -12,7 +12,7 @@ import { Button } from "../../src/ui/button";
 import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
 import { Skeleton } from "../../src/ui/skeleton";
-import { IconBell, IconBuildings, IconEarnings, IconGigs, IconUser } from "../../src/ui/icons";
+import { IconBell, IconBuildings, IconEarnings, IconGigs, IconUser, IconWarning } from "../../src/ui/icons";
 
 // Task 9 (SP7): followerCount, read straight off the same profile doc this
 // list already fetches per membership (ProfileDoc.followerCount?: number,
@@ -322,6 +322,7 @@ function AdminEntry() {
 export default function Dashboard() {
   const { user, loading, signOutUser } = useAuth();
   const router = useRouter();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
 
   if (loading) {
@@ -336,6 +337,7 @@ export default function Dashboard() {
   const deleteAccount = async () => {
     if (!window.confirm("This permanently deletes your account and data. Continue?")) return;
     try {
+      setDeleteError(null);
       await httpsCallable(getFirebase().functions, "deleteAccount")({});
       // Navigate away first: this unmounts Dashboard (and its auth-guard
       // effect above), so that effect can't race signOutUser() below and
@@ -346,7 +348,7 @@ export default function Dashboard() {
       router.push("/");
       await signOutUser();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Can't delete yet.");
+      setDeleteError(e instanceof Error ? e.message : "Couldn't delete your account. Try again.");
     }
   };
 
@@ -396,6 +398,7 @@ export default function Dashboard() {
       <div className="mt-6 border-t border-gk-border pt-6">
         <p className="font-sora text-sm text-gk-muted">
           Deleting your account permanently removes it and everything tied to it. There&apos;s no undo.
+          Tickets to upcoming events, open transfers, and orders in progress block deletion until they resolve.
         </p>
         <Button
           type="button"
@@ -405,6 +408,12 @@ export default function Dashboard() {
         >
           Delete account
         </Button>
+        {deleteError && (
+          <p role="alert" className="mt-3 flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {deleteError}
+          </p>
+        )}
       </div>
     </main>
   );

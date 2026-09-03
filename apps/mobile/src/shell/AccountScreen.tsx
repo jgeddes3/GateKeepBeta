@@ -1,10 +1,11 @@
+import { useState } from "react";
 import { View, Pressable, Alert } from "react-native";
 import { useRouter } from "expo-router";
 import { httpsCallable } from "firebase/functions";
 import { useAuth } from "../auth/AuthProvider";
 import { getFirebase } from "../lib/firebase";
 import { NotificationsList } from "./NotificationsList";
-import { Text, Button, Card, ThemeToggle, PageBackground, IconCaretRight } from "../ui";
+import { Text, Button, Card, ThemeToggle, PageBackground, IconCaretRight, ErrorBanner } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -17,17 +18,24 @@ export function AccountScreen() {
   const { user, signOutUser } = useAuth();
   const router = useRouter();
   const t = useTokens();
+  // SP10 Task 13: a deletion refusal (tickets, transfers, orders, sole admin)
+  // renders inline under the button instead of a native alert, so the user
+  // can act on it with the rest of the screen still in view.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteAccount = () => {
     Alert.alert("Delete account", "This permanently deletes your account and data. Continue?",
       [{ text: "Cancel", style: "cancel" },
        { text: "Delete", style: "destructive", onPress: async () => {
+          setDeleteError(null);
           try {
             await httpsCallable(getFirebase().functions, "deleteAccount")({});
             // The callable already deleted the auth user server-side; sign
             // out locally too so client state (and the Gate redirect) don't
             // depend on onAuthStateChanged noticing the now-invalid token.
             await signOutUser();
-          } catch (e: any) { Alert.alert("Can't delete yet", e?.message ?? ""); }
+          } catch (e) {
+            setDeleteError(e instanceof Error ? e.message : "Couldn't delete your account. Try again.");
+          }
        } }]);
   };
   return (
@@ -56,6 +64,7 @@ export function AccountScreen() {
         </Card>
         <Button title="Sign out" variant="secondary" onPress={signOutUser} />
         <Button title="Delete account" variant="destructive" onPress={deleteAccount} />
+        <ErrorBanner message={deleteError} />
         <NotificationsList />
       </View>
     </View>

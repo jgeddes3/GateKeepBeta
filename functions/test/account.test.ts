@@ -3,7 +3,10 @@ import { signUpTestUser, callFn, wait, fetchPendingInviteId } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
-import type { ProfileDraftInput } from "@gatekeep/shared";
+import {
+  DELETE_ACCOUNT_TICKETS_MESSAGE, DELETE_ACCOUNT_TRANSFERS_MESSAGE, DELETE_ACCOUNT_ORDERS_MESSAGE,
+  type ProfileDraftInput,
+} from "@gatekeep/shared";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_AUTH_EMULATOR_HOST = "localhost:9099";
@@ -73,5 +76,74 @@ describe("deleteAccount", () => {
     await callFn("deleteAccount", {}, fan.user);
     expect((await adb.doc(`curatorAccess/${fan.uid}`).get()).exists).toBe(false);
     expect((await adb.doc(`curatorAccessRetries/${fan.uid}`).get()).exists).toBe(false);
+  });
+});
+
+// SP10 Task 13: every refusal is seeded directly via the admin SDK. The
+// subject is the gate, not the checkout/transfer flows that ordinarily
+// produce these docs (ticketing.test.ts covers those).
+async function seedFutureEvent(): Promise<string> {
+  const ref = adb.collection("events").doc();
+  const now = Date.now();
+  await ref.set({
+    curatorProfileId: "seed-curator", title: "Seeded show", description: "", status: "published",
+    location: { venueName: null, neighborhood: null, city: "Austin", geo: null, addressVisibility: "neighborhood", address: null },
+    startsAt: now + 86_400_000, endsAt: now + 90_000_000, posterPath: null, maxTicketsPerBuyer: 8,
+    lineup: [], lineupMusicianProfileIds: [], gigId: null, createdAt: now, updatedAt: now,
+  });
+  return ref.id;
+}
+
+describe("deleteAccount refusals (SP10)", () => {
+  it("refuses while the user holds a valid ticket to an event that has not ended; allows once it has", async () => {
+    const fan = await signUpTestUser(`da1-${Date.now()}@test.com`);
+    const eventId = await seedFutureEvent();
+    await adb.doc(`users/${fan.uid}/tickets/t1`).set({
+      eventId, tierId: "t", tierName: "General", orderId: "o1", curatorProfileId: "seed-curator",
+      qrSecret: "x", status: "checked_in", createdAt: Date.now(),
+    });
+    await expect(callFn("deleteAccount", {}, fan.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: DELETE_ACCOUNT_TICKETS_MESSAGE });
+    await adb.doc(`events/${eventId}`).update({ endsAt: Date.now() - 1000 });
+    await callFn("deleteAccount", {}, fan.user);
+    expect((await adb.doc(`users/${fan.uid}`).get()).exists).toBe(false);
+  });
+
+  it("refuses while a transfer is offered on either side", async () => {
+    const fan = await signUpTestUser(`da2-${Date.now()}@test.com`);
+    const now = Date.now();
+    const ref = adb.collection("transfers").doc();
+    await ref.set({ ticketId: "t", eventId: "e", fromUid: fan.uid, toUid: "other", status: "offered", createdAt: now, expiresAt: now + 86_400_000 });
+    await expect(callFn("deleteAccount", {}, fan.user))
+      .rejects.toMatchObject({ message: DELETE_ACCOUNT_TRANSFERS_MESSAGE });
+    await ref.set({ ticketId: "t", eventId: "e", fromUid: "other", toUid: fan.uid, status: "offered", createdAt: now, expiresAt: now + 86_400_000 });
+    await expect(callFn("deleteAccount", {}, fan.user))
+      .rejects.toMatchObject({ message: DELETE_ACCOUNT_TRANSFERS_MESSAGE });
+    await ref.update({ status: "declined", resolvedAt: now });
+    await callFn("deleteAccount", {}, fan.user);
+  });
+
+  it("refuses while a ticket order is pending", async () => {
+    const fan = await signUpTestUser(`da3-${Date.now()}@test.com`);
+    const now = Date.now();
+    const ref = adb.collection("orders").doc();
+    await ref.set({
+      buyerUid: fan.uid, eventId: "e", curatorProfileId: "c", items: [], faceTotalCents: 0, serviceFeeCents: 0,
+      feePolicy: { ticketFeePct: 7, ticketFeeFixedCents: 99, ticketFeeCapCents: 399 }, paymentIntentId: null,
+      status: "pending", refundedTicketIds: [], refundedCents: 0, refundedFaceCents: 0, createdAt: now, expiresAt: now + 600_000,
+    });
+    await expect(callFn("deleteAccount", {}, fan.user))
+      .rejects.toMatchObject({ message: DELETE_ACCOUNT_ORDERS_MESSAGE });
+    await ref.update({ status: "expired" });
+    await callFn("deleteAccount", {}, fan.user);
+  });
+
+  it("writes an account_deleted audit entry on success", async () => {
+    const fan = await signUpTestUser(`da4-${Date.now()}@test.com`);
+    await callFn("deleteAccount", {}, fan.user);
+    const logs = await adb.collection("auditLogs")
+      .where("targetId", "==", fan.uid).where("action", "==", "account_deleted").get();
+    expect(logs.size).toBe(1);
+    expect(logs.docs[0].data().actorUid).toBe(fan.uid);
   });
 });
