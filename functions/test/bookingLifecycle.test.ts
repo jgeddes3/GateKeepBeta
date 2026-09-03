@@ -570,6 +570,48 @@ describe("cancelOccurrence", () => {
     }
   });
 
+  it("SP10 Task 22 (sp4 #4): a date reopened on a booked run takes a SINGLE-occurrence booking, which can be accepted while the run keeps its own booking", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("reopc");
+    const { owner: musicianA, profileId: musicianAId } = await makeApprovedMusicianProfile("reopa");
+    const { owner: musicianB, profileId: musicianBId } = await makeApprovedMusicianProfile("reopb");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musicianA, profileId: musicianAId });
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musicianB, profileId: musicianBId });
+    const series = await seedSeries(curatorProfileId);
+    try {
+      const gigId1 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 100 * 3_600_000 });
+      const gigId2 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 268 * 3_600_000 });
+      await Promise.all([gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+
+      const { bookingId: runBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId1, musicianProfileId: musicianAId, offer: offerPayload() }, musicianA.user);
+      await callFn("acceptBooking", { bookingId: runBookingId }, curator.user);
+      await ageConfirmedAt(runBookingId);
+      await callFn("cancelOccurrence", { bookingId: runBookingId, gigId: gigId1, reason: "Private event that night." }, curator.user);
+      expect((await adb.doc(`gigs/${gigId1}`).get()).data()?.status).toBe("open");
+
+      // Musician B applies to the reopened date: single-occurrence, not a run.
+      const { bookingId: dateBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+        "applyToGig", { gigId: gigId1, musicianProfileId: musicianBId, offer: offerPayload() }, musicianB.user);
+      const dateBooking = (await adb.doc(`bookings/${dateBookingId}`).get()).data() as BookingRequestDoc;
+      expect(dateBooking.seriesId).toBeNull();
+
+      // Accept goes through (no "This series is already booked."): the date
+      // fills for B, the run's other date and the series linkage stay A's.
+      await callFn("acceptBooking", { bookingId: dateBookingId }, curator.user);
+      const gig1 = (await adb.doc(`gigs/${gigId1}`).get()).data();
+      expect(gig1?.status).toBe("filled");
+      expect(gig1?.bookingId).toBe(dateBookingId);
+      expect(gig1?.bookedMusicianProfileId).toBe(musicianBId);
+      const gig2 = (await adb.doc(`gigs/${gigId2}`).get()).data();
+      expect(gig2?.status).toBe("filled");
+      expect(gig2?.bookingId).toBe(runBookingId);
+      expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(runBookingId);
+      expect((await adb.doc(`bookings/${runBookingId}`).get()).data()?.status).toBe("confirmed");
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  });
+
   it("rejects a single-gig (non-whole-run) booking with failed-precondition", async () => {
     const { curator, bookingId, gigId } = await makeConfirmedBooking("occ1s");
     await expect(callFn("cancelOccurrence", { bookingId, gigId, reason: "n/a" }, curator.user))

@@ -2,7 +2,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import {
   validateOfferInput, isValidDocId, computeExpectedTotalCents, computeDepositCents,
-  MAX_BOOKING_THREAD_ENTRIES, MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE,
+  MAX_BOOKING_THREAD_ENTRIES, MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, THREAD_FULL_MESSAGE,
   DEPOSIT_PERCENT, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
   type BookingRequestDoc, type OfferEntry, type BookingSide, type GigDoc, type GigSeriesDoc,
   type AcceptedTerms, type BookingDeposit, type PaymentDoc, type StripeProfileDoc,
@@ -126,15 +126,21 @@ async function finalizeBookingRequest(params: {
       `A profile may have at most ${MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE} open initiated booking requests.`);
   }
 
-  // Whole-run detection: this booking targets the entire series' run (not
-  // just this one occurrence) only when the gig belongs to an ACTIVE series
-  // whose fillMode is "whole_run", a paused/ended series, or a
-  // per_occurrence one, books only this occurrence (seriesId stays null).
+  // Whole-run detection: this booking targets the entire series' run only
+  // when the gig belongs to an ACTIVE series whose fillMode is "whole_run"
+  // AND that series is not already booked. SP10 Task 22 (sp4 #4): a date
+  // reopened by cancelOccurrence on a booked run used to spawn a whole-run
+  // booking that acceptBooking's rebooking-door guard could never accept;
+  // with activeBookingId set, the reopened date books on its own
+  // (seriesId null), and every run-scoped unwind already filters on
+  // bookingId so the two bookings never touch each other's dates.
   let seriesId: string | null = null;
   if (gig.seriesId) {
     const seriesSnap = await db.doc(`gigSeries/${gig.seriesId}`).get();
     const series = seriesSnap.data() as GigSeriesDoc | undefined;
-    if (series?.fillMode === "whole_run" && series.status === "active") seriesId = gig.seriesId;
+    if (series?.fillMode === "whole_run" && series.status === "active" && series.activeBookingId == null) {
+      seriesId = gig.seriesId;
+    }
   }
 
   const now = Date.now();
@@ -188,6 +194,12 @@ export const applyToGig = onCall<ApplyToGigInput>({ region: "us-central1" }, asy
     // enumeration oracle for a non-member probing gig ids.
     throw new HttpsError("failed-precondition", "This gig is not open for applications.");
   }
+  // SP10 Task 22 (sp4 #24): an open gig whose date already passed is still
+  // listed until the daily sweep closes it. Same generic message as above,
+  // for the same enumeration reason.
+  if (gig.startsAt <= Date.now()) {
+    throw new HttpsError("failed-precondition", "This gig is not open for applications.");
+  }
   // Re-read: the curator profile may have been unpublished/rejected after
   // posting this gig, mirrors publishGig/updateGig's identical staleness
   // rationale in gigs.ts (a since-rejected profile's gig can still be
@@ -226,6 +238,10 @@ export const offerGig = onCall<OfferGigInput>({ region: "us-central1" }, async (
     // the caller must already be a member of the gig's own curator profile
     // to reach this line, so there's nothing to enumerate.
     throw new HttpsError("failed-precondition", `Cannot offer on a gig in status "${gig.status}".`);
+  }
+  // SP10 Task 22 (sp4 #24): mirrors publishGig's own past-date guard.
+  if (gig.startsAt <= Date.now()) {
+    throw new HttpsError("failed-precondition", "This gig's date has already passed.");
   }
   await requireApprovedMusicianProfile(input.musicianProfileId);
   await requireCuratorChargeable(gig.curatorProfileId);
@@ -300,8 +316,7 @@ export const counterBooking = onCall<CounterBookingInput>({ region: "us-central1
       throw new HttpsError("failed-precondition", BOOKING_LOCKED_BY_DEPOSIT_MESSAGE);
     }
     if (freshBooking.thread.length >= MAX_BOOKING_THREAD_ENTRIES) {
-      throw new HttpsError("resource-exhausted",
-        `A booking's negotiation thread may have at most ${MAX_BOOKING_THREAD_ENTRIES} entries.`);
+      throw new HttpsError("resource-exhausted", THREAD_FULL_MESSAGE);
     }
 
     const expectedQuantity = freshBooking.structure === "perHour" ? gig.durationMinutes / 60
@@ -604,13 +619,15 @@ async function readAndValidateAccept(
     if (!series || series.status !== "active") {
       throw new HttpsError("failed-precondition", GIG_UNAVAILABLE_MESSAGE);
     }
-    // Task 7 carry-forward (a), the rebooking door: a cancelOccurrence-
-    // reopened date on a still-active whole_run series can otherwise
-    // accept a FRESH whole-run applyToGig/offerGig even while the series
-    // is already linked to another confirmed run booking (applyToGig's
-    // whole-run detection only checks fillMode+status, never
-    // activeBookingId). Refuse here, a series names at most one confirmed
-    // run booking at a time.
+    // Task 7 carry-forward (a), the rebooking door: belt-and-suspenders
+    // backstop for a series naming at most one confirmed run booking at a
+    // time. SP10 Task 22 (sp4 #4): finalizeBookingRequest's own
+    // activeBookingId==null gate now stops a FRESH whole-run
+    // applyToGig/offerGig from even being CREATED while the series is
+    // already linked to another confirmed run booking (see
+    // bookingLifecycle.test.ts's reopened-date case), so this guard's own
+    // remaining exposure is a booking that reached "open" with this
+    // seriesId some other way.
     if (series.activeBookingId != null && series.activeBookingId !== bookingId) {
       throw new HttpsError("failed-precondition", "This series is already booked.");
     }

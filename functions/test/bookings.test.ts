@@ -3,7 +3,7 @@ import { signUpTestUser, makeAdminUser, seedCuratorGateContent, callFn, wait, ma
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import {
-  MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_BOOKING_THREAD_ENTRIES,
+  MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_BOOKING_THREAD_ENTRIES, THREAD_FULL_MESSAGE,
   DEPOSIT_PERCENT, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
   type ProfileDraftInput, type BookingRequestDoc, type OfferEntry,
 } from "@gatekeep/shared";
@@ -325,6 +325,16 @@ describe("applyToGig", () => {
         .rejects.toMatchObject({ code: "functions/invalid-argument" });
     });
   });
+
+  it("SP10 Task 22 (sp4 #24): refuses an open gig whose startsAt has elapsed", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("atpastc");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("atpastm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 }); // still "open": the sweep has not run
+    await expect(callFn("applyToGig", { gigId, musicianProfileId, offer: offerPayload() }, musician.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: expect.stringContaining("not open for applications") });
+  });
 });
 
 describe("offerGig", () => {
@@ -354,6 +364,16 @@ describe("offerGig", () => {
     const { user: stranger } = await signUpTestUser(`og2s-${Date.now()}@test.com`);
     await expect(callFn("offerGig", { gigId, musicianProfileId, offer: offerPayload() }, stranger))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("SP10 Task 22 (sp4 #24): refuses an open gig whose startsAt has elapsed", async () => {
+    const { owner: curator, profileId: curatorProfileId } = await makeApprovedCuratorProfile("ogpastc");
+    const { owner: musician, profileId: musicianProfileId } = await makeApprovedMusicianProfile("ogpastm");
+    await makeMoneyReady({ owner: curator, profileId: curatorProfileId }, { owner: musician, profileId: musicianProfileId });
+    const gigId = await createOpenGig(curatorProfileId, curator.user);
+    await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 });
+    await expect(callFn("offerGig", { gigId, musicianProfileId, offer: offerPayload() }, curator.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: expect.stringContaining("already passed") });
   });
 });
 
@@ -436,7 +456,7 @@ describe("counterBooking", () => {
     };
     await bookingRef.set(doc);
     await expect(callFn("counterBooking", { bookingId: bookingRef.id, offer: offerPayload() }, curator.user))
-      .rejects.toMatchObject({ code: "functions/resource-exhausted" });
+      .rejects.toMatchObject({ code: "functions/resource-exhausted", message: expect.stringContaining(THREAD_FULL_MESSAGE) });
   });
 });
 
@@ -741,23 +761,41 @@ describe("acceptBooking", () => {
     const series = await seedSeries(curatorProfileId, "whole_run");
     try {
       const gigId1 = await createOpenGig(curatorProfileId, curator.user);
-      const gigId2 = await createOpenGig(curatorProfileId, curator.user);
-      await Promise.all([gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+      await adb.doc(`gigs/${gigId1}`).update({ seriesId: series.id });
 
       const { bookingId: winnerBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
         "applyToGig", { gigId: gigId1, musicianProfileId: winnerProfileId, offer: offerPayload() }, winner.user);
       await callFn("acceptBooking", { bookingId: winnerBookingId }, curator.user);
       expect((await adb.doc(`gigSeries/${series.id}`).get()).data()?.activeBookingId).toBe(winnerBookingId);
 
-      // A FRESH occurrence appears on the already-booked run (simulating a
-      // cancelOccurrence-reopened date, or, as here, a newly materialized
-      // one), still "open", still whole_run+active, so a rival can apply
-      // and have their own booking targeted at the whole run too.
+      // A FRESH occurrence appears on the already-booked run (a newly
+      // materialized date, or one reopened by cancelOccurrence). SP10 Task
+      // 22 (sp4 #4) fixed applyToGig/offerGig so such a date books on its
+      // own (seriesId null, see bookingLifecycle.test.ts's reopened-date
+      // case) instead of wrongly targeting the whole run, so this booking is
+      // seeded directly rather than through applyToGig: it exercises
+      // acceptBooking's OWN activeBookingId check as the belt-and-suspenders
+      // backstop for any other way a whole-run booking might still reach
+      // "open" against an already-booked series.
       const gigId3 = await createOpenGig(curatorProfileId, curator.user);
       await adb.doc(`gigs/${gigId3}`).update({ seriesId: series.id });
-      const { bookingId: rivalBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-        "applyToGig", { gigId: gigId3, musicianProfileId: rivalProfileId, offer: offerPayload() }, rival.user);
-      expect((await adb.doc(`bookings/${rivalBookingId}`).get()).data()?.seriesId).toBe(series.id);
+      // The thread's `at` is set relative to the GIG doc's own post-update
+      // updatedAt (read back), not a fresh client Date.now(): the F2 gig-edit
+      // guard (bookings.ts) compares server-side clocks, and a client-side
+      // timestamp racing a loaded full-suite run has no such guarantee.
+      const gigAfter = (await adb.doc(`gigs/${gigId3}`).get()).data() as { updatedAt: number };
+      const rivalAt = gigAfter.updatedAt + 1;
+      const rivalRef = adb.collection("bookings").doc();
+      const rivalDoc: BookingRequestDoc = {
+        gigId: gigId3, seriesId: series.id, curatorProfileId, musicianProfileId: rivalProfileId,
+        initiatedBy: "musician", structure: "perHour",
+        thread: [{ by: "musician", amountCents: 15000, expectedQuantity: 1.5, note: null, at: rivalAt }],
+        awaitingSide: "curator", status: "open",
+        acceptedTerms: null, deposit: null, cancellation: null,
+        createdAt: rivalAt, updatedAt: rivalAt, confirmedAt: null, resolvedAt: null,
+      };
+      await rivalRef.set(rivalDoc);
+      const rivalBookingId = rivalRef.id;
 
       await expect(callFn("acceptBooking", { bookingId: rivalBookingId }, curator.user)).rejects.toMatchObject({
         code: "functions/failed-precondition",

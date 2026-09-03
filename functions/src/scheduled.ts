@@ -486,6 +486,9 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             // createGig's "draft" default for a member-authored one-off.
             const gig: GigDoc = {
               curatorProfileId: series.curatorProfileId, seriesId: seriesDoc.id, detachedFromTemplate: false,
+              // SP10 Task 22 (sp4 #2): public, so browse and detail can say
+              // "Books as a run" without a member-only gigSeries read.
+              fillMode: series.fillMode,
               title: series.template.title, description: series.template.description, wants: series.template.wants,
               budget: series.template.budget, startsAt, durationMinutes: series.template.durationMinutes,
               provisions: series.template.provisions, location: series.template.location,
@@ -747,12 +750,16 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     for await (const page of paginate(openBookingsQuery, SWEEP_PAGE_SIZE)) {
       for (const doc of page) {
         const booking = doc.data() as BookingRequestDoc;
+        // SP10 Task 22 (sp4 #14): an accept saga is mid-flight on this
+        // booking; the payments sweep's step 1 owns it (its rule 3). Expiring
+        // it here would turn a recoverable saga into an admin alert.
+        if (booking.depositChargePending === true) continue;
         const gigSnap = await db.doc(`gigs/${booking.gigId}`).get();
         const gig = gigSnap.data() as GigDoc | undefined;
         if (!gig || gig.startsAt < now || gig.status !== "open") {
           await writer.update(doc.ref, { status: "expired", resolvedAt: now, updatedAt: now });
           report.bookingsExpired++;
-          // Per-item try/catch (S3 sweep philosophy), one failed notify
+          // Per-item try/catch (S3 sweep philosophy): one failed notify
           // must never abort the rest of this step.
           try {
             await notifyProfileMembers(booking.musicianProfileId, {
@@ -760,6 +767,18 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
             });
           } catch (e) {
             console.error(`dailySweep: failed to notify expired booking ${doc.id}`, e);
+          }
+          // SP10 Task 22 (sp4 #23): a curator who sent the offer learns it
+          // lapsed, like every other resolution notifies both sides.
+          if (booking.initiatedBy === "curator") {
+            try {
+              await notifyProfileMembers(booking.curatorProfileId, {
+                kind: "booking", refId: doc.id, title: "Your offer expired",
+                body: "The gig is no longer available, so this offer has expired.",
+              });
+            } catch (e) {
+              console.error(`dailySweep: failed to notify curator of expired offer ${doc.id}`, e);
+            }
           }
         }
       }

@@ -153,6 +153,7 @@ export const createGig = onCall<CreateGigInput>({ region: "us-central1", secrets
   const gigRef = db.collection("gigs").doc();
   const gig: GigDoc = {
     curatorProfileId: input.profileId, seriesId: null, detachedFromTemplate: false,
+    fillMode: null,
     title: input.title.trim(), description: input.description.trim(),
     wants: { genres: input.wants.genres, actSizes: input.wants.actSizes },
     budget: { minCents: input.budget.minCents, maxCents: input.budget.maxCents, structure: input.budget.structure },

@@ -85,9 +85,11 @@ async function makeConfirmedBooking(prefix: string, opts: { pastStartHours?: num
   const musician = await makeApprovedMusicianProfile(`${prefix}m`);
   await makeMoneyReady(curator, musician);
   const gigId = await createOpenGig(curator.profileId, curator.owner.user);
-  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
     "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: { amountCents: RATE_CENTS, note: "Hi" } }, musician.owner.user);
+  // SP10 Task 22 (sp4 #24): applyToGig now refuses an already-elapsed
+  // startsAt, so the past-dating must happen AFTER the offer, not before.
+  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   await callFn("acceptBooking", { bookingId }, curator.owner.user);
   return { curator, musician, gigId, bookingId };
 }

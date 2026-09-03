@@ -223,9 +223,11 @@ async function makeConfirmedSingleBooking(prefix: string, opts: { pastStartHours
   const musician = await makeApprovedMusicianProfile(`${prefix}m`);
   await makeMoneyReady(curator, musician);
   const gigId = await createOpenGig(curator.profileId, curator.owner.user);
-  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
     "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+  // SP10 Task 22 (sp4 #24): applyToGig now refuses an already-elapsed
+  // startsAt, so the past-dating must happen AFTER the offer, not before.
+  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   await callFn("acceptBooking", { bookingId }, curator.owner.user);
   return { curator, musician, gigId, bookingId };
 }
@@ -766,14 +768,16 @@ describe("payments sweep, accept-saga reconciliation (step 1)", () => {
     const musician = await makeApprovedMusicianProfile("swrule3m");
     await makeMoneyReady(curator, musician);
     const gigId = await createOpenGig(curator.profileId, curator.owner.user);
+    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     // PAST-dated before staging, so the staged doc's own occurrenceStartsAt is
     // past too (it is stamped at staging time). That is what puts this doc in
     // step 4's due-occurrence net as well as step 7's expired-booking net,
     // one fixture then exercises all three guards, and the `not_due`
-    // assertion below becomes load-bearing rather than incidental.
+    // assertion below becomes load-bearing rather than incidental. SP10 Task
+    // 22 (sp4 #24): AFTER the offer, though, applyToGig itself now refuses
+    // an already-elapsed startsAt.
     await setGigStartsAt(gigId, -5);
-    const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
-      "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
     await stageAcceptManually(bookingId, gigId, 1);
 
     // Exactly what unwindBookingsForModeration / the daily sweep's expiry step

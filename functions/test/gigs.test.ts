@@ -110,6 +110,7 @@ describe("createGig", () => {
     expect(pub.curatorProfileId).toBe(profileId);
     expect(pub.seriesId).toBeNull();
     expect(pub.detachedFromTemplate).toBe(false);
+    expect(pub.fillMode).toBeNull(); // SP10 Task 22: a one-off gig books one date
     expect(pub.location.addressVisibility).toBe("public");
     expect(pub.location.address).toBe(SEED_ADDRESS);
     expect(pub.location.venueName).toBe("The Green Room");

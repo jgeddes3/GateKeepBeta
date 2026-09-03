@@ -207,6 +207,16 @@ describe("runDailySweep, series materialization", () => {
     expect(series.materializedThrough).toBe(anchor + 56 * DAY_MS);
   });
 
+  it("SP10 Task 22: stamps the series' fillMode on every materialized occurrence", async () => {
+    const createdAt = Date.now();
+    const anchor = expectedAnchor(createdAt, 5, 20, 0);
+    const { seriesId } = await seedSeries({ createdAt, updatedAt: createdAt, fillMode: "whole_run" });
+    await runDailySweep(anchor);
+    const occs = await occurrencesFor(seriesId);
+    expect(occs.length).toBeGreaterThan(0);
+    for (const occ of occs) expect(occ.data().fillMode).toBe("whole_run");
+  });
+
   it("biweekly cadence materializes exactly ceil(8w/2w)=4 occurrences, 14 days apart", async () => {
     const createdAt = Date.now();
     const { seriesId } = await seedSeries({
@@ -690,6 +700,41 @@ describe("runDailySweep, SP4 Task 8: booking expiry sweep (step 6)", () => {
     expect(booking.resolvedAt).toBe(now);
     const notes = await pollNotifications(musicianUid);
     expect(notes.empty).toBe(false);
+  });
+
+  it("SP10 Task 22 (sp4 #14): leaves an open booking with depositChargePending untouched even though its gig has started", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const gigId = await seedOccurrence("not-a-real-series", curatorProfileId, { status: "open", startsAt: now - 3600_000 });
+    const { bookingId } = await seedBooking({
+      gigId, seriesId: null, curatorProfileId, musicianProfileId, status: "open", depositChargePending: true,
+    });
+
+    await runDailySweep(now);
+
+    const booking = (await adb.doc(`bookings/${bookingId}`).get()).data() as BookingRequestDoc;
+    expect(booking.status).toBe("open"); // the payments sweep's saga step owns this booking
+  });
+
+  it("SP10 Task 22 (sp4 #23): notifies the curator side when a curator-initiated offer expires", async () => {
+    const now = Date.now();
+    const curatorProfileId = fakeProfileId();
+    const musicianProfileId = fakeProfileId();
+    const curatorUid = fakeUid();
+    await seedMember(curatorProfileId, curatorUid);
+    const gigId = await seedOccurrence("not-a-real-series", curatorProfileId, { status: "cancelled", startsAt: now + 3600_000 });
+    const { bookingId } = await seedBooking({
+      gigId, seriesId: null, curatorProfileId, musicianProfileId, status: "open",
+      initiatedBy: "curator", awaitingSide: "musician",
+      thread: [{ by: "curator", amountCents: 10_000, expectedQuantity: 1, note: null, at: now }],
+    });
+
+    await runDailySweep(now);
+
+    expect((await adb.doc(`bookings/${bookingId}`).get()).data()?.status).toBe("expired");
+    const notes = await pollNotifications(curatorUid);
+    expect(notes.docs.some((d) => d.data().refId === bookingId && d.data().title === "Your offer expired")).toBe(true);
   });
 });
 

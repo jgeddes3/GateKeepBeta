@@ -820,16 +820,19 @@ describe("Task 6 accept saga", () => {
     const musician = await makeApprovedMusicianProfile("t6pstm");
     await makeMoneyReady(curator, musician);
     // publishGig refuses a past startsAt outright, so publish it in the
-    // future and push it into the past via the admin SDK, BEFORE the offer,
-    // so the thread's only entry postdates the edit and the F2 gig-edit guard
-    // has nothing to trip on. (Mirrors bookingLifecycle.test.ts's
-    // setGigStartsAt, whose whole-run fixture seeds a past occurrence the
-    // same way.)
+    // future, apply while it's still (barely) open, THEN push it into the
+    // past via the admin SDK. SP10 Task 22 (sp4 #24): applyToGig itself now
+    // refuses an already-elapsed startsAt, so the time-travel must land
+    // after the offer, not before; a raw admin-SDK field update doesn't
+    // touch gig.updatedAt, so the thread's only entry still predates it and
+    // the F2 gig-edit guard has nothing to trip on either way. (Mirrors
+    // bookingLifecycle.test.ts's setGigStartsAt, whose whole-run fixture
+    // seeds a past occurrence the same way.)
     const gigId = await createOpenGig(curator.profileId, curator.owner.user, { durationMinutes: 90 });
-    await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 });
 
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    await adb.doc(`gigs/${gigId}`).update({ startsAt: Date.now() - 3_600_000 });
 
     await callFn("acceptBooking", { bookingId }, curator.owner.user);
 
@@ -1337,9 +1340,11 @@ async function makeConfirmedSingleBooking(prefix: string, opts: { pastStartHours
   const musician = await makeApprovedMusicianProfile(`${prefix}m`);
   await makeMoneyReady(curator, musician);
   const gigId = await createOpenGig(curator.profileId, curator.owner.user);
-  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
     "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+  // SP10 Task 22 (sp4 #24): applyToGig itself now refuses an already-elapsed
+  // startsAt, so the past-dating must happen AFTER the offer, not before.
+  if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   await callFn("acceptBooking", { bookingId }, curator.owner.user);
   return { curator, musician, gigId, bookingId };
 }

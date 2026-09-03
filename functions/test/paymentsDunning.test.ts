@@ -143,13 +143,15 @@ async function makeEndedBookingFor(
   opts: { gig?: Record<string, unknown>; offer?: Record<string, unknown> } = {},
 ): Promise<{ gigId: string; bookingId: string }> {
   const gigId = await createOpenGig(curator.profileId, curator.owner.user, opts.gig ?? {});
-  // BEFORE the accept: a payment doc's `occurrenceStartsAt` is stamped at
-  // accept time and never follows a later gig edit.
-  await setGigStartsAt(gigId, -5);
   const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
     "applyToGig",
     { gigId, musicianProfileId: musician.profileId, offer: opts.offer ?? offerPayload() },
     musician.owner.user);
+  // BEFORE the accept: a payment doc's `occurrenceStartsAt` is stamped at
+  // accept time and never follows a later gig edit. SP10 Task 22 (sp4 #24):
+  // AFTER the offer, though, applyToGig itself now refuses an
+  // already-elapsed startsAt.
+  await setGigStartsAt(gigId, -5);
   await callFn("acceptBooking", { bookingId }, curator.owner.user);
   return { gigId, bookingId };
 }

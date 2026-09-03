@@ -267,11 +267,13 @@ async function makeEndedBooking(
   const musician = await makeApprovedMusicianProfile(`${prefix}m`);
   await makeMoneyReady(curator, musician);
   const gigId = await createOpenGig(curator.profileId, curator.owner.user, opts.gig ?? {});
-  await setGigStartsAt(gigId, -(opts.pastStartHours ?? 5));
   const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
     "applyToGig",
     { gigId, musicianProfileId: musician.profileId, offer: opts.offer ?? offerPayload() },
     musician.owner.user);
+  // SP10 Task 22 (sp4 #24): applyToGig now refuses an already-elapsed
+  // startsAt, so the past-dating must happen AFTER the offer, not before.
+  await setGigStartsAt(gigId, -(opts.pastStartHours ?? 5));
   await callFn("acceptBooking", { bookingId }, curator.owner.user);
   return { curator, musician, gigId, bookingId };
 }
@@ -505,9 +507,11 @@ describe("settlement, the full T+3 pipeline", () => {
       uid: musician.owner.uid, role: "member", label: "also here", joinedAt: Date.now(),
     });
     const gigId = await createOpenGig(curator.profileId, curator.owner.user);
-    await setGigStartsAt(gigId, -5);
     const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
       "applyToGig", { gigId, musicianProfileId: musician.profileId, offer: offerPayload() }, musician.owner.user);
+    // SP10 Task 22 (sp4 #24): applyToGig now refuses an already-elapsed
+    // startsAt, so the past-dating must happen AFTER the offer, not before.
+    await setGigStartsAt(gigId, -5);
     await callFn("acceptBooking", { bookingId }, curator.owner.user);
     expect((await getBooking(bookingId)).selfDeal).toBe(true);
     const accountId = await musicianAccountId(musician.profileId);
