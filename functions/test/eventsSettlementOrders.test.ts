@@ -95,4 +95,97 @@ describe("per-order ticket settlement", () => {
     const ob = (await adb.doc(`orders/${orderB}`).get()).data()!;
     expect(ob.settlementLegs).toBe(1);
   });
+
+  // Fix round 1 (Critical, migration): an event whose ONE event-wide
+  // transfer already succeeded under the pre-Task-7 code, before this
+  // deploy ever ran, is still "published" (its completion write never
+  // landed) with `settlementStartedAt` set but no order stamped with its
+  // own `settledAt` (that field did not exist yet). Recognised by the
+  // legacy `ticket_settlement` ledger row (no `orderId`, the old code's own
+  // shape): the sweep must stamp the order to match, WITHOUT attempting a
+  // second transfer.
+  it("recognises an event settled under the old per-event key and stamps its order without a second transfer", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("leg1");
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "GA", priceCents: 1000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const ga = await tierIdByName(eventId, "GA");
+    const a = await makeBuyer("leg1a");
+    const orderA = await payOrder(eventId, ga, 1, a.user);
+    await pushEventPastSettleWindow(eventId);
+
+    // Fabricate the legacy state: settlementStartedAt set (the old single
+    // transfer succeeded), the order has NO settledAt, and a legacy
+    // ticket_settlement ledger row with no orderId.
+    await adb.doc(`events/${eventId}`).update({ settlementStartedAt: Date.now(), settlementClaimedAt: Date.now() });
+    await adb.collection("ledger").doc("legacy-ticket-settlement-row").set({
+      kind: "ticket_settlement", amountCents: 1000, bookingId: null, gigId: null,
+      profileId, stripeId: "tr_legacy_fake", detail: "legacy ticket settlement (pre Task 7)",
+      eventId, buyerUid: null, at: Date.now(),
+    });
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.ticketSettlementsCompleted).toBeGreaterThanOrEqual(1);
+
+    const ev = (await adb.doc(`events/${eventId}`).get()).data()!;
+    expect(ev.status).toBe("completed");
+
+    const oa = (await adb.doc(`orders/${orderA}`).get()).data()!;
+    expect(oa.settledAt).toBeTypeOf("number");
+    expect(oa.settlementLegs).toBe(1);
+    expect(oa.settlementProfileCents).toBe(1000);
+
+    // No second transfer: the curator's fake connected-account balance never
+    // moved for this pass (the legacy transfer this test fabricates was
+    // never itself credited to the fake account, so 0 is the correct proof
+    // that nothing moved just now).
+    const acct = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+    expect(acct?.balanceCents ?? 0).toBe(0);
+
+    // Still exactly the one legacy row: no new per-order row was written.
+    const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("legacy-ticket-settlement-row");
+  });
+
+  // Fix round 1 (Important 5): the genuine idempotent-replay case, distinct
+  // from the legacy-migration test above (that one's ledger row carries no
+  // orderId; this order's own row does, so the sweep must NOT treat this as
+  // a legacy event, it must replay the SAME per-order transfer).
+  it("replays cleanly after a crash between a successful transfer and its settledAt stamp", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("rep1");
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "GA", priceCents: 1500, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const ga = await tierIdByName(eventId, "GA");
+    const a = await makeBuyer("rep1a");
+    const orderA = await payOrder(eventId, ga, 1, a.user);
+    await pushEventPastSettleWindow(eventId);
+
+    await runPaymentsSweep(Date.now());
+    const afterFirst = (await adb.doc(`events/${eventId}`).get()).data()!;
+    expect(afterFirst.status).toBe("completed");
+    const acctAfterFirst = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+    expect(acctAfterFirst?.balanceCents).toBe(1500);
+
+    // Simulate the crash window: the transfer succeeded and the ledger row
+    // landed, but the order's own settledAt stamp (and the event's own
+    // completion) never made it, by hand-reverting both.
+    await adb.doc(`orders/${orderA}`).update({ settledAt: FieldValue.delete() });
+    await adb.doc(`events/${eventId}`).update({ status: "published" });
+
+    const report = await runPaymentsSweep(Date.now());
+    expect(report.errors.ticketSettlementTransfer ?? 0).toBe(0);
+
+    const afterRetry = (await adb.doc(`events/${eventId}`).get()).data()!;
+    expect(afterRetry.status).toBe("completed");
+    // Unchanged: the SAME per-order idempotency key replayed the SAME
+    // transfer instead of minting a second one.
+    const acctAfterRetry = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
+    expect(acctAfterRetry?.balanceCents).toBe(1500);
+
+    const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");
+    const orderRows = rows.filter((r) => r.data().orderId === orderA);
+    expect(orderRows).toHaveLength(1);
+  });
 });

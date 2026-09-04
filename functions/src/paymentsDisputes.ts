@@ -259,6 +259,24 @@ async function reverseForLostDispute(
       // one order at a time and other orders of the same event can be settled
       // (or still pending) independently of this one.
       if (order.settledAt == null) {
+        const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
+        const event = eventSnap.data() as EventDoc | undefined;
+        // SP5c Task 7 fix round 1 (Critical, migration): `settlementStartedAt`
+        // already set with THIS order still carrying no `settledAt` can only
+        // mean the event was fully settled under the OLD per-event model
+        // (before this task), whose single transfer already paid this
+        // order's share; there is no per-order `settledAt` because that
+        // field did not exist yet under that model. Shrinking the basis
+        // here would be wrong (the money already left, under a key this
+        // order's own reversal can no longer replay against), so this is
+        // handed to an operator instead, exactly as the pre-Task-7 code's
+        // "settled, no matching row" branch already did.
+        if (event?.settlementStartedAt != null) {
+          return {
+            kind: "no-op",
+            reason: "legacy per-event settlement: this order was paid under the old event-level key; reverse manually in Stripe",
+          };
+        }
         // SP10 Task 9 fix round 1 (Critical 1): a FRESH `settlementClaimedAt`
         // means a settlement pass for this event may be mid-flight RIGHT NOW,
         // and this order could be the very one it is about to transfer (or has
@@ -273,8 +291,6 @@ async function reverseForLostDispute(
         // fires and an operator finishes the unwind in Stripe. A STALE claim
         // belongs to a settlement that kept failing and falls through to the
         // pre-settlement reduction below.
-        const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
-        const event = eventSnap.data() as EventDoc | undefined;
         const claimedAt = event?.settlementClaimedAt;
         if (claimedAt != null && now - claimedAt < SETTLEMENT_CLAIM_STALE_MS) {
           return {
@@ -303,17 +319,25 @@ async function reverseForLostDispute(
     });
     if (result.kind === "no-op") return nothingReversed(result.reason);
     if (result.kind === "reduced") return nothingReversed(null);
-    if (!result.transferId) {
-      return nothingReversed("no transfer: the order is marked settled but no ticket_settlement row names its transfer");
-    }
     // SP5c Task 7 (Ruling E, mirrors Task 6's booking-settlement cap): cap the
     // reversal at the PROFILE's own share of this order's settlement, never
     // the split total. `dist.transferId` (payoutShares.ts, distributeEarnings)
     // is the profile's own transfer, a member's transferred share is not this
     // profile's account and this path must never reach into it.
+    //
+    // FIX ROUND 1 (Important 4): checked BEFORE `!result.transferId` below.
+    // An all-held order's `ticket_settlement` row carries a deterministic
+    // `held:ticket_settlement:...` pseudo id (paymentsSweep.ts), never null,
+    // so `!result.transferId` alone can no longer tell "nothing to reverse
+    // because it's all held" from "a real transfer exists"; checking the
+    // profile's actual share first is what still gives the accurate reason
+    // (and refuses to call Stripe with a pseudo id either way).
     const profileCap = Math.min(result.faceCents, result.profileCents ?? result.faceCents);
     if (profileCap <= 0) {
       return nothingReversed("no transfer: the profile's share of this order was 0, member shares are not recovered");
+    }
+    if (!result.transferId) {
+      return nothingReversed("no transfer: the order is marked settled but no ticket_settlement row names its transfer");
     }
     const r = await stripe.reverseTransfer({
       transferId: result.transferId, amountCents: profileCap, idempotencyKey: `dispute_reverse:${disputeId}`,

@@ -72,7 +72,10 @@ type CreateOrderResult = { orderId: string; clientSecret: string | null };
 
 // Same FakeStripe test hook ticketing.test.ts/ticketingRefunds.test.ts use:
 // the emulator has no browser Elements flow, so "the buyer confirmed" is
-// simulated by flipping the fake intent's own stored status.
+// simulated by flipping the fake intent's own stored status. Deliberately
+// leaves the intent without a `chargeId` (unlike ticketFixtures.ts's own
+// copy, added for SP5c Task 7's per-order sourcing tests): every order this
+// suite settles is therefore exercised on the UNSOURCED path.
 async function confirmFakeIntent(clientSecret: string): Promise<string> {
   const intentId = clientSecret.replace(/_secret_fake$/, "");
   await adb.doc(`stripeFake/state/objects/${intentId}`).update({ status: "succeeded" });

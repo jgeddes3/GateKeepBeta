@@ -96,7 +96,7 @@ export async function payOrder(
 // directly, same shortcut helpers.ts's makeMoneyReady takes for the
 // musician side of an SP5 booking (the account.updated webhook that would
 // normally flip these flags is never triggered by these fixtures).
-export async function makeCuratorPayoutReady(profileId: string, ownerUser: import("firebase/auth").User): Promise<void> {
+export async function makeCuratorPayoutReady(profileId: string, ownerUser: import("firebase/auth").User): Promise<string> {
   await callFn("createOnboardingLink", { profileId }, ownerUser);
   const sp = (await adb.doc(`profiles/${profileId}/private/stripe`).get()).data();
   if (!sp?.accountId) {

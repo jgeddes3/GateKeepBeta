@@ -1083,7 +1083,7 @@ Also update `eventsSettlement.test.ts`'s "settles the face value of the non-refu
   // unchanged: the completion transaction
 ```
 
-`PaymentsSweepReport` gains `ticketOrdersSettled: 0`. The all-free case still completes the event with no ledger row. Note: the old `ticket_settlement:${eventId}` key is never reused, so an event settled before this change (`settlementStartedAt` set) is skipped by the claim as before.
+`PaymentsSweepReport` gains `ticketOrdersSettled: 0`. The all-free case still completes the event with no ledger row. Note: the old `ticket_settlement:${eventId}` key is never reused, so an event settled before this change (settlementStartedAt set, no order stamped) is recognised by its legacy per-event ledger row and its orders are stamped without a second transfer.
 
 - [ ] **Step 3: Run, commit**
 

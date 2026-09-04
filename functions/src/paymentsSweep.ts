@@ -84,6 +84,18 @@ import { distributeEarnings } from "./payoutShares.js";
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// SP5c Task 7 fix round 1 (Important 6): the per-EVENT bound on how many
+// orders one settleOneEvent call will settle in a single pass. Without this
+// an event with thousands of pending orders (a huge free RSVP event, or one
+// whose curator was blocked for a long time) settles them all in one
+// function invocation, risking a timeout that leaves the whole batch
+// re-attempted from the top next hour. Hitting the budget with orders still
+// pending logs and returns (never completes the event, and never `break`s
+// into the completion transaction): the next hourly pass picks up exactly
+// where this one left off, since every order already stamped this pass is
+// `settledAt`-excluded from `pending` on the next read.
+const TICKET_SETTLEMENT_ORDERS_PER_PASS = 200;
+
 // IDEMPOTENCY_WINDOW_MS (paymentsCore.ts) is the Stripe contract; what follows
 // is how THIS file measures against it. Both staleness guards below use the
 // doc's own `updatedAt` as the "first seen in this state" clock: every
@@ -1686,101 +1698,184 @@ async function settleOneEvent(
     const { claim, claimedAt } = await claimSettlementStart(db, doc.ref, now);
     if (claim === "not_published") return; // raced (cancelled, or resolved) since the read above
 
-    // Tracks the field's REAL state through this pass: true already when
-    // `claim === "already_started"` (claimSettlementStart only returns that
-    // when settlementStartedAt is already set), and flips true the moment
-    // this pass's first order transfers successfully (Important 2: once ANY
-    // order has settled, cancel is refused forever, so the claim must never
-    // be released again after that point either).
-    let settlementStarted = event.settlementStartedAt != null;
-
-    for (const orderDoc of pending) {
-      const order = orderDoc.data() as TicketOrderDoc;
-      const amount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
-      if (amount === 0) {
-        // Nothing owed for this order (every ticket free, or refunded/
-        // disputed down to zero already): settle it with no transfer and no
-        // ledger row, same as the all-free event path below.
-        await orderDoc.ref.update({ settledAt: now, settlementLegs: 0, settlementProfileCents: 0 });
-        continue;
-      }
-      // SOURCING (Ruling F): prefer the charge completeOrderTx already
-      // stamped on the order; fall back to a lookup for an order that
-      // predates that stamp. A charge that still can't be resolved leaves
-      // `source: null` below, an UNSOURCED transfer, never a failure.
-      let chargeId = order.chargeId ?? null;
-      let chargeAmountCents = order.chargeAmountCents ?? null;
-      if (!chargeId && order.paymentIntentId) {
-        const intent = await getStripe().retrieveIntent(order.paymentIntentId).catch(() => null);
-        chargeId = intent?.chargeId ?? null;
-        chargeAmountCents = intent?.amountCents ?? null;
-        if (chargeId) {
-          await orderDoc.ref.update({ chargeId, chargeAmountCents }).catch(() => undefined);
+    // FIX ROUND 1 (Critical, migration): `claim === "already_started"` means
+    // `settlementStartedAt` was ALREADY set before this pass ever ran, which
+    // under the pre-Task-7 code only happened after that event's ONE
+    // event-wide transfer succeeded. If NO paid order of this event carries
+    // its own `settledAt` yet, that transfer predates the per-order fields
+    // entirely, and walking `pending` below under the new per-order keys
+    // would pay every one of those orders a SECOND time. Recognise this by
+    // the legacy `ticket_settlement` ledger row the old code wrote (kind +
+    // eventId, but no `orderId`, a field the old code never set): if one
+    // exists, this event was already fully paid under the old model, so
+    // every pending order is stamped to MATCH what that single old transfer
+    // already covered, with no new transfer at all.
+    let legacySettled = false;
+    if (claim === "already_started") {
+      const anyOrderAlreadySettled = ordersSnap.docs.some((o) => (o.data() as TicketOrderDoc).settledAt != null);
+      if (!anyOrderAlreadySettled) {
+        const legacySnap = await db.collection("ledger")
+          .where("kind", "==", "ticket_settlement").where("eventId", "==", doc.id).get();
+        const legacyRow = legacySnap.docs.find((d) => d.data().orderId == null);
+        if (legacyRow) {
+          legacySettled = true;
+          console.info(
+            `paymentsSweep: event ${doc.id} was already fully settled under the old per-event ticket_settlement `
+            + `key (ledger row ${legacyRow.id}); stamping ${pending.length} pending order(s) to match, no new transfer`);
+          for (let i = 0; i < pending.length; i++) {
+            const orderDoc = pending[i];
+            const order = orderDoc.data() as TicketOrderDoc;
+            const legacyAmount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
+            await orderDoc.ref.update({ settledAt: now, settlementLegs: 1, settlementProfileCents: legacyAmount });
+            report.ticketOrdersSettled++;
+            if ((i + 1) % TICKET_SETTLEMENT_ORDERS_PER_PASS === 0 && i < pending.length - 1) {
+              console.info(
+                `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
+                + "stamping legacy-settled orders, with orders still pending; resuming next pass");
+              return;
+            }
+          }
         }
-      }
-      try {
-        const dist = await distributeEarnings({
-          profileId: event.curatorProfileId, amountCents: amount,
-          source: chargeId && chargeAmountCents != null
-            ? { chargeId, remainingCents: chargeAmountCents - order.refundedCents } : null,
-          purpose: "ticket_settlement", ref: { eventId: doc.id, orderId: orderDoc.id },
-          idempotencyBase: `ticket_settlement:${doc.id}:${orderDoc.id}`,
-          meta: { purpose: "ticket_settlement", eventId: doc.id, orderId: orderDoc.id },
-          profileAccountId: curatorStripe.accountId, now,
-        });
-        await orderDoc.ref.update({
-          settledAt: now, settlementLegs: dist.legs.length, settlementProfileCents: dist.profileCents,
-        });
-        // Ruling A: stamped ONCE, right after the first successful order
-        // transfer of this pass, not after the whole loop, so an event whose
-        // order A settles and whose order B then refuses cannot be cancelled
-        // out from under order A's already-received transfer.
-        if (!settlementStarted) {
-          await doc.ref.update({ settlementStartedAt: now, updatedAt: now });
-          settlementStarted = true;
-        }
-        await writeLedger({
-          kind: "ticket_settlement", amountCents: amount, bookingId: null, gigId: null,
-          profileId: event.curatorProfileId, stripeId: dist.transferId, sourced: dist.sourcedAny,
-          detail: `ticket settlement (T+1) for "${event.title}", order ${orderDoc.id}`,
-          eventId: doc.id, orderId: orderDoc.id, buyerUid: order.buyerUid,
-        }).catch((e) => console.error(`paymentsSweep: ticket_settlement ledger row failed for order ${orderDoc.id}`, e));
-        report.ticketOrdersSettled++;
-      } catch (e) {
-        // Ruling B: release the claim only when NOTHING for this event has
-        // settled yet this pass (or any earlier pass) AND the refusal is
-        // definite; once any order has settled, settlementStartedAt is
-        // permanent and releasing the claim would not reopen cancel anyway.
-        if (!settlementStarted && isDefiniteStripeRefusal(e)) {
-          await releaseSettlementClaim(db, doc.ref, claimedAt, now)
-            .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
-        }
-        const alertId = ticketSettlementFailedAlertId(doc.id);
-        const cancelNote = settlementStarted
-          ? "stays blocked (an earlier order for this event already settled)"
-          : isDefiniteStripeRefusal(e) ? "stays possible" : "reopens once the claim is 24h old";
-        const shouldLog = await recordAdminAlert({
-          alertId, kind: "ticket_settlement_failed",
-          detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${amount}c for order ${orderDoc.id} to curator `
-            + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}; retried hourly, `
-            + `cancel ${cancelNote}`,
-          bookingId: null, gigId: null, now,
-        });
-        if (shouldLog) {
-          console.error(
-            `paymentsSweep: event ${doc.id} ticket settlement transfer failed for order ${orderDoc.id} (see adminAlerts/${alertId})`, e);
-        }
-        bumpError(report, "ticketSettlementTransfer");
-        return;
       }
     }
-    report.ticketSettlementsTransferred++;
+
+    if (!legacySettled) {
+      // Tracks the field's REAL state through this pass: true already when
+      // `claim === "already_started"` (claimSettlementStart only returns that
+      // when settlementStartedAt is already set), and flips true the moment
+      // this pass's first order transfers successfully (Important 2: once ANY
+      // order has settled, cancel is refused forever, so the claim must never
+      // be released again after that point either).
+      let settlementStarted = event.settlementStartedAt != null;
+      let ordersProcessedThisPass = 0;
+
+      for (let i = 0; i < pending.length; i++) {
+        const orderDoc = pending[i];
+        const order = orderDoc.data() as TicketOrderDoc;
+        const amount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
+        if (amount === 0) {
+          // Nothing owed for this order (every ticket free, or refunded/
+          // disputed down to zero already): settle it with no transfer and no
+          // ledger row, same as the all-free event path below.
+          await orderDoc.ref.update({ settledAt: now, settlementLegs: 0, settlementProfileCents: 0 });
+          ordersProcessedThisPass++;
+        } else {
+          // SOURCING (Ruling F, fix round 1 Important 3): the lookup below
+          // runs ONLY when `chargeId` was never even attempted (the field is
+          // missing entirely, an order that predates completeOrderTx's own
+          // stamp), and its OUTCOME, found or not, is frozen onto the order
+          // right away, BEFORE the transfer. That is what makes a retry (this
+          // same order's own transfer having failed and a later pass picking
+          // it back up) replay the exact same `source` under the exact same
+          // idempotency key, rather than re-deriving a possibly different one.
+          let chargeId = order.chargeId ?? null;
+          let chargeAmountCents = order.chargeAmountCents ?? null;
+          if (order.chargeId === undefined) {
+            chargeId = null;
+            chargeAmountCents = null;
+            if (order.paymentIntentId) {
+              const intent = await getStripe().retrieveIntent(order.paymentIntentId).catch(() => null);
+              chargeId = intent?.chargeId ?? null;
+              chargeAmountCents = intent?.amountCents ?? null;
+            }
+            await orderDoc.ref.update({ chargeId, chargeAmountCents }).catch(() => undefined);
+          }
+          try {
+            const dist = await distributeEarnings({
+              profileId: event.curatorProfileId, amountCents: amount,
+              source: chargeId && chargeAmountCents != null
+                ? { chargeId, remainingCents: chargeAmountCents - order.refundedCents } : null,
+              purpose: "ticket_settlement", ref: { eventId: doc.id, orderId: orderDoc.id },
+              idempotencyBase: `ticket_settlement:${doc.id}:${orderDoc.id}`,
+              meta: { purpose: "ticket_settlement", eventId: doc.id, orderId: orderDoc.id },
+              profileAccountId: curatorStripe.accountId, now,
+            });
+            await orderDoc.ref.update({
+              settledAt: now, settlementLegs: dist.legs.length, settlementProfileCents: dist.profileCents,
+            });
+            // FIX ROUND 1 (Important 2): the ledger row lands BEFORE the
+            // settlementStartedAt stamp, so a transient failure of that
+            // one-field write can never lose the record of a transfer that
+            // already happened.
+            await writeLedger({
+              kind: "ticket_settlement", amountCents: amount, bookingId: null, gigId: null,
+              profileId: event.curatorProfileId,
+              // FIX ROUND 1 (Important 4, Task 6's own convention): an
+              // all-held order (every share held pending onboarding, no
+              // profile leg transferred) has no real Stripe transfer id;
+              // this deterministic pseudo id keeps the row's dedup and still
+              // records that the order settled, without inventing a Stripe
+              // object that doesn't exist.
+              stripeId: dist.transferId ?? `held:ticket_settlement:${doc.id}:${orderDoc.id}`,
+              sourced: dist.sourcedAny,
+              detail: `ticket settlement (T+1) for "${event.title}", order ${orderDoc.id}`,
+              eventId: doc.id, orderId: orderDoc.id, buyerUid: order.buyerUid,
+            }).catch((e) => console.error(`paymentsSweep: ticket_settlement ledger row failed for order ${orderDoc.id}`, e));
+            // Ruling A: stamped ONCE, right after the first successful order
+            // transfer of this pass, not after the whole loop, so an event
+            // whose order A settles and whose order B then refuses cannot be
+            // cancelled out from under order A's already-received transfer.
+            if (!settlementStarted) {
+              await doc.ref.update({ settlementStartedAt: now, updatedAt: now });
+              settlementStarted = true;
+            }
+            report.ticketOrdersSettled++;
+            ordersProcessedThisPass++;
+          } catch (e) {
+            // Ruling B: release the claim only when NOTHING for this event has
+            // settled yet this pass (or any earlier pass) AND the refusal is
+            // definite; once any order has settled, settlementStartedAt is
+            // permanent and releasing the claim would not reopen cancel anyway.
+            if (!settlementStarted && isDefiniteStripeRefusal(e)) {
+              await releaseSettlementClaim(db, doc.ref, claimedAt, now)
+                .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
+            }
+            const alertId = ticketSettlementFailedAlertId(doc.id);
+            const cancelNote = settlementStarted
+              ? "stays blocked (an earlier order for this event already settled)"
+              : isDefiniteStripeRefusal(e) ? "stays possible" : "reopens once the claim is 24h old";
+            const shouldLog = await recordAdminAlert({
+              alertId, kind: "ticket_settlement_failed",
+              detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${amount}c for order ${orderDoc.id} to curator `
+                + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}; retried hourly, `
+                + `cancel ${cancelNote}`,
+              bookingId: null, gigId: null, now,
+            });
+            if (shouldLog) {
+              console.error(
+                `paymentsSweep: event ${doc.id} ticket settlement transfer failed for order ${orderDoc.id} (see adminAlerts/${alertId})`, e);
+            }
+            bumpError(report, "ticketSettlementTransfer");
+            return;
+          }
+        }
+        // FIX ROUND 1 (Important 6): bounded per pass. Hitting the budget
+        // with more orders left in `pending` logs and returns, never
+        // `break`s (a `break` would fall straight into the completion
+        // transaction below with orders still unsettled).
+        if (ordersProcessedThisPass >= TICKET_SETTLEMENT_ORDERS_PER_PASS && i < pending.length - 1) {
+          console.info(
+            `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
+            + "with orders still pending; resuming next pass");
+          return;
+        }
+      }
+      report.ticketSettlementsTransferred++;
+    }
   } else {
     // Every pending order owes nothing (all free, or all refunded/disputed to
     // zero): settle them all with no transfer and no ledger row, same as the
     // all-free event path.
-    for (const orderDoc of pending) {
+    for (let i = 0; i < pending.length; i++) {
+      const orderDoc = pending[i];
       await orderDoc.ref.update({ settledAt: now, settlementLegs: 0, settlementProfileCents: 0 });
+      // FIX ROUND 1 (Important 6): same per-pass budget as the owed branch.
+      if ((i + 1) % TICKET_SETTLEMENT_ORDERS_PER_PASS === 0 && i < pending.length - 1) {
+        console.info(
+          `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
+          + "settling zero-owed orders, with orders still pending; resuming next pass");
+        return;
+      }
     }
   }
 
