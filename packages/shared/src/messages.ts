@@ -176,3 +176,4 @@ export const SAVED_SEARCH_LIMIT_MESSAGE = "You can keep up to 10 saved searches.
 export const SEARCH_EMPTY_MESSAGE = "Nothing matches yet. Try fewer filters or a shorter search.";
 export const SEARCH_LOCATION_OFF_MESSAGE = "Turn on location to search near you.";
 export const SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE = "Type something or pick a filter before saving a search.";
+export const SEARCH_SIGN_IN_MESSAGE = "Sign in to search.";

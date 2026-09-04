@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  SEARCH_LIMIT_MESSAGE,
+  SEARCH_LIMIT_MESSAGE, SEARCH_SIGN_IN_MESSAGE,
   type SearchFace, type SearchFilters, type SearchInput, type SearchPin, type SearchResult,
 } from "@gatekeep/shared";
 import { callableCode, runSearch } from "./searchApi";
@@ -78,6 +78,20 @@ export function useSearch(face: SearchFace, opts: {
   const [budgetHit, setBudgetHit] = useState(false);
   const seqRef = useRef(0);
   const pageRef = useRef(0);
+  // Whole-hook-lifetime guard, not per-request: the page-0 effect's own
+  // cancel() (below) only ever cancels ITS OWN request (superseded by a
+  // dependency change or a true unmount), so a loadMore request, started
+  // later from a click handler with no cancel() of its own kept around,
+  // still needs some way to know the hook it would setState into is gone.
+  // mountedRef covers both call sites through the one shared check in
+  // runFetch's .then/.catch, while the per-call `cancelled` flag (kept as
+  // is) keeps doing its own job of not letting the page-0 effect's cleanup
+  // cancel a legitimate, still-mounted loadMore request.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q), 300);
@@ -101,14 +115,16 @@ export function useSearch(face: SearchFace, opts: {
   // mounted, it says nothing about the hook itself having unmounted (or a
   // Tabs panel remounting into a fresh hook instance) while this promise
   // was still in flight, which would otherwise call setState on a
-  // component that's gone.
+  // component that's gone. mountedRef is the same "gone" check but for
+  // loadMore's own request, which has no per-call cancel() kept around
+  // anywhere for an unmount cleanup to call.
   const runFetch = useCallback((pageToFetch: number, append: boolean): (() => void) => {
     pageRef.current = pageToFetch;
     const mySeq = ++seqRef.current;
     let cancelled = false;
     runSearch(buildInput(face, debouncedQ, filters, opts.location, pageToFetch, opts.includePins))
       .then((res) => {
-        if (cancelled || seqRef.current !== mySeq) return;
+        if (cancelled || !mountedRef.current || seqRef.current !== mySeq) return;
         setItems((prev) => (append ? [...prev, ...res.items] : res.items));
         setPins(res.pins ?? []);
         setMatched(res.matched);
@@ -117,7 +133,7 @@ export function useSearch(face: SearchFace, opts: {
         setLoading(false);
       })
       .catch((e: unknown) => {
-        if (cancelled || seqRef.current !== mySeq) return;
+        if (cancelled || !mountedRef.current || seqRef.current !== mySeq) return;
         setLoading(false);
         const code = callableCode(e);
         if (code === "functions/resource-exhausted") {
@@ -125,7 +141,7 @@ export function useSearch(face: SearchFace, opts: {
           setError(SEARCH_LIMIT_MESSAGE);
         } else if (code === "functions/unauthenticated") {
           setBudgetHit(false);
-          setError("Sign in to search.");
+          setError(SEARCH_SIGN_IN_MESSAGE);
         } else {
           setBudgetHit(false);
           setError(e instanceof Error ? e.message : "Search failed.");
