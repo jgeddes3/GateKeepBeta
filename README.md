@@ -798,6 +798,15 @@ before a real launch:
   unpublish with `deleteProfile` (unblocked once the profile is `rejected`), whose cascade sweeps
   `public/tracks`, `review/tracks`, and `public/photos`. Between the two steps a direct
   `getDownloadURL` obtained while the profile was live still resolves, do both promptly.
+- **Firebase console, Authentication settings, user actions: turn OFF "Delete account"**
+  (Identity Platform "user actions"), so self-service deletion has to go through the
+  `deleteAccount` callable. Firebase has no blocking delete trigger, so nothing server-side can
+  refuse a client's `currentUser.delete()` or a console deletion, and either walks straight past
+  `deleteAccount`'s refusals (a live ticket to a future event, an offered transfer, a pending
+  order, sole admin of a profile). Until the toggle is off, the `account_deleted_unclean` admin
+  alert raised by `onUserDeleted` (`functions/src/authTriggers.ts`) is the only backstop: the
+  cascade still runs, and the alert names the uid and what was outstanding so an operator can
+  finish the unwind by hand.
 - **Firebase Email Enumeration Protection**: confirm this is enabled (Firebase console →
   Authentication → Settings) on both the `gatekeep-dev-jg` project and whatever project id
   production uses. The app's sign-in error handling degrades gracefully either way, but it
