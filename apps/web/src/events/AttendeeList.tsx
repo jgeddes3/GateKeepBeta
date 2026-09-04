@@ -55,7 +55,19 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
   onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [undoBusy, setUndoBusy] = useState(false);
   const canRefund = refundable && (row.status === "valid" || row.status === "checked_in");
+
+  const undo = async () => {
+    setUndoBusy(true);
+    try {
+      await callFn("undoCheckIn", { eventId, ticketId: row.id });
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not undo this check-in.");
+    } finally {
+      setUndoBusy(false);
+    }
+  };
 
   const refund = async () => {
     if (!window.confirm(`Refund ${row.ownerName}'s "${row.tierName}" ticket? This can't be undone.`)) return;
@@ -95,11 +107,18 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
           {checkedInLabel(row.checkedInAt) && ` · Checked in ${checkedInLabel(row.checkedInAt)}`}
         </p>
       </div>
-      {canRefund && (
-        <Button type="button" variant="destructive" size="sm" onClick={refund} disabled={busy} className="shrink-0">
-          {busy ? "Refunding…" : "Refund"}
-        </Button>
-      )}
+      <div className="flex shrink-0 flex-wrap gap-2">
+        {row.status === "checked_in" && (
+          <Button type="button" variant="secondary" size="sm" className="min-h-11" onClick={undo} disabled={busy || undoBusy}>
+            {undoBusy ? "Undoing…" : "Undo check-in"}
+          </Button>
+        )}
+        {canRefund && (
+          <Button type="button" variant="destructive" size="sm" className="min-h-11" onClick={refund} disabled={busy || undoBusy}>
+            {busy ? "Refunding…" : "Refund"}
+          </Button>
+        )}
+      </div>
     </li>
   );
 }

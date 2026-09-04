@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Linking, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Linking, Pressable, StyleSheet, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { FunctionsError } from "firebase/functions";
-import { TICKET_ALREADY_CHECKED_IN_MESSAGE } from "@gatekeep/shared";
+import { TICKET_ALREADY_CHECKED_IN_MESSAGE, SCANNER_OFFLINE_MESSAGE } from "@gatekeep/shared";
 import { callFn } from "../lib/callable";
 import { formatGigTime } from "./eventDisplay";
 import {
@@ -45,7 +45,16 @@ interface CheckInTicketInput { curatorProfileId: string; eventId: string; ticket
 type ScanResult =
   | { kind: "success"; ownerName: string; tierName: string }
   | { kind: "duplicate"; checkedInAt: number | undefined }
-  | { kind: "invalid"; message: string };
+  | { kind: "invalid"; message: string }
+  // Transport or server failure, NOT a ticket verdict (sp6 audit finding 3):
+  // the door must never turn a fan away over venue Wi-Fi.
+  | { kind: "offline" };
+
+// The three codes checkInTicket uses for a verdict ABOUT THE TICKET (or the
+// caller's right to scan it). Everything else, unavailable, deadline-exceeded,
+// internal, a plain fetch failure that is not even a FunctionsError, is the
+// network or the server, and renders the neutral offline panel.
+const VERDICT_CODES = new Set(["functions/failed-precondition", "functions/not-found", "functions/permission-denied"]);
 
 // A FunctionsError's `details` (checkInTicket's original checkedInAt on a
 // duplicate scan, see functions/src/ticketing.ts's own comment on why it
@@ -58,12 +67,22 @@ function errorDetails(e: unknown): { checkedInAt?: number } | undefined {
   return e instanceof FunctionsError ? (e.details as { checkedInAt?: number } | undefined) : undefined;
 }
 
-function ResultPanel({ result }: { result: ScanResult }) {
+function ResultPanel({ result, onDismiss }: { result: ScanResult; onDismiss: () => void }) {
   const t = useTokens();
-  const tone = result.kind === "success" ? "success" : "destructive";
-  const toneColor = t[tone];
+  const tone = result.kind === "success" ? "success" : result.kind === "offline" ? "neutral" : "destructive";
+  const toneColor = result.kind === "success" ? t.success : result.kind === "offline" ? t.muted : t.destructive;
+  // Success clears itself; the other three wait for a tap so the staffer
+  // can actually read the verdict (the old 1.5 s clear on "Not valid" was
+  // gone before anyone could).
+  const sticky = result.kind !== "success";
   return (
-    <View style={{ flex: 1 }}>
+    <Pressable
+      onPress={sticky ? onDismiss : undefined}
+      disabled={!sticky}
+      accessibilityRole={sticky ? "button" : undefined}
+      accessibilityLabel={sticky ? "Scan the next ticket" : undefined}
+      style={{ flex: 1 }}
+    >
       <PageBackground />
       <View style={{ flex: 1, padding: tokens.space.lg }}>
         <Callout tone={tone} style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: tokens.space.md }}>
@@ -92,9 +111,18 @@ function ResultPanel({ result }: { result: ScanResult }) {
               <Text muted style={{ textAlign: "center" }}>{result.message}</Text>
             </View>
           )}
+          {result.kind === "offline" && (
+            <View style={{ alignItems: "center", gap: 4 }}>
+              <Text variant="heading" style={{ textAlign: "center" }}>{SCANNER_OFFLINE_MESSAGE}</Text>
+              <Text muted style={{ textAlign: "center" }}>
+                This is a connection problem, not a verdict on the ticket. Check the venue Wi-Fi and scan it again.
+              </Text>
+            </View>
+          )}
+          {sticky && <Text variant="meta" muted style={{ marginTop: tokens.space.md }}>Tap anywhere to scan the next ticket</Text>}
         </Callout>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -119,18 +147,21 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
   // whether a decode is allowed to proceed.
   const scanLockRef = useRef(false);
 
-  // Auto-ready for the next scan ~1.5s after a result appears (brief's own
-  // anatomy), cleared on unmount and whenever a new result replaces this
-  // one; also where the scan lock re-arms, so the very same tick that
-  // clears the result is the tick that allows a new decode.
+  // Auto-ready for the next scan 1.5 s after a SUCCESS (brief's own anatomy).
+  // Duplicate, invalid, and offline stay until the staffer taps the panel
+  // (dismiss below), which is also where the scan lock re-arms for them.
   useEffect(() => {
-    if (!result) return;
+    if (!result || result.kind !== "success") return;
     const timer = setTimeout(() => {
       setResult(null);
       scanLockRef.current = false;
     }, 1500);
     return () => clearTimeout(timer);
   }, [result]);
+  const dismiss = () => {
+    setResult(null);
+    scanLockRef.current = false;
+  };
 
   // The CameraView itself also unmounts while `result` is showing (see the
   // branch below), so no further decode events can even fire once a result
@@ -150,16 +181,22 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
     })
       .then(({ data: res }) => setResult({ kind: "success", ownerName: res.ownerName, tierName: res.tierName }))
       .catch((e: unknown) => {
-        const message = e instanceof Error ? e.message : "Could not check in this ticket.";
-        if (message === TICKET_ALREADY_CHECKED_IN_MESSAGE) {
+        // A verdict is one of three codes checkInTicket throws about the
+        // ticket itself; anything else is the network or the server and gets
+        // the neutral offline panel, never the destructive "Not valid" one.
+        if (!(e instanceof FunctionsError) || !VERDICT_CODES.has(e.code)) {
+          setResult({ kind: "offline" });
+          return;
+        }
+        if (e.message === TICKET_ALREADY_CHECKED_IN_MESSAGE) {
           setResult({ kind: "duplicate", checkedInAt: errorDetails(e)?.checkedInAt });
         } else {
-          // TICKET_NOT_VALID_MESSAGE and every other rejection (event not
-          // published, ticket not found) share this same destructive
-          // "invalid" bucket: none has a useful interactive follow-up from a
-          // door scan, matching AttendeeList's own "verbatim server error in
-          // a friendly wrapper" convention.
-          setResult({ kind: "invalid", message });
+          // TICKET_NOT_VALID_MESSAGE and every other ticket-verdict rejection
+          // (event not published, ticket not found) share this same
+          // destructive "invalid" bucket: none has a useful interactive
+          // follow-up from a door scan, matching AttendeeList's own
+          // "verbatim server error in a friendly wrapper" convention.
+          setResult({ kind: "invalid", message: e.message });
         }
       })
       .finally(() => setBusy(false));
@@ -199,7 +236,7 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
     );
   }
 
-  if (result) return <ResultPanel result={result} />;
+  if (result) return <ResultPanel result={result} onDismiss={dismiss} />;
 
   return (
     // tokens.dark.bg0 (not a raw hex): a dark backdrop behind the camera

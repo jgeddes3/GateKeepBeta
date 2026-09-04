@@ -34,6 +34,7 @@ interface CheckInTicketResult { ownerName: string; tierName: string; checkedInAt
 interface CheckInTicketInput {
   curatorProfileId: string; eventId: string; ticketId: string; override: true;
 }
+interface UndoCheckInInput { eventId: string; ticketId: string }
 
 function useAttendees(eventId: string): AttendeeRow[] | "loading" {
   const [rows, setRows] = useState<AttendeeRow[] | "loading">("loading");
@@ -109,12 +110,13 @@ function CheckInSheet({ curatorProfileId, eventId, row, onClose }: {
 
 // ---------- Row ----------
 
-function AttendeeRowView({ row, refundable, refundBusy, onPress, onRefund }: {
-  row: AttendeeRow; refundable: boolean; refundBusy: boolean;
-  onPress: () => void; onRefund: () => void;
+function AttendeeRowView({ row, refundable, refundBusy, undoBusy, onPress, onRefund, onUndo }: {
+  row: AttendeeRow; refundable: boolean; refundBusy: boolean; undoBusy: boolean;
+  onPress: () => void; onRefund: () => void; onUndo: () => void;
 }) {
   const canRefund = refundable && (row.status === "valid" || row.status === "checked_in");
   const label = checkedInLabel(row.checkedInAt);
+  const busy = refundBusy || undoBusy;
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`Check in ${row.ownerName}, ${row.tierName}`}>
       <Card style={{ gap: 6 }}>
@@ -129,8 +131,18 @@ function AttendeeRowView({ row, refundable, refundBusy, onPress, onRefund }: {
             </Text>
           </View>
         </View>
-        {canRefund && (
-          <Button variant="destructive" title={refundBusy ? "Refunding…" : "Refund"} onPress={onRefund} disabled={refundBusy} />
+        {(canRefund || row.status === "checked_in") && (
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: tokens.space.sm }}>
+            {/* sp6 audit finding 12: a mis-scan (wrong person, wrong door)
+                had no way back. undoCheckIn flips checked_in to valid on both
+                the ticket and the attendee row; the live list re-renders. */}
+            {row.status === "checked_in" && (
+              <Button variant="secondary" title={undoBusy ? "Undoing…" : "Undo check-in"} onPress={onUndo} disabled={busy} />
+            )}
+            {canRefund && (
+              <Button variant="destructive" title={refundBusy ? "Refunding…" : "Refund"} onPress={onRefund} disabled={busy} />
+            )}
+          </View>
         )}
       </Card>
     </Pressable>
@@ -154,6 +166,7 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
   const [error, setError] = useState<string | null>(null);
   const [checkInRow, setCheckInRow] = useState<AttendeeRow | null>(null);
   const [refundBusyId, setRefundBusyId] = useState<string | null>(null);
+  const [undoBusyId, setUndoBusyId] = useState<string | null>(null);
   // Same window refundTicket itself enforces (functions/src/ticketing.ts):
   // not cancelled, and not yet past the event's own endsAt, mirrors web
   // AttendeeList.tsx's identical `refundable` derivation via useNow.
@@ -184,6 +197,20 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
       `Refund ${row.ownerName}'s "${row.tierName}" ticket?`, "This can't be undone.",
       [{ text: "Keep ticket", style: "cancel" }, { text: "Refund", style: "destructive", onPress: () => void doRefund(row) }],
     );
+  };
+
+  const doUndo = async (row: AttendeeRow) => {
+    setUndoBusyId(row.id);
+    setError(null);
+    try {
+      await callFn<UndoCheckInInput, { ok: true }>("undoCheckIn", { eventId, ticketId: row.id });
+    } catch (e) {
+      // Verbatim server copy ("This ticket is not checked in.", the
+      // published-event gate), same convention as the refund branch above.
+      setError(e instanceof Error ? e.message : "Could not undo this check-in.");
+    } finally {
+      setUndoBusyId(null);
+    }
   };
 
   if (rows === "loading") return <AttendeeListSkeleton />;
@@ -222,8 +249,8 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
           contentContainerStyle={{ padding: tokens.space.lg, paddingTop: 0, gap: tokens.space.sm }}
           renderItem={({ item }) => (
             <AttendeeRowView
-              row={item} refundable={refundable} refundBusy={refundBusyId === item.id}
-              onPress={() => setCheckInRow(item)} onRefund={() => confirmRefund(item)}
+              row={item} refundable={refundable} refundBusy={refundBusyId === item.id} undoBusy={undoBusyId === item.id}
+              onPress={() => setCheckInRow(item)} onRefund={() => confirmRefund(item)} onUndo={() => void doUndo(item)}
             />
           )}
         />
