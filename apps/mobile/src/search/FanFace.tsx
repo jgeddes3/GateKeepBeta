@@ -4,12 +4,9 @@ import { useRouter } from "expo-router";
 import type { SearchFilters } from "@gatekeep/shared";
 import { LocationPromptSheet } from "../discover/LocationPromptSheet";
 import { useDeckLocation } from "../discover/useDeckLocation";
-import { IconMagnifyingGlass, Input } from "../ui";
-import { useTokens } from "../theme/ThemeProvider";
-import { tokens } from "../theme/tokens";
-import { FilterChips } from "./FilterChips";
 import { ResultList } from "./ResultList";
 import { ShowRow } from "./ResultRows";
+import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
 // The fan Search tab (mobile twin of apps/web/src/search/FanFace.tsx): a
@@ -23,30 +20,20 @@ export function FanFace({ initial, headerRight }: {
   headerRight?: ReactNode;
 }) {
   const router = useRouter();
-  const t = useTokens();
   const location = useDeckLocation();
   const state = useSearch("fan", { location: location.location, includePins: false, initial });
 
   const header = (
-    <View style={{ gap: tokens.space.md, paddingBottom: tokens.space.md }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
-        <View style={{ flex: 1, justifyContent: "center" }}>
-          <View style={{ position: "absolute", left: 12, top: 0, bottom: 0, justifyContent: "center", zIndex: 1 }}>
-            <IconMagnifyingGlass size={18} color={t.muted} />
-          </View>
-          <Input
-            value={state.q}
-            onChangeText={state.setQ}
-            placeholder="Search shows, artists, venues"
-            autoCorrect={false}
-            clearButtonMode="while-editing"
-            style={{ paddingLeft: 40 }}
-          />
-        </View>
-        {headerRight}
-      </View>
-      <FilterChips face="fan" filters={state.filters} onChange={state.setFilters} location={location} />
-    </View>
+    <SearchHeader
+      value={state.q}
+      onChangeText={state.setQ}
+      placeholder="Search shows, artists, venues"
+      face="fan"
+      filters={state.filters}
+      onFiltersChange={state.setFilters}
+      location={location}
+      right={headerRight}
+    />
   );
 
   return (

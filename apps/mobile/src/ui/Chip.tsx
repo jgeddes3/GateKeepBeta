@@ -23,6 +23,7 @@ export function Chip({
       onPress={onPress}
       disabled={disabled}
       accessibilityRole="button"
+      accessibilityState={{ selected: active, disabled: !!disabled }}
       style={{
         paddingVertical: 6,
         paddingHorizontal: 12,

@@ -2,12 +2,9 @@ import type { ReactNode } from "react";
 import { View } from "react-native";
 import type { SearchFilters } from "@gatekeep/shared";
 import type { DeckLocationState } from "../discover/useDeckLocation";
-import { IconMagnifyingGlass, Input } from "../ui";
-import { useTokens } from "../theme/ThemeProvider";
-import { tokens } from "../theme/tokens";
 import { CuratorArtistRow } from "./CuratorArtistRow";
-import { FilterChips } from "./FilterChips";
 import { ResultList } from "./ResultList";
+import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
 // SP8 Task 15: the curator's "find an artist" search, mobile twin of
@@ -26,29 +23,19 @@ export function CuratorFace({ curatorProfileId, initial, headerRight }: {
   initial?: { q: string; filters: SearchFilters };
   headerRight?: ReactNode;
 }) {
-  const t = useTokens();
   const state = useSearch("curator", { location: null, includePins: false, initial });
 
   const header = (
-    <View style={{ gap: tokens.space.md, paddingBottom: tokens.space.md }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
-        <View style={{ flex: 1, justifyContent: "center" }}>
-          <View style={{ position: "absolute", left: 12, top: 0, bottom: 0, justifyContent: "center", zIndex: 1 }}>
-            <IconMagnifyingGlass size={18} color={t.muted} />
-          </View>
-          <Input
-            value={state.q}
-            onChangeText={state.setQ}
-            placeholder="Search artists by name"
-            autoCorrect={false}
-            clearButtonMode="while-editing"
-            style={{ paddingLeft: 40 }}
-          />
-        </View>
-        {headerRight}
-      </View>
-      <FilterChips face="curator" filters={state.filters} onChange={state.setFilters} location={NO_LOCATION} />
-    </View>
+    <SearchHeader
+      value={state.q}
+      onChangeText={state.setQ}
+      placeholder="Search artists by name"
+      face="curator"
+      filters={state.filters}
+      onFiltersChange={state.setFilters}
+      location={NO_LOCATION}
+      right={headerRight}
+    />
   );
 
   return (

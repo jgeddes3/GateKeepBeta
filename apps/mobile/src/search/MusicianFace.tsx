@@ -1,17 +1,15 @@
 import { useState, type ReactNode } from "react";
 import { View } from "react-native";
 import { useRouter } from "expo-router";
-import type { SearchFace, SearchFilters } from "@gatekeep/shared";
+import type { SearchFilters } from "@gatekeep/shared";
 import { GigDetailSheet } from "../bookings/GigDetailSheet";
 import { LocationPromptSheet } from "../discover/LocationPromptSheet";
 import { useDeckLocation, type DeckLocationState } from "../discover/useDeckLocation";
-import { Chip, IconMagnifyingGlass, Input } from "../ui";
-import { useTokens } from "../theme/ThemeProvider";
-import { tokens } from "../theme/tokens";
-import { FilterChips } from "./FilterChips";
+import { Chip } from "../ui";
 import { ResultList } from "./ResultList";
 import { GigRow, ProfileRow } from "./ResultRows";
-import { useSearch, type UseSearchState } from "./useSearch";
+import { SearchHeader } from "./SearchHeader";
+import { useSearch } from "./useSearch";
 
 // SP8 Task 15: the musician's search, mobile twin of apps/web/src/search/
 // MusicianFace.tsx. Web mounts Gigs and Venues as Radix Tabs (only the
@@ -29,40 +27,17 @@ import { useSearch, type UseSearchState } from "./useSearch";
 
 type Segment = "gigs" | "venues";
 
+// Fix round 1 (important #2): "Gigs" | "Venues" stand in for a tab strip
+// (RN has no tablist role), so each Chip carries an accessibilityLabel that
+// says so explicitly ("Gigs, segment") rather than just its bare visible
+// text, and Chip.tsx's own accessibilityState={{selected}} (added this
+// round) announces which one is current. A sighted user reads the active
+// Chip's fill color; VoiceOver/TalkBack reads both of those instead.
 function SegmentChips({ segment, onChange }: { segment: Segment; onChange: (s: Segment) => void }) {
   return (
     <View style={{ flexDirection: "row", gap: 6 }}>
-      <Chip label="Gigs" active={segment === "gigs"} onPress={() => onChange("gigs")} />
-      <Chip label="Venues" active={segment === "venues"} onPress={() => onChange("venues")} />
-    </View>
-  );
-}
-
-function SearchHeader({ segment, onSegmentChange, state, placeholder, face, location, headerRight }: {
-  segment: Segment; onSegmentChange: (s: Segment) => void; state: UseSearchState;
-  placeholder: string; face: SearchFace; location: DeckLocationState; headerRight?: ReactNode;
-}) {
-  const t = useTokens();
-  return (
-    <View style={{ gap: tokens.space.md, paddingBottom: tokens.space.md }}>
-      <SegmentChips segment={segment} onChange={onSegmentChange} />
-      <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
-        <View style={{ flex: 1, justifyContent: "center" }}>
-          <View style={{ position: "absolute", left: 12, top: 0, bottom: 0, justifyContent: "center", zIndex: 1 }}>
-            <IconMagnifyingGlass size={18} color={t.muted} />
-          </View>
-          <Input
-            value={state.q}
-            onChangeText={state.setQ}
-            placeholder={placeholder}
-            autoCorrect={false}
-            clearButtonMode="while-editing"
-            style={{ paddingLeft: 40 }}
-          />
-        </View>
-        {headerRight}
-      </View>
-      <FilterChips face={face} filters={state.filters} onChange={state.setFilters} location={location} />
+      <Chip label="Gigs" active={segment === "gigs"} onPress={() => onChange("gigs")} accessibilityLabel="Gigs, segment" />
+      <Chip label="Venues" active={segment === "venues"} onPress={() => onChange("venues")} accessibilityLabel="Venues, segment" />
     </View>
   );
 }
@@ -74,8 +49,11 @@ function GigsSegment({ segment, onSegmentChange, location, initial, headerRight,
 }) {
   const state = useSearch("musician_gigs", { location: location.location, includePins: false, initial });
   const header = (
-    <SearchHeader segment={segment} onSegmentChange={onSegmentChange} state={state}
-      placeholder="Search gigs" face="musician_gigs" location={location} headerRight={headerRight} />
+    <SearchHeader
+      value={state.q} onChangeText={state.setQ} placeholder="Search gigs"
+      face="musician_gigs" filters={state.filters} onFiltersChange={state.setFilters} location={location}
+      above={<SegmentChips segment={segment} onChange={onSegmentChange} />} right={headerRight}
+    />
   );
   return (
     <ResultList state={state} header={header} renderRow={(r) => <GigRow r={r} onPress={() => onOpenGig(r.id)} />} />
@@ -89,8 +67,11 @@ function VenuesSegment({ segment, onSegmentChange, location, initial, headerRigh
   const router = useRouter();
   const state = useSearch("musician_venues", { location: location.location, includePins: false, initial });
   const header = (
-    <SearchHeader segment={segment} onSegmentChange={onSegmentChange} state={state}
-      placeholder="Search venues" face="musician_venues" location={location} headerRight={headerRight} />
+    <SearchHeader
+      value={state.q} onChangeText={state.setQ} placeholder="Search venues"
+      face="musician_venues" filters={state.filters} onFiltersChange={state.setFilters} location={location}
+      above={<SegmentChips segment={segment} onChange={onSegmentChange} />} right={headerRight}
+    />
   );
   return (
     <ResultList

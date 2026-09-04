@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, View } from "react-native";
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, getDoc } from "firebase/firestore";
 import { type CuratorBookingDoc, type SearchResult } from "@gatekeep/shared";
@@ -71,15 +71,21 @@ export function CuratorArtistRow({ curatorProfileId, r }: { curatorProfileId: st
       <Sheet visible={offering} onClose={() => setOffering(false)}>
         {/* Sheet takes no stance on keyboard avoidance; the offer's
             amount/note fields need one, same pattern as GigDetailSheet's own
-            Apply flow. */}
+            Apply flow. A ScrollView (same maxHeight/keyboardShouldPersistTaps
+            shape GigDetailSheet uses) keeps "Send offer" reachable when a
+            curator with several open gigs has the keyboard up on a small
+            device: the gig-chip list plus the offer fields can run past the
+            sheet's own height without one. */}
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={0}>
-          <OfferComposer
-            key={`${curatorProfileId}-${r.id}`}
-            curatorProfileId={curatorProfileId}
-            musicianProfileId={r.id}
-            musicianName={r.title}
-            onClose={() => setOffering(false)}
-          />
+          <ScrollView style={{ maxHeight: "85%" }} keyboardShouldPersistTaps="handled">
+            <OfferComposer
+              key={`${curatorProfileId}-${r.id}`}
+              curatorProfileId={curatorProfileId}
+              musicianProfileId={r.id}
+              musicianName={r.title}
+              onClose={() => setOffering(false)}
+            />
+          </ScrollView>
         </KeyboardAvoidingView>
       </Sheet>
     </Card>
