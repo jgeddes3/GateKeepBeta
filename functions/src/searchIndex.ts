@@ -90,19 +90,20 @@ export function projectVenue(profileId: string, profile: ProfileDoc | undefined,
 
 // ---------- writer and rebuilds ----------
 
-// "deleted" only when a stale index doc actually existed and was removed;
-// a source that was never public (or already had no index doc) resolves
-// to "skipped" instead, so backfillSearchIndex's own `deleted` tally
-// counts actual removals, not every non-public source it walked past.
-export async function applyProjection(ref: DocumentReference, doc: SearchIndexDoc | null): Promise<"set" | "deleted" | "skipped"> {
+// A plain set-or-delete, no existence check: a pre-read here would mean one
+// extra read per source in backfillSearchIndex's own walk over every
+// profile/event/gig (fine for a trigger firing on one document, ruinous
+// once the full test suite's shared database made that walk itself run
+// past the emulator test's timeout). backfillSearchIndex instead knows
+// which ids existed before it started, from its own one-time scan of
+// searchIndex below, so it decides "deleted" vs "skipped" itself.
+export async function applyProjection(ref: DocumentReference, doc: SearchIndexDoc | null): Promise<"set" | "deleted"> {
   if (doc) { await ref.set(doc); return "set"; }
-  const existing = await ref.get();
-  if (!existing.exists) return "skipped";
   await ref.delete();
   return "deleted";
 }
 
-export async function rebuildArtistIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
+export async function rebuildArtistIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted"> {
   const ref = db.doc(`searchIndex/${indexDocId("artist", profileId)}`);
   const snap = await db.doc(`profiles/${profileId}`).get();
   const profile = snap.data() as ProfileDoc | undefined;
@@ -130,17 +131,17 @@ export async function rebuildArtistIndex(db: Firestore, profileId: string, now: 
   return applyProjection(ref, projectArtist(profileId, profile, { hasAudio: !trackSnap.empty, busyDays: [...days].sort(), actSize, now }));
 }
 
-export async function rebuildVenueIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
+export async function rebuildVenueIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted"> {
   const snap = await db.doc(`profiles/${profileId}`).get();
   return applyProjection(db.doc(`searchIndex/${indexDocId("venue", profileId)}`), projectVenue(profileId, snap.data() as ProfileDoc | undefined, now));
 }
 
-export async function rebuildShowIndex(db: Firestore, eventId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
+export async function rebuildShowIndex(db: Firestore, eventId: string, now: number): Promise<"set" | "deleted"> {
   const snap = await db.doc(`events/${eventId}`).get();
   return applyProjection(db.doc(`searchIndex/${indexDocId("show", eventId)}`), projectShow(eventId, snap.data() as EventDoc | undefined, now));
 }
 
-export async function rebuildGigIndex(db: Firestore, gigId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
+export async function rebuildGigIndex(db: Firestore, gigId: string, now: number): Promise<"set" | "deleted"> {
   const snap = await db.doc(`gigs/${gigId}`).get();
   return applyProjection(db.doc(`searchIndex/${indexDocId("gig", gigId)}`), projectGig(gigId, snap.data() as GigDoc | undefined, now));
 }
@@ -233,33 +234,63 @@ async function* pageCollection(db: Firestore, name: string) {
   }
 }
 
+// Ids only (an empty field mask via .select()), so a full-database backfill
+// pays for one cheap scan of searchIndex instead of one extra get() per
+// source it walks (that per-source read was what made backfillSearchIndex
+// itself time out under the full suite: 47 other test files leave hundreds
+// of profiles/events/gigs in the shared emulator database, so this callable
+// was already walking thousands of sources before this fix wave's
+// per-delete pre-read piled another read onto every single one of them).
+async function existingSearchIndexIds(db: Firestore): Promise<Set<string>> {
+  const ids = new Set<string>();
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+  for (;;) {
+    let q = db.collection("searchIndex").select().orderBy("__name__").limit(BACKFILL_PAGE);
+    if (cursor) q = q.startAfter(cursor);
+    const snap = await q.get();
+    if (snap.empty) return ids;
+    for (const d of snap.docs) ids.add(d.id);
+    if (snap.docs.length < BACKFILL_PAGE) return ids;
+    cursor = snap.docs[snap.docs.length - 1];
+  }
+}
+
 // Admin one-shot after the first deploy (and safe to re-run): projects
 // every profile, event, and gig through the same functions the triggers
 // use. Counts are docs written per kind; `deleted` counts sources that
-// resolved to "not public" and had a stale index doc removed.
+// resolved to "not public" and had a stale index doc removed (decided from
+// existingSearchIndexIds's own pre-backfill snapshot, not a per-delete
+// read, since applyProjection itself always just sets or deletes).
 export const backfillSearchIndex = onCall<Record<string, never>>(
   { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
   async (req) => {
     requireAdmin(req);
     const db = getFirestore();
     const now = Date.now();
+    const existingIds = await existingSearchIndexIds(db);
     const counts = { artists: 0, venues: 0, shows: 0, gigs: 0, deleted: 0 };
-    const tally = (kind: "artists" | "venues" | "shows" | "gigs", r: "set" | "deleted" | "skipped") => {
+    const tally = (kind: "artists" | "venues" | "shows" | "gigs", r: "set" | "deleted", indexId: string) => {
       if (r === "set") counts[kind]++;
-      else if (r === "deleted") counts.deleted++;
+      else if (existingIds.has(indexId)) counts.deleted++;
     };
     for await (const page of pageCollection(db, "profiles")) {
       for (const d of page) {
         const p = d.data() as ProfileDoc;
-        if (p.type === "musician") tally("artists", await rebuildArtistIndex(db, d.id, now));
-        else if (p.type === "curator") tally("venues", await rebuildVenueIndex(db, d.id, now));
+        if (p.type === "musician") tally("artists", await rebuildArtistIndex(db, d.id, now), indexDocId("artist", d.id));
+        else if (p.type === "curator") tally("venues", await rebuildVenueIndex(db, d.id, now), indexDocId("venue", d.id));
       }
     }
     for await (const page of pageCollection(db, "events")) {
-      for (const d of page) tally("shows", await applyProjection(db.doc(`searchIndex/${indexDocId("show", d.id)}`), projectShow(d.id, d.data() as EventDoc, now)));
+      for (const d of page) {
+        const indexId = indexDocId("show", d.id);
+        tally("shows", await applyProjection(db.doc(`searchIndex/${indexId}`), projectShow(d.id, d.data() as EventDoc, now)), indexId);
+      }
     }
     for await (const page of pageCollection(db, "gigs")) {
-      for (const d of page) tally("gigs", await applyProjection(db.doc(`searchIndex/${indexDocId("gig", d.id)}`), projectGig(d.id, d.data() as GigDoc, now)));
+      for (const d of page) {
+        const indexId = indexDocId("gig", d.id);
+        tally("gigs", await applyProjection(db.doc(`searchIndex/${indexId}`), projectGig(d.id, d.data() as GigDoc, now)), indexId);
+      }
     }
     return counts;
   },

@@ -7,6 +7,9 @@ vi.setConfig({ testTimeout: 60_000 });
 const DAY = 24 * 60 * 60 * 1000;
 
 describe("backfillSearchIndex", () => {
+  // 180s, not the file's 60s default: under the full suite this callable
+  // legitimately walks every profile/event/gig the other 47 test files
+  // leave in the shared emulator database, not just this test's own rows.
   it("rebuilds missing docs, is admin-only, and is idempotent", async () => {
     const m = await makeApprovedMusicianProfile("bf1m");
     const c = await makeApprovedCuratorProfile("bf1c");
@@ -27,7 +30,7 @@ describe("backfillSearchIndex", () => {
     expect((await adb.doc(`searchIndex/show_${eventId}`).get()).exists).toBe(true);
     const r2 = await callFn<object, { artists: number }>("backfillSearchIndex", {}, admin.user);
     expect(r2.artists).toBe(r1.artists);
-  });
+  }, 180_000);
 });
 
 describe("runSearchIndexSweep", () => {
