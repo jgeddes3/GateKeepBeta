@@ -30,17 +30,20 @@ export function NotificationsList() {
   // (notificationHref, also used by web's dashboard NotificationsList and by
   // this app's own push tap handler), cast `as Href` because the helper
   // returns a plain string and expo-router's typed routes accept the two
-  // shapes it produces. new_music still resolves locally: its refId is the
-  // artist's profileId, not a route (NotificationDoc has no room for a
-  // denormalized handle), so this keeps the one getDoc lookup
-  // resolveLineup/loadShows elsewhere in this app make for the same
-  // profileId -> handle need. A resolve failure (profile since
+  // shapes it produces. SP8 Task 17: `item.refKind` is passed through so
+  // notificationHref can route a saved_search_match to the event or gig
+  // page; a profile match (or new_music, which has no refKind at all) still
+  // resolves locally below. new_music/profile-kind matches resolve their
+  // handle client-side: their refId is the artist's profileId, not a route
+  // (NotificationDoc has no room for a denormalized handle), so this keeps
+  // the one getDoc lookup resolveLineup/loadShows elsewhere in this app make
+  // for the same profileId -> handle need. A resolve failure (profile since
   // deleted/unapproved, or any other read error) just marks the
   // notification read with nowhere to go, rather than surfacing a broken
   // navigation.
   const onPress = (item: { id: string } & NotificationDoc) => {
     void markRead(item.id);
-    if (item.kind === "new_music" && item.refId) {
+    if ((item.kind === "new_music" || (item.kind === "saved_search_match" && item.refKind === "profile")) && item.refId) {
       const refId = item.refId;
       getDoc(doc(getFirebase().db, "profiles", refId))
         .then((snap) => {
@@ -50,7 +53,7 @@ export function NotificationsList() {
         .catch((e) => console.warn("NotificationsList: new_music profile lookup failed", refId, e));
       return;
     }
-    const href = notificationHref(item.kind, item.refId, "mobile");
+    const href = notificationHref(item.kind, item.refId, "mobile", item.refKind);
     if (href) router.push(href as Href);
   };
   return (

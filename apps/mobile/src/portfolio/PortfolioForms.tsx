@@ -35,6 +35,13 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   // select 2 -> save -> deselect all -> save must hit the guard below even
   // though `initial` still says zero.
   const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
+  // SP8: home city, mirroring web's own BioGenresForm. Tracks what the
+  // SERVER currently holds (same reason as savedGenres above): the payload
+  // only sends `city` when the trimmed value actually differs from it, and
+  // it's the value the skip-if-unchanged check compares against, not the
+  // mount-time `initial` alone.
+  const [city, setCity] = useState(initial?.location?.city ?? "");
+  const [savedCity, setSavedCity] = useState(initial?.location?.city ?? "");
   const [busy, setBusy] = useState(false);
   const toggle = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
@@ -58,11 +65,17 @@ export function BioGenresForm({ profileId, initial, onSaved }:
     // both treat an omitted field as "leave it alone", but an explicit []
     // fails the 1-3-genres check.
     const payload = genres.length > 0 ? { profileId, bio, genres } : { profileId, bio };
+    // Same rule as web: `city` is sent only when it actually changed, `null`
+    // clears it, and an unchanged field is omitted entirely so a bio/genres-
+    // only save never touches the geocoded city.
+    const trimmedCity = city.trim();
+    if (trimmedCity !== savedCity) Object.assign(payload, { city: trimmedCity === "" ? null : trimmedCity });
     const v = validatePortfolioUpdate(payload);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
     setBusy(true);
     if (await callOrAlert("updatePortfolio", payload)) {
       if (genres.length > 0) setSavedGenres(genres);
+      setSavedCity(trimmedCity);
       onSaved?.();
     }
     setBusy(false);
@@ -74,10 +87,12 @@ export function BioGenresForm({ profileId, initial, onSaved }:
       <TextArea numberOfLines={5} maxLength={2000} value={bio} onChangeText={setBio}
         placeholder="Tell curators and fans who you are…"
         style={{ minHeight: 100 }} />
+      <Text variant="label">Home city</Text>
+      <Input value={city} onChangeText={setCity} placeholder="Where you're based" />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {GENRES.map((g) => <Chip key={g} label={g} active={genres.includes(g)} onPress={() => toggle(g)} />)}
       </View>
-      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save bio & genres"} />
+      <Button onPress={() => void save()} disabled={busy} title={busy ? "Saving…" : "Save bio, city & genres"} />
     </View>
   );
 }

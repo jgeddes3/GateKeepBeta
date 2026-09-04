@@ -10,6 +10,7 @@ import { MapResults } from "./MapResults";
 import { ResultList } from "./ResultList";
 import { ShowRow } from "./ResultRows";
 import { regionFromLocation } from "./ResultsMap";
+import { SaveSearchButton } from "./SaveSearchButton";
 import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
@@ -42,6 +43,7 @@ export function FanFace({ initial, headerRight }: {
       right={
         <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
           <ListMapToggle view={view} onChange={(v) => { setView(v); setSelectedPin(null); }} />
+          <SaveSearchButton face="fan" q={state.q} filters={state.filters} />
           {headerRight}
         </View>
       }

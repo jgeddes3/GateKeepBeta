@@ -1,22 +1,47 @@
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
-import { doc, onSnapshot } from "firebase/firestore";
+import { useLocalSearchParams } from "expo-router";
+import { doc, getDoc, onSnapshot } from "firebase/firestore";
 import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { CuratorFace } from "../../src/search/CuratorFace";
-import type { ProfileDoc } from "@gatekeep/shared";
+import type { ProfileDoc, SavedSearchDoc, SearchFilters } from "@gatekeep/shared";
 import { Text, PageBackground, Skeleton, SkeletonCard } from "../../src/ui";
 import { tokens } from "../../src/theme/tokens";
 
-// Curator "Find musicians" tab (SP8 Task 15): the curator search face,
+// Curator "Find musicians" tab (SP8 Task 15/17): the curator search face,
 // replacing the earlier browse placeholder. Gated the same way
 // (curator)/events/index.tsx gates its own content: an approved curator
 // profile is required both to browse usefully (offerGig needs one) and to
-// match web's dashboard/curator/[profileId]/musicians/page.tsx gate.
+// match web's dashboard/curator/[profileId]/musicians/page.tsx gate. `saved`
+// resolves through one owner-read getDoc before CuratorFace ever mounts
+// (its `initial` prop only takes effect at mount); a missing or
+// permission-denied doc just renders the empty face, no alert.
 export default function Musicians() {
   const { user } = useAuth();
   const { activeContext } = useProfileContext();
+  const { saved } = useLocalSearchParams<{ saved?: string }>();
+  const [savedReady, setSavedReady] = useState(!saved);
+  const [initial, setInitial] = useState<{ q: string; filters: SearchFilters } | undefined>(undefined);
+  const resolvedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!saved || resolvedRef.current === saved) return;
+    resolvedRef.current = saved;
+    setSavedReady(false);
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, "savedSearches", saved))
+      .then((snap) => {
+        if (cancelled) return;
+        if (snap.exists()) {
+          const d = snap.data() as SavedSearchDoc;
+          setInitial({ q: d.q, filters: d.filters });
+        }
+        setSavedReady(true);
+      })
+      .catch(() => { if (!cancelled) setSavedReady(true); });
+    return () => { cancelled = true; };
+  }, [saved]);
   const profileId = typeof activeContext === "object" && activeContext.type === "curator"
     ? activeContext.profileId : null;
   const [profile, setProfile] = useState<ProfileDoc | null>(null);
@@ -39,7 +64,7 @@ export default function Musicians() {
       () => { if (activeIdRef.current !== forId) return; setProfile(null); });
   }, [profileId]);
 
-  if (!user || !profileId || !profile) {
+  if (!user || !profileId || !profile || !savedReady) {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -71,5 +96,5 @@ export default function Musicians() {
     );
   }
 
-  return <CuratorFace key={profileId} curatorProfileId={profileId} />;
+  return <CuratorFace key={profileId} curatorProfileId={profileId} initial={initial} />;
 }

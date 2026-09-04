@@ -12,6 +12,7 @@ import { MapResults } from "./MapResults";
 import { ResultList } from "./ResultList";
 import { GigRow, ProfileRow } from "./ResultRows";
 import { regionFromLocation } from "./ResultsMap";
+import { SaveSearchButton } from "./SaveSearchButton";
 import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
@@ -62,6 +63,7 @@ function GigsSegment({ segment, onSegmentChange, location, initial, headerRight,
       right={
         <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
           <ListMapToggle view={view} onChange={(v) => { setView(v); setSelectedPin(null); }} />
+          <SaveSearchButton face="musician_gigs" q={state.q} filters={state.filters} />
           {headerRight}
         </View>
       }
@@ -100,7 +102,13 @@ function VenuesSegment({ segment, onSegmentChange, location, initial, headerRigh
     <SearchHeader
       value={state.q} onChangeText={state.setQ} placeholder="Search venues"
       face="musician_venues" filters={state.filters} onFiltersChange={state.setFilters} location={location}
-      above={<SegmentChips segment={segment} onChange={onSegmentChange} />} right={headerRight}
+      above={<SegmentChips segment={segment} onChange={onSegmentChange} />}
+      right={
+        <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+          <SaveSearchButton face="musician_venues" q={state.q} filters={state.filters} />
+          {headerRight}
+        </View>
+      }
     />
   );
   return (

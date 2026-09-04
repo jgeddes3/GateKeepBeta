@@ -2,8 +2,10 @@ import type { ReactNode } from "react";
 import { View } from "react-native";
 import type { SearchFilters } from "@gatekeep/shared";
 import type { DeckLocationState } from "../discover/useDeckLocation";
+import { tokens } from "../theme/tokens";
 import { CuratorArtistRow } from "./CuratorArtistRow";
 import { ResultList } from "./ResultList";
+import { SaveSearchButton } from "./SaveSearchButton";
 import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
@@ -34,7 +36,12 @@ export function CuratorFace({ curatorProfileId, initial, headerRight }: {
       filters={state.filters}
       onFiltersChange={state.setFilters}
       location={NO_LOCATION}
-      right={headerRight}
+      right={
+        <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+          <SaveSearchButton face="curator" q={state.q} filters={state.filters} />
+          {headerRight}
+        </View>
+      }
     />
   );
 

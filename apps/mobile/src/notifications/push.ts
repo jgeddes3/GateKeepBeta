@@ -28,12 +28,18 @@ export async function ensureAndroidChannel(): Promise<void> {
 // The route a tapped push opens: the same map the in-app inbox rows use, read
 // off the data: { kind, refId } payload notifyUser attaches (section B3).
 // Null for a kind with no destination or a legacy push without data, in
-// which case the tap just foregrounds the app, exactly as before.
+// which case the tap just foregrounds the app, exactly as before. SP8 Task
+// 17: `refKind` is read the same optional way so a saved_search_match push
+// routes to the event/gig page once the payload carries it; today's payload
+// omits it, so this just falls back to notificationHref's own null (a
+// saved_search_match tap opens the app with nowhere to go, same as before),
+// same as NotificationsList's in-app row for a profile match.
 export function pushHref(response: Notifications.NotificationResponse | null | undefined): Href | null {
-  const data = response?.notification.request.content.data as { kind?: unknown; refId?: unknown } | undefined;
+  const data = response?.notification.request.content.data as { kind?: unknown; refId?: unknown; refKind?: unknown } | undefined;
   if (!data || typeof data.kind !== "string") return null;
   const refId = typeof data.refId === "string" ? data.refId : null;
-  return notificationHref(data.kind as NotificationKind, refId, "mobile") as Href | null;
+  const refKind = data.refKind === "event" || data.refKind === "gig" || data.refKind === "profile" ? data.refKind : undefined;
+  return notificationHref(data.kind as NotificationKind, refId, "mobile", refKind) as Href | null;
 }
 
 // The token registered by this app session, so sign-out can delete exactly

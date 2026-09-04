@@ -60,6 +60,19 @@ export function AccountScreen() {
             <Text variant="label">Following</Text>
             <IconCaretRight size={16} color={t.muted} />
           </Pressable>
+          {/* SP8 Task 17: every account can save a search from any face's
+              header and get alerted when a new match appears, so this row
+              is unconditional here too. */}
+          <Pressable
+            onPress={() => router.push("/(fan)/saved-searches")}
+            accessibilityRole="button"
+            accessibilityLabel="Saved searches"
+            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.md,
+              borderTopWidth: 1, borderTopColor: t.border, paddingTop: tokens.space.md }}
+          >
+            <Text variant="label">Saved searches</Text>
+            <IconCaretRight size={16} color={t.muted} />
+          </Pressable>
         </Card>
         <Button title="Sign out" variant="secondary" onPress={signOutUser} />
         <Button title="Delete account" variant="destructive" onPress={deleteAccount} />

@@ -17,6 +17,10 @@ export default function FanTabs() {
           AccountScreen's own "Following" row; href:null keeps it out of the
           tab bar itself. */}
       <Tabs.Screen name="following" options={{ title: "Following", href: null }} />
+      {/* SP8 Task 17: reachable via router.push("/(fan)/saved-searches")
+          from AccountScreen's own "Saved searches" row, same shape as
+          `following` above. */}
+      <Tabs.Screen name="saved-searches" options={{ title: "Saved searches", href: null }} />
     </Tabs>
   );
 }
