@@ -1,4 +1,5 @@
 import { onSchedule } from "firebase-functions/v2/scheduler";
+import { HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldPath, FieldValue } from "firebase-admin/firestore";
 import {
   SERIES_MATERIALIZE_WEEKS, MAX_OPEN_GIGS_PER_PROFILE, POSTER_UPLOAD_TTL_MS, LAUNCH_TIMEZONE,
@@ -1068,6 +1069,18 @@ async function drainEventCascadeRetries(
           await doc.ref.delete();
           report.eventCascadeRetried++;
         } catch (e) {
+          // Audit note: the event doc is GONE (deleted by hand, or by another
+          // cascade that ran to completion). There is nothing left to cancel
+          // or refund, so this retry can never succeed and re-queueing it only
+          // buys a permanent event_cascade_stuck alert nobody can clear.
+          // Draining it is the terminal success for this doc, not an error.
+          if (e instanceof HttpsError && e.code === "not-found") {
+            await doc.ref.delete().catch((deleteError) =>
+              console.error(`dailySweep: eventCascadeRetries delete failed for ${doc.id}`, deleteError));
+            report.eventCascadeRetried++;
+            console.info(`dailySweep: event ${doc.id} no longer exists, cascade retry dropped`);
+            continue;
+          }
           const lastError = e instanceof Error ? e.message : String(e);
           console.error(`dailySweep: event cascade retry failed for event ${doc.id}`, e);
           report.errors.eventCascadeRetries++;

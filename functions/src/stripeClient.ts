@@ -45,8 +45,11 @@ export interface VerifiedWebhookEvent {
 }
 
 export interface ChargeResult { id: string; chargeId: string | null; }
-// A connected account's two payout buckets, read together (see getBalances).
-export interface StripeBalances { availableCents: number; instantAvailableCents: number; }
+// A connected account's payout buckets, read together (see getBalances).
+// `pendingCents` is money that HAS been earned but has not finished settling
+// through the card network; it lands in `available` days later, so anything
+// that asks "is this account empty?" has to count it (branch audit, LOW).
+export interface StripeBalances { availableCents: number; instantAvailableCents: number; pendingCents: number; }
 export interface StripeAccountState {
   id: string; transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
 }
@@ -725,8 +728,11 @@ export class FakeStripe implements StripeLike {
     const balance = (snap.data()?.balanceCents as number | undefined) ?? 0;
     // The fake tracks one running balance per account, no real card-network
     // settlement delay to model, so "instant available" coincides with
-    // "available".
-    return { availableCents: balance, instantAvailableCents: balance };
+    // "available" and nothing is ever pending on its own. `pendingCents` is
+    // therefore 0 unless a test sets it directly on the account object, which
+    // is how the deleteProfile gate's pending case is exercised.
+    const pending = (snap.data()?.pendingCents as number | undefined) ?? 0;
+    return { availableCents: balance, instantAvailableCents: balance, pendingCents: pending };
   }
   async createPayout(p: { accountId: string; amountCents: number; instant: boolean; idempotencyKey: string; meta: Record<string, string> }) {
     return this.idem(p.idempotencyKey, async () => {
@@ -1030,6 +1036,7 @@ export class RealStripe implements StripeLike {
     return {
       availableCents: usdTotal(b.available),
       instantAvailableCents: usdTotal(b.instant_available),
+      pendingCents: usdTotal(b.pending),
     };
   }
   async createPayout(p: { accountId: string; amountCents: number; instant: boolean; idempotencyKey: string; meta: Record<string, string> }) {

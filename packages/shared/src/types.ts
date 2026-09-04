@@ -342,6 +342,12 @@ export const SERIES_MATERIALIZE_WEEKS = 8;
 // Set this to the launch metro's zone before launch (Task 14 adds the
 // README launch-checklist item to not forget this).
 export const LAUNCH_TIMEZONE = "America/New_York";
+// The same zone in words, for copy. Anything that tells a person "the end of
+// that day" has to say WHOSE day, and hard-coding "Eastern time" at each such
+// site would drift the moment LAUNCH_TIMEZONE moves to the real launch metro
+// (which is its own owner-owed launch item). Deliberately the plain-English
+// name, not an abbreviation: it stays correct across EST and EDT.
+export const LAUNCH_TIMEZONE_LABEL = "Eastern time";
 
 // ---------- Sub-project 4: booking flow ----------
 
@@ -869,7 +875,12 @@ export type AdminAlertKind =
   | "dispute_opened" | "dispute_reversal_failed" | "external_refund" | "ticket_order_stuck"
   // SP10 Task 10 fix round 1: an event whose moderation cancel-and-refund
   // keeps failing; ticket holders may be unrefunded, resolve manually.
-  | "event_cascade_stuck";
+  | "event_cascade_stuck"
+  // SP10 branch audit: an auth account was deleted OUTSIDE deleteAccount (the
+  // client SDK's currentUser.delete(), the console, the Admin SDK), bypassing
+  // its refusals, while it still owed something: a live ticket, an offered
+  // transfer, a pending order, or sole admin of a profile now left with none.
+  | "account_deleted_unclean";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;

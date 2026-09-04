@@ -178,6 +178,11 @@
     ] },
   { "collectionGroup": "orders", "queryScope": "COLLECTION",
     "fields": [
+      { "fieldPath": "buyerUid", "order": "ASCENDING" },
+      { "fieldPath": "status", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "orders", "queryScope": "COLLECTION",
+    "fields": [
       { "fieldPath": "eventId", "order": "ASCENDING" },
       { "fieldPath": "status", "order": "ASCENDING" }
     ] },

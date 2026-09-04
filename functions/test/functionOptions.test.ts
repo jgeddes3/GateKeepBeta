@@ -24,4 +24,14 @@ describe("deployed function options (SP10 Task 24)", () => {
   it("stripeWebhook has a 120 s timeout", () => {
     expect(stripeWebhook.__endpoint.timeoutSeconds).toBe(120);
   });
+
+  // Task 24 review: stripeSecrets.test.ts reads the SOURCE text of
+  // paymentsWebhook.ts for the same three names; this reads the deployed
+  // MANIFEST instead, so a secret that is written in the options object but
+  // never reaches the endpoint (a wrong param object, a stale build) still
+  // fails here. Both halves are cheap and neither subsumes the other.
+  it("stripeWebhook declares all three Stripe secrets on its endpoint", () => {
+    const keys = (stripeWebhook.__endpoint.secretEnvironmentVariables ?? []).map((s) => s.key).sort();
+    expect(keys).toEqual(["STRIPE_CONNECT_WEBHOOK_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]);
+  });
 });

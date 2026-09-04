@@ -145,17 +145,29 @@ export const disputeCreatedHandler: WebhookHandler = async (object, eventId) => 
 
   // 3. The durable escalation. Evidence is submitted by hand in Stripe; the
   // ledger and the booking thread are the evidence, and this row is what tells
-  // an operator to go and assemble it. Kept ABOVE the redelivery guard below:
-  // a `created` that arrives after the dispute is already decided is still a
-  // real (if late) delivery worth recording a recurrence of.
+  // an operator to go and assemble it.
+  //
+  // Branch audit (LOW): skipped once the dispute is DECIDED. recordAdminAlert
+  // clears `resolvedAt` on every recurrence, on purpose: an operator must not
+  // be able to silence a condition that is still live. A dispute Stripe has
+  // already won or lost is not a live condition, and the closed handler's own
+  // "was WON/LOST" detail is the row's final word, so a late redelivery here
+  // would reopen a finished ticket and overwrite that word with "opened".
+  // Logged instead, so the late delivery is still visible. This is the same
+  // stale-echo reasoning as the `stillOpen` guard on steps 4/5 below; only a
+  // brand-new (`!existing`) or still-open dispute reaches the alert.
   const alertId = disputeAlertId(d.disputeId);
-  const shouldLog = await recordAdminAlert({
-    alertId, kind: "dispute_opened",
-    detail: `dispute ${d.disputeId} opened on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c, reason ${d.reason};`
-      + " submit evidence in the Stripe dashboard (the ledger and the booking thread are the record)",
-    bookingId: target.bookingId ?? null, gigId: target.gigId ?? null, now,
-  });
-  if (shouldLog) console.error(`charge.dispute.created: ${scope} disputed (see adminAlerts/${alertId})`);
+  if (existing && existing.status !== "open") {
+    console.info(`charge.dispute.created: ${d.disputeId} already ${existing.status}, late delivery not re-escalated (event ${eventId})`);
+  } else {
+    const shouldLog = await recordAdminAlert({
+      alertId, kind: "dispute_opened",
+      detail: `dispute ${d.disputeId} opened on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c, reason ${d.reason};`
+        + " submit evidence in the Stripe dashboard (the ledger and the booking thread are the record)",
+      bookingId: target.bookingId ?? null, gigId: target.gigId ?? null, now,
+    });
+    if (shouldLog) console.error(`charge.dispute.created: ${scope} disputed (see adminAlerts/${alertId})`);
+  }
 
   // Review round 1 (Important 1): a redelivered `created` (fresh event id,
   // same dispute) must not re-run steps 4/5 once the dispute is DECIDED
@@ -198,8 +210,14 @@ export const disputeCreatedHandler: WebhookHandler = async (object, eventId) => 
 // event's ticket settlement. Returns the reversal id(s) joined by "," (one in
 // every ordinary case), or null when there was nothing to reverse; throws when
 // Stripe refuses. `reason` explains a null.
+// `disputeAmountCents` is what the BANK took back, which can be less than the
+// transfer that moved the money out (a partial chargeback). Every reversal
+// below is therefore capped at it: reversing the whole transfer would claw
+// back more from the musician than the platform actually lost (branch audit,
+// LOW). The ticket branch already reasons in per-order face value and is
+// unchanged.
 async function reverseForLostDispute(
-  target: ChargeTarget, disputeId: string, now: number,
+  target: ChargeTarget, disputeId: string, now: number, disputeAmountCents: number,
 ): Promise<{ reversalIds: string[]; reason: string | null }> {
   const db = getFirestore();
   const stripe = getStripe();
@@ -279,7 +297,14 @@ async function reverseForLostDispute(
   if (target.purpose === "settlement" || target.purpose === "paydue") {
     const hit = docs.find(({ p }) => p.settlement.intentId === target.intentId && p.transfer.status === "transferred" && p.transfer.id);
     if (!hit) return { reversalIds: [], reason: "no transfer: the settlement has no live earnings transfer to reverse" };
-    const r = await stripe.reverseTransfer({ transferId: hit.p.transfer.id!, idempotencyKey: `dispute_reverse:${disputeId}` });
+    const r = await stripe.reverseTransfer({
+      transferId: hit.p.transfer.id!, idempotencyKey: `dispute_reverse:${disputeId}`,
+      amountCents: Math.min(disputeAmountCents, hit.p.transfer.amountCents ?? disputeAmountCents),
+    });
+    // The doc still reads "reversed" on a PARTIAL reversal: this occurrence's
+    // earnings transfer is no longer whole, and nothing downstream treats
+    // "reversed" as "reversed in full". The exact cents live on the ledger row
+    // the caller writes, and in Stripe.
     await hit.ref.update({ "transfer.status": "reversed", updatedAt: now })
       .catch((e) => console.error(`charge.dispute.closed: transfer.status write failed for ${target.bookingId}/${hit.gigId}`, e));
     await recomputePaymentSummary(target.bookingId!)
@@ -296,7 +321,12 @@ async function reverseForLostDispute(
   const ids: string[] = [];
   for (const f of forfeits) {
     const key = forfeits.length === 1 ? `dispute_reverse:${disputeId}` : `dispute_reverse:${disputeId}:${f.gigId}`;
-    const r = await stripe.reverseTransfer({ transferId: f.p.deposit.forfeitTransferId!, idempotencyKey: key });
+    const r = await stripe.reverseTransfer({
+      transferId: f.p.deposit.forfeitTransferId!, idempotencyKey: key,
+      // The forfeit transfer moved exactly the deposit slice (paymentsCore's
+      // forfeit_transfer ledger row is written for that amount).
+      amountCents: Math.min(disputeAmountCents, f.p.deposit.sliceCents),
+    });
     ids.push(r.id);
   }
   await recomputePaymentSummary(target.bookingId!)
@@ -385,7 +415,7 @@ export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
   let reversalIds: string[] = [];
   let failure: string | null = null;
   try {
-    const r = await reverseForLostDispute(target, d.disputeId, now);
+    const r = await reverseForLostDispute(target, d.disputeId, now, d.amountCents);
     reversalIds = r.reversalIds;
     failure = r.reason;
   } catch (e) {

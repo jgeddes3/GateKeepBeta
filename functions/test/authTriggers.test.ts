@@ -40,6 +40,25 @@ describe("onUserCreated", () => {
   );
 
   it(
+    "an EMPTY auth displayName falls back to the email local part, never a blank name",
+    async () => {
+      // Rules audit: the users update rule now requires a present, non-blank
+      // displayName on EVERY patch (even a homeCity-only one). A doc seeded
+      // with "" would therefore be permanently unpatchable by its own owner,
+      // so the seed must never produce one. `??` does not catch "" (it is not
+      // nullish), which is exactly the hole this closes.
+      const email = `blank-${Date.now()}@test.com`;
+      const created = await adminAuth(admin).createUser({ email, password: "GateKeep-Test1", displayName: "" });
+      const snap = await waitForUserDoc(created.uid);
+      expect(snap.exists).toBe(true);
+      expect(snap.data()?.displayName).toBe(email.split("@")[0]);
+      expect((snap.data()?.displayName as string).trim().length).toBeGreaterThan(0);
+      expect(snap.data()?.displayNameLower).toBe(email.split("@")[0].toLowerCase());
+    },
+    15_000,
+  );
+
+  it(
     "also stamps displayNameLower as the lowercased displayName",
     async () => {
       const { uid } = await signUpTestUser(`bob-${Date.now()}@test.com`);
@@ -193,6 +212,48 @@ describe("onUserDeleted", () => {
     expect(transfer?.status).toBe("voided");
     expect(typeof transfer?.resolvedAt).toBe("number");
   }, 30_000);
+
+  it("a client-side deletion with a live future ticket alerts account_deleted_unclean and still cascades", async () => {
+    const { uid } = await signUpTestUser(`od3-${Date.now()}@test.com`);
+    await waitForUserDoc(uid);
+    const adb = adminFirestore(admin);
+    const now = Date.now();
+    const eventId = `od3-event-${now}`;
+    // Dated past DECK_WINDOW_MS (30 days) and given the full EventDoc shape:
+    // this fixture is written straight through the Admin SDK, and getDiscoverDeck
+    // reads every published event inside its window without null-guarding
+    // lineupMusicianProfileIds, so a half-shaped one poisons an unrelated suite.
+    const startsAt = now + 60 * 86_400_000;
+    await adb.doc(`events/${eventId}`).set({
+      curatorProfileId: "od3-curator", title: "Future night", description: "",
+      location: { venueName: null, neighborhood: null, city: "Austin", geo: null, addressVisibility: "neighborhood", address: null },
+      startsAt, endsAt: startsAt + 3 * 3_600_000, status: "published",
+      lineup: [], lineupMusicianProfileIds: [], genres: [],
+      createdAt: now, updatedAt: now,
+    });
+    await adb.doc(`users/${uid}/tickets/od3-ticket`).set({
+      eventId, tierId: "t1", orderId: "o1", ownerUid: uid, status: "valid", createdAt: now,
+    });
+
+    // currentUser.delete() on a client, or a console deletion: neither can be
+    // refused server-side, so deleteAccount's refusals are bypassed entirely.
+    await adminAuth(admin).deleteUser(uid);
+
+    const gone = await waitForUserDocGone(uid);
+    expect(gone.exists).toBe(false); // the cascade still ran
+
+    const deadline = Date.now() + 15_000;
+    let alert = (await adb.doc(`adminAlerts/account-deleted-unclean:${uid}`).get()).data();
+    while (!alert && Date.now() < deadline) {
+      await wait(250);
+      alert = (await adb.doc(`adminAlerts/account-deleted-unclean:${uid}`).get()).data();
+    }
+    expect(alert).toBeDefined();
+    expect(alert?.kind).toBe("account_deleted_unclean");
+    expect(alert?.detail).toContain(uid);
+    expect(alert?.detail).toMatch(/ticket/i);
+    expect(alert?.resolvedAt).toBeNull();
+  }, 40_000);
 
   it("a sole admin deleted from the console is logged, not refused: the membership goes, the profile stays", async () => {
     const owner = await signUpTestUser(`od2-${Date.now()}@test.com`);

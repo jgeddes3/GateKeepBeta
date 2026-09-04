@@ -593,7 +593,13 @@ async function cancelPendingOrderForCancelledEvent(
   return outcome === "released" ? "expired" : outcome;
 }
 
-const ORDER_ALREADY_PAID_MESSAGE = "This order has already been paid. Check your tickets.";
+// Task 21 review: the "deferred" outcome is NOT proof the order was paid. It
+// covers a succeeded intent, an intent still `processing`, and one whose
+// status could not be read at all, so the copy has to be true for all three:
+// it says the order is being finalized and is past the point of cancelling,
+// and points at the tickets, without claiming money moved.
+const ORDER_ALREADY_PAID_MESSAGE =
+  "This order is being finalized and can no longer be cancelled. Check your tickets in a few minutes.";
 
 export interface CancelTicketOrderInput { orderId: string; }
 export interface CancelTicketOrderResult { orderStatus: TicketOrderStatus; }

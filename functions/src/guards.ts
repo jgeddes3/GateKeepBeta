@@ -1,5 +1,6 @@
 import { HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, type DocumentSnapshot } from "firebase-admin/firestore";
+import { EMAIL_NOT_VERIFIED_MESSAGE } from "@gatekeep/shared";
 
 // Shared onCall guards used across profiles/members/portfolio/booking/curator
 // callables.
@@ -12,7 +13,12 @@ export function requireAuthUid(req: { auth?: { uid?: string } }): string {
 
 export function requireVerifiedEmail(req: { auth?: { token?: Record<string, unknown> } }): void {
   if (req.auth?.token?.email_verified !== true) {
-    throw new HttpsError("failed-precondition", "Please verify your email address first.");
+    // Task 27 review: the SHARED constant, not a copy of its text. Both
+    // clients' callFn wrappers (apps/*/src/lib/callable.ts) trigger their
+    // one-shot token refresh on an exact match against this same export, so
+    // the retry stays coupled to this throw by import rather than by two
+    // string literals that could drift apart.
+    throw new HttpsError("failed-precondition", EMAIL_NOT_VERIFIED_MESSAGE);
   }
 }
 

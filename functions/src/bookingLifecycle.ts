@@ -533,6 +533,7 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
   // must always agree, even across a retry or a slow commit).
   const now = Date.now();
   const gigRef = db.doc(`gigs/${gigId}`);
+  const seriesRef = db.doc(`gigSeries/${booking.seriesId}`);
   const reliabilityRef = db.doc(`profiles/${booking.musicianProfileId}/private/reliability`);
   // The reliability doc is read here (up front, alongside the booking/gig)
   // and, when a mark applies, written in the SAME transaction's write phase
@@ -556,6 +557,11 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
 
     const gigSnap = await tx.get(gigRef);
     const gig = gigSnap.data() as GigDoc | undefined;
+    // Task 32 review: read in the read phase, used in the write phase below.
+    // The materializer stamps every occurrence with the SERIES' fillMode, and
+    // browse/detail render run copy ("one act takes the whole run") off it.
+    const seriesSnap = await tx.get(seriesRef);
+    const seriesActiveBookingId = (seriesSnap.data() as GigSeriesDoc | undefined)?.activeBookingId ?? null;
     // Belongs to THIS booking's run (not just any gig sharing the series id
     //, e.g. a filled occurrence of a DIFFERENT booking would be a
     // logic error elsewhere, but this check makes it impossible to reach
@@ -623,7 +629,17 @@ export const cancelOccurrence = onCall<CancelOccurrenceInput>({ region: "us-cent
     // Booking itself stays "confirmed", only this one date is affected;
     // the run continues with its remaining occurrences.
     tx.update(bookingRef, { occurrenceCancellations: nextEntries, updatedAt: now });
-    tx.update(gigRef, { status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now });
+    // Task 32 review: while the run keeps its own activeBookingId, this date
+    // can only ever be taken singly (Task 22's path: applyToGig mints a
+    // seriesId-less booking for it), so the inherited "whole_run" stamp would
+    // have browse and detail promising a run that is not on offer. Cleared in
+    // the SAME write that reopens the date, never as a follow-up. A PAUSED or
+    // ENDED run keeps its stamp: its activeBookingId is null, nothing is
+    // taking those dates, and sp10b-rulings records that as an accepted gap.
+    tx.update(gigRef, {
+      status: "open", bookingId: null, bookedMusicianProfileId: null, updatedAt: now,
+      ...(seriesActiveBookingId != null ? { fillMode: null } : {}),
+    });
     if (markApplied) {
       const mark: ReliabilityMark = {
         bookingId, gigId, kind: "late_cancel", at: now, reportedByProfileId: null, removedByAdmin: false,

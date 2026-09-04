@@ -21,12 +21,27 @@ import { writeAudit } from "./review.js";
 // client-keyed message. The transfer and order scans filter status in
 // memory off a single-field query: both are bounded by one user's own
 // history, and neither has a (uid, status) composite today.
-async function assertNothingOutstanding(db: FirebaseFirestore.Firestore, uid: string, now: number): Promise<void> {
+//
+// Branch audit (MEDIUM): the same three questions asked WITHOUT throwing, so
+// the onUserDeleted trigger can report what a client-side deletion bypassed.
+// Firebase has no blocking delete trigger, so `currentUser.delete()` and the
+// console cannot be refused; the alert this feeds is the backstop until the
+// "Delete account" user action is disabled in the Identity Platform console
+// (README "Manual follow-ups"). Every reason is a caller-facing message
+// constant, so the alert detail and the callable's refusal say the same thing.
+// Order is load-bearing: assertNothingOutstanding throws the FIRST reason, and
+// the callable's own behavior (tickets before transfers before orders) is
+// unchanged by this refactor.
+export async function listOutstandingObligations(
+  db: FirebaseFirestore.Firestore, uid: string, now: number,
+): Promise<string[]> {
+  const reasons: string[] = [];
+
   const tickets = await db.collection(`users/${uid}/tickets`).where("status", "in", ["valid", "checked_in"]).get();
   const eventIds = [...new Set(tickets.docs.map((d) => (d.data() as TicketDoc).eventId))];
   for (const eventId of eventIds) {
     const event = (await db.doc(`events/${eventId}`).get()).data() as EventDoc | undefined;
-    if (event && event.endsAt > now) throw new HttpsError("failed-precondition", DELETE_ACCOUNT_TICKETS_MESSAGE);
+    if (event && event.endsAt > now) { reasons.push(DELETE_ACCOUNT_TICKETS_MESSAGE); break; }
   }
 
   const [fromSnap, toSnap] = await Promise.all([
@@ -34,12 +49,18 @@ async function assertNothingOutstanding(db: FirebaseFirestore.Firestore, uid: st
     db.collection("transfers").where("toUid", "==", uid).get(),
   ]);
   const offered = [...fromSnap.docs, ...toSnap.docs].some((d) => (d.data() as TicketTransferDoc).status === "offered");
-  if (offered) throw new HttpsError("failed-precondition", DELETE_ACCOUNT_TRANSFERS_MESSAGE);
+  if (offered) reasons.push(DELETE_ACCOUNT_TRANSFERS_MESSAGE);
 
   const orders = await db.collection("orders").where("buyerUid", "==", uid).get();
   if (orders.docs.some((d) => (d.data() as TicketOrderDoc).status === "pending")) {
-    throw new HttpsError("failed-precondition", DELETE_ACCOUNT_ORDERS_MESSAGE);
+    reasons.push(DELETE_ACCOUNT_ORDERS_MESSAGE);
   }
+  return reasons;
+}
+
+async function assertNothingOutstanding(db: FirebaseFirestore.Firestore, uid: string, now: number): Promise<void> {
+  const reasons = await listOutstandingObligations(db, uid, now);
+  if (reasons.length > 0) throw new HttpsError("failed-precondition", reasons[0]);
 }
 
 const RETRY_SAFE_MESSAGE = "Account deletion did not complete. It is safe to try again.";
@@ -66,9 +87,13 @@ async function runPhase(uid: string, phase: string, run: () => Promise<unknown>)
 // the onUserDeleted trigger so a console or Admin SDK deletion cascades
 // identically. Idempotent per phase (re-deleting a deleted doc is a no-op),
 // which also makes the trigger's second pass after deleteAccount harmless.
-// The sole-admin case is a refusal for the callable and a logged fact for
-// the trigger: the auth user is already gone by the time onDelete runs.
-export async function cascadeDeleteUser(uid: string, opts: { allowSoleAdmin: boolean }): Promise<void> {
+// The sole-admin case is a refusal for the callable and a REPORTED fact for
+// the trigger (returned, not logged here): the auth user is already gone by
+// the time onDelete runs, so there is nothing left to refuse, and the trigger
+// folds it into the one account_deleted_unclean alert an operator will read.
+export async function cascadeDeleteUser(
+  uid: string, opts: { allowSoleAdmin: boolean },
+): Promise<{ soleAdminOf: string[] }> {
   const db = getFirestore();
   const memberships = await db.collectionGroup("members").where("uid", "==", uid).get();
   const soleAdminOf: string[] = [];
@@ -81,13 +106,15 @@ export async function cascadeDeleteUser(uid: string, opts: { allowSoleAdmin: boo
       soleAdminOf.push(p.data()?.name ?? profileRef.id);
     }
   }
-  if (soleAdminOf.length > 0) {
-    if (!opts.allowSoleAdmin) {
-      throw new HttpsError("failed-precondition",
-        `You are the only admin of: ${soleAdminOf.join(", ")}. Transfer admin or delete those profiles first.`);
-    }
-    console.error("cascadeDeleteUser: removing the sole admin; these profiles now have no admin", { uid, soleAdminOf });
+  if (soleAdminOf.length > 0 && !opts.allowSoleAdmin) {
+    throw new HttpsError("failed-precondition",
+      `You are the only admin of: ${soleAdminOf.join(", ")}. Transfer admin or delete those profiles first.`);
   }
+  // Branch audit (MEDIUM): the allowSoleAdmin case is reported to the CALLER
+  // (onUserDeleted) rather than logged here, so the one place that can raise
+  // an admin alert about an unclean deletion sees this fact alongside the
+  // obligations it gathered before the cascade. A console line alone was not
+  // an escalation anybody would ever read.
 
   // S5: curatorAccess/{uid} first, so a stale marker never outlives the account.
   await runPhase(uid, "curatorAccess", () => Promise.all([
@@ -127,6 +154,7 @@ export async function cascadeDeleteUser(uid: string, opts: { allowSoleAdmin: boo
     if (n > 0) await batch.commit();
   });
   await runPhase(uid, "firestore", () => db.recursiveDelete(db.doc(`users/${uid}`)));
+  return { soleAdminOf };
 }
 
 export const deleteAccount = onCall({ region: "us-central1" }, async (req) => {

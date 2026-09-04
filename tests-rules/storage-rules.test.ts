@@ -19,6 +19,21 @@ beforeEach(async () => { await env.clearStorage(); });
 const bytes = new Uint8Array([1, 2, 3]);
 const meta = (contentType: string) => ({ contentType });
 
+describe("storage: public serving path", () => {
+  // SP6 posters live under the same world-readable public/photos prefix as
+  // avatars and covers, and a fan looking at an event page is often signed
+  // out, so the anonymous read is the case that actually has to work.
+  it("an anonymous reader gets a processed poster object", async () => {
+    const path = "public/photos/p1/poster-3fa85f64-5717-4562-b3fc-2c963f66afa6.jpg";
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), path), bytes, meta("image/jpeg"));
+    });
+    const anon = env.unauthenticatedContext().storage();
+    await assertSucceeds(getBytes(ref(anon, path)));
+    await assertSucceeds(getDownloadURL(ref(anon, path)));
+  });
+});
+
 describe("storage: staging/audio", () => {
   it("owner uploads audio to own staging path; wrong uid, wrong type, zero-byte fail", async () => {
     const alice = env.authenticatedContext("alice").storage();

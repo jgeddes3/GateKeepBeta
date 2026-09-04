@@ -31,9 +31,12 @@ export const EMPTY_BOOKING_RATES: BookingRates = { perHour: null, perSong: null,
 // each doc it converges, the primary writer of both projections today, per
 // the comments left in profiles.ts / firestore.rules by earlier tasks. Not
 // the ONLY writer of the reliability summary going forward, though: Task 6
-// adds recomputeReliability, which merge-writes just the `reliability` field
-// inside curatorBooking after cancellation/no-show/admin-removal events,
-// without touching rates/preferences or publicBooking.
+// adds recomputeReliability, which merge-writes the `reliability` field of
+// curatorBooking after cancellation/no-show/admin-removal events, leaving
+// rates/preferences and publicBooking untouched. That merge is why this
+// function no longer deletes curatorBooking for a musician with no booking
+// info (SP10 Task 18): a reliability summary written by that path has to
+// survive a rebuild that finds no source doc.
 //
 // `source`, when passed, is the BookingDoc the caller is about to persist,
 // updateBookingInfo passes its just-built docData so the source write folds
@@ -44,7 +47,9 @@ export const EMPTY_BOOKING_RATES: BookingRates = { perHour: null, perSong: null,
 // rates/preferences with an older projection. Omit `source` to have this
 // function read the current source doc itself (backfillBookingVisibility's
 // path, and any direct/administrative rebuild), a doc that doesn't exist in
-// that case triggers the clear branch below, not an error.
+// that case triggers the seed-and-keep branch below (a merge-set projection
+// carrying whatever reliability already exists), not an error and not a
+// delete.
 export async function rebuildBookingProjections(profileId: string, source?: BookingDoc): Promise<void> {
   const db = getFirestore();
   const bookingRef = db.doc(`profiles/${profileId}/private/booking`);

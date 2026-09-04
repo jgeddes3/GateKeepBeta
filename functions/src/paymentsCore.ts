@@ -848,6 +848,12 @@ export function disputeReversalAlertId(disputeId: string): string { return `disp
 // SP10 Task 6: a refund issued from the Stripe dashboard against a charge the
 // system still reads as paid. Scoped to the refund.
 export function externalRefundAlertId(refundId: string): string { return `external-refund:${refundId}`; }
+// An auth account deleted OUTSIDE deleteAccount (the client SDK's
+// currentUser.delete(), the console, the Admin SDK) that still owed something.
+// Keyed on the uid alone: the account is gone, so there will never be a second
+// episode for the same one, and a redelivery of the same trigger must land on
+// the same row.
+export function accountDeletedUncleanAlertId(uid: string): string { return `account-deleted-unclean:${uid}`; }
 
 // The durable "a human has to look at this" queue (adminAlerts/{alertId}).
 // Every SP5 path that deliberately REFUSES to move money, because moving it

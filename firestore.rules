@@ -36,6 +36,11 @@ service cloud.firestore {
         && request.resource.data.displayName is string
         && request.resource.data.displayName.size() >= 1
         && request.resource.data.displayName.size() <= 80
+        // Rules audit: size() alone accepts " ", which reads as a blank name
+        // everywhere it is displayed (attendee rows, notification copy). The
+        // stored value is left untrimmed on purpose, only the emptiness test
+        // trims, so a name with meaningful inner spacing is unaffected.
+        && request.resource.data.displayName.trim().size() >= 1
         && (request.resource.data.get('photoUrl', null) == null
             || (request.resource.data.get('photoUrl', null) is string
                 && request.resource.data.get('photoUrl', null).matches('^https://.*')
@@ -378,9 +383,9 @@ service cloud.firestore {
     match /invites/{inviteId} {
       // F15: admins read invites too (support: "I never got the invite").
       allow read: if signedIn()
-        && (request.auth.uid == resource.data.invitedUid
-            || request.auth.uid == resource.data.invitedByUid
-            || isAdmin());
+        && (isAdmin()
+            || request.auth.uid == resource.data.invitedUid
+            || request.auth.uid == resource.data.invitedByUid);
       allow write: if false; // Cloud Functions only
     }
 
@@ -396,7 +401,12 @@ service cloud.firestore {
     // under the uploader's uid; the client watches it to learn the final
     // processed path. Owner get/list only, server write only.
     match /posterUploads/{uid}/uploads/{nonce} {
-      allow get, list: if isOwner(uid);
+      // Rules audit: get ONLY. Both PosterField components subscribe to the
+      // single nonce they just minted, and the sweep's reaper runs on the
+      // Admin SDK, so nothing legitimate lists this collection; leaving list
+      // open only exposed an upload history nothing asked for.
+      allow get: if isOwner(uid);
+      allow list: if false;
       allow write: if false;
     }
     // Stripe dispute records (DisputeRecord): admin-read, server-write, like

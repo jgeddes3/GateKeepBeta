@@ -907,6 +907,22 @@ describe("deleteProfile money gate (SP10)", () => {
     expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(false);
   });
 
+  // Branch audit (LOW): "available" is only the SETTLED half of a connected
+  // account. Money still working through the card network sits in "pending"
+  // and lands days later, on an account whose profile the cascade has by then
+  // deleted, so the gate has to read both buckets.
+  it("refuses while only PENDING funds remain, and allows once both buckets are zero", async () => {
+    const { user, profileId } = await draftMusician("gate1p");
+    await adb.doc(`profiles/${profileId}/private/stripe`).set(stripeDoc({ accountId: "acct_gate1p" }));
+    await adb.doc(`stripeFake/state/objects/acct_gate1p`).set({ balanceCents: 0, pendingCents: 500 }, { merge: true });
+    await expect(callFn("deleteProfile", { profileId }, user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: DELETE_PROFILE_BALANCE_MESSAGE });
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(true);
+    await adb.doc(`stripeFake/state/objects/acct_gate1p`).set({ pendingCents: 0 }, { merge: true });
+    await callFn("deleteProfile", { profileId }, user);
+    expect((await adb.doc(`profiles/${profileId}`).get()).exists).toBe(false);
+  });
+
   it("refuses a delinquent profile; balance is checked first when both apply", async () => {
     const { user, profileId } = await draftMusician("gate2");
     await adb.doc(`profiles/${profileId}/private/stripe`).set(stripeDoc({ delinquent: true, delinquentSince: Date.now() }));

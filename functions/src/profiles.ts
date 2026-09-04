@@ -118,8 +118,15 @@ async function assertNoMoneyOutstanding(
   if (stripe?.accountId) {
     // Live read, never the cached doc: the balance changes without any
     // Firestore write (a payout landing, a transfer arriving).
+    //
+    // Branch audit (LOW): PENDING counts too. Deleting the profile destroys
+    // the only record of its connected account, and pending funds settle into
+    // `available` days later on an account nothing points at any more. The
+    // copy is deliberately the same DELETE_PROFILE_BALANCE_MESSAGE: from the
+    // owner's side both cases are "pay this out first", and splitting the
+    // message would only ask them to understand Stripe's settlement clock.
     const balances = await getStripe().getBalances(stripe.accountId);
-    if (balances.availableCents !== 0) {
+    if (balances.availableCents + balances.pendingCents !== 0) {
       throw new HttpsError("failed-precondition", DELETE_PROFILE_BALANCE_MESSAGE);
     }
   }

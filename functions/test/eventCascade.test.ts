@@ -181,10 +181,15 @@ describe("dailySweep step 9: drainEventCascadeRetries", () => {
 });
 
 describe("fix round 1: a permanently poisoned retry doc escalates", () => {
+  // Audit note: the event here is REAL but poisoned (settlementStartedAt set,
+  // so cancelEventCore refuses), not a missing event id. A retry doc naming a
+  // DELETED event is now drained rather than escalated (see the sweep test
+  // below), so a ghost id would no longer reach this path at all.
   it("alerts event_cascade_stuck once attempts reach the max, and keeps alerting on later runs", async () => {
-    const eventId = `evc-ghost-${Date.now()}`;
+    const { profileId, eventId } = await makeDraftEvent("evcstuck");
+    await adb.doc(`events/${eventId}`).update({ status: "published", settlementStartedAt: Date.now() });
     const seed: EventCascadeRetryDoc = {
-      profileId: "ghost-profile", reason: ORGANIZER_INACTIVE_REASON, attempts: 2,
+      profileId, reason: ORGANIZER_INACTIVE_REASON, attempts: 2,
       lastError: "seeded", createdAt: Date.now(),
     };
     await adb.doc(`eventCascadeRetries/${eventId}`).set(seed);
@@ -206,6 +211,26 @@ describe("fix round 1: a permanently poisoned retry doc escalates", () => {
     const alertAfterSecond = await adminAlert(alertId);
     expect(alertAfterSecond!.kind).toBe("event_cascade_stuck");
     expect(alertAfterSecond!.runCount).toBe(2);
+  });
+});
+
+describe("audit note: a retry doc for a DELETED event drains instead of alerting forever", () => {
+  it("deletes the retry doc, counts it as retried, and writes no event_cascade_stuck alert", async () => {
+    // Nothing left to cancel or refund: the event doc is gone (an admin
+    // cleanup, a cascade that ran to completion elsewhere). Attempts is
+    // already at the escalation threshold, so before this fix the sweep both
+    // kept the doc forever AND raised a permanent alert nobody could clear.
+    const eventId = `evc-gone-${Date.now()}`;
+    await adb.doc(`eventCascadeRetries/${eventId}`).set({
+      profileId: "gone-profile", reason: ORGANIZER_INACTIVE_REASON, attempts: 3,
+      lastError: "seeded", createdAt: Date.now(),
+    } satisfies EventCascadeRetryDoc);
+
+    const report = await runDailySweep(Date.now());
+
+    expect((await adb.doc(`eventCascadeRetries/${eventId}`).get()).exists).toBe(false);
+    expect(report.eventCascadeRetried).toBeGreaterThanOrEqual(1);
+    expect(await adminAlert(eventCascadeStuckAlertId(eventId))).toBeUndefined();
   });
 });
 

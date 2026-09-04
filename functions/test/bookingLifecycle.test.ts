@@ -580,7 +580,12 @@ describe("cancelOccurrence", () => {
     try {
       const gigId1 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 100 * 3_600_000 });
       const gigId2 = await createOpenGig(curatorProfileId, curator.user, { startsAt: Date.now() + 268 * 3_600_000 });
-      await Promise.all([gigId1, gigId2].map((id) => adb.doc(`gigs/${id}`).update({ seriesId: series.id })));
+      // fillMode is stamped the way the series materializer stamps a real
+      // occurrence (scheduled.ts copies series.fillMode onto every date), not
+      // left at createGig's standalone null, so the reopen assertion below is
+      // about cancelOccurrence clearing it rather than it never being set.
+      await Promise.all([gigId1, gigId2].map((id) =>
+        adb.doc(`gigs/${id}`).update({ seriesId: series.id, fillMode: "whole_run" })));
 
       const { bookingId: runBookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
         "applyToGig", { gigId: gigId1, musicianProfileId: musicianAId, offer: offerPayload() }, musicianA.user);
@@ -602,6 +607,12 @@ describe("cancelOccurrence", () => {
       expect(gig1?.status).toBe("filled");
       expect(gig1?.bookingId).toBe(dateBookingId);
       expect(gig1?.bookedMusicianProfileId).toBe(musicianBId);
+      // Task 32 review: the occurrence was materialized with the SERIES'
+      // fillMode ("whole_run"), which browse and detail read to show run copy
+      // ("one act takes the whole run"). Once the run is already booked by
+      // someone else, this date can only ever book singly, so cancelOccurrence
+      // clears the stamp in the same write that reopens it.
+      expect(gig1?.fillMode).toBeNull();
       const gig2 = (await adb.doc(`gigs/${gigId2}`).get()).data();
       expect(gig2?.status).toBe("filled");
       expect(gig2?.bookingId).toBe(runBookingId);

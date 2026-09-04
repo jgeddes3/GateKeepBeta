@@ -344,9 +344,16 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     const before = await accountBalanceCents(accountId);
     expect(before).toBe(paid.transfer.amountCents);
     const chargeId = (await fakeObject(paid.settlement.intentId!))?.chargeId as string;
-    const disputeId = await openDispute({ intentId: paid.settlement.intentId!, chargeId, amountCents: 5000 });
+    // A chargeback covering at least the whole earnings transfer: the reversal
+    // is capped at the disputed amount, so this is the FULL-reversal case and
+    // the account empties. Reversing only part of a transfer (a partial
+    // chargeback, and also the ordinary case where the settlement charge is
+    // smaller than the transfer it helped fund, because the deposit paid the
+    // rest) is its own test below.
+    const disputeCents = paid.transfer.amountCents!;
+    const disputeId = await openDispute({ intentId: paid.settlement.intentId!, chargeId, amountCents: disputeCents });
 
-    const res = await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: 5000, status: "lost" });
+    const res = await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: disputeCents, status: "lost" });
     expect(res.status).toBe(200);
 
     expect(await accountBalanceCents(accountId)).toBe(0);
@@ -358,11 +365,11 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect(rec?.reversalTransferId).toBeTruthy();
     expect(typeof rec?.closedAt).toBe("number");
     const row = await ledgerRow(`dispute_lost:${disputeId}`);
-    expect(row?.amountCents).toBe(5000);
+    expect(row?.amountCents).toBe(disputeCents);
     expect(row?.detail).toContain(rec!.reversalTransferId!);
     expect(await adb.doc(`stripeFake/state/idem/${encodeURIComponent(`dispute_reverse:${disputeId}`)}`).get().then((s) => s.exists)).toBe(true);
     // Redelivery: nothing moves twice.
-    expect((await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: 5000, status: "lost" })).status).toBe(200);
+    expect((await closeDispute({ disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: disputeCents, status: "lost" })).status).toBe(200);
     expect(await accountBalanceCents(accountId)).toBe(0);
   });
 
@@ -380,6 +387,31 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect((await closeDispute({ disputeId, intentId: p.deposit.intentId!, chargeId: p.deposit.chargeId, amountCents: DEPOSIT_CHARGE_CENTS, status: "lost" })).status).toBe(200);
     expect(await accountBalanceCents(accountId)).toBe(0);
     expect(await fakeObject(p.deposit.forfeitTransferId!).then((t) => t?.reversed)).toBe(true);
+    expect((await disputeDoc(disputeId))?.status).toBe("lost");
+  });
+
+  // Branch audit (LOW): a PARTIAL chargeback. The reversal used to be
+  // amount-less, i.e. "reverse the whole transfer", which claws back more from
+  // the musician than the bank actually took off the platform.
+  it("lost settlement for LESS than the transfer: only the disputed amount is reversed", async () => {
+    const { musician, gigId, bookingId } = await makeConfirmedBooking("dlp1", { pastStartHours: 5 });
+    const paid = await settleBooking(bookingId, gigId);
+    const accountId = (await getStripeDoc(musician.profileId))!.accountId!;
+    const transferred = paid.transfer.amountCents!;
+    expect(await accountBalanceCents(accountId)).toBe(transferred);
+    const partial = Math.floor(transferred / 3);
+    expect(partial).toBeGreaterThan(0);
+    const chargeId = (await fakeObject(paid.settlement.intentId!))?.chargeId as string;
+    const disputeId = await openDispute({ intentId: paid.settlement.intentId!, chargeId, amountCents: partial });
+
+    expect((await closeDispute({
+      disputeId, intentId: paid.settlement.intentId!, chargeId, amountCents: partial, status: "lost",
+    })).status).toBe(200);
+
+    expect(await accountBalanceCents(accountId)).toBe(transferred - partial);
+    const t = await fakeObject(paid.transfer.id!);
+    expect(t?.reversedCents).toBe(partial);
+    expect(t?.reversed).toBe(false); // still partly live, not a full reversal
     expect((await disputeDoc(disputeId))?.status).toBe("lost");
   });
 
@@ -528,6 +560,34 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     const ticketDispute = await openDispute({ intentId: t.intentId, chargeId: t.chargeId, amountCents: 1169 });
     expect((await closeDispute({ disputeId: ticketDispute, intentId: t.intentId, chargeId: t.chargeId, amountCents: 1169, status: "won" })).status).toBe(200);
     expect(((await adb.doc(`orders/${t.orderId}`).get()).data() as TicketOrderDoc).disputeStatus).toBe("won");
+  });
+
+  // Branch audit (LOW): a redelivered `created` behind a decided dispute used
+  // to run recordAdminAlert, whose "never silence a live condition" rule
+  // clears resolvedAt and overwrites the detail. For a DECIDED dispute there
+  // is no live condition left, so the resolved row must stay resolved.
+  it("a late created behind a WON dispute leaves the resolved alert resolved", async () => {
+    const { gigId, bookingId } = await makeConfirmedBooking("dlate1", { pastStartHours: 5 });
+    const paid = await settleBooking(bookingId, gigId);
+    const intentId = paid.settlement.intentId!;
+    const chargeId = (await fakeObject(intentId))?.chargeId as string;
+    const disputeId = await openDispute({ intentId, chargeId, amountCents: 1000 });
+    expect((await closeDispute({ disputeId, intentId, chargeId, amountCents: 1000, status: "won" })).status).toBe(200);
+
+    const alertId = disputeAlertId(disputeId);
+    const resolved = await adminAlert(alertId);
+    expect(typeof resolved?.resolvedAt).toBe("number");
+    const resolvedAt = resolved!.resolvedAt;
+
+    // The late redelivery.
+    expect((await postWebhook(fakeEvent("charge.dispute.created", disputeObject({
+      id: disputeId, intentId, chargeId, amountCents: 1000, status: "needs_response",
+    })))).status).toBe(200);
+
+    const after = await adminAlert(alertId);
+    expect(after?.resolvedAt).toBe(resolvedAt);
+    expect(after?.detail).toContain("WON");
+    expect((await disputeDoc(disputeId))?.status).toBe("won");
   });
 
   it("closed for a dispute `created` never saw resolves the target itself", async () => {
