@@ -261,17 +261,29 @@ async function reverseForLostDispute(
       if (order.settledAt == null) {
         const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
         const event = eventSnap.data() as EventDoc | undefined;
-        // SP5c Task 7 fix round 1 (Critical, migration): `settlementStartedAt`
-        // already set with THIS order still carrying no `settledAt` can only
-        // mean the event was fully settled under the OLD per-event model
-        // (before this task), whose single transfer already paid this
-        // order's share; there is no per-order `settledAt` because that
-        // field did not exist yet under that model. Shrinking the basis
-        // here would be wrong (the money already left, under a key this
-        // order's own reversal can no longer replay against), so this is
-        // handed to an operator instead, exactly as the pre-Task-7 code's
-        // "settled, no matching row" branch already did.
-        if (event?.settlementStartedAt != null) {
+        // SP5c Task 7 fix round 2 (over-broad in fix round 1): checking
+        // `event.settlementStartedAt != null` alone is WRONG once an event
+        // can have more than one order, because the per-order code stamps
+        // that field the moment the FIRST order of ANY pass settles (Ruling
+        // A), long before every sibling order is done. A still-pending
+        // order B on an event whose order A already settled under the NEW
+        // code is not legacy at all, and must still fall through to the
+        // fresh-claim/stale-claim logic below.
+        //
+        // The real legacy signal is the legacy LEDGER ROW itself, the exact
+        // one settleOneEvent's own migration guard keys on: a
+        // `ticket_settlement` row for this event that carries no `orderId`
+        // at all (the field the OLD event-wide code never wrote, not even
+        // as `null`). Firestore equality queries never match a MISSING
+        // field against `== null` (only an explicitly stored `null`), so
+        // `.where("orderId", "==", null)` cannot find it; a small paged
+        // read and an in-code "does this doc have the key at all" check is
+        // what actually works. Read-only, no Stripe call, still inside this
+        // same transaction.
+        const legacyCandidatesSnap = await tx.get(db.collection("ledger")
+          .where("kind", "==", "ticket_settlement").where("eventId", "==", order.eventId).limit(5));
+        const legacyRow = legacyCandidatesSnap.docs.find((d) => !("orderId" in d.data()));
+        if (legacyRow) {
           return {
             kind: "no-op",
             reason: "legacy per-event settlement: this order was paid under the old event-level key; reverse manually in Stripe",

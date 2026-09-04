@@ -645,6 +645,43 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect(await adminAlert(disputeReversalAlertId(disputeId))).toBeUndefined();
   });
 
+  // SP5c Task 7 fix round 2: `event.settlementStartedAt != null` alone is
+  // NOT a legacy signal once an event can carry more than one order, since
+  // the per-order code stamps that field the moment the FIRST order of any
+  // pass settles (Ruling A), long before every sibling order is done. This
+  // fabricates exactly that shape (order A already settled under the NEW
+  // per-order code, order B still pending, a STALE settlementClaimedAt so
+  // there is no in-flight pass to defer to) and asserts a lost dispute on
+  // the still-pending order B is treated as ordinary pre-settlement basis
+  // reduction, the same outcome dl9 asserts, not the legacy no-op.
+  it("lost ticket dispute on a still-pending sibling order of an event already partly settled under the new per-order code", async () => {
+    const { profileId, eventId, tierId } = await makePublishedEvent("dl10", 1000);
+    const a = await payOrder(eventId, tierId, 2, "dl10a");
+    const b = await payOrder(eventId, tierId, 2, "dl10b");
+
+    const settledAt = Date.now();
+    await adb.doc(`events/${eventId}`).update({
+      settlementStartedAt: settledAt, settlementClaimedAt: settledAt - SETTLEMENT_CLAIM_STALE_MS - 1000,
+    });
+    await adb.doc(`orders/${a.orderId}`).update({ settledAt, settlementLegs: 1, settlementProfileCents: 2000 });
+    // A new-style ticket_settlement row: it carries `orderId`, unlike the
+    // legacy shape (no `orderId` key at all) settleOneEvent's own migration
+    // guard, and this fix round's new check, both key on.
+    await adb.collection("ledger").doc("ticket_settlement:tr_dl10_fake").set({
+      kind: "ticket_settlement", amountCents: 2000, bookingId: null, gigId: null,
+      profileId, stripeId: "tr_dl10_fake", detail: "per-order ticket settlement (test fixture)",
+      eventId, orderId: a.orderId, buyerUid: null, at: settledAt,
+    });
+
+    const disputeId = await openDispute({ intentId: b.intentId, chargeId: b.chargeId, amountCents: 2338 });
+    expect((await closeDispute({ disputeId, intentId: b.intentId, chargeId: b.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
+
+    const order = (await adb.doc(`orders/${b.orderId}`).get()).data() as TicketOrderDoc;
+    expect(order.refundedFaceCents).toBe(2000);
+    expect(order.refundedCents).toBe(2000);
+    expect(await adminAlert(disputeReversalAlertId(disputeId))).toBeUndefined();
+  });
+
   it("won: ledger dispute_won, record closed, curator gate lifted, order stamped won", async () => {
     const { curator, gigId, bookingId } = await makeConfirmedBooking("dw1");
     const p = await getPayment(bookingId, gigId);
