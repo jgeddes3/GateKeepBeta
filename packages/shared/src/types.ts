@@ -1040,6 +1040,27 @@ export interface LedgerEntry {
   uid?: string | null; orderId?: string | null;
 }
 
+// SP5c Task 8: getPayoutHistory's request scope, either a profile's shared
+// ledger (any member may read it) or the caller's own rows (uid is always
+// the caller's, never client-supplied).
+export type PayoutHistoryScope =
+  | { kind: "profile"; profileId: string }
+  | { kind: "user" };
+
+// SP5c Task 8: one page row of getPayoutHistory, a client-facing projection
+// of a LedgerEntry. Both web and mobile Earnings panels render this shape.
+export interface HistoryRow {
+  id: string;                              // the ledger doc id
+  kind: LedgerKind;
+  amountCents: number;
+  at: number;
+  detail: string;
+  sourced: boolean | null;                 // LedgerEntry.sourced, absent normalized to null
+  uid: string | null;                      // the member this row is about, null for curator-side rows
+  label: string | null;                    // that member's profile label, null when uid is null or unknown
+  ref: { bookingId?: string; gigId?: string; eventId?: string; orderId?: string };
+}
+
 export interface DisputeRecord {
   chargeId: string; intentId: string;
   purpose: "deposit" | "settlement" | "paydue" | "paydue_deposit" | "tickets";

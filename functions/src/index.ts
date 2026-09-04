@@ -28,6 +28,7 @@ export {
 export { requestPayout } from "./paymentsPayouts.js";
 export { setPayoutShares, onMemberStripeWritten } from "./payoutShares.js";
 export { createMemberOnboardingLink, getMemberPayoutStatus, requestMemberPayout } from "./memberPayouts.js";
+export { getPayoutHistory } from "./payoutHistory.js";
 export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } from "./events.js";
 export { takedownEvent } from "./eventsAdmin.js";
 export {
