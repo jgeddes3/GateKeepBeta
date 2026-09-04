@@ -163,7 +163,9 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
   // cash-out buttons are admin-only actions on a shared profile's money. A
   // plain member still sees the balance and history, just not the controls.
   const { user } = useAuth();
-  const isAdmin = useProfileRole(profileId, user?.uid) === "admin";
+  const role = useProfileRole(profileId, user?.uid);
+  const isAdmin = role === "admin";
+  const roleLoading = role === "loading";
   // Hoisted once per render (not recomputed inline at each use site) so the
   // fee preview label and the Instant-button gating logic below can never
   // disagree about what "the typed amount" currently parses to.
@@ -273,7 +275,9 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
             </p>
           )}
           {!(status.hasAccount && status.payoutsEnabled) ? (
-            isAdmin ? (
+            roleLoading ? (
+              <Skeleton className="h-9 w-40" role="status" aria-label="Loading" />
+            ) : isAdmin ? (
               <div className="grid gap-2.5">
                 <p className="font-sora text-sm text-gk-text">Set up payouts to get paid for your bookings.</p>
                 <Button onClick={setupPayouts} disabled={onboardBusy} className="w-fit">
@@ -310,7 +314,9 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
                   </p>
                 )}
               </div>
-              {isAdmin ? (
+              {roleLoading ? (
+                <Skeleton className="h-9 w-40" role="status" aria-label="Loading" />
+              ) : isAdmin ? (
                 <>
                   <div className="grid max-w-40 gap-1.5">
                     <label htmlFor={amountFieldId} className="font-sora text-sm font-medium text-gk-text">

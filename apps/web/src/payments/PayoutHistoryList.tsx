@@ -22,7 +22,7 @@ const KIND_LABELS: Record<LedgerKind, string> = {
   deposit_charged: "Deposit",
   settlement_charged: "Settlement",
   refund: "Refund",
-  forfeit_transfer: "Settlement",
+  forfeit_transfer: "Deposit forfeited",
   earnings_transfer: "Settlement",
   late_fee: "Fee",
   payout_standard: "Payout",
@@ -47,6 +47,16 @@ const KIND_LABELS: Record<LedgerKind, string> = {
 };
 
 const SHARE_KINDS = new Set<LedgerKind>(["share_transfer", "share_held", "share_released"]);
+
+// The only two kinds distributeEarnings (functions/src/payoutShares.ts) is
+// ever called from (paymentsSettlement.ts's booking settlement, and
+// paymentsSweep.ts's ticket settlement): these are the only rows a share_*
+// row can be split from, so only these are eligible parents. Fix round 1:
+// an earlier version keyed parents off ANY non-share_* row sharing a ref,
+// which let a forfeit_transfer row (same bookingId+gigId, never routed
+// through distributeEarnings) wrongly claim a settlement's share_* children
+// as its own.
+const SETTLEMENT_PARENT_KINDS = new Set<LedgerKind>(["earnings_transfer", "ticket_settlement"]);
 
 // The ref key a settlement row and the share_* rows split from it always
 // share: distributeEarnings (functions/src/payoutShares.ts) writes every leg
@@ -158,7 +168,7 @@ export function PayoutHistoryList({ scope }: { scope: PayoutHistoryScope }) {
   // vanishing.
   const parentByKey = new Map<string, HistoryRow>();
   for (const row of rows) {
-    if (SHARE_KINDS.has(row.kind)) continue;
+    if (!SETTLEMENT_PARENT_KINDS.has(row.kind)) continue;
     const key = refKey(row);
     if (key) parentByKey.set(key, row);
   }

@@ -4,9 +4,10 @@ import { collection, doc, onSnapshot, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import {
-  MAX_PAYOUT_SHARES, formatShareCents, payeeKey, validatePayoutShares,
+  MAX_PAYOUT_SHARES, payeeKey, validatePayoutShares,
   type HeldShareDoc, type MemberDoc, type PayoutShare, type StripeProfileDoc,
 } from "@gatekeep/shared";
+import { formatCents } from "../gigs/GigForms";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Skeleton } from "../ui/skeleton";
@@ -31,27 +32,36 @@ function baselineFrom(shares: PayoutShare[] | null, memberUids: string[]): Recor
   return base;
 }
 
-// The admin-only editor. Split out from SharesCard so its edit state
-// (`percents`) can be seeded ONCE, straight from props, via useState's lazy
-// initializer: SharesCard only mounts this once the member roster and the
-// current shares have both actually loaded, so there is no async "seed this
-// after the effect fires" step, and so no later live snapshot (another
-// admin's save, a member joining) ever clobbers this admin's in-progress
-// edit. handleClear resets `percents` directly (a click-triggered update,
-// not an effect), which is the one time the edit state is meant to snap
-// back to a known value.
+// The admin-only editor. Split out from SharesCard so its edit state can be
+// seeded ONCE, straight from props, via useState's lazy initializer:
+// SharesCard only mounts this once the member roster and the current shares
+// have both actually loaded, so there is no async "seed this after the
+// effect fires" step. `baseline` and `percents` are held together in ONE
+// state object, both frozen at that same mount: the dirty check ("Save
+// disabled unless the total is 100 and something changed") compares
+// `percents` against `baseline` alone, never against the live `shares` prop.
+// Fix round 1: a version that recomputed `baseline` from the live prop on
+// every render meant another admin's save (a real Firestore update landing
+// on `shares`) flipped Save enabled purely because the frozen edit state now
+// differed from the NEW baseline, and clicking Save would overwrite that
+// other admin's newer split with this admin's stale numbers. Freezing both
+// together means only THIS admin's own edits (setPercent) or a completed
+// save/clear of THIS admin's own (handleSave/handleClear, which advance
+// both halves together) ever change what "changed" means.
 function SharesEditor({
   profileId, members, shares, heldByUid,
 }: {
   profileId: string; members: MemberRow[]; shares: PayoutShare[] | null; heldByUid: Record<string, number>;
 }) {
-  const [percents, setPercents] = useState<Record<string, number>>(
-    () => baselineFrom(shares, members.map((m) => m.uid)));
+  const [state, setState] = useState<{ baseline: Record<string, number>; percents: Record<string, number> }>(() => {
+    const baseline = baselineFrom(shares, members.map((m) => m.uid));
+    return { baseline, percents: baseline };
+  });
+  const { baseline, percents } = state;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const baseline = baselineFrom(shares, members.map((m) => m.uid));
   const total = Object.values(percents).reduce((sum, n) => sum + n, 0);
   const changed = Object.keys(baseline).some((k) => (percents[k] ?? 0) !== (baseline[k] ?? 0));
   const canSave = total === 100 && changed && !busy;
@@ -60,7 +70,7 @@ function SharesEditor({
   const setPercent = (key: string, raw: string) => {
     const n = raw === "" ? 0 : Math.round(Number(raw));
     const clamped = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
-    setPercents((prev) => ({ ...prev, [key]: clamped }));
+    setState((prev) => ({ ...prev, percents: { ...prev.percents, [key]: clamped } }));
     setError(null); setMessage(null);
   };
 
@@ -78,6 +88,11 @@ function SharesEditor({
     try {
       await callFn<{ profileId: string; shares: PayoutShare[] | null }, { ok: boolean }>(
         "setPayoutShares", { profileId, shares: v.shares });
+      // The just-saved values are now the server's truth: advance the frozen
+      // baseline to match so "changed" (and Save) correctly go back to false,
+      // without waiting on the live `shares` prop to catch up.
+      const saved = baselineFrom(v.shares, members.map((m) => m.uid));
+      setState({ baseline: saved, percents: saved });
       setMessage("Shares saved.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save shares.");
@@ -91,7 +106,8 @@ function SharesEditor({
     try {
       await callFn<{ profileId: string; shares: PayoutShare[] | null }, { ok: boolean }>(
         "setPayoutShares", { profileId, shares: null });
-      setPercents(baselineFrom(null, members.map((m) => m.uid)));
+      const cleared = baselineFrom(null, members.map((m) => m.uid));
+      setState({ baseline: cleared, percents: cleared });
       setMessage("Shares cleared.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not clear shares.");
@@ -126,7 +142,7 @@ function SharesEditor({
                 </div>
               </div>
               {!!heldCents && (
-                <p className="mt-0.5 font-sora text-xs text-gk-muted">Held: {formatShareCents(heldCents)}</p>
+                <p className="mt-0.5 font-sora text-xs text-gk-muted">Held: {formatCents(heldCents)}</p>
               )}
             </li>
           );
@@ -194,7 +210,7 @@ function SharesReadOnly({ members, shares, heldByUid }: {
               <span className="font-sora text-sm font-medium text-gk-text">{s.percent}%</span>
             </div>
             {!!heldCents && (
-              <p className="mt-0.5 font-sora text-xs text-gk-muted">Held: {formatShareCents(heldCents)}</p>
+              <p className="mt-0.5 font-sora text-xs text-gk-muted">Held: {formatCents(heldCents)}</p>
             )}
           </li>
         );
