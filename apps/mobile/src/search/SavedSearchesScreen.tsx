@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, ScrollView, Pressable } from "react-native";
+import { View, ScrollView, Pressable, Alert } from "react-native";
 import { useRouter } from "expo-router";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import type { SavedSearchDoc, SearchFace } from "@gatekeep/shared";
@@ -45,23 +45,24 @@ function openRow(router: ReturnType<typeof useRouter>, row: SavedSearchRow) {
 // signed-in user is currently browsing as.
 export function SavedSearchesScreen() {
   const { user } = useAuth();
+  const uid = user?.uid;
   const router = useRouter();
   const t = useTokens();
   const [rows, setRows] = useState<SavedSearchRow[] | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!user) return;
+    if (!uid) return;
     let cancelled = false;
     const { db } = getFirebase();
     const unsubscribe = onSnapshot(
-      query(collection(db, "savedSearches"), where("uid", "==", user.uid), orderBy("createdAt", "desc")),
+      query(collection(db, "savedSearches"), where("uid", "==", uid), orderBy("createdAt", "desc")),
       (snap) => {
         if (cancelled) return;
         setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as SavedSearchDoc) })));
       });
     return () => { cancelled = true; unsubscribe(); };
-  }, [user?.uid]);
+  }, [uid]);
 
   const remove = async (id: string) => {
     setDeletingId(id);
@@ -70,6 +71,8 @@ export function SavedSearchesScreen() {
       // No local filter here: onSnapshot's own next event removes the row,
       // the same "let the subscription be the only writer of `rows`" shape
       // NotificationsList's markRead uses.
+    } catch (e) {
+      Alert.alert("Could not delete", e instanceof Error ? e.message : "Try again.");
     } finally {
       setDeletingId(null);
     }
@@ -96,20 +99,32 @@ export function SavedSearchesScreen() {
           </View>
         )}
         {rows !== null && rows.map((row) => (
-          <Pressable key={row.id} onPress={() => openRow(router, row)} accessibilityRole="button" accessibilityLabel={row.label}>
+          // A row's Pressable and its Delete Button are SIBLINGS, not
+          // nested (fix round 1, important #1): a Pressable that wraps a
+          // nested Button and carries its own accessibilityRole/Label
+          // collapses that whole subtree into one accessibility node,
+          // leaving the Button unreachable for screen readers. Neither the
+          // outer View nor Card below sets an accessibility role of its
+          // own, so VoiceOver/TalkBack see exactly two focusable elements
+          // per row.
+          <View key={row.id}>
             <Card style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
-              <View style={{ flex: 1, gap: 2 }}>
-                <Text variant="label" numberOfLines={1}>{row.label}</Text>
-                <Text variant="meta" muted>{FACE_NAME[row.face]}</Text>
-              </View>
+              <Pressable onPress={() => openRow(router, row)} accessibilityRole="button" accessibilityLabel={row.label}
+                style={{ flex: 1 }}>
+                <View style={{ gap: 2 }}>
+                  <Text variant="label" numberOfLines={1}>{row.label}</Text>
+                  <Text variant="meta" muted>{FACE_NAME[row.face]}</Text>
+                </View>
+              </Pressable>
               {deletingId === row.id ? (
                 <Text variant="meta" muted>Deleting…</Text>
               ) : (
-                <Button title="Delete" variant="secondary" onPress={() => void remove(row.id)}
+                <Button title="Delete" variant="secondary" accessibilityLabel={`Delete ${row.label}`}
+                  onPress={() => void remove(row.id)}
                   style={{ minHeight: 36, paddingHorizontal: tokens.space.sm }} />
               )}
             </Card>
-          </Pressable>
+          </View>
         ))}
       </ScrollView>
     </View>

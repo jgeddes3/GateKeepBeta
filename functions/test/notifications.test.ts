@@ -149,7 +149,7 @@ describe("notifyUser push data payload (SP10 Task 29)", () => {
   // geocode.test.ts: notifyUser is imported straight from src (not called
   // through a deployed callable), so stubbing global fetch here observes
   // exactly the request body it builds.
-  it("attaches data: { kind, refId } to every Expo push message", async () => {
+  it("attaches data: { kind, refId, refKind } to every Expo push message", async () => {
     const { uid } = await signUpTestUser(`nd1-${Date.now()}@test.com`);
     await adb.doc(`users/${uid}/pushTokens/ExponentPushToken[nd1]`).set({ createdAt: Date.now() });
     const fetchMock = vi.fn(async () =>
@@ -161,14 +161,14 @@ describe("notifyUser push data payload (SP10 Task 29)", () => {
       const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
       expect(body).toEqual([{
         to: "ExponentPushToken[nd1]", title: "Booking update", body: "Your booking moved forward",
-        data: { kind: "booking", refId: "book123" },
+        data: { kind: "booking", refId: "book123", refKind: null },
       }]);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("sends refId: null when the notification carries no refId", async () => {
+  it("sends refId: null and refKind: null when the notification carries neither", async () => {
     const { uid } = await signUpTestUser(`nd2-${Date.now()}@test.com`);
     await adb.doc(`users/${uid}/pushTokens/ExponentPushToken[nd2]`).set({ createdAt: Date.now() });
     const fetchMock = vi.fn(async () =>
@@ -177,7 +177,28 @@ describe("notifyUser push data payload (SP10 Task 29)", () => {
     try {
       await notifyUser(uid, { title: "System", body: "Something happened", kind: "system" });
       const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-      expect(body[0].data).toEqual({ kind: "system", refId: null });
+      expect(body[0].data).toEqual({ kind: "system", refId: null, refKind: null });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // SP8 Task 17 fix round 1: refKind rides the push payload the same way
+  // refId does, so a saved_search_match push tap can route without a
+  // second Firestore read, matching NotificationsList's in-app row.
+  it("passes refKind through when the notification carries one", async () => {
+    const { uid } = await signUpTestUser(`nd3-${Date.now()}@test.com`);
+    await adb.doc(`users/${uid}/pushTokens/ExponentPushToken[nd3]`).set({ createdAt: Date.now() });
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [{ status: "ok", id: "x" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await notifyUser(uid, {
+        title: "New match", body: "A saved search matched", kind: "saved_search_match",
+        refId: "gig123", refKind: "gig",
+      });
+      const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+      expect(body[0].data).toEqual({ kind: "saved_search_match", refId: "gig123", refKind: "gig" });
     } finally {
       vi.unstubAllGlobals();
     }

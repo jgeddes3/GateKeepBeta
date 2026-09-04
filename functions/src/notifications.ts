@@ -56,9 +56,13 @@ export async function notifyUser(
   // Task 29: every push carries data: { kind, refId } so a tap can route
   // without a second Firestore read; refId is null (not omitted) when the
   // notification has none, matching pushHref's own optional-field handling.
+  // SP8 Task 17 fix round 1: refKind rides along the same way, null (not
+  // omitted) when absent, so a saved_search_match push tap can route to the
+  // event/gig page exactly like the in-app NotificationsList row already
+  // does off the Firestore doc.
   const messages = tokenIds.map((to) => ({
     to, title: note.title, body: note.body,
-    data: { kind: note.kind, refId: note.refId ?? null },
+    data: { kind: note.kind, refId: note.refId ?? null, refKind: note.refKind ?? null },
   }));
   let body: unknown = null;
   try {
