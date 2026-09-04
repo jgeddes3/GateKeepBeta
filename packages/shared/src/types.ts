@@ -794,7 +794,13 @@ export interface MemberStripeDoc {
 }
 
 export type HeldShareRef = { bookingId: string; gigId: string } | { eventId: string; orderId: string };
-export type HeldShareStatus = "held" | "released" | "failed";
+// "voided" (SP5c final fix wave, I4): the settlement this share belonged to
+// was unwound after the fact (a no-show clawback, a lost dispute, a restore
+// re-run), so the money behind it went back to the payer. The share must
+// never release later out of the platform's own balance for a date nobody
+// was charged for. Voided rows are excluded from every held total and from
+// the release query, exactly as `released` is.
+export type HeldShareStatus = "held" | "released" | "failed" | "voided";
 // heldShares/{idempotencyBase}:{uid}. A member's share of a settlement that
 // could not be transferred because their account is not enabled yet.
 export interface HeldShareDoc {
@@ -808,6 +814,16 @@ export interface HeldShareDoc {
   // off the same doc write) never both transfer this doc; stale after 10
   // minutes.
   releaseClaimedAt?: number | null;
+  // SP5c final fix wave (I7): when the last release attempt for this doc was
+  // made, and the Stripe error code it failed with (null for an error with no
+  // code at all). Together they gate the replay of `held:{docId}`: past
+  // Stripe's 24h idempotency window that key is brand new, so only a DEFINITE
+  // refusal (nothing moved) may be replayed; anything ambiguous is left for an
+  // operator instead of risking a second transfer.
+  releaseAttemptedAt?: number | null;
+  releaseErrorCode?: string | null;
+  // SP5c final fix wave (I4): when this share was voided by an unwind.
+  voidedAt?: number | null;
 }
 
 // adminAlerts/{alertId}, SP5 Task 9, extended through Task 11. The money
@@ -1017,6 +1033,11 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // instead, and the later release of that held share; a member cash-out
   // through the standard or instant rail, and a failed member payout.
   | "share_transfer" | "share_held" | "share_released"
+  // SP5c final fix wave (I4): a held share cancelled by an unwind of the
+  // settlement that created it (no-show clawback, lost dispute, restore
+  // re-run). No money moves; the row is what records that the member's
+  // waiting share is gone and why.
+  | "share_voided"
   | "member_payout_standard" | "member_payout_instant" | "member_payout_failed";
 export interface LedgerEntry {
   kind: LedgerKind;

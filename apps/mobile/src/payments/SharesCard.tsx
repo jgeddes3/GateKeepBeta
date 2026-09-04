@@ -169,9 +169,16 @@ function SharesEditor({
           </View>
         </Card>
       </View>
-      <Text muted={total === 100} color={total === 100 ? undefined : t.destructive}>
-        Total: {total}%
-      </Text>
+      {/* Task 11 brief: on mobile the off-100 total is a Callout, not a
+          coloured line. A single tinted word in a stack of number rows is easy
+          to miss on a phone; the Callout gives it the same weight as the error
+          it will become the moment Save is pressed. Web keeps its coloured
+          line, which its own brief names. */}
+      {total === 100 ? (
+        <Text muted>Total: {total}%</Text>
+      ) : (
+        <Callout tone="warning"><Text color={t.warning}>Total: {total}%</Text></Callout>
+      )}
       <View style={{ flexDirection: "row", gap: tokens.space.sm, flexWrap: "wrap" }}>
         <Button title={busy ? "Saving…" : "Save"} onPress={() => void handleSave()} disabled={!canSave} />
         <Button title="Clear shares" variant="secondary" onPress={() => void handleClear()} disabled={busy || isEmpty} />

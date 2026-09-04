@@ -42,6 +42,7 @@ const KIND_LABELS: Record<LedgerKind, string> = {
   share_transfer: "Share paid",
   share_held: "Share held",
   share_released: "Share released",
+  share_voided: "Share voided",
   member_payout_standard: "Payout",
   member_payout_instant: "Instant payout",
   member_payout_failed: "Payout failed",
