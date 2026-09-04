@@ -38,3 +38,4 @@ export { getDiscoverDeck } from "./discover.js";
 export {
   onProfileWrittenSearch, onTrackWrittenSearch, onEventWrittenSearch, onGigWrittenSearch, onBookingWrittenSearch,
 } from "./searchIndex.js";
+export { search } from "./search.js";
