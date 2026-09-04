@@ -200,7 +200,13 @@ export const STALE_CLAIM_MS = 10 * 60 * 1000;
 const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const stripeWebhook = onRequest(
-  { region: "us-central1", secrets: [stripeSecretKey, stripeWebhookSecret, stripeConnectWebhookSecret] },
+  // SP10 Task 24: a webhook delivery that finalizes a ticket order or a
+  // settlement can wait on several Firestore transactions; 60 s was the
+  // platform default, not a decision.
+  {
+    region: "us-central1", timeoutSeconds: 120,
+    secrets: [stripeSecretKey, stripeWebhookSecret, stripeConnectWebhookSecret],
+  },
   async (req, res) => {
     if (req.method !== "POST") { res.status(405).end(); return; }
     if (req.rawBody == null) { res.status(400).send("missing body"); return; }

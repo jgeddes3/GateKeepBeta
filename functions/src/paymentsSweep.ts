@@ -1842,7 +1842,10 @@ export async function runPaymentsSweep(now: number): Promise<PaymentsSweepReport
 // on each of them. `secrets: [stripeSecretKey]` is mandatory, steps 1 and 3
 // both reach getStripe(), which fails CLOSED outside the emulator without it.
 export const paymentsSweep = onSchedule(
-  { schedule: "every 1 hours", region: "us-central1", timeoutSeconds: 540, memory: "512MiB", secrets: [stripeSecretKey] },
+  {
+    schedule: "every 1 hours", region: "us-central1", timeoutSeconds: 540, memory: "512MiB",
+    retryCount: 3, secrets: [stripeSecretKey],
+  },
   async () => { await runPaymentsSweep(Date.now()); },
 );
 

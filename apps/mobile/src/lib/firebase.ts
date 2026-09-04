@@ -15,14 +15,21 @@ import { getStorage, connectStorageEmulator, type FirebaseStorage } from "fireba
 import { Platform } from "react-native";
 import Constants from "expo-constants";
 
-// Public web-app config from Firebase console → Project settings → Your apps.
+// Public web-app config from Firebase console, Project settings, Your apps.
 // These values are NOT secrets; security comes from rules + App Check.
+// SP10 Task 24 (cross-cutting #7): EXPO_PUBLIC_FIREBASE_* overrides each
+// value at bundle time; the dev project is the default (.env.example).
+// Literal process.env.EXPO_PUBLIC_* accesses only: Metro inlines those.
+const pick = (value: string | undefined, fallback: string): string =>
+  value !== undefined && value.length > 0 ? value : fallback;
+
 const firebaseConfig = {
-  apiKey: "AIzaSyCj3Q8__Tmu4B-UCE1fTMZxK31L9Cq_NqU",
-  authDomain: "gatekeep-dev-jg.firebaseapp.com",
-  projectId: "gatekeep-dev-jg",
-  storageBucket: "gatekeep-dev-jg.firebasestorage.app",
-  appId: "1:894446689930:web:20531390a23a3804b05773",
+  apiKey: pick(process.env.EXPO_PUBLIC_FIREBASE_API_KEY, "AIzaSyCj3Q8__Tmu4B-UCE1fTMZxK31L9Cq_NqU"),
+  authDomain: pick(process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN, "gatekeep-dev-jg.firebaseapp.com"),
+  projectId: pick(process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID, "gatekeep-dev-jg"),
+  storageBucket: pick(process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET, "gatekeep-dev-jg.firebasestorage.app"),
+  messagingSenderId: pick(process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID, "894446689930"),
+  appId: pick(process.env.EXPO_PUBLIC_FIREBASE_APP_ID, "1:894446689930:web:20531390a23a3804b05773"),
 };
 
 // Where do the Firebase emulators live, from this device's point of view?

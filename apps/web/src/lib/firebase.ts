@@ -4,16 +4,7 @@ import { getAuth, connectAuthEmulator, type Auth } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator, type Firestore } from "firebase/firestore";
 import { getFunctions, connectFunctionsEmulator, type Functions } from "firebase/functions";
 import { getStorage, connectStorageEmulator, type FirebaseStorage } from "firebase/storage";
-
-// Public web-app config from Firebase console → Project settings → Your apps.
-// These values are NOT secrets; security comes from rules + App Check.
-const firebaseConfig = {
-  apiKey: "AIzaSyCj3Q8__Tmu4B-UCE1fTMZxK31L9Cq_NqU",
-  authDomain: "gatekeep-dev-jg.firebaseapp.com",
-  projectId: "gatekeep-dev-jg",
-  storageBucket: "gatekeep-dev-jg.firebasestorage.app",
-  appId: "1:894446689930:web:20531390a23a3804b05773",
-};
+import { firebaseConfig } from "./firebaseConfig";
 
 // Follow the hostname the page was loaded from, so opening the dev server
 // from a phone on the same Wi-Fi (http://<LAN-IP>:3000) reaches the

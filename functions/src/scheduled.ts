@@ -1119,7 +1119,13 @@ async function drainEventCascadeRetries(
 // headroom now that its five steps page through potentially large
 // collections; the default 60s/256MiB was sized for the original four-step,
 // unbounded-`.get()` implementation and was already a latent risk at scale.
+// SP10 Task 24 (cross-cutting #17): 09:00 in LAUNCH_TIMEZONE is the launch
+// metro's morning, not 09:00 UTC; retryCount 3 means a transient failure
+// no longer costs a whole materialization day.
 export const dailySweep = onSchedule(
-  { schedule: "every day 09:00", region: "us-central1", timeoutSeconds: 540, memory: "512MiB", secrets: [stripeSecretKey] },
+  {
+    schedule: "every day 09:00", timeZone: LAUNCH_TIMEZONE, region: "us-central1",
+    timeoutSeconds: 540, memory: "512MiB", retryCount: 3, secrets: [stripeSecretKey],
+  },
   async () => { await runDailySweep(Date.now()); },
 );

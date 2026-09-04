@@ -7,7 +7,7 @@
 // Usage (emulator, start `pnpm emu` first, or wrap in emulators:exec):
 //   FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 \
 //     pnpm tsx scripts/seed-test-accounts.ts
-// Usage (real dev project gatekeep-dev-jg):
+// Usage (a real project; id from --project, GCLOUD_PROJECT, or the credentials file):
 //   GOOGLE_APPLICATION_CREDENTIALS=<service-account.json> pnpm tsx scripts/seed-test-accounts.ts
 //
 // Idempotent: re-running resets each account's password/emailVerified and
@@ -27,20 +27,14 @@
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getAuth, type UserRecord } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
+import { resolveProjectId } from "./projectId.js";
 
 const PASSWORD = "GateKeep-Test1";
-const app = getApps()[0] ?? initializeApp({ projectId: "gatekeep-dev-jg" });
+const projectId = resolveProjectId(process.argv);
+console.log(`project: ${projectId}`);
+const app = getApps()[0] ?? initializeApp({ projectId });
 const auth = getAuth(app);
 const db = getFirestore(app);
-
-const inEmulator = !!process.env.FIREBASE_AUTH_EMULATOR_HOST || !!process.env.FIRESTORE_EMULATOR_HOST;
-if (!inEmulator && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-  console.error(
-    "Refusing: no emulator hosts set and no GOOGLE_APPLICATION_CREDENTIALS.\n" +
-    "Set FIREBASE_AUTH_EMULATOR_HOST + FIRESTORE_EMULATOR_HOST for the emulator,\n" +
-    "or GOOGLE_APPLICATION_CREDENTIALS for the real dev project.");
-  process.exit(1);
-}
 
 async function ensureUser(email: string, displayName: string): Promise<UserRecord> {
   let user: UserRecord;
