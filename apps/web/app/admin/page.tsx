@@ -490,7 +490,7 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
   const approve = async () => {
     setBusyAction("approve"); setError(null);
     try {
-      await callFn("reviewTrack", 
+      await callFn("reviewTrack",
         { profileId: t.profileId, trackId: t.id, decision: "approved" });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not submit the review, try again.");
@@ -506,7 +506,7 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
     }
     setBusyAction("reject"); setError(null);
     try {
-      await callFn("reviewTrack", 
+      await callFn("reviewTrack",
         { profileId: t.profileId, trackId: t.id, decision: "rejected", reason: trimmed });
       setShowReject(false); setReason("");
     } catch (e) {
@@ -893,7 +893,7 @@ function ReliabilityPanel({ profileId }: { profileId: string }) {
     const key = `${mark.bookingId}-${mark.kind}`;
     setBusyKey(key); setRemoveError(null);
     try {
-      await callFn("removeReliabilityMark", 
+      await callFn("removeReliabilityMark",
         { musicianProfileId: profileId, bookingId: mark.bookingId, kind: mark.kind });
       setMarks((prev) => (prev === "loading" ? prev : prev.map((m) => (
         m.bookingId === mark.bookingId && m.kind === mark.kind ? { ...m, removedByAdmin: true } : m))));
@@ -1049,7 +1049,7 @@ function LiveTrackRow({ profileId, track, onRemoved }: {
     }
     setBusy(true); setError(null);
     try {
-      await callFn("reviewTrack", 
+      await callFn("reviewTrack",
         { profileId, trackId: track.id, decision: "rejected", reason: trimmed });
       onRemoved(track.id);
     } catch (e) {
@@ -1358,7 +1358,7 @@ function TakedownsPanel() {
     }
     setProfileBusy(true); setUnpublishError(null);
     try {
-      await callFn("reviewProfile", 
+      await callFn("reviewProfile",
         { profileId, decision: "rejected", reason: trimmed });
       setProfile((p) => (p ? { ...p, status: "rejected", rejectionReason: trimmed } : p));
       setShowUnpublish(false); setUnpublishReason("");
@@ -1855,6 +1855,7 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   external_refund: "Refund issued from the Stripe dashboard",
   ticket_order_stuck: "Ticket order stuck with a pending charge",
   event_cascade_stuck: "Event cascade stuck",
+  account_deleted_unclean: "Account deleted with obligations",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on

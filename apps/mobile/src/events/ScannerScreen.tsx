@@ -113,7 +113,7 @@ function ResultPanel({ result, onDismiss }: { result: ScanResult; onDismiss: () 
           )}
           {result.kind === "offline" && (
             <View style={{ alignItems: "center", gap: 4 }}>
-              <Text variant="heading" style={{ textAlign: "center" }}>{SCANNER_OFFLINE_MESSAGE}</Text>
+              <Text variant="heading" color={toneColor} style={{ textAlign: "center" }}>{SCANNER_OFFLINE_MESSAGE}</Text>
               <Text muted style={{ textAlign: "center" }}>
                 This is a connection problem, not a verdict on the ticket. Check the venue Wi-Fi and scan it again.
               </Text>

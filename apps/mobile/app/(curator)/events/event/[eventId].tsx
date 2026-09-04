@@ -43,7 +43,7 @@ function CancelEventPanel({ curatorProfileId, eventId, title, onClose, onCancell
     setBusy(true);
     setError(null);
     try {
-      await callFn("cancelEvent", 
+      await callFn("cancelEvent",
         { curatorProfileId, eventId, reason: reason.trim() || undefined });
       onCancelled();
     } catch (e) {

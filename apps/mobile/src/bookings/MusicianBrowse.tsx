@@ -6,6 +6,7 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type BookingRates, type GigDoc } from "@gatekeep/shared";
 import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
+import { formatChipLabel } from "../discover/discoverQueries";
 import { DEPOSIT_HONESTY_LINE, DEPOSIT_HONESTY_RUN_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, formatReliabilityLine, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
 import {
@@ -184,7 +185,11 @@ function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string
           <>
             <RatesSummary rates={booking.rates ?? NULL_RATES} />
             {booking.preferences?.availabilityPattern && (
-              <Text variant="meta" muted>{booking.preferences.availabilityPattern}</Text>
+              // Task 25 review: the same display-only reskin web runs on this
+              // field ("weekends" -> "Weekends"). The raw code is what the
+              // server stores and what every filter compares against; only the
+              // rendered string changes.
+              <Text variant="meta" muted>{formatChipLabel(booking.preferences.availabilityPattern)}</Text>
             )}
             <Text variant="meta" muted>{formatReliabilityLine(booking.reliability)}</Text>
           </>

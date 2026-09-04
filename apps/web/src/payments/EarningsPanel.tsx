@@ -268,7 +268,7 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
       const res = await callFn<
         { profileId: string; amountCents: number; method: "standard" | "instant"; requestId: string },
         RequestPayoutResult
-      >("requestPayout", 
+      >("requestPayout",
         { profileId, amountCents, method, requestId: requestRef.current.id });
       const verb = res.data.replayed ? "Already sent" : "Sent";
       setPayoutMessage(res.data.feeCents > 0

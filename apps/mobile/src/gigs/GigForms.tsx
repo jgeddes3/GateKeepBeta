@@ -1,6 +1,6 @@
 import { View } from "react-native";
 import {
-  GENRES, ACT_SIZES, SERIES_CADENCES, LAUNCH_TIMEZONE,
+  GENRES, ACT_SIZES, SERIES_CADENCES, LAUNCH_TIMEZONE, LAUNCH_TIMEZONE_LABEL,
   type GigContentInput, type GigBudget, type GigDoc, type GigStatus, type SeriesStatus,
   type BudgetStructure, type ActSize, type SeriesCadence, type FillMode, type AddressVisibility, type GigRecurrence,
 } from "@gatekeep/shared";
@@ -381,7 +381,8 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
           style={{ width: 140 }} />
       </View>
       <UiText variant="meta" color={tok.warning}>
-        The time above is UTC for now, local-timezone support is coming. The end date is inclusive: the series runs through the end of that day.
+        The time above is UTC for now, local-timezone support is coming. The end date is inclusive: the series runs
+        through the end of that day in {LAUNCH_TIMEZONE_LABEL}.
       </UiText>
       <UiText>Fill mode</UiText>
       <View style={{ flexDirection: "row", gap: 6 }}>
@@ -400,12 +401,23 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
 // launchTzNextDayStartMs derives the boundary from the actual next calendar
 // date), so an occurrence whose recurrence time lands anywhere on the end
 // date is still materialized. The old UTC-midnight parse silently dropped
-// the final date for every recurrence time after 00:00 UTC. Returns null for
-// an empty or malformed input (same contract as before; the callers pass
-// null through as "no end date"). Byte-identical to web's version.
+// the final date for every recurrence time after 00:00 UTC.
+//
+// Returns null for an empty or malformed input (the callers pass null through
+// as "no end date"). Task 32 review: that contract is now ENFORCED rather than
+// asserted. launchTzNextDayStartMs advances the calendar date with plain
+// Date.UTC arithmetic before validating, so "2026-02-30" quietly rolls into a
+// real March date and comes back as a bound the curator never typed. The shape
+// check plus the round trip through launchTzDateInput refuse exactly that: a
+// value only survives if the millisecond it produces reads back as the same
+// Y-M-D in LAUNCH_TIMEZONE. Load-bearing on mobile, where the field is free
+// text; kept identical on web so the two files stay byte-comparable twins.
 export function endDateInputToLaunchTzEndMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const nextStart = launchTzNextDayStartMs(value);
-  return nextStart == null ? null : nextStart - 1;
+  if (nextStart == null) return null;
+  const endMs = nextStart - 1;
+  return launchTzDateInput(endMs) === value ? endMs : null;
 }
 
 // The reverse mapping for the editors: the Y-M-D a stored endDate falls on

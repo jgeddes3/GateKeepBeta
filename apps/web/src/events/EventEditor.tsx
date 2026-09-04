@@ -240,7 +240,7 @@ function TierEditor({ profileId, eventId, eventStatus, initialTiers }: {
     }
     setBusy(true);
     try {
-      await callFn<SetEventTiersPayload, { ok: true }>("setEventTiers", 
+      await callFn<SetEventTiersPayload, { ok: true }>("setEventTiers",
         { curatorProfileId: profileId, eventId, tiers });
       setSaved(true);
       // Refetch (a one-shot read, same idiom BuyTicketsFlow.tsx's own
@@ -341,7 +341,7 @@ function CancelPanel({ profileId, eventId, title, onClose, onCancelled }: {
     setBusy(true);
     setError(null);
     try {
-      await callFn("cancelEvent", 
+      await callFn("cancelEvent",
         { curatorProfileId: profileId, eventId, reason: reason.trim() || undefined });
       onCancelled();
     } catch (e) {

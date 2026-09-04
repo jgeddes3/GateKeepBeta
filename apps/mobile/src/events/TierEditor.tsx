@@ -89,7 +89,7 @@ export function TierEditor({ curatorProfileId, eventId, eventStatus, initialTier
     }
     setBusy(true);
     try {
-      await callFn<SetEventTiersPayload, { ok: true }>("setEventTiers", 
+      await callFn<SetEventTiersPayload, { ok: true }>("setEventTiers",
         { curatorProfileId, eventId, tiers });
       setSaved(true);
       // Refetch (one-shot, same idiom the web twin uses): picks up

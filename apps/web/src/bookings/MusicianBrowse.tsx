@@ -69,11 +69,16 @@ function MusicianGridItem({ curatorProfileId, musician }: { curatorProfileId: st
 
   // Availability + reliability: rendered only from data this card already
   // fetched above, never a price (rates are private by SP4 rule and the
-  // locked card spec is explicit: NEVER a price on this card). Both reads are
-  // optional-chained: recomputeReliability can create this projection with
-  // reliability alone (no rates, no preferences) for a musician who never
-  // opened the booking-info editor, and rebuildBookingProjections used to
-  // delete the doc outright (sp4 audit finding 1).
+  // locked card spec is explicit: NEVER a price on this card).
+  //
+  // Both reads tolerate a PARTIAL projection, in two different places:
+  // `preferences?` is optional-chained here, while reliability's own absence
+  // is handled inside formatReliabilityLine (which takes the field as
+  // possibly-undefined and returns its no-history copy). That matters because
+  // recomputeReliability can create this projection with reliability alone
+  // (no rates, no preferences) for a musician who never opened the
+  // booking-info editor, and rebuildBookingProjections used to delete the doc
+  // outright (sp4 audit finding 1).
   const availabilityLabel = booking && booking !== "loading" && booking.preferences?.availabilityPattern
     ? formatChipLabel(booking.preferences.availabilityPattern)
     : null;

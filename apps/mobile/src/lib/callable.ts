@@ -29,6 +29,16 @@ export async function callFn<Req = unknown, Res = unknown>(name: string, data: R
     return await fn(data);
   } catch (e) {
     if (!isStaleVerificationError(e) || !auth.currentUser) throw e;
+    // Task 27 review: reload() first. It re-reads the ACCOUNT record, which is
+    // where emailVerified actually lives; the ID token is a cached copy that
+    // only rotates hourly. If the account still says unverified, the server
+    // was right, so the original error is rethrown untouched and the screen's
+    // existing "verify your email" branch runs exactly as before. Only a
+    // genuinely stale claim gets the forced refresh and the one retry, so an
+    // unverified user hammering a gated action no longer mints a fresh token
+    // (and a second callable round trip) on every attempt.
+    await auth.currentUser.reload();
+    if (!auth.currentUser.emailVerified) throw e;
     await auth.currentUser.getIdToken(true);
     return await fn(data);
   }

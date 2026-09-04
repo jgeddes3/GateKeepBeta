@@ -149,8 +149,12 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
 // name links to its public page, the row links to the booking thread.
 function BookedActLine({ bookingId, musicianProfileId }: { bookingId: string; musicianProfileId: string | null }) {
   const act = useCounterparty(musicianProfileId ?? undefined);
+  // A div, not a paragraph (Task 32 review): the loading branch below renders
+  // a Skeleton, which is itself a div, and a div inside a <p> is invalid HTML
+  // that the browser silently reparses, closing the paragraph early and
+  // stranding the rest of the row outside its own box.
   return (
-    <p className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5 font-sora text-sm text-gk-text">
+    <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5 font-sora text-sm text-gk-text">
       <span>Booked act:</span>
       {act === "loading" ? (
         <Skeleton className="h-4 w-32" />
@@ -164,7 +168,7 @@ function BookedActLine({ bookingId, musicianProfileId }: { bookingId: string; mu
       <Link href={`/dashboard/bookings/${bookingId}`} className="ml-auto text-gk-muted underline underline-offset-4 hover:text-gk-text">
         Open the booking
       </Link>
-    </p>
+    </div>
   );
 }
 

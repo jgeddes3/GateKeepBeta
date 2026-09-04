@@ -135,7 +135,7 @@ function CardConfirmForm({ profileId, onSaved, onCancel }: {
     try {
       // Passes the CONFIRMED SetupIntent's id, see the header note on why
       // this (not a bare refresh) is what pins THIS card as the default.
-      await callFn("refreshPaymentMethod", 
+      await callFn("refreshPaymentMethod",
         { profileId, setupIntentId: setupIntent.id });
       onSaved();
     } catch (e) {

@@ -33,12 +33,17 @@ export function Button({
     ghost: { bg: "transparent", border: "transparent", fg: t.text, radius: tokens.radius.card },
   }[variant];
   const isDisabled = Boolean(disabled) || Boolean(loading);
+  // accessibilityState is MERGED, not replaced (Task 26 review): TogglePill
+  // renders through this component and passes { selected }, which the plain
+  // object literal below used to drop, so no toggle in the app announced its
+  // on/off state. This component's own two flags still win, they are derived
+  // from props it alone owns.
   return (
     <Pressable
       {...rest}
       disabled={isDisabled}
       accessibilityRole="button"
-      accessibilityState={{ disabled: isDisabled, busy: loading }}
+      accessibilityState={{ ...rest.accessibilityState, disabled: isDisabled, busy: loading }}
       style={(state) => [
         {
           minHeight: 44,

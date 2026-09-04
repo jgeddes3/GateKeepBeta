@@ -73,7 +73,7 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
     if (!window.confirm(`Refund ${row.ownerName}'s "${row.tierName}" ticket? This can't be undone.`)) return;
     setBusy(true);
     try {
-      await callFn("refundTicket", 
+      await callFn("refundTicket",
         { curatorProfileId, eventId, ticketId: row.id });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not refund this ticket.";
