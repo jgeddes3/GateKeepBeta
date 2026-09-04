@@ -4,6 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import { requireProfileAdmin } from "./profiles.js";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { syncCuratorAccess } from "./curator.js";
+import { reassignShareOnRemoval } from "./payoutShares.js";
 import { isValidDocId, type InviteDoc, type MemberDoc, type MemberRole } from "@gatekeep/shared";
 
 const MAX_PENDING_INVITES_PER_PROFILE = 20;
@@ -213,6 +214,11 @@ export const removeMember = onCall<{ profileId: string; uid: string }>(
       }
       tx.delete(memberRef);
     });
+    // SP5c: the removed member's standing payout share (if any) joins the
+    // band fund so shares still sum to 100. Best-effort: a reassignment
+    // failure must not undo a removal that already committed.
+    await reassignShareOnRemoval(db, profileId, uid, Date.now())
+      .catch((e) => console.error(`removeMember: share reassignment failed for ${profileId}/${uid}`, e));
     // curatorAccess/{uid} maintenance (Task 6, repaired S4): recompute
     // unconditionally for any curator-profile removal, regardless of
     // whether THIS profile is currently approved. syncCuratorAccess is a

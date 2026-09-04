@@ -26,6 +26,7 @@ export {
 // Also the edge that loads paymentsPayouts.ts's payout.paid/payout.failed
 // webhook registrations (see paymentsWebhook.ts's header).
 export { requestPayout } from "./paymentsPayouts.js";
+export { setPayoutShares } from "./payoutShares.js";
 export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } from "./events.js";
 export { takedownEvent } from "./eventsAdmin.js";
 export {
