@@ -57,8 +57,10 @@ Gates at merge: see the gates line in `docs/superpowers/HANDOFF.md` (measured on
    (`share_voided` ledger rows); a member's transferred share is never reversed (spec section 8).
 3. **A partial distribution never reopens cancel.** `DistributePartialError` (thrown once any leg
    has moved) is treated as a non-definite failure: the ticket settlement claim stands, and
-   `settlementStartedAt` is stamped after the FIRST successful order transfer of a pass so
-   `cancelEventCore` refuses once any money moved. A later pass walks the pending orders.
+   `settlementStartedAt` is stamped at the FIRST successful order transfer of a pass or
+   immediately on a partial distribution, whichever comes first (two stamp sites in
+   `settleOneEvent`), so `cancelEventCore` refuses once any money moved. A later pass walks the
+   pending orders.
 4. **Release is claim-then-transfer.** `releaseHeldShares` claims each doc in a transaction
    (`releaseClaimedAt`, stale after 10 minutes) before the Stripe call under `held:{docId}`, so
    the trigger and the sync hook cannot double-transfer (FakeStripe has no mutual exclusion; real
@@ -86,7 +88,10 @@ Gates at merge: see the gates line in `docs/superpowers/HANDOFF.md` (measured on
 10. **Legacy events.** An event settled under the old per-event key (still `published`,
     `settlementStartedAt` set, no order stamped) is recognised by its ledger row with no `orderId`
     field: its orders are stamped without a second transfer, and a lost dispute on such an order
-    refuses with an alert instead of reducing the basis.
+    refuses with an alert instead of reducing the basis. The first discovery stamps the sticky
+    `EventDoc.legacySettlement` flag; the scan runs only when no order is stamped or that flag is
+    set, so a legacy event with more pending orders than one pass's budget keeps stamping on later
+    passes while modern events skip the scan.
 11. **Copy and gating.** Non-admin members see the balance and "Only profile admins can cash out.";
     the "Not set up for payouts yet" per-member line was dropped (other users' Stripe docs are not
     readable); the held line renders whenever `heldCents > 0` in any state. The spec's held-line
@@ -117,7 +122,7 @@ Gates at merge: see the gates line in `docs/superpowers/HANDOFF.md` (measured on
   double-pay), and the whole-branch review caught what only the production runtime would show
   (the unbound trigger secret) plus lifecycle gaps (failed releases never retried, held shares
   surviving clawbacks, deletion skipping reassignment). Budget one fix wave; this one took four
-  commits.
+  commits plus a short second round (a fifth commit) for a defect the wave itself introduced.
 - FakeStripe caches definite refusals under key plus fingerprint like real Stripe (24 hours);
   failure tests use the `failTransferAccountIds` knob rather than corrupting data under a static
   key.
