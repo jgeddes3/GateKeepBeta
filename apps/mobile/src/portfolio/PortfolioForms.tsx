@@ -11,6 +11,7 @@ import {
 } from "@gatekeep/shared";
 import { Text, Button, Input, TextArea, Chip } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
+import { tokens } from "../theme/tokens";
 
 // RN ports of the web portfolio forms: same callables, same validation,
 // same field set. Expo Router's stack navigator reuses screen instances
@@ -228,19 +229,28 @@ type RateInput = { amount: string; note: string | null };
 const rateInputFrom = (r: RateAmount | null | undefined): RateInput =>
   r ? { amount: (r.amountCents / 100).toString(), note: r.note ?? null } : { amount: "", note: null };
 
-// SP4 Task 1 stopgap: BookingUpdateInput now requires `visibility`, but the
-// per-field visibility toggle UI is a later SP4 task. Until it lands, saves
-// from this form preserve whatever visibility is already stored (edit case)
-// or fall back to this default (matches the SP4 backfill's default and
-// preserves pre-SP4 exposure: rates readable by curators, prefs by curators).
-const DEFAULT_BOOKING_VISIBILITY: BookingVisibility = {
-  perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
-};
-
 const DEFAULT_PREFS: BookingPreferences = {
   gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null,
   bringsOwnPA: null, availabilityPattern: null,
 };
+
+// A two-state pill for the visibility controls below: the "default" (ember
+// pill) Button variant when active, "secondary" (outlined) when not, forced
+// to the pill radius, exactly the web Chip's Button-based construction.
+function TogglePill({ label, active, onPress, disabled }: {
+  label: string; active: boolean; onPress: () => void; disabled?: boolean;
+}) {
+  return (
+    <Button
+      title={label}
+      variant={active ? "default" : "secondary"}
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityState={{ selected: active, disabled: Boolean(disabled) }}
+      style={{ borderRadius: tokens.radius.pill, paddingHorizontal: 14 }}
+    />
+  );
+}
 
 export function BookingForm({ profileId, initial }:
   { profileId: string; initial: BookingDoc | null }) {
@@ -255,6 +265,11 @@ export function BookingForm({ profileId, initial }:
     perSet: rateInputFrom(initial?.rates.perSet),
   });
   const [prefs, setPrefs] = useState<BookingPreferences>(initial?.preferences ?? DEFAULT_PREFS);
+  // Same seed rule as web (see that file's comment): a doc with no visibility
+  // block is the backfill default, all curators.
+  const [visibility, setVisibility] = useState<BookingVisibility>(initial?.visibility ?? {
+    perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
+  });
   const [busy, setBusy] = useState(false);
 
   const numField = (value: number | null, set: (n: number | null) => void, placeholder: string) => (
@@ -263,20 +278,31 @@ export function BookingForm({ profileId, initial }:
       onChangeText={(t) => set(t === "" ? null : Math.round(Number(t)))}
       style={{ width: 100 }} />
   );
-  const rateRow = (key: RateKey, label: string) => (
-    <View key={key} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-      <Text style={{ width: 100 }}>{label}</Text>
-      <Text>$</Text>
-      <Input keyboardType="decimal-pad" placeholder="-"
-        value={rateInputs[key].amount}
-        onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: t } }))}
-        style={{ width: 90 }} />
-      <Input placeholder="note (optional)" maxLength={200} editable={rateInputs[key].amount.trim() !== ""}
-        value={rateInputs[key].note ?? ""}
-        onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: t || null } }))}
-        style={{ flex: 1 }} />
-    </View>
-  );
+  const rateRow = (key: RateKey, label: string) => {
+    const blank = rateInputs[key].amount.trim() === "";
+    return (
+      <View key={key} style={{ gap: 6 }}>
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <Text style={{ width: 100 }}>{label}</Text>
+          <Text>$</Text>
+          <Input keyboardType="decimal-pad" placeholder="-"
+            value={rateInputs[key].amount}
+            onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: t } }))}
+            style={{ width: 90 }} />
+          <Input placeholder="note (optional)" maxLength={200} editable={!blank}
+            value={rateInputs[key].note ?? ""}
+            onChangeText={(t) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: t || null } }))}
+            style={{ flex: 1 }} />
+        </View>
+        <View style={{ flexDirection: "row", gap: 6, marginLeft: 108 }}>
+          <TogglePill label="Visible to curators" active={visibility[key] === "curators"} disabled={blank}
+            onPress={() => setVisibility((v) => ({ ...v, [key]: "curators" }))} />
+          <TogglePill label="Private" active={visibility[key] === "private"} disabled={blank}
+            onPress={() => setVisibility((v) => ({ ...v, [key]: "private" }))} />
+        </View>
+      </View>
+    );
+  };
   const save = async () => {
     const rates: BookingRates = { perHour: null, perSong: null, perSet: null };
     for (const key of ["perHour", "perSong", "perSet"] as const) {
@@ -289,10 +315,7 @@ export function BookingForm({ profileId, initial }:
       }
       rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
     }
-    const input = {
-      profileId, rates, preferences: prefs,
-      visibility: initial?.visibility ?? DEFAULT_BOOKING_VISIBILITY,
-    };
+    const input = { profileId, rates, preferences: prefs, visibility };
     const v = validateBookingUpdate(input);
     if (!v.ok) { Alert.alert("Check your info", v.reason); return; }
     setBusy(true);
@@ -303,7 +326,10 @@ export function BookingForm({ profileId, initial }:
   return (
     <View style={{ gap: 10 }}>
       <Text variant="title">Rates & preferences</Text>
-      <Text muted>Visible to curators only, never on your public page. Offer any mix of the three.</Text>
+      <Text muted>
+        Rates never appear on your public page: each one is visible to curators or private.
+        Preferences can be public or curators only. Offer any mix of the three.
+      </Text>
       {rateRow("perHour", "Per hour")}
       {rateRow("perSong", "Per song")}
       {rateRow("perSet", "Per set (flat)")}
@@ -313,6 +339,16 @@ export function BookingForm({ profileId, initial }:
           onPress={() => setPrefs((p) => ({ ...p, gigTypes: p.gigTypes.includes(g)
             ? p.gigTypes.filter((x) => x !== g) : [...p.gigTypes, g] }))} />)}
       </View>
+      <Text variant="label">Who sees your preferences</Text>
+      <View style={{ flexDirection: "row", gap: 6 }}>
+        <TogglePill label="Public" active={visibility.preferences === "public"}
+          onPress={() => setVisibility((v) => ({ ...v, preferences: "public" }))} />
+        <TogglePill label="Curators only" active={visibility.preferences === "curators"}
+          onPress={() => setVisibility((v) => ({ ...v, preferences: "curators" }))} />
+      </View>
+      <Text variant="meta" muted>
+        Public puts gig types, act size, and availability on your public page. Curators only keeps them inside Find musicians.
+      </Text>
       <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
         <Text>Travel radius (km)</Text>
         {numField(prefs.travelRadiusKm, (n) => setPrefs((p) => ({ ...p, travelRadiusKm: n })), "-")}

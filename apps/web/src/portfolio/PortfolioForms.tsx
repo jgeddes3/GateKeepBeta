@@ -10,6 +10,7 @@ import {
   type ExternalLink, type ExternalLinkKind, type RateAmount, type PhotoKind,
 } from "@gatekeep/shared";
 import { Button } from "../ui/button";
+import { Switch } from "../ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -329,15 +330,6 @@ type RateInput = { amount: string; note: string | null };
 const rateInputFrom = (r: RateAmount | null | undefined): RateInput =>
   r ? { amount: (r.amountCents / 100).toString(), note: r.note ?? null } : { amount: "", note: null };
 
-// SP4 Task 1 stopgap: BookingUpdateInput now requires `visibility`, but the
-// per-field visibility toggle UI is a later SP4 task. Until it lands, saves
-// from this form preserve whatever visibility is already stored (edit case)
-// or fall back to this default (matches the SP4 backfill's default and
-// preserves pre-SP4 exposure: rates readable by curators, prefs by curators).
-const DEFAULT_BOOKING_VISIBILITY: BookingVisibility = {
-  perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
-};
-
 // Radix's Select requires every item's value to be a non-empty string, so
 // each "no selection yet" field below is threaded through this sentinel
 // rather than "", mapped back to `null` (the field's real empty value) on
@@ -359,32 +351,62 @@ export function BookingForm({ profileId, initial }:
   const [prefs, setPrefs] = useState(initial?.preferences ??
     { gigTypes: [], travelRadiusKm: null, actSize: null, typicalSetMinutes: null,
       bringsOwnPA: null, availabilityPattern: null });
+  // Seeded once from the stored doc. A doc with no visibility block is a
+  // pre-SP4 doc the backfill has not converged yet; BookingDoc.visibility's
+  // own comment defines that case as "every rate curators, preferences
+  // curators", which is the literal below. Rates can never be public (spec
+  // decision 4: RateVisibility has no "public" member), so each rate gets a
+  // curators/private switch and only preferences gets a public option.
+  const [visibility, setVisibility] = useState<BookingVisibility>(initial?.visibility ?? {
+    perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
+  });
   const [busy, setBusy] = useState(false);
 
-  const rateField = (key: RateKey, label: string) => (
-    <div key={key} className="flex flex-wrap items-center gap-3">
-      <span className="w-28 shrink-0 font-sora text-sm font-medium text-gk-text">{label}</span>
-      <div className="flex items-center gap-1.5">
-        <span className="font-sora text-sm text-gk-muted">$</span>
-        <Input
-          type="number"
-          min={0}
-          step="0.01"
-          className="w-24"
-          value={rateInputs[key].amount}
-          onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: e.target.value } }))}
-        />
+  const rateField = (key: RateKey, label: string) => {
+    const blank = rateInputs[key].amount.trim() === "";
+    const visibleToCurators = visibility[key] === "curators";
+    return (
+      <div key={key} className="grid gap-1.5">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="w-28 shrink-0 font-sora text-sm font-medium text-gk-text">{label}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="font-sora text-sm text-gk-muted">$</span>
+            <Input
+              type="number"
+              min={0}
+              step="0.01"
+              className="w-24"
+              value={rateInputs[key].amount}
+              onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], amount: e.target.value } }))}
+            />
+          </div>
+          <Input
+            placeholder="Note (optional)"
+            maxLength={200}
+            className="min-w-[160px] flex-1"
+            value={rateInputs[key].note ?? ""}
+            disabled={blank}
+            onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: e.target.value || null } }))}
+          />
+        </div>
+        {/* min-h-11 (44px) on the label, not on the 24px switch: the label is
+            the click target (label/button association), so the target meets
+            the accessibility floor without inflating the control's drawing.
+            Disabled while the rate is blank: an unset rate has nothing to
+            show or hide. ml-31 = the w-28 label plus the gap-3 (7.75rem), so
+            the switch sits under the dollar input, not under the row label. */}
+        <label className="ml-31 flex min-h-11 w-fit cursor-pointer items-center gap-2 font-sora text-xs text-gk-muted">
+          <Switch
+            checked={visibleToCurators}
+            disabled={blank}
+            aria-label={`${label} rate visibility`}
+            onCheckedChange={(on) => setVisibility((v) => ({ ...v, [key]: on ? "curators" : "private" }))}
+          />
+          {visibleToCurators ? "Visible to curators" : "Private"}
+        </label>
       </div>
-      <Input
-        placeholder="Note (optional)"
-        maxLength={200}
-        className="min-w-[160px] flex-1"
-        value={rateInputs[key].note ?? ""}
-        disabled={rateInputs[key].amount.trim() === ""}
-        onChange={(e) => setRateInputs((r) => ({ ...r, [key]: { ...r[key], note: e.target.value || null } }))}
-      />
-    </div>
-  );
+    );
+  };
 
   const save = async () => {
     const rates: { perHour: RateAmount | null; perSong: RateAmount | null; perSet: RateAmount | null } =
@@ -399,10 +421,7 @@ export function BookingForm({ profileId, initial }:
       }
       rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
     }
-    const input = {
-      profileId, rates, preferences: prefs,
-      visibility: initial?.visibility ?? DEFAULT_BOOKING_VISIBILITY,
-    };
+    const input = { profileId, rates, preferences: prefs, visibility };
     const v = validateBookingUpdate(input);
     if (!v.ok) { window.alert(v.reason); return; }
     setBusy(true);
@@ -417,7 +436,8 @@ export function BookingForm({ profileId, initial }:
       </CardHeader>
       <CardContent className="grid gap-5">
         <p className="font-sora text-sm text-gk-muted">
-          Visible to curators only, never on your public page. Offer any mix of the three.
+          Rates never appear on your public page: each one is visible to curators or private.
+          Preferences can be public or curators only. Offer any mix of the three.
         </p>
         <div className="grid gap-3">
           {rateField("perHour", "Per hour")}
@@ -439,6 +459,23 @@ export function BookingForm({ profileId, initial }:
               </Chip>
             ))}
           </div>
+        </div>
+
+        <div className="grid gap-2">
+          <span className="font-sora text-sm font-medium text-gk-text">Who sees your preferences</span>
+          <div className="flex flex-wrap gap-2">
+            <Chip active={visibility.preferences === "public"}
+              onClick={() => setVisibility((v) => ({ ...v, preferences: "public" }))}>
+              Public
+            </Chip>
+            <Chip active={visibility.preferences === "curators"}
+              onClick={() => setVisibility((v) => ({ ...v, preferences: "curators" }))}>
+              Curators only
+            </Chip>
+          </div>
+          <span className="font-sora text-xs text-gk-muted">
+            Public puts gig types, act size, and availability on your public page. Curators only keeps them inside Find musicians.
+          </span>
         </div>
 
         <div className="grid gap-2">
