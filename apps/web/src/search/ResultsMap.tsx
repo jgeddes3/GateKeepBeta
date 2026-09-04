@@ -4,6 +4,18 @@ import type { SearchPin } from "@gatekeep/shared";
 
 const SINGLE_PIN_ZOOM = 14;
 
+// setOptions() is documented to only take effect on its first call and logs
+// a dev warning on every later one; a module-level flag (not component
+// state, since the loader's own install is itself module-global) keeps
+// this component from re-calling it every time a List | Map toggle remounts
+// ResultsMap within the same page load.
+let mapsOptionsSet = false;
+
+function clearMarker(marker: google.maps.Marker) {
+  google.maps.event.clearInstanceListeners(marker);
+  marker.setMap(null);
+}
+
 // NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY has to be a literal property access,
 // not a dynamic lookup (process.env["NEXT_PUBLIC_..."] or a computed key):
 // Next.js only inlines literal NEXT_PUBLIC_* references at build time, so
@@ -63,7 +75,10 @@ export function ResultsMap({ pins, onSelect }: { pins: SearchPin[]; onSelect: (p
     let cancelled = false;
     void (async () => {
       const { setOptions, importLibrary } = await import("@googlemaps/js-api-loader");
-      setOptions({ key: apiKey, v: "weekly" });
+      if (!mapsOptionsSet) {
+        setOptions({ key: apiKey, v: "weekly" });
+        mapsOptionsSet = true;
+      }
       await importLibrary("maps");
       await importLibrary("marker");
       if (cancelled || !containerRef.current) return;
@@ -77,12 +92,14 @@ export function ResultsMap({ pins, onSelect }: { pins: SearchPin[]; onSelect: (p
     return () => { cancelled = true; };
   }, []);
 
-  // Markers: cleared before every rebuild so a filter/query change (a new
-  // pins array) never leaves an earlier search's markers on the map.
+  // Markers: cleared (listeners freed via clearInstanceListeners, then
+  // unmapped) before every rebuild so a filter/query change (a new pins
+  // array) never leaves an earlier search's markers, or their click
+  // closures, hanging around on the map.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    markersRef.current.forEach((marker) => marker.setMap(null));
+    markersRef.current.forEach(clearMarker);
     markersRef.current = pins.map((pin) => {
       const marker = new google.maps.Marker({ position: pin.geo, map, title: pin.title });
       marker.addListener("click", () => onSelectRef.current(pin));
@@ -98,7 +115,7 @@ export function ResultsMap({ pins, onSelect }: { pins: SearchPin[]; onSelect: (p
       map.fitBounds(bounds);
     }
 
-    return () => { markersRef.current.forEach((marker) => marker.setMap(null)); };
+    return () => { markersRef.current.forEach(clearMarker); };
   }, [pins, mapReady]);
 
   if (!hasMapsKey()) return null;

@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import type { SearchPin } from "@gatekeep/shared";
 import { DateBlockRow } from "../components/DateBlockRow";
@@ -12,6 +13,29 @@ import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
 
 type PanelProps = { location: UseBrowserLocationState; headerSlot?: ReactNode };
+
+// SearchPin.startsAt is typed number | null; every pin this panel actually
+// produces (kind "gig") has one, but the type doesn't guarantee it, so
+// this renders the DateBlockRow only when it's actually present, and a
+// plain title/subtitle link (ProfileRow's own shape) otherwise, rather
+// than asserting a value that isn't provably there.
+function SelectedGigCard({ pin }: { pin: SearchPin }) {
+  const href = `/gigs/${pin.id}`;
+  if (pin.startsAt !== null) {
+    return <DateBlockRow dateMs={pin.startsAt} title={pin.title} subtitle={pin.subtitle} href={href} />;
+  }
+  return (
+    <Link
+      href={href}
+      className="flex w-full items-center gap-3 rounded-gk-sm px-2 py-2 text-left outline-none transition-colors hover:bg-gk-border/25 focus-visible:ring-2 focus-visible:ring-gk-focus"
+    >
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-syne text-sm font-semibold text-gk-text">{pin.title}</p>
+        <p className="truncate font-sora text-xs text-gk-muted">{pin.subtitle}</p>
+      </div>
+    </Link>
+  );
+}
 
 // MusicianGigsPanel and MusicianVenuesPanel are exported on their own, not
 // only assembled inside MusicianFace below: SearchFaces' three-segment
@@ -44,14 +68,7 @@ export function MusicianGigsPanel({ location, headerSlot }: PanelProps) {
       {view === "map" ? (
         <div className="grid gap-3">
           <ResultsMap pins={state.pins} onSelect={setSelectedPin} />
-          {selectedPin && (
-            <DateBlockRow
-              dateMs={selectedPin.startsAt!}
-              title={selectedPin.title}
-              subtitle={selectedPin.subtitle}
-              href={`/gigs/${selectedPin.id}`}
-            />
-          )}
+          {selectedPin && <SelectedGigCard pin={selectedPin} />}
         </div>
       ) : (
         <ResultList state={state} row={GigRow} />

@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import type { SearchPin } from "@gatekeep/shared";
 import { DateBlockRow } from "../components/DateBlockRow";
@@ -9,6 +10,29 @@ import { hasMapsKey, ResultsMap } from "./ResultsMap";
 import { SearchInputField } from "./SearchInputField";
 import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
+
+// SearchPin.startsAt is typed number | null; every pin this face actually
+// produces (kind "show") has one, but the type doesn't guarantee it, so
+// this renders the DateBlockRow only when it's actually present, and a
+// plain title/subtitle link (ProfileRow's own shape) otherwise, rather
+// than asserting a value that isn't provably there.
+function SelectedShowCard({ pin }: { pin: SearchPin }) {
+  const href = `/e/${pin.id}`;
+  if (pin.startsAt !== null) {
+    return <DateBlockRow dateMs={pin.startsAt} title={pin.title} subtitle={pin.subtitle} href={href} />;
+  }
+  return (
+    <Link
+      href={href}
+      className="flex w-full items-center gap-3 rounded-gk-sm px-2 py-2 text-left outline-none transition-colors hover:bg-gk-border/25 focus-visible:ring-2 focus-visible:ring-gk-focus"
+    >
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-syne text-sm font-semibold text-gk-text">{pin.title}</p>
+        <p className="truncate font-sora text-xs text-gk-muted">{pin.subtitle}</p>
+      </div>
+    </Link>
+  );
+}
 
 // The signed-in fan's search: a free-text box, the "fan" face's filter
 // chips, and a list (or, behind the Maps browser key, a map) of upcoming
@@ -45,14 +69,7 @@ export function FanFace({ location, headerSlot }: { location: UseBrowserLocation
       {view === "map" ? (
         <div className="grid gap-3">
           <ResultsMap pins={state.pins} onSelect={setSelectedPin} />
-          {selectedPin && (
-            <DateBlockRow
-              dateMs={selectedPin.startsAt!}
-              title={selectedPin.title}
-              subtitle={selectedPin.subtitle}
-              href={`/e/${selectedPin.id}`}
-            />
-          )}
+          {selectedPin && <SelectedShowCard pin={selectedPin} />}
         </div>
       ) : (
         <ResultList state={state} row={ShowRow} />
