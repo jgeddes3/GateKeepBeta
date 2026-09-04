@@ -2,13 +2,24 @@ export type PayoutPayee = { kind: "member"; uid: string } | { kind: "profile" };
 export interface PayoutShare { payee: PayoutPayee; percent: number }
 export const MAX_PAYOUT_SHARES = 20;
 
+// This module imports nothing (types.ts imports PayoutShare from here, not
+// the other way, to avoid a cycle), so these four SP5c message strings are
+// defined here and messages.ts re-exports them, keeping both import paths
+// (`@gatekeep/shared`'s messages.ts surface and payoutShares.ts's own
+// validator) reading the exact same constant rather than two copies of the
+// same English that could drift apart.
+export const SHARES_SUM_MESSAGE = "Shares must add up to 100%.";
+export const SHARES_MEMBER_MESSAGE = "Every share must belong to a current member.";
+export const SHARES_ADMIN_MESSAGE = "Only a profile admin can change payout shares.";
+export const MEMBER_PAYOUT_SETUP_REQUIRED_MESSAGE = "Set up payouts before cashing out.";
+
 export function payeeKey(p: PayoutPayee): string { return p.kind === "profile" ? "profile" : `member:${p.uid}`; }
 
 type Ok = { ok: true; shares: PayoutShare[] };
 type Fail = { ok: false; reason: string };
 
 export function validatePayoutShares(raw: unknown, memberUids: ReadonlySet<string>): Ok | Fail {
-  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_PAYOUT_SHARES) return { ok: false, reason: "Shares must list 1 to 20 payees." };
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_PAYOUT_SHARES) return { ok: false, reason: `Shares must list 1 to ${MAX_PAYOUT_SHARES} payees.` };
   const seen = new Set<string>();
   const shares: PayoutShare[] = [];
   let sum = 0;
@@ -21,14 +32,14 @@ export function validatePayoutShares(raw: unknown, memberUids: ReadonlySet<strin
     let clean: PayoutPayee;
     if (p.kind === "profile") clean = { kind: "profile" };
     else if (p.kind === "member" && typeof p.uid === "string" && memberUids.has(p.uid)) clean = { kind: "member", uid: p.uid };
-    else return { ok: false, reason: "Every share must belong to a current member." };
+    else return { ok: false, reason: SHARES_MEMBER_MESSAGE };
     const key = payeeKey(clean);
     if (seen.has(key)) return { ok: false, reason: key === "profile" ? "Only one band fund share." : "Each member appears once." };
     seen.add(key);
     shares.push({ payee: clean, percent });
     sum += percent;
   }
-  if (sum !== 100) return { ok: false, reason: "Shares must add up to 100%." };
+  if (sum !== 100) return { ok: false, reason: SHARES_SUM_MESSAGE };
   return { ok: true, shares };
 }
 

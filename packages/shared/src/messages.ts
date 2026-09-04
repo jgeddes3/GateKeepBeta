@@ -179,7 +179,7 @@ export const SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE = "Type something or pick a fil
 export const SEARCH_SIGN_IN_MESSAGE = "Sign in to search.";
 
 // ---------- Sub-project 5c payout splits ----------
-export const SHARES_SUM_MESSAGE = "Shares must add up to 100%.";
-export const SHARES_MEMBER_MESSAGE = "Every share must belong to a current member.";
-export const SHARES_ADMIN_MESSAGE = "Only a profile admin can change payout shares.";
-export const MEMBER_PAYOUT_SETUP_REQUIRED_MESSAGE = "Set up payouts before cashing out.";
+// Defined in payoutShares.ts (which imports nothing, avoiding a cycle with
+// types.ts) and re-exported here so both import paths read the same
+// constant; validatePayoutShares itself uses the payoutShares.ts copy.
+export { SHARES_SUM_MESSAGE, SHARES_MEMBER_MESSAGE, SHARES_ADMIN_MESSAGE, MEMBER_PAYOUT_SETUP_REQUIRED_MESSAGE } from "./payoutShares.js";

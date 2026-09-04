@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validatePayoutShares, splitCents, payeeKey, shareHeldMessage, type PayoutShare } from "../src/index.js";
+import { validatePayoutShares, splitCents, payeeKey, shareHeldMessage, MAX_PAYOUT_SHARES, type PayoutShare } from "../src/index.js";
 
 const members = new Set(["a", "b", "c"]);
 
@@ -23,6 +23,14 @@ describe("validatePayoutShares", () => {
     expect(validatePayoutShares([], members).ok).toBe(false);
     expect(validatePayoutShares("nope", members).ok).toBe(false);
     expect(validatePayoutShares([{ payee: { kind: "member", uid: 5 }, percent: 100 }], members).ok).toBe(false);
+  });
+  it("rejects more than MAX_PAYOUT_SHARES payees, and the reason mentions the cap", () => {
+    const uids = Array.from({ length: 21 }, (_, i) => `m${i}`);
+    const bigMembers = new Set(uids);
+    const shares = uids.map((uid, i) => ({ payee: { kind: "member" as const, uid }, percent: i === 0 ? 20 : 4 }));
+    const v = validatePayoutShares(shares, bigMembers);
+    expect(v.ok).toBe(false);
+    expect(v.ok === false && v.reason).toContain(String(MAX_PAYOUT_SHARES));
   });
 });
 
