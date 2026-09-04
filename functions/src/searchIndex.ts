@@ -1,10 +1,12 @@
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import { onCall } from "firebase-functions/v2/https";
 import { getFirestore, type Firestore, type DocumentReference } from "firebase-admin/firestore";
 import {
   normalizeWords, buildTokens, dayKeyInLaunchZone, SEARCH_BUSY_DAYS_WINDOW_MS,
   type SearchIndexDoc, type SearchKind, type EventDoc, type GigDoc, type ProfileDoc, type BookingRequestDoc,
   type BookingDoc, type ActSize,
 } from "@gatekeep/shared";
+import { requireAdmin } from "./review.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const BUSY_BOOKINGS_CAP = 50;
@@ -205,3 +207,66 @@ export const onBookingWrittenSearch = onDocumentWritten("bookings/{bookingId}", 
     console.error("searchIndex: booking trigger failed", bookingId, e);
   }
 });
+
+// ---------- backfill and sweep ----------
+
+const BACKFILL_PAGE = 300;
+
+async function* pageCollection(db: Firestore, name: string) {
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+  for (;;) {
+    let q = db.collection(name).orderBy("__name__").limit(BACKFILL_PAGE);
+    if (cursor) q = q.startAfter(cursor);
+    const snap = await q.get();
+    if (snap.empty) return;
+    yield snap.docs;
+    if (snap.docs.length < BACKFILL_PAGE) return;
+    cursor = snap.docs[snap.docs.length - 1];
+  }
+}
+
+// Admin one-shot after the first deploy (and safe to re-run): projects
+// every profile, event, and gig through the same functions the triggers
+// use. Counts are docs written per kind; `deleted` counts sources that
+// resolved to "not public" and had a stale index doc removed.
+export const backfillSearchIndex = onCall<Record<string, never>>(
+  { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
+  async (req) => {
+    requireAdmin(req);
+    const db = getFirestore();
+    const now = Date.now();
+    const counts = { artists: 0, venues: 0, shows: 0, gigs: 0, deleted: 0 };
+    const tally = (kind: "artists" | "venues" | "shows" | "gigs", r: "set" | "deleted") => { if (r === "set") counts[kind]++; else counts.deleted++; };
+    for await (const page of pageCollection(db, "profiles")) {
+      for (const d of page) {
+        const p = d.data() as ProfileDoc;
+        if (p.type === "musician") tally("artists", await rebuildArtistIndex(db, d.id, now));
+        else if (p.type === "curator") tally("venues", await rebuildVenueIndex(db, d.id, now));
+      }
+    }
+    for await (const page of pageCollection(db, "events")) {
+      for (const d of page) tally("shows", await applyProjection(db.doc(`searchIndex/${indexDocId("show", d.id)}`), projectShow(d.id, d.data() as EventDoc, now)));
+    }
+    for await (const page of pageCollection(db, "gigs")) {
+      for (const d of page) tally("gigs", await applyProjection(db.doc(`searchIndex/${indexDocId("gig", d.id)}`), projectGig(d.id, d.data() as GigDoc, now)));
+    }
+    return counts;
+  },
+);
+
+// Daily: drop show docs a day after they end. Open gigs that pass their
+// start are closed by the sweep's past-gig step, and the gig trigger removes
+// their index doc, so only shows need this.
+export async function runSearchIndexSweep(db: Firestore, now: number): Promise<number> {
+  let deleted = 0;
+  const cutoff = now - DAY_MS;
+  for (;;) {
+    const snap = await db.collection("searchIndex").where("kind", "==", "show").where("endsAt", "<", cutoff).orderBy("endsAt").limit(BACKFILL_PAGE).get();
+    if (snap.empty) return deleted;
+    const batch = db.batch();
+    for (const d of snap.docs) batch.delete(d.ref);
+    await batch.commit();
+    deleted += snap.size;
+    if (snap.size < BACKFILL_PAGE) return deleted;
+  }
+}

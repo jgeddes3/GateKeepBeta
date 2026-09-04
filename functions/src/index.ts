@@ -37,6 +37,7 @@ export { createShowPost, removeShowPost } from "./showPosts.js";
 export { getDiscoverDeck } from "./discover.js";
 export {
   onProfileWrittenSearch, onTrackWrittenSearch, onEventWrittenSearch, onGigWrittenSearch, onBookingWrittenSearch,
+  backfillSearchIndex,
 } from "./searchIndex.js";
 export { search } from "./search.js";
 export { saveSearch, deleteSavedSearch, onSearchIndexCreated } from "./savedSearches.js";

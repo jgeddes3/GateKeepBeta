@@ -14,6 +14,7 @@ import { buildPaymentDoc, recordAdminAlert } from "./paymentsCore.js";
 import { EVENT_REMINDER_WINDOW_MS, eventCascadeStuckAlertId } from "./eventsCore.js";
 import { cancelAndRefundEventForModeration, type EventCascadeRetryDoc } from "./events.js";
 import { stripeSecretKey } from "./stripeClient.js";
+import { runSearchIndexSweep } from "./searchIndex.js";
 
 // SP10 Task 10 fix round 1 (durability review, Important 1): a retry doc
 // this poisoned, this many times in a row, never resolves itself. Kept
@@ -299,6 +300,9 @@ export interface SweepReport {
   // SP10 Task 19, step 3b: posterUploads/{uid}/uploads/{nonce} docs older
   // than POSTER_UPLOAD_TTL_MS deleted this run.
   posterUploadsReaped: number;
+  // SP8 Task 7, step 10: searchIndex/show_* docs whose event ended more than
+  // a day ago, deleted (a "show" is stale search inventory once it's over).
+  searchIndexExpired: number;
   // S3: per-step failure counts, a step that throws is caught, logged, and
   // counted here rather than aborting the remaining steps.
   errors: {
@@ -325,6 +329,9 @@ export interface SweepReport {
     // SP10 Task 19, step 3b: the poster upload reaper's own query/pagination
     // failed, or the writer's commit failed.
     posterUploads: number;
+    // SP8 Task 7, step 10: the search index expiry step's own query or batch
+    // delete failed.
+    searchIndex: number;
   };
 }
 
@@ -350,10 +357,11 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
     eventRemindersSent: 0,
     eventCascadeRetried: 0,
     posterUploadsReaped: 0,
+    searchIndexExpired: 0,
     errors: {
       series: 0, pastGigs: 0, tracks: 0, invites: 0, curatorAccessRetries: 0,
       bookingExpiry: 0, bookingCompletion: 0, seriesMaterialize: 0, eventReminders: 0,
-      eventCascadeRetries: 0, posterUploads: 0,
+      eventCascadeRetries: 0, posterUploads: 0, searchIndex: 0,
     },
   };
 
@@ -1052,6 +1060,14 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   // event review.ts's reject-from-approved cascade could not resolve (see
   // eventCascadeRetries). Mirrors step 5's per-doc isolate-log-continue.
   await drainEventCascadeRetries(db, report, now);
+
+  // 10) SP8: expire search index docs for shows that ended over a day ago.
+  try {
+    report.searchIndexExpired = await runSearchIndexSweep(db, now);
+  } catch (e) {
+    console.error("dailySweep: search index sweep step failed", e);
+    report.errors.searchIndex++;
+  }
 
   return report;
 }
