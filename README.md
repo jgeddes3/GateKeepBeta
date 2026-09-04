@@ -1324,17 +1324,18 @@ experience on both platforms, a results map behind the Maps key, saved searches 
 and an SEO pack (sitemap, robots, JSON-LD, lowercase handle redirects).
 
 **Web, both themes:**
-- Fan face: the search box returns results for a name/genre/city query, and each filter chip
-  narrows them.
+- Fan face: the search box returns results for a query that matches a show's title, a lineup act's
+  name, or its venue or neighborhood, and each filter chip narrows them.
 - The map toggle and pin tap work when `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY` is set.
-- Musician face (`/gigs`): the Gigs and Venues segments both return results, and the apply sheet's
-  filters narrow them.
+- Musician face (`/gigs`): the Gigs and Venues segments both return results, and each face's own
+  filter chips narrow the list (the gig detail's apply sheet has no filters of its own).
 - Curator face: the musicians directory filters work, including "Free on".
 - Save a search, see it on the dashboard, delete it.
 - Publish an event or gig that matches a saved search and receive the `saved_search_match` alert.
 - `sitemap.xml` and `robots.txt` render at the site root.
 - A mixed-case handle in a profile URL redirects to the lowercase canonical.
-- A musician or curator portfolio's home city field saves and reflects in results.
+- A musician portfolio's home city field saves and reflects in results (only the musician
+  portfolio has one; the curator editor has no home city field).
 
 **Mobile, both themes, needs a new EAS dev-client build** (`react-native-maps` joined the native
 dependency list, see the launch checklist above):
@@ -1343,7 +1344,8 @@ dependency list, see the launch checklist above):
 - Curator Find Musicians tab: filters work, including "Free on".
 - Save a search, see it under the hidden Account tab, delete it.
 - Receive a push for a `saved_search_match` alert and tap it to the matching result.
-- Portfolio home city field saves on both the musician and curator editors.
+- Portfolio home city field saves on the musician editor (the curator editor has no home city
+  field).
 
 ### Sub-project 2 polish follow-ups (non-blocking)
 

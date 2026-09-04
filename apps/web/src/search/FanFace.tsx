@@ -76,7 +76,7 @@ export function FanFace({
           {selectedPin && <SelectedShowCard pin={selectedPin} />}
         </div>
       ) : (
-        <ResultList state={state} row={ShowRow} />
+        <ResultList state={state} renderRow={(r) => <ShowRow r={r} />} />
       )}
     </div>
   );

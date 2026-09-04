@@ -6,6 +6,7 @@ import type { SavedSearchDoc, SearchFace } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { IconWarning } from "../ui/icons";
 import { deleteSavedSearch } from "./searchApi";
 
 type SavedSearchRow = { id: string } & SavedSearchDoc;
@@ -29,6 +30,7 @@ const FACE_NAME: Record<SearchFace, string> = {
 export function SavedSearches({ uid }: { uid: string }) {
   const [rows, setRows] = useState<SavedSearchRow[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -43,11 +45,14 @@ export function SavedSearches({ uid }: { uid: string }) {
 
   const remove = async (id: string) => {
     setDeletingId(id);
+    setDeleteError(null);
     try {
       await deleteSavedSearch(id);
       // No local filter here: onSnapshot's own next event removes the row,
       // the same "let the subscription be the only writer of `rows`" shape
       // NotificationsList's markRead uses.
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Could not delete this saved search.");
     } finally {
       setDeletingId(null);
     }
@@ -57,6 +62,15 @@ export function SavedSearches({ uid }: { uid: string }) {
     <Card>
       <CardHeader><CardTitle>Saved searches</CardTitle></CardHeader>
       <CardContent>
+        {deleteError && (
+          <p
+            role="alert"
+            className="mb-3 flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          >
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {deleteError}
+          </p>
+        )}
         <ul className="grid gap-3">
           {rows.map((r) => (
             <li key={r.id} className="flex flex-wrap items-center justify-between gap-3">

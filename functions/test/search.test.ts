@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { callFn } from "./helpers";
 import { adb, makeApprovedMusicianProfile, makeApprovedCuratorProfile, makePublishedBookingEvent, makeFan, waitForIndex } from "./discoverFixtures";
 import { consumeSearchBudget } from "../src/searchBudget.js";
-import { SEARCH_DAILY_BUDGET, type SearchInput, type SearchOutput } from "@gatekeep/shared";
+import { dayKeyInLaunchZone, whenWindow, SEARCH_DAILY_BUDGET, type SearchInput, type SearchOutput } from "@gatekeep/shared";
 vi.setConfig({ testTimeout: 40_000 });
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -61,8 +61,10 @@ describe("search callable", () => {
     expect(free.items.some((r) => r.id === eventId)).toBe(true);
     const jazz = await callFn<SearchInput, SearchOutput>("search", input({ q: token, filters: { genres: ["jazz"] } }), fan.user);
     expect(jazz.items.some((r) => r.id === eventId)).toBe(idx!.genres.includes("jazz"));
+    const tonightWindow = whenWindow("tonight", Date.now());
     const tonight = await callFn<SearchInput, SearchOutput>("search", input({ q: token, filters: { when: "tonight" } }), fan.user);
-    expect(tonight.items.some((r) => r.id === eventId)).toBe(idx!.startsAt! < Date.now() + DAY);
+    const expectTonightMatch = idx!.startsAt! >= tonightWindow.start && (tonightWindow.end === null || idx!.startsAt! <= tonightWindow.end);
+    expect(tonight.items.some((r) => r.id === eventId)).toBe(expectTonightMatch);
     if (idx!.geo) {
       const near = await callFn<SearchInput, SearchOutput>("search", input({ q: token, filters: { nearMe: true }, location: { lat: idx!.geo.lat, lng: idx!.geo.lng } }), fan.user);
       const row = near.items.find((r) => r.id === eventId);
@@ -91,7 +93,11 @@ describe("search callable", () => {
     expect((await q({ city: "austin" })).items.some((r) => r.id === m.profileId)).toBe(true);
     expect((await q({ city: "Dallas" })).items.some((r) => r.id === m.profileId)).toBe(false);
     expect((await q({ hasAudio: true })).items.some((r) => r.id === m.profileId)).toBe(true);
-    expect((await q({ availableOn: "2030-01-01" })).items.some((r) => r.id === m.profileId)).toBe(true);
+    // Inside the 180-day busy window (2030-01-01 is not) and not a day this
+    // fixture's musician is busy on: no confirmed booking or lineup event
+    // was created for `m` in this test, so its indexed busyDays is empty.
+    const availableDay = dayKeyInLaunchZone(Date.now() + 3 * DAY);
+    expect((await q({ availableOn: availableDay })).items.some((r) => r.id === m.profileId)).toBe(true);
   });
 
   it("pages 20 at a time and returns pins on request", async () => {

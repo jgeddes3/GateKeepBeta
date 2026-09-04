@@ -134,6 +134,7 @@ export function FilterBar({ face, filters, onChange, location }: {
             onBlur={commitCity}
             onKeyDown={(e) => { if (e.key === "Enter") commitCity(); }}
             placeholder="City"
+            aria-label="City"
             className="w-36"
           />
         )}

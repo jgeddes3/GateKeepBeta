@@ -22,12 +22,20 @@ export type ProfileSummary = { profileId: string; type: ProfileType; name: strin
 // PortfolioEditor's `bookingProfileId` uses): adjusting state synchronously
 // during render when `uid` itself changes, which React re-renders once more
 // before committing, so the reset is never painted stale.
-export function useMyProfiles(uid: string | null): ProfileSummary[] {
+// Shared implementation behind both hooks below: useMyProfiles keeps the
+// bare-array return every existing caller (OfferGigButton, AppShell) already
+// depends on, and useMyProfilesState adds `loaded` for SearchFaces, which
+// needs to know "the first snapshot hasn't arrived yet" (or "signed out, so
+// there never will be one") to hold its own face choice rather than
+// defaulting to FanFace for a moment on every signed-in visit.
+function useMyProfilesInternal(uid: string | null): { profiles: ProfileSummary[]; loaded: boolean } {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [loaded, setLoaded] = useState(uid === null);
   const [trackedUid, setTrackedUid] = useState(uid);
   if (uid !== trackedUid) {
     setTrackedUid(uid);
     setProfiles([]);
+    setLoaded(uid === null);
   }
   useEffect(() => {
     if (!uid) return;
@@ -44,11 +52,24 @@ export function useMyProfiles(uid: string | null): ProfileSummary[] {
           out.push({ profileId: p.id, type: d.type, name: d.name, status: d.status });
         }
       }
-      if (!cancelled) setProfiles(out);
+      if (!cancelled) { setProfiles(out); setLoaded(true); }
     });
     return () => { cancelled = true; unsubscribe(); };
   }, [uid]);
-  return profiles;
+  return { profiles, loaded };
+}
+
+export function useMyProfiles(uid: string | null): ProfileSummary[] {
+  return useMyProfilesInternal(uid).profiles;
+}
+
+// SearchFaces' own hook (fix round 1 minor #5): the array-only shape above
+// has no way to say "still loading" versus "loaded and empty", and every
+// other caller of useMyProfiles already depends on the bare-array return, so
+// this is a second hook onto the same subscription rather than a breaking
+// change to that shape.
+export function useMyProfilesState(uid: string | null): { profiles: ProfileSummary[]; loaded: boolean } {
+  return useMyProfilesInternal(uid);
 }
 
 // Same destination as ProfilesList's editHref: the switcher and nav send

@@ -34,7 +34,7 @@ export function CuratorFace({
         {headerSlot}
       </div>
       <FilterBar face="curator" filters={state.filters} onChange={state.setFilters} location={NO_LOCATION} />
-      <ResultList state={state} row={(props) => <CuratorArtistRow curatorProfileId={curatorProfileId} r={props.r} />} />
+      <ResultList state={state} renderRow={(r) => <CuratorArtistRow curatorProfileId={curatorProfileId} r={r} />} />
     </div>
   );
 }

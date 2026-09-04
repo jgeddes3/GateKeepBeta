@@ -74,7 +74,7 @@ export function FanFace({ initial, headerRight }: {
           renderRow={(r) => <ShowRow r={r} onPress={() => openShow(r.id)} />}
         />
       )}
-      <LocationPromptSheet state={location} />
+      <LocationPromptSheet state={location} body="Search sorts nearby shows and gigs first." />
     </View>
   );
 }

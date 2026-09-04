@@ -137,7 +137,7 @@ export function normalizeWords(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const cleaned = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  for (const raw of cleaned.split(/[^a-z0-9]+/)) {
+  for (const raw of cleaned.split(/[^\p{L}\p{N}]+/u)) {
     if (raw.length < SEARCH_TOKEN_MIN || seen.has(raw)) continue;
     seen.add(raw);
     out.push(raw);
@@ -318,7 +318,16 @@ function validateFilters(face: SearchFace, raw: unknown): { ok: true; filters: S
   const filters: SearchFilters = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (value === undefined) continue;
-    if (!allowed.includes(key)) return fail(`Filter "${key}" does not apply here.`);
+    if (!allowed.includes(key)) {
+      // A stored SavedSearchDoc for a face without "nearMe" in its own
+      // FACE_FILTER_KEYS can still carry a literal `nearMe: false` (older
+      // validateSavedSearchInput wrote it into every face; see that
+      // function below). Tolerate that specific shape here so restoring
+      // and re-saving such a doc doesn't fail; a `true` still isn't
+      // meaningful for a face with no near-me concept, so that still fails.
+      if (key === "nearMe" && value === false) continue;
+      return fail(`Filter "${key}" does not apply here.`);
+    }
     switch (key as keyof SearchFilters) {
       case "when":
         if (!(SEARCH_WHENS as readonly string[]).includes(value as string)) return fail("Unknown time window.");
@@ -397,7 +406,12 @@ export function validateSavedSearchInput(data: unknown): Ok<SavedSearchInput> | 
   const { face, q } = base;
   const f = validateFilters(face, d.filters ?? {});
   if (!f.ok) return f;
-  const filters: SearchFilters = { ...f.filters, nearMe: false };
+  // Only stamp nearMe:false into the stored filters for a face that
+  // actually has a "nearMe" concept; a face like curator has no such key
+  // in FACE_FILTER_KEYS, so forcing one in here would make validateFilters
+  // reject the doc's own filters the next time this same input round-trips
+  // through this function (e.g. a "save it again" from a restored search).
+  const filters: SearchFilters = FACE_FILTER_KEYS[face].includes("nearMe") ? { ...f.filters, nearMe: false } : { ...f.filters };
   if (!hasSavedSearchCriteria(q, filters)) return fail("Type something or pick a filter before saving a search.");
   return { ok: true, input: { face, q: q.trim(), filters } };
 }

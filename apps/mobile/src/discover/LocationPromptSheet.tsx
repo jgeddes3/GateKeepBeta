@@ -9,17 +9,25 @@ import type { DeckLocationState } from "./useDeckLocation";
 // unchanged from the deck; only `state` (the Pick below is every field this
 // component actually reads) moved out to a prop so a second screen can
 // share it against its own useDeckLocation() instance.
+//
+// Fix round 1 (minor #7): the body line named "the deck" even when this
+// sheet mounted from a search face, which never showed a deck. `body`
+// defaults to that same deck line (DeckScreen passes nothing, so it reads
+// exactly as before), and each search face passes its own line instead.
+const DECK_BODY = "Allow location and the deck ranks nearby rooms and shows first. Nothing is stored.";
+
 export function LocationPromptSheet({
-  state,
+  state, body = DECK_BODY,
 }: {
   state: Pick<DeckLocationState, "promptVisible" | "allow" | "dismiss">;
+  body?: string;
 }) {
   return (
     <Sheet visible={state.promptVisible} onClose={() => void state.dismiss()}>
       <View style={{ gap: tokens.space.md }}>
         <View style={{ gap: 4 }}>
           <Text variant="title">Show what&apos;s close</Text>
-          <Text muted>Allow location and the deck ranks nearby rooms and shows first. Nothing is stored.</Text>
+          <Text muted>{body}</Text>
         </View>
         <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
           <Button title="Not now" variant="ghost" onPress={() => void state.dismiss()} style={{ flex: 1 }} />

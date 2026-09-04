@@ -27,6 +27,12 @@ describe("normalizeWords", () => {
     const text = Array.from({ length: 60 }, (_, i) => `w${i + 10}`).join(" ");
     expect(normalizeWords(text)).toHaveLength(40);
   });
+  it("keeps non-Latin letters as words instead of dropping them (spec: split on non letter/digit)", () => {
+    expect(normalizeWords("Оркестр Ночных Сов")).toEqual(["оркестр", "ночных", "сов"]);
+    // The accent-strip step (NFD + combining-mark removal) also strips a
+    // Greek tonos the same way it strips a Latin acute accent.
+    expect(normalizeWords("Ελληνικό Συγκρότημα")).toEqual(["ελληνικο", "συγκροτημα"]);
+  });
 });
 
 describe("buildTokens", () => {
@@ -165,6 +171,19 @@ describe("validateSearchInput", () => {
     expect(v.ok && v.input.filters.nearMe).toBe(false);
     expect(validateSavedSearchInput({ face: "fan", q: "", filters: { when: "any" } }).ok).toBe(false);
     expect(validateSavedSearchInput({ face: "fan", q: "", filters: { genres: [] } }).ok).toBe(false);
+  });
+  // curator has no "nearMe" entry in FACE_FILTER_KEYS, so a save must not
+  // stamp one into the stored filters (or a later re-save of that exact
+  // doc would fail validateFilters), but restoring an older doc that does
+  // carry a literal `nearMe: false` must still round-trip cleanly.
+  it("omits nearMe entirely for a face without it, but tolerates a stored nearMe:false on restore", () => {
+    const saved = validateSavedSearchInput({ face: "curator", q: "", filters: { actSize: "duo" } });
+    expect(saved.ok && saved.input.filters).toEqual({ actSize: "duo" });
+    expect(saved.ok && "nearMe" in saved.input.filters).toBe(false);
+    const restored = validateSavedSearchInput({ face: "curator", q: "", filters: { actSize: "duo", nearMe: false } });
+    expect(restored.ok && restored.input.filters).toEqual({ actSize: "duo" });
+    const bad = validateSavedSearchInput({ face: "curator", q: "", filters: { actSize: "duo", nearMe: true } });
+    expect(bad.ok).toBe(false);
   });
 });
 

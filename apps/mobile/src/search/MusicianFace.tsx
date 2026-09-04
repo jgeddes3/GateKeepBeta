@@ -132,6 +132,19 @@ export function MusicianFace({ initialSegment, initial, preselectGigId, headerRi
   const location = useDeckLocation();
   const [openGigId, setOpenGigId] = useState<string | null>(preselectGigId ?? null);
 
+  // Render-time reset (fix round 1 important #3, same idiom as
+  // GigDetailSheet's own trackedGigId): a `useState(preselectGigId ?? null)`
+  // initializer only runs once, at mount, so a gigId arriving on an
+  // already-mounted Find Gigs tab (a push tap or an inbox row while this
+  // screen is already the active tab) never reopened the sheet. Tracking
+  // the prop and comparing it on every render, rather than only at mount,
+  // catches that later arrival too.
+  const [trackedPreselect, setTrackedPreselect] = useState(preselectGigId);
+  if (preselectGigId !== trackedPreselect) {
+    setTrackedPreselect(preselectGigId);
+    setOpenGigId(preselectGigId ?? null);
+  }
+
   return (
     <View style={{ flex: 1 }}>
       {segment === "gigs" ? (
@@ -145,7 +158,7 @@ export function MusicianFace({ initialSegment, initial, preselectGigId, headerRi
           initial={initial} headerRight={headerRight}
         />
       )}
-      <LocationPromptSheet state={location} />
+      <LocationPromptSheet state={location} body="Search sorts nearby shows and gigs first." />
       <GigDetailSheet gigId={openGigId} onClose={() => setOpenGigId(null)} />
     </View>
   );

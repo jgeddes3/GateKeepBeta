@@ -1,11 +1,12 @@
 "use client";
 import type { SearchFace, SearchFilters } from "@gatekeep/shared";
 import { useAuth } from "../auth/AuthProvider";
-import { useMyProfiles } from "../shell/useMyProfiles";
+import { useMyProfilesState } from "../shell/useMyProfiles";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { CuratorFace } from "./CuratorFace";
 import { FanFace } from "./FanFace";
 import { MusicianFace, MusicianGigsPanel, MusicianVenuesPanel } from "./MusicianFace";
+import { SearchSkeleton } from "./ResultRows";
 import { useBrowserLocation } from "./useBrowserLocation";
 
 // Role resolution (controller ruling 3): an approved musician profile with
@@ -13,10 +14,11 @@ import { useBrowserLocation } from "./useBrowserLocation";
 // no approved musician gets CuratorFace, scoped to that curator's own
 // first approved profile; holding both gets the three-segment strip below
 // (a working musician who also curates shows still needs both); neither
-// gets the plain fan face. useMyProfiles returns [] while its own
-// subscription is still loading, so a signed-in account with profiles
-// briefly sees FanFace until that first snapshot arrives, the same
-// loading-shape tradeoff AppShell's own nav resolution already accepts.
+// gets the plain fan face. useMyProfilesState's own `loaded` flag (fix round
+// 1 minor #5) holds this component on the shared search skeleton until the
+// first snapshot arrives (or resolves instantly for a signed-out visitor),
+// so a signed-in account with profiles never flashes FanFace and fires a fan
+// search before its real face is known.
 // initial (Task 11): the ?saved=<id> restore path. SearchClient resolves
 // the saved search doc BEFORE this component ever mounts (its own loading
 // gate), so `initial` here is either absent (the ordinary /search visit) or
@@ -24,11 +26,13 @@ import { useBrowserLocation } from "./useBrowserLocation";
 // arrives after Tabs has already picked its (uncontrolled) defaultValue.
 export function SearchFaces({ initial }: { initial?: { face: SearchFace; q: string; filters: SearchFilters } }) {
   const { user } = useAuth();
-  const profiles = useMyProfiles(user?.uid ?? null);
+  const { profiles, loaded } = useMyProfilesState(user?.uid ?? null);
   // Created once here, not inside any one face: FanFace and MusicianFace
   // both need the same live position, and a device location prompt should
   // never fire twice for one signed-in visit.
   const location = useBrowserLocation();
+
+  if (!loaded) return <SearchSkeleton />;
 
   const hasApprovedMusician = profiles.some((p) => p.type === "musician" && p.status === "approved");
   const approvedCurator = profiles.find((p) => p.type === "curator" && p.status === "approved");

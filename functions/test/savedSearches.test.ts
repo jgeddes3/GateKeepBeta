@@ -34,6 +34,26 @@ describe("saveSearch / deleteSavedSearch", () => {
     await callFn("deleteSavedSearch", { id }, fan.user);
     expect((await adb.doc(`savedSearches/${id}`).get()).exists).toBe(false);
   });
+
+  // Fix round (important #1): curator has no "nearMe" entry in
+  // FACE_FILTER_KEYS, so validateSavedSearchInput must not stamp one into
+  // the stored filters, or re-saving the doc's own face/q/filters (the
+  // "restore a saved search, then save it again" path SaveSearchButton
+  // exercises) fails validateFilters with "Filter nearMe does not apply
+  // here." This round-trips exactly that: save, read the doc back, save
+  // again with the doc's own face/q/filters, and expect the same id.
+  it("re-saves a restored curator search (no nearMe key) to the same id", async () => {
+    const curator = await makeFan("ss3");
+    const { id } = await callFn<object, { id: string }>(
+      "saveSearch", { face: "curator", q: "the band", filters: { actSize: "duo" } }, curator.user,
+    );
+    const stored = (await adb.doc(`savedSearches/${id}`).get()).data() as SavedSearchDoc;
+    expect(stored.filters).not.toHaveProperty("nearMe");
+    const again = await callFn<object, { id: string }>(
+      "saveSearch", { face: stored.face, q: stored.q, filters: stored.filters }, curator.user,
+    );
+    expect(again.id).toBe(id);
+  });
 });
 
 describe("saved search alerts", () => {

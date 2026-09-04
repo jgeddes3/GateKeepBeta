@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { cloneElement, type ReactElement } from "react";
 import Link from "next/link";
 import { SEARCH_EMPTY_MESSAGE, distanceLabel, type ActSize, type SearchResult } from "@gatekeep/shared";
 import { formatCents } from "../events/eventDisplay";
@@ -90,13 +90,24 @@ function ResultRowSkeleton() {
   );
 }
 
+// Exported so SearchFaces can show the identical shape while it waits on
+// useMyProfilesState's first snapshot to know which face to mount, rather
+// than a bare blank moment (or, before this fix, a flash of FanFace).
+export function SearchSkeleton() {
+  return (
+    <div role="status" aria-label="Loading search" className="grid gap-1">
+      {[0, 1, 2].map((i) => <ResultRowSkeleton key={i} />)}
+    </div>
+  );
+}
+
 // One shared list shell for every face: a loading skeleton (only on the
 // FIRST page, so paging in more results never flashes the list back to a
 // skeleton), an error line (budgetHit's SEARCH_LIMIT_MESSAGE flows through
 // state.error the same as any other search failure, no separate branch
 // needed here), the empty state, the rows themselves via the caller's own
 // row component, and a "Show more" button while state.hasMore.
-export function ResultList({ state, row: Row }: { state: UseSearchState; row: ComponentType<{ r: SearchResult }> }) {
+export function ResultList({ state, renderRow }: { state: UseSearchState; renderRow: (r: SearchResult) => ReactElement }) {
   return (
     <div className="grid gap-4">
       {state.error && (
@@ -126,7 +137,14 @@ export function ResultList({ state, row: Row }: { state: UseSearchState; row: Co
 
       {state.items.length > 0 && (
         <div>
-          {state.items.map((r) => <Row key={r.id} r={r} />)}
+          {/* renderRow is a plain function, not a component type (fix round
+              1 important #2): calling it here, once per item, means a new
+              inline arrow passed in by a caller never becomes a component
+              type React mounts/unmounts on every render, only ever a value
+              this list itself invokes. cloneElement adds the list key React
+              needs for the array without requiring every caller to remember
+              to set one on the element it hands back. */}
+          {state.items.map((r) => cloneElement(renderRow(r), { key: r.id }))}
         </div>
       )}
 

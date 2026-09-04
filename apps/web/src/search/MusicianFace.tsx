@@ -77,7 +77,7 @@ export function MusicianGigsPanel({ location, headerSlot, initial }: PanelProps)
           {selectedPin && <SelectedGigCard pin={selectedPin} />}
         </div>
       ) : (
-        <ResultList state={state} row={GigRow} />
+        <ResultList state={state} renderRow={(r) => <GigRow r={r} />} />
       )}
     </div>
   );
@@ -93,7 +93,7 @@ export function MusicianVenuesPanel({ location, headerSlot, initial }: PanelProp
         {headerSlot}
       </div>
       <FilterBar face="musician_venues" filters={state.filters} onChange={state.setFilters} location={location} />
-      <ResultList state={state} row={ProfileRow} />
+      <ResultList state={state} renderRow={(r) => <ProfileRow r={r} />} />
     </div>
   );
 }

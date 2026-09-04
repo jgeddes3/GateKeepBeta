@@ -90,13 +90,19 @@ export function projectVenue(profileId: string, profile: ProfileDoc | undefined,
 
 // ---------- writer and rebuilds ----------
 
-export async function applyProjection(ref: DocumentReference, doc: SearchIndexDoc | null): Promise<"set" | "deleted"> {
+// "deleted" only when a stale index doc actually existed and was removed;
+// a source that was never public (or already had no index doc) resolves
+// to "skipped" instead, so backfillSearchIndex's own `deleted` tally
+// counts actual removals, not every non-public source it walked past.
+export async function applyProjection(ref: DocumentReference, doc: SearchIndexDoc | null): Promise<"set" | "deleted" | "skipped"> {
   if (doc) { await ref.set(doc); return "set"; }
+  const existing = await ref.get();
+  if (!existing.exists) return "skipped";
   await ref.delete();
   return "deleted";
 }
 
-export async function rebuildArtistIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted"> {
+export async function rebuildArtistIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
   const ref = db.doc(`searchIndex/${indexDocId("artist", profileId)}`);
   const snap = await db.doc(`profiles/${profileId}`).get();
   const profile = snap.data() as ProfileDoc | undefined;
@@ -124,17 +130,17 @@ export async function rebuildArtistIndex(db: Firestore, profileId: string, now: 
   return applyProjection(ref, projectArtist(profileId, profile, { hasAudio: !trackSnap.empty, busyDays: [...days].sort(), actSize, now }));
 }
 
-export async function rebuildVenueIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted"> {
+export async function rebuildVenueIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
   const snap = await db.doc(`profiles/${profileId}`).get();
   return applyProjection(db.doc(`searchIndex/${indexDocId("venue", profileId)}`), projectVenue(profileId, snap.data() as ProfileDoc | undefined, now));
 }
 
-export async function rebuildShowIndex(db: Firestore, eventId: string, now: number): Promise<"set" | "deleted"> {
+export async function rebuildShowIndex(db: Firestore, eventId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
   const snap = await db.doc(`events/${eventId}`).get();
   return applyProjection(db.doc(`searchIndex/${indexDocId("show", eventId)}`), projectShow(eventId, snap.data() as EventDoc | undefined, now));
 }
 
-export async function rebuildGigIndex(db: Firestore, gigId: string, now: number): Promise<"set" | "deleted"> {
+export async function rebuildGigIndex(db: Firestore, gigId: string, now: number): Promise<"set" | "deleted" | "skipped"> {
   const snap = await db.doc(`gigs/${gigId}`).get();
   return applyProjection(db.doc(`searchIndex/${indexDocId("gig", gigId)}`), projectGig(gigId, snap.data() as GigDoc | undefined, now));
 }
@@ -238,7 +244,10 @@ export const backfillSearchIndex = onCall<Record<string, never>>(
     const db = getFirestore();
     const now = Date.now();
     const counts = { artists: 0, venues: 0, shows: 0, gigs: 0, deleted: 0 };
-    const tally = (kind: "artists" | "venues" | "shows" | "gigs", r: "set" | "deleted") => { if (r === "set") counts[kind]++; else counts.deleted++; };
+    const tally = (kind: "artists" | "venues" | "shows" | "gigs", r: "set" | "deleted" | "skipped") => {
+      if (r === "set") counts[kind]++;
+      else if (r === "deleted") counts.deleted++;
+    };
     for await (const page of pageCollection(db, "profiles")) {
       for (const d of page) {
         const p = d.data() as ProfileDoc;
