@@ -9,7 +9,7 @@ contains no em dashes, and CI now refuses one anywhere in the repo.
 Spec: `docs/superpowers/specs/2026-09-02-hardening-design.md` (binding authority)
 Plans: `docs/superpowers/plans/2026-09-02-hardening-sweep.md` (branch A, 5 tasks) and
 `docs/superpowers/plans/2026-09-02-hardening.md` (branch B, 36 tasks, 0 to 35)
-Gates at merge: filled in by Task 35 Step 7.
+Gates at merge: typecheck 5/5, shared 174, emu:test 871, emu:rules 132, web lint 0 + build, mobile lint 0 new + expo export.
 
 ## What shipped
 
@@ -166,7 +166,7 @@ Numbering continues from 7. Each entry condenses one "Ruling:" line recorded dur
     `2026-09-02-hardening.md`, and the rulings-doc cell reads `sp10b-rulings.md`.
 32. Task 35 audits: compare against merge base `d707495`, not `origin/main` (main has one docs
     commit since); the audit briefs' rulings-doc reference is `docs/superpowers/sp10b-rulings.md`.
-33. Task 33: the SP8 spec and plan exist only on `origin/main`, not this worktree, so Task 33
+33. Task 34: the SP8 spec and plan exist only on `origin/main`, not this worktree, so Task 33
     omits its rows; Task 35 adds the two SP8 rows to the README design-docs table and the
     HANDOFF roadmap after merging main.
 34. Task 34: the HANDOFF roadmap drops the brief's "7 Fan discovery (in flight)" row (SP7 is
@@ -184,8 +184,17 @@ Numbering continues from 7. Each entry condenses one "Ruling:" line recorded dur
 - The gig-promotion and pending-cap guards are non-transactional.
 - A series paused across its endDate and resumed after it ends does not materialize the skipped
   dates.
-- The callable retry currently retries once even for a still-unverified user (closed in the final
-  fix wave if it lands).
+- A lost dispute reverses at most the disputed charge's amount, so a lost settlement dispute
+  normally reverses only the settlement charge's share of the earnings transfer (the deposit
+  charge is disputed separately) and `transfer.status: "reversed"` no longer implies in full
+  (the ledger row carries the amount).
+- Multiple forfeits funded by one deposit intent cap independently.
+- `getDiscoverDeck` now tolerates a missing `lineupMusicianProfileIds`.
+- The settlement-dispute cap uses the disputed charge total rather than the musician's 98
+  percent share of its base, so it can over-reverse the curator fee share.
+- A disputed deposit charge on an already-settled booking reverses nothing (no forfeit exists).
+- The dispute remainder is spent across forfeits in document-id order.
+- An unclean deletion that is also a sole-admin case writes the alert row twice (runCount 2).
 
 ## Accepted exceptions and deferred (conscious, not oversights)
 
@@ -196,7 +205,14 @@ Numbering continues from 7. Each entry condenses one "Ruling:" line recorded dur
 
 ## Audits at merge
 
-Filled in by Task 35 Step 5 and Step 6 (security audit verdict and fix wave, rules audit verdict).
+The whole-branch security audit (opus, 2026-09-03) returned PASS with one MEDIUM (client-side auth
+deletion bypasses the deleteAccount refusals; closed by the `account_deleted_unclean` alert plus
+the owed console toggle) and three LOW (pending balance in the profile delete gate, a late
+dispute.created reopening a resolved alert, full reversal on a partial booking dispute), all
+fixed in the final wave. The rules audit (opus, 2026-09-03) returned PASS with no weakened rule
+and five LOW items (whitespace display names, the empty auth displayName seam, an unused
+posterUploads list grant, invites disjunct order, an informational pushTokens delete note), the
+first four fixed and the tests it listed as missing added.
 
 ## Owner smoke (the hard pre-launch gate for sub-10)
 

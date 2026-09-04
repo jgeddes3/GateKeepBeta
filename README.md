@@ -1335,6 +1335,7 @@ sub-project 1 rulings.
 | 6 Events and ticketing | `docs/superpowers/specs/2026-08-30-events-ticketing-design.md` | `docs/superpowers/plans/2026-08-30-events-ticketing.md` | `docs/superpowers/sp6-rulings.md` | 2026-08-31 |
 | 7 Fan discovery | `docs/superpowers/specs/2026-09-02-fan-discovery-design.md` | `docs/superpowers/plans/2026-09-02-fan-discovery.md` | `docs/superpowers/sp7-rulings.md` | 2026-09-02 |
 | 10 Hardening | `docs/superpowers/specs/2026-09-02-hardening-design.md` | `docs/superpowers/plans/2026-09-02-hardening-sweep.md` (branch A) and `docs/superpowers/plans/2026-09-02-hardening.md` (branch B) | `docs/superpowers/sp10b-rulings.md` (branch B Task 34; covers both branches) | 2026-09-09 |
+| 8 Search | `docs/superpowers/specs/2026-09-02-search-design.md` | `docs/superpowers/plans/2026-09-02-search.md` (19 tasks) | not yet executed (no rulings doc) | docs merged 2026-09-03 |
 
 The whole-project audit that sourced sub-project 10: `docs/superpowers/audit-2026-09-01.md`, with
 the detail reports in `docs/superpowers/audit/`.

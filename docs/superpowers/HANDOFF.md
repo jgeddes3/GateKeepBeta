@@ -1,6 +1,6 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-09-03, after the 10
+Read this first in any new session or on a new machine. Last updated 2026-09-04, after the 10
 merge. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
@@ -66,9 +66,21 @@ Done and merged (each has a rulings doc that is the authority for its area):
 - **8 Search**: text search, ranking, the map view, venue filter chips, saved searches and alerts,
   sitemap, handle redirects, reserved handles, a rate-limit helper, and the internals of both
   placeholder directories (`apps/web/app/gigs/`, the curator musicians directory, and their
-  mobile twins). Spec and plan are on main, merged in by Task 35. Owner decision 2026-09-03: run
-  it subagent-driven in a fresh worktree from main as soon as 10B lands, re-running its plan's
-  pre-flight scan against the merged main first.
+  mobile twins). Spec (`docs/superpowers/specs/2026-09-02-search-design.md`) and plan
+  (`docs/superpowers/plans/2026-09-02-search.md`, 19 tasks) are on main, merged in by
+  Task 35. Owner decision 2026-09-03: run it subagent-driven in a fresh worktree from main as
+  soon as 10B lands, re-running its plan's pre-flight scan against the merged main first.
+- **From the SP7 reconciliation**:
+  - Add a share affordance to event pages and universal or app links (associatedDomains,
+    intentFilters) so a shared event URL opens the app; today `app.json` carries only the custom
+    scheme.
+  - Build a web location or distance story for discover, and give fans a way to set homeCity or
+    grant device location; today only the mobile deck ranks by device location.
+  - Add a fan account editor, starting with the display name that appears on a ticket; the fan
+    account screen has no editable fields today.
+  - Add doorsAt and an age-restriction field to the event model; neither exists in the schema.
+  - Add artist linkage for standalone events that are not tied to a booking (curator tags an
+    artist, artist accepts), so artist-page discovery is not limited to promoted gigs.
 - **5c Band payout splits**: admin-initiated member payout splits, per-order ticket settlement
   transfers (`source_transaction`), payout history, member roles on payout buttons.
 - **Messaging**: general musician to curator chat beyond the terms-only booking thread.
@@ -80,9 +92,10 @@ Done and merged (each has a rulings doc that is the authority for its area):
 
 **Audit context:** `docs/superpowers/audit-2026-09-01.md` is the whole-project audit run after
 the 6 merge (19 blockers and near-blockers, per-area verdicts, the SP7 brief, and the
-fix-before-SP7 list). Sub-project 7 was brainstormed and built before that audit was read on this
-machine; 10B should reconcile the audit's SP7 brief against `sp7-rulings.md` and pick up anything
-the built surface missed. Detail reports live in `docs/superpowers/audit/` and
+fix-before-SP7 list). The audit's SP7 brief has been reconciled against `sp7-rulings.md` and
+sub-project 10B; the five remaining gaps (event sharing and deep links, web location story, fan
+account editor, event doorsAt and age fields, non-booking artist linkage) are tracked in the
+roadmap above. Detail reports live in `docs/superpowers/audit/` and
 `anti-slop/audit-001-2026-09-01.md`.
 
 ## Binding rules for ALL work
@@ -152,8 +165,8 @@ the built surface missed. Detail reports live in `docs/superpowers/audit/` and
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (167), `pnpm emu:test` (735,
-  single blocking call), `pnpm emu:rules` (114), web lint + build, mobile lint.
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (174), `pnpm emu:test` (871,
+  single blocking call), `pnpm emu:rules` (132), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
   locally; EAS cloud is unaffected). Node 22 is the functions runtime since sub-project 10
