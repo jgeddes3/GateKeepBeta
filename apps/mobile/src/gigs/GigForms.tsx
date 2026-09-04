@@ -6,6 +6,7 @@ import {
 } from "@gatekeep/shared";
 import { Text as UiText, Input, TextArea, Chip as UiChip, type StatusTone } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
+import { launchTzNextDayStartMs } from "../bookings/BookingForms";
 
 // RN port of ../../web/src/gigs/GigForms.tsx, sub-project 3's gig/series
 // equivalent of ../curator/CuratorForms.tsx: controlled field-group
@@ -27,15 +28,10 @@ import { useTokens } from "../theme/ThemeProvider";
 // doesn't list package.json, and a new native module would need a dev-client
 // rebuild this environment can't perform or verify). Internal state keeps the
 // same string-based shapes as web's RecurrenceState/BudgetState (raw text,
-// converted once at submit). P8 CORRECTION: this comment used to claim the
-// UTC endDate math and hour/minute parsing below were already
-// "byte-identical to the reviewed web version", that was aspirational, not
-// actual: mobile's free-text entry (no native date/time picker to constrain
-// input) needed its own range + round-trip rollover validation FIRST, and
-// web's endDateInputToUtcMs didn't have the matching checks until a later
-// fix ported them back. They are genuinely byte-identical now (see
-// endDateInputToUtcMs below), see the DO-NOT-COPY note on Intl.ListFormat:
-// this file makes no use of it.
+// converted once at submit). Task 32: the end date is now submitted as
+// end-of-day in LAUNCH_TIMEZONE (endDateInputToLaunchTzEndMs below), not UTC
+// midnight, see that function's own comment. See the DO-NOT-COPY note on
+// Intl.ListFormat: this file makes no use of it.
 
 // Mirrors functions/src/gigs.ts's MAX_ADDRESS_LENGTH (module-private, not
 // exported to shared), a UX-only soft cap; the server remains authoritative.
@@ -146,7 +142,7 @@ export const emptyRecurrence = (): RecurrenceState =>
   ({ weekday: 5, hour: "20", minute: "00", cadence: "weekly", endDate: "", fillMode: "per_occurrence" });
 export const recurrenceFrom = (r: GigRecurrence, fillMode: FillMode): RecurrenceState => ({
   weekday: r.weekday, hour: String(r.hour).padStart(2, "0"), minute: String(r.minute).padStart(2, "0"),
-  cadence: r.cadence, endDate: r.endDate ? new Date(r.endDate).toISOString().slice(0, 10) : "", fillMode,
+  cadence: r.cadence, endDate: r.endDate ? launchTzDateInput(r.endDate) : "", fillMode,
 });
 
 // One-off gig startsAt, LOCAL time (unlike the recurrence's UTC-interpreted
@@ -184,7 +180,7 @@ export function oneOffDateTimeToMs(v: OneOffDateTimeState): number | null {
   // individually in-range, but the constructor didn't land on the actual
   // month/day requested). LOCAL getters match this constructor's local-time
   // semantics (see OneOffDateTimeState's comment above, deliberately NOT
-  // UTC, unlike endDateInputToUtcMs below).
+  // UTC/LAUNCH_TIMEZONE, unlike endDateInputToLaunchTzEndMs below).
   if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day
       || d.getHours() !== hh || d.getMinutes() !== mm) {
     return null;
@@ -385,7 +381,7 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
           style={{ width: 140 }} />
       </View>
       <UiText variant="meta" color={tok.warning}>
-        Times are in UTC for now, local-timezone support is coming. The end date above is also treated as UTC midnight.
+        The time above is UTC for now, local-timezone support is coming. The end date is inclusive: the series runs through the end of that day.
       </UiText>
       <UiText>Fill mode</UiText>
       <View style={{ flexDirection: "row", gap: 6 }}>
@@ -398,29 +394,28 @@ export function RecurrenceFields({ value, onChange }: { value: RecurrenceState; 
   );
 }
 
-// Explicit UTC parse for the "YYYY-MM-DD" endDate string, rather than
-// `new Date(value).getTime()`, spells out the UTC math the same way
-// functions/src/scheduled.ts's anchorFor does with Date.UTC(...), keeping
-// endDate consistent with the recurrence's weekday/hour/minute (also
-// UTC-interpreted). Byte-identical logic to web's endDateInputToUtcMs (P8:
-// web's version was missing this function's range + round-trip rollover
-// checks and has since been brought in line with this one).
-export function endDateInputToUtcMs(value: string): number | null {
-  if (!value) return null;
-  const parts = value.split("-").map(Number);
-  const year = parts[0]; const month = parts[1]; const day = parts[2];
-  if (!year || !month || !day) return null;
-  // Same silent-rollover concern as oneOffDateTimeToMs above, Date.UTC
-  // doesn't throw on an out-of-range day/month, it wraps into a different
-  // date. Explicit range checks first, then a round-trip check via the UTC
-  // getters (matching Date.UTC's own semantics) to catch day-in-month
-  // rollovers the range checks alone can't (e.g. Feb 30).
-  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
-  if (!Number.isInteger(day) || day < 1 || day > 31) return null;
-  const ms = Date.UTC(year, month - 1, day);
-  const d = new Date(ms);
-  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
-    return null;
-  }
-  return ms;
+// Spec 6.10: the series end date is INCLUSIVE of that calendar day in
+// LAUNCH_TIMEZONE. Submitted as the last millisecond of that day (the launch
+// zone's next-day midnight minus one, DST-correct because
+// launchTzNextDayStartMs derives the boundary from the actual next calendar
+// date), so an occurrence whose recurrence time lands anywhere on the end
+// date is still materialized. The old UTC-midnight parse silently dropped
+// the final date for every recurrence time after 00:00 UTC. Returns null for
+// an empty or malformed input (same contract as before; the callers pass
+// null through as "no end date"). Byte-identical to web's version.
+export function endDateInputToLaunchTzEndMs(value: string): number | null {
+  const nextStart = launchTzNextDayStartMs(value);
+  return nextStart == null ? null : nextStart - 1;
+}
+
+// The reverse mapping for the editors: the Y-M-D a stored endDate falls on
+// in LAUNCH_TIMEZONE. A legacy UTC-midnight endDate reads back as the
+// previous launch-zone day; re-saving it moves the bound LATER (to the end
+// of that day), never earlier, so no already-promised date disappears.
+export function launchTzDateInput(ms: number): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: LAUNCH_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date(ms));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }

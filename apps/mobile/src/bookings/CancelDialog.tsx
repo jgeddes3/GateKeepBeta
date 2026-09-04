@@ -10,7 +10,7 @@ import { ErrorBox } from "./BookingForms";
 // mirroring web's identical CancelDialog.tsx/BookingThread.tsx split.
 import { useNow } from "./BookingThread";
 import {
-  CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_CANCEL_REASON_LENGTH,
+  CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_CANCEL_REASON_LENGTH, CANCEL_GRACE_MS,
   type BookingSide,
 } from "@gatekeep/shared";
 import { Text, Button, TextArea } from "../ui";
@@ -25,12 +25,17 @@ import { tokens } from "../theme/tokens";
 // cancelOccurrence windows use, it's advisory only (the server
 // independently recomputes hoursBeforeStart at commit time from ITS OWN
 // `now`, which is authoritative).
-export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCents, mode, onClose, onDone }: {
+export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCents, confirmedAt, mode, onClose, onDone }: {
   bookingId: string;
   gigId?: string; // required when mode === "occurrence" (cancelOccurrence's target date)
   side: BookingSide; // caller's resolved side, musician-first when a viewer is on both (see BookingThread)
   startsAt: number; // the relevant occurrence's startsAt, for the window math below
   depositAmountCents?: number; // known only once a booking is confirmed
+  // The booking's accept timestamp (web parity, SP5 Task 15): within
+  // CANCEL_GRACE_MS of now the post-accept grace neutralizes EITHER side's
+  // penalty regardless of the window math below. Omitted or null shows the
+  // ordinary window warning.
+  confirmedAt?: number | null;
   mode: "booking" | "occurrence";
   onClose: () => void;
   onDone: () => void;
@@ -44,7 +49,15 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
   const hoursBeforeStart = now == null ? null : (startsAt - now) / 3_600_000;
   const hoursLabel = hoursBeforeStart == null ? null : Math.max(0, Math.round(hoursBeforeStart));
   const depositRef = depositAmountCents != null ? ` (${formatCents(depositAmountCents)})` : "";
-  const warning = hoursBeforeStart == null ? "Checking the cancellation window…" : side === "curator"
+  // Advisory only: the server recomputes the grace window from ITS OWN now at
+  // commit time (bookingLifecycle.ts's executeCancellation); a few seconds of
+  // clock drift at the boundary is accepted, same as the window math below.
+  const inGracePeriod = now != null && confirmedAt != null && (now - confirmedAt) < CANCEL_GRACE_MS;
+  const graceHours = CANCEL_GRACE_MS / 3_600_000;
+  const warning = hoursBeforeStart == null ? "Checking the cancellation window…"
+    : inGracePeriod
+      ? `You're within the ${graceHours}-hour grace period after accepting. Cancelling now is penalty-free, regardless of the usual cancellation window.`
+      : side === "curator"
     ? (hoursBeforeStart < CURATOR_FORFEIT_WINDOW_HOURS
         ? `Cancelling now forfeits your deposit${depositRef}. The gig is in ${hoursLabel}h.`
         : `Cancelling now refunds your deposit${depositRef}. This is outside the ${CURATOR_FORFEIT_WINDOW_HOURS}h forfeiture window.`)

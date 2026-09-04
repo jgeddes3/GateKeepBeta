@@ -40,6 +40,12 @@ export { gigLocationLabel } from "../../app/u/[handle]/gigDisplay";
 export const DEPOSIT_HONESTY_LINE =
   `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card at accept.`;
 
+// The whole-run twin (sp4 audit finding 2): on a whole_run series the deposit
+// is charged PER DATE, for every open date of the run, at accept. Rendered
+// wherever DEPOSIT_HONESTY_LINE is, whenever the gig's own fillMode says so.
+export const DEPOSIT_HONESTY_RUN_LINE =
+  `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card per date, for every open date of the run.`;
+
 // The curator-facing reliability sentence, one definition for every surface
 // that renders it (Find musicians cards today; Task 32 adds the inbox rows and
 // the thread header). Counts BOOKINGS, not dates: an 8-date completed
@@ -181,9 +187,9 @@ function tzOffsetMs(timeZone: string, utcMs: number): number {
 // LAUNCH_TIMEZONE's offset AT that guess (so DST is derived per-date, never
 // a hardcoded constant), then shift the guess by that offset to land on the
 // actual UTC instant of LAUNCH_TIMEZONE midnight for that calendar date.
-// Round-trip-validated the same way GigForms.tsx's endDateInputToUtcMs is
-// (catches e.g. Feb 30 -> March 2 day-in-month rollovers); returns null for
-// an empty/malformed input, mirroring that helper's contract.
+// Round-trip-validated the same way launchTzNextDayStartMs below is (catches
+// e.g. Feb 30 -> March 2 day-in-month rollovers); returns null for an
+// empty/malformed input, mirroring that helper's contract.
 export function launchTzDayStartMs(dateInput: string): number | null {
   if (!dateInput) return null;
   const [year, month, day] = dateInput.split("-").map(Number);

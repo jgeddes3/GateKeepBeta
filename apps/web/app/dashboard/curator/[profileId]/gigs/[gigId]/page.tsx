@@ -6,6 +6,7 @@ import { doc, onSnapshot, getDoc } from "firebase/firestore";
 import { getFirebase } from "../../../../../../src/lib/firebase";
 import { callFn } from "../../../../../../src/lib/callable";
 import { useAuth } from "../../../../../../src/auth/AuthProvider";
+import { useCounterparty } from "../../../../../../src/bookings/BookingInbox";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields,
   contentFrom, provisionsFrom, budgetFrom, MAX_ADDRESS_LENGTH, GIG_STATUS_LABEL,
@@ -140,6 +141,30 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
         {busy ? "Saving…" : "Save changes"}
       </Button>
     </div>
+  );
+}
+
+// A filled gig used to show "Filled" and nothing else: cancelGig then refuses
+// with "cancel the booking instead" and there was no path to it. The act's
+// name links to its public page, the row links to the booking thread.
+function BookedActLine({ bookingId, musicianProfileId }: { bookingId: string; musicianProfileId: string | null }) {
+  const act = useCounterparty(musicianProfileId ?? undefined);
+  return (
+    <p className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5 font-sora text-sm text-gk-text">
+      <span>Booked act:</span>
+      {act === "loading" ? (
+        <Skeleton className="h-4 w-32" />
+      ) : act ? (
+        act.handle
+          ? <Link href={`/@${act.handle}`} className="font-medium underline underline-offset-4 hover:text-gk-focus">{act.name}</Link>
+          : <span className="font-medium">{act.name}</span>
+      ) : (
+        <span className="text-gk-muted">unavailable</span>
+      )}
+      <Link href={`/dashboard/bookings/${bookingId}`} className="ml-auto text-gk-muted underline underline-offset-4 hover:text-gk-text">
+        Open the booking
+      </Link>
+    </p>
   );
 }
 
@@ -279,6 +304,8 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
           </p>
         </div>
       )}
+
+      {gig.bookingId && <BookedActLine bookingId={gig.bookingId} musicianProfileId={gig.bookedMusicianProfileId} />}
 
       {!editable && (
         <p className="mt-6 font-sora text-sm text-gk-muted">

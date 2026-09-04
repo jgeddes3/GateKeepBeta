@@ -6,7 +6,7 @@ import { callFn } from "../lib/callable";
 import { GENRES, type GigDoc, type BudgetStructure } from "@gatekeep/shared";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import {
-  DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode,
+  DEPOSIT_HONESTY_LINE, DEPOSIT_HONESTY_RUN_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode,
   formatDuration, gigLocationLabel, launchTzDayStartMs, launchTzNextDayStartMs, type OfferState,
 } from "./BookingForms";
 import { useProfileContext } from "../shell/ProfileContext";
@@ -28,10 +28,9 @@ import { tokens } from "../theme/tokens";
 //   listed in Task 12's brief, unlike web's).
 // - Gig detail is a Modal on this same screen (mobile-appropriate) instead
 //   of a separate route, includes the Apply flow inline.
-// - Series badge is ALWAYS the softer "Part of a recurring series" copy
-//   derived from seriesId != null alone, no gigSeries fetch anywhere on
-//   this screen (mobile explicitly skips the fillMode reveal web's separate
-//   gig-detail page attempts for members).
+// - Series badge reads gig.fillMode straight off the public gig doc (Task 22
+//   stamps it on every occurrence), same as web's grid; no gigSeries fetch
+//   on this screen either.
 // - The Apply panel's musician-profile picker reuses ProfileContext's
 //   `myProfiles` (already the same collectionGroup(members)-derived list
 //   web's ApplyPanel builds with its own query) rather than re-querying.
@@ -96,7 +95,7 @@ function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
       <OfferFields structure={gig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />
       {error && <GatePrompt message={error} viewerIsMusician onRetry={() => void submit()} />}
       <Button title={busy ? "Applying…" : "Apply"} disabled={busy} onPress={() => void submit()} />
-      <Text variant="meta" muted>{DEPOSIT_HONESTY_LINE}</Text>
+      <Text variant="meta" muted>{gig.fillMode === "whole_run" ? DEPOSIT_HONESTY_RUN_LINE : DEPOSIT_HONESTY_LINE}</Text>
     </View>
   );
 }
@@ -124,7 +123,12 @@ function GigDetailModal({ gig, onClose }: { gig: GigRow | null; onClose: () => v
                   </Text>
                 )}
                 <Text muted>{gigLocationLabel(gig.location)}</Text>
-                {gig.seriesId != null && <StatusBadge label="Part of a recurring series" status="neutral" />}
+                {gig.seriesId != null && (
+                  <StatusBadge label={gig.fillMode === "whole_run" ? "Books as a run" : "Part of a recurring series"} status="neutral" />
+                )}
+                {gig.fillMode === "whole_run" && (
+                  <Text muted>Applying here applies to every open date of this run, plus dates added later, under one booking.</Text>
+                )}
                 <View style={{ borderTopWidth: 1, borderTopColor: t.border, paddingTop: 12, gap: 8 }}>
                   <Text variant="title">Apply for this gig</Text>
                   <ApplyPanel key={gig.id} gig={gig} gigId={gig.id} />
@@ -171,7 +175,9 @@ function GigCard({ gig, onPress }: { gig: GigRow; onPress: () => void }) {
             </Text>
           )}
           <Text variant="meta" muted>{gigLocationLabel(gig.location)}</Text>
-          {gig.seriesId != null && <StatusBadge label="Part of a recurring series" status="neutral" />}
+          {gig.seriesId != null && (
+            <StatusBadge label={gig.fillMode === "whole_run" ? "Books as a run" : "Part of a recurring series"} status="neutral" />
+          )}
         </View>
       </Card>
     </Pressable>

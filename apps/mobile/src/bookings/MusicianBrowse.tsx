@@ -6,7 +6,7 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type BookingRates, type GigDoc } from "@gatekeep/shared";
 import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
-import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, formatReliabilityLine, type OfferState } from "./BookingForms";
+import { DEPOSIT_HONESTY_LINE, DEPOSIT_HONESTY_RUN_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, formatReliabilityLine, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
 import {
   Text, Button, Card, Chip, PageBackground, PhotoScrim, PhotoPlaceholder,
@@ -130,7 +130,7 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
           </View>
           {selectedGig && <OfferFields structure={selectedGig.budget.structure} value={offer} onChange={setOffer} disabled={busy} />}
           {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={() => void submit()} />}
-          <Text variant="meta" muted>{DEPOSIT_HONESTY_LINE}</Text>
+          <Text variant="meta" muted>{selectedGig?.fillMode === "whole_run" ? DEPOSIT_HONESTY_RUN_LINE : DEPOSIT_HONESTY_LINE}</Text>
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Button title={busy ? "Sending…" : "Send offer"} disabled={busy} onPress={() => void submit()} />
             <Button title="Cancel" variant="secondary" disabled={busy} onPress={onClose} />

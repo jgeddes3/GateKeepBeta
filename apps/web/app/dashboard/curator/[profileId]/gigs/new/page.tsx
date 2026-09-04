@@ -8,7 +8,7 @@ import { callFn } from "../../../../../../src/lib/callable";
 import { useAuth } from "../../../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
-  emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, endDateInputToUtcMs, MAX_ADDRESS_LENGTH,
+  emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, endDateInputToLaunchTzEndMs, MAX_ADDRESS_LENGTH,
   type LocationValue, type CreateGigPayload, type CreateSeriesPayload,
 } from "../../../../../../src/gigs/GigForms";
 import {
@@ -127,7 +127,7 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
         const [hourStr, minuteStr] = recurrence.time.split(":");
         const recurrenceInput = {
           weekday: recurrence.weekday, hour: Number(hourStr), minute: Number(minuteStr),
-          cadence: recurrence.cadence, endDate: endDateInputToUtcMs(recurrence.endDate),
+          cadence: recurrence.cadence, endDate: endDateInputToLaunchTzEndMs(recurrence.endDate),
         };
         const rv = validateRecurrence(recurrenceInput, Date.now());
         if (!rv.ok) { setError(rv.reason); setBusy(false); return; }

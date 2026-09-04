@@ -547,7 +547,7 @@ export default function GigsList() {
                   <StatusBadge label={SERIES_STATUS_LABEL[s.status]} status="neutral" />
                 </View>
                 <Text variant="meta" muted>
-                  {WEEKDAY_LABELS[s.recurrence.weekday]}s, {String(s.recurrence.hour).padStart(2, "0")}:{String(s.recurrence.minute).padStart(2, "0")}, {s.recurrence.cadence}
+                  {WEEKDAY_LABELS[s.recurrence.weekday]}s, {String(s.recurrence.hour).padStart(2, "0")}:{String(s.recurrence.minute).padStart(2, "0")} (UTC), {s.recurrence.cadence}
                 </Text>
               </Card>
             </Pressable>

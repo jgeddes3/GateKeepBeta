@@ -5,6 +5,7 @@ import { doc, onSnapshot, getDoc } from "firebase/firestore";
 import { getFirebase } from "../../../src/lib/firebase";
 import { callFn } from "../../../src/lib/callable";
 import { useAuth } from "../../../src/auth/AuthProvider";
+import { useCounterparty } from "../../../src/bookings/BookingInbox";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, OneOffDateTimeFields,
   contentFrom, provisionsFrom, budgetFrom, oneOffDateTimeFrom, oneOffDateTimeToMs, MAX_ADDRESS_LENGTH,
@@ -91,6 +92,27 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
       <ErrorBanner message={error} />
       <Button title={busy ? "Saving…" : "Save changes"} disabled={busy} onPress={() => void save()} />
     </View>
+  );
+}
+
+function BookedActCard({ bookingId, musicianProfileId }: { bookingId: string; musicianProfileId: string | null }) {
+  const router = useRouter();
+  const act = useCounterparty(musicianProfileId ?? undefined);
+  return (
+    <Card style={{ gap: 8 }}>
+      <Text variant="label">Booked act</Text>
+      {act === "loading" ? <Skeleton height={16} width="50%" />
+        : act ? (
+          <Text
+            style={act.handle ? { textDecorationLine: "underline" } : undefined}
+            onPress={act.handle ? () => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } }) : undefined}
+          >
+            {act.name}
+          </Text>
+        ) : <Text muted>Profile no longer available.</Text>}
+      <Button title="Open the booking →" variant="secondary"
+        onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } })} />
+    </Card>
   );
 }
 
@@ -230,6 +252,7 @@ export default function GigEditor() {
               onPress={() => router.push({ pathname: "/(curator)/events/series/[seriesId]", params: { seriesId: gig.seriesId! } })} />
           </Card>
         )}
+        {gig.bookingId && <BookedActCard bookingId={gig.bookingId} musicianProfileId={gig.bookedMusicianProfileId} />}
         {!editable && <Text muted>This gig is {GIG_STATUS_LABEL[gig.status].toLowerCase()} and can no longer be edited.</Text>}
         {editable && <GigEditForm key={gigId} gigId={gigId} gig={gig} isVenue={isVenue} currentLabel={currentLabel} />}
         {gig.status === "draft" && (

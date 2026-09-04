@@ -4,11 +4,12 @@ import { useRouter } from "expo-router";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
+import { formatReliabilityLine } from "./BookingForms";
 import {
   DEPOSIT_PERCENT,
-  type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc,
+  type BookingRequestDoc, type BookingSide, type BookingStatus, type CuratorBookingDoc, type GigDoc, type ProfileDoc,
 } from "@gatekeep/shared";
-import { Text, StatusBadge } from "../ui";
+import { Text, StatusBadge, Skeleton } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -106,6 +107,76 @@ function useNextOccurrence(bookingId: string): { startsAt: number } | null {
   return next;
 }
 
+// The other party's name and handle (sp4 audit finding 3). A booking only
+// exists between two approved profiles, so profiles/{id} is a public get; a
+// profile rejected since the booking was made reads permission-denied,
+// which renders as "unavailable" rather than an error. n+1 per row, same
+// sanction as useRowGigTitle above.
+export type Counterparty = { name: string; handle: string | null } | null | "loading";
+export function useCounterparty(profileId: string | undefined): Counterparty {
+  const [state, setState] = useState<Counterparty>("loading");
+  useEffect(() => {
+    if (!profileId) return;
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, "profiles", profileId))
+      .then((s) => {
+        if (cancelled) return;
+        if (!s.exists()) { setState(null); return; }
+        const p = s.data() as ProfileDoc;
+        setState({ name: p.name, handle: p.handle ?? null });
+      })
+      .catch(() => { if (!cancelled) setState(null); });
+    return () => { cancelled = true; };
+  }, [profileId]);
+  return profileId ? state : null;
+}
+
+// Curator side only: the same reliability line Find musicians renders, read
+// from the projection curatorAccess already grants (firestore.rules'
+// curatorBooking read rule). Undefined musicianProfileId (a musician-side
+// viewer) skips the read entirely.
+export function useCounterpartyReliability(musicianProfileId: string | undefined): string | null {
+  const [line, setLine] = useState<string | null>(null);
+  useEffect(() => {
+    if (!musicianProfileId) return;
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, `profiles/${musicianProfileId}/private/curatorBooking`))
+      .then((s) => { if (!cancelled) setLine(s.exists() ? formatReliabilityLine((s.data() as CuratorBookingDoc).reliability) : null); })
+      .catch(() => { if (!cancelled) setLine(null); });
+    return () => { cancelled = true; };
+  }, [musicianProfileId]);
+  return musicianProfileId ? line : null;
+}
+
+// "with {name}" plus, for a curator viewer, the act's reliability. Mobile
+// links only to /artist/[handle]: there is no curator public route on
+// mobile yet, so a curator counterparty renders as a plain name.
+export function CounterpartyLine({ musicianProfileId, curatorProfileId, mySide }: {
+  musicianProfileId: string; curatorProfileId: string; mySide: BookingSide;
+}) {
+  const router = useRouter();
+  const otherId = mySide === "curator" ? musicianProfileId : curatorProfileId;
+  const other = useCounterparty(otherId);
+  const reliability = useCounterpartyReliability(mySide === "curator" ? musicianProfileId : undefined);
+  if (other === "loading") return <Skeleton height={12} width="55%" />;
+  if (!other) return <Text variant="meta" muted>with a profile that is no longer available</Text>;
+  const linkable = mySide === "curator" && other.handle;
+  return (
+    <Text variant="meta" muted>
+      with{" "}
+      <Text
+        variant="meta"
+        style={linkable ? { textDecorationLine: "underline" } : undefined}
+        onPress={linkable ? () => router.push({ pathname: "/artist/[handle]", params: { handle: other.handle! } }) : undefined}
+        accessibilityRole={linkable ? "link" : undefined}
+      >
+        {other.name}
+      </Text>
+      {reliability ? ` · ${reliability}` : ""}
+    </Text>
+  );
+}
+
 function OpenThreadRow({ row, mySide, onPress }: { row: BookingRow; mySide: BookingSide; onPress: () => void }) {
   const t = useTokens();
   const title = useRowGigTitle(row.gigId);
@@ -117,6 +188,7 @@ function OpenThreadRow({ row, mySide, onPress }: { row: BookingRow; mySide: Book
         <Text variant="label" style={{ flex: 1 }}>{title}</Text>
         {yourTurn && <StatusBadge status="warning" label="your turn" />}
       </View>
+      <CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />
       <Text variant="meta" muted>
         {row.thread.length} offer{row.thread.length === 1 ? "" : "s"} so far
       </Text>
@@ -124,7 +196,7 @@ function OpenThreadRow({ row, mySide, onPress }: { row: BookingRow; mySide: Book
   );
 }
 
-function ConfirmedRow({ row, onPress }: { row: BookingRow; onPress: () => void }) {
+function ConfirmedRow({ row, mySide, onPress }: { row: BookingRow; mySide: BookingSide; onPress: () => void }) {
   const t = useTokens();
   const title = useRowGigTitle(row.gigId);
   const next = useNextOccurrence(row.id);
@@ -132,6 +204,7 @@ function ConfirmedRow({ row, onPress }: { row: BookingRow; onPress: () => void }
     <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
       padding: tokens.space.md, gap: tokens.space.xs }}>
       <Text variant="label">{title}</Text>
+      <CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />
       {next && <Text variant="meta" muted>{formatGigDateTime(next.startsAt)}</Text>}
       {/* deposit is already frozen (computeDepositCents ran inside
           acceptBooking's transaction), no need to recompute, only display
@@ -141,13 +214,14 @@ function ConfirmedRow({ row, onPress }: { row: BookingRow; onPress: () => void }
   );
 }
 
-function HistoryRow({ row, onPress }: { row: BookingRow; onPress: () => void }) {
+function HistoryRow({ row, mySide, onPress }: { row: BookingRow; mySide: BookingSide; onPress: () => void }) {
   const t = useTokens();
   const title = useRowGigTitle(row.gigId);
   return (
     <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
       padding: tokens.space.md, gap: tokens.space.xs }}>
       <Text variant="label">{title}</Text>
+      <CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />
       <Text variant="meta" muted>{bookingHistoryLabel(row)}</Text>
     </Pressable>
   );
@@ -209,13 +283,13 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         <Text variant="title">Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
         {confirmed.length === 0
           ? <Text muted>Nothing confirmed yet.</Text>
-          : confirmed.map((row) => <ConfirmedRow key={row.id} row={row} onPress={() => openThread(row.id)} />)}
+          : confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
       </View>
       <View style={{ gap: tokens.space.sm }}>
         <Text variant="title">History</Text>
         {history.length === 0
           ? <Text muted>No past bookings yet.</Text>
-          : history.map((row) => <HistoryRow key={row.id} row={row} onPress={() => openThread(row.id)} />)}
+          : history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
       </View>
     </ScrollView>
   );

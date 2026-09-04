@@ -5,14 +5,14 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { formatDuration, type OfferPayload } from "./BookingForms";
-import { bookingHistoryLabel, depositLine } from "./BookingInbox";
+import { bookingHistoryLabel, depositLine, CounterpartyLine } from "./BookingInbox";
 import { OfferForm } from "./OfferForm";
 import { CancelDialog } from "./CancelDialog";
 import { GatePrompt } from "../payments/GatePrompt";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
   NO_SHOW_REPORT_WINDOW_DAYS, CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS,
-  DEPOSIT_PERCENT, CANCEL_GRACE_MS, depositChargePreviewCents,
+  DEPOSIT_PERCENT, CANCEL_GRACE_MS, THREAD_FULL_MESSAGE, depositChargePreviewCents,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
 import { cn } from "../lib/utils";
@@ -178,6 +178,26 @@ export function useOccurrences(bookingId: string): Occurrence[] {
   return rows;
 }
 
+// Open dates of a whole-run series, live (sp4 audit findings 2 and 8): the
+// count both the run notice and the accept preview render. Public-provable
+// (seriesId and status are equality pins; "open" is the public disjunct of
+// the gigs read rule), no membership needed, so either side can read it.
+// Null while loading or when the query fails; the accept confirm stays
+// disabled on null so a whole-run charge is never confirmed blind.
+export function useOpenRunDates(seriesId: string | null): number | null {
+  const [count, setCount] = useState<number | null>(null);
+  useEffect(() => {
+    if (!seriesId) return;
+    const { db } = getFirebase();
+    const unsub = onSnapshot(
+      query(collection(db, "gigs"), where("seriesId", "==", seriesId), where("status", "==", "open")),
+      (snap) => setCount(snap.size),
+      () => setCount(null));
+    return () => { unsub(); };
+  }, [seriesId]);
+  return seriesId ? count : null;
+}
+
 // Chat-style thread (sub-project 9A task 11, owner-locked per spec 6.7):
 // every offer/counter in the thread renders as a message bubble, own side
 // right and ember-tinted, other side left and solid, exactly the same
@@ -302,6 +322,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const occurrences = useOccurrences(bookingId);
   // Render-safe "now": see useNow's comment above.
   const now = useNow();
+  const openRunDates = useOpenRunDates(booking !== "loading" && booking !== "unavailable" && booking ? booking.seriesId : null);
 
   if (booking === "loading" || role === "loading") return <ThreadSkeleton />;
   if (booking === "unavailable" || !booking) {
@@ -350,6 +371,10 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const isCuratorSide = role === "curator" || bothSides;
 
   const lastEntry = booking.thread[booking.thread.length - 1];
+  // sp4 audit finding 16: counterBooking refuses at the cap with
+  // resource-exhausted; the button is disabled with the reason shown, while
+  // accept, decline, and withdraw stay available exactly as the server allows.
+  const threadFull = booking.thread.length >= MAX_BOOKING_THREAD_ENTRIES;
   // Accept-preview total/deposit: pure derivation, recomputed every render
   // from the CURRENT last thread entry + the live gig's durationMinutes,
   // exactly mirroring acceptBooking's own freeze-from-last-entry math
@@ -534,11 +559,12 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
 
   return (
     <div className="grid gap-6">
-      <div>
+      <div className="grid gap-1">
         <h1 className="font-syne text-2xl font-extrabold text-gk-text sm:text-3xl">{gigTitle}</h1>
-        <p className="mt-1 font-sora text-sm text-gk-muted">
+        <p className="font-sora text-sm text-gk-muted">
           {BUDGET_STRUCTURE_LABEL[booking.structure]} · Status: {booking.status.replace(/_/g, " ")}
         </p>
+        <CounterpartyLine musicianProfileId={booking.musicianProfileId} curatorProfileId={booking.curatorProfileId} mySide={mySide} />
       </div>
 
       {bothSides && (
@@ -557,6 +583,16 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
       {booking.status === "open" && (
         <section className="grid gap-3 border-t border-gk-border pt-5">
           <h2 className="font-syne text-lg font-semibold text-gk-text">Respond</h2>
+          {booking.seriesId != null && (
+            <p className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              <span>
+                Books as a run: accepting covers every open date of this series
+                {openRunDates != null ? ` (${openRunDates} open right now)` : ""} plus any date added later.
+                Deposits, settlement, and cancellations are per date.
+              </span>
+            </p>
+          )}
           {showCounterForm ? (
             <OfferForm structure={booking.structure} busy={actionBusy === "counter"} error={actionError}
               onSubmit={counter} onCancel={() => { setShowCounterForm(false); setActionError(null); }} />
@@ -574,11 +610,13 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                 <Button onClick={() => setShowAcceptConfirm(true)} disabled={actionBusy !== null}>
                   Accept {formatCents(lastEntry.amountCents)}
                 </Button>
-                <Button onClick={() => setShowCounterForm(true)} disabled={actionBusy !== null} variant="secondary">Counter…</Button>
+                <Button onClick={() => setShowCounterForm(true)} disabled={actionBusy !== null || threadFull}
+                  title={threadFull ? THREAD_FULL_MESSAGE : undefined} variant="secondary">Counter…</Button>
                 <Button onClick={decline} disabled={actionBusy !== null} variant="ghost">
                   {actionBusy === "decline" ? "Declining…" : "Decline"}
                 </Button>
               </div>
+              {threadFull && <p className="font-sora text-xs text-gk-muted">{THREAD_FULL_MESSAGE}</p>}
               {actionError && (
                 <GatePrompt message={actionError} curatorProfileId={booking.curatorProfileId}
                   viewerIsMusician={mySide === "musician"} onRetry={accept} />
@@ -601,33 +639,28 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                         {mySide === "curator" ? (
                           <>
                             <p className="font-sora text-sm text-gk-muted">
-                              Due now: {formatCents(preview.chargePreview.totalCents)}{" "}
+                              {booking.seriesId != null ? "Per date: " : "Due now: "}{formatCents(preview.chargePreview.totalCents)}{" "}
                               ({formatCents(preview.chargePreview.sliceCents)} deposit{" + "}
                               {formatCents(preview.chargePreview.feeCents)} service fee)
-                              {/* SP5 Task 15 review round 1 (medium #5): a whole-
-                                  run booking's deposit is charged PER DATE, not
-                                  once. The figure above is one date's worth.
-                                  occurrences[] only ever holds "filled" gigs, so
-                                  it's empty at this pre-accept point in
-                                  practice; the count branch below is a
-                                  cheap-if-available upgrade, not something this
-                                  screen can currently reach, but it stays
-                                  correct if that ever changes. */}
-                              {booking.seriesId != null && occurrences.length === 0
-                                ? " × each of the run's upcoming dates" : ""}
                             </p>
-                            {booking.seriesId != null && occurrences.length > 0 && (
-                              <p className="font-sora text-sm text-gk-muted">
-                                ≈ {occurrences.length} dates, {formatCents(preview.chargePreview.totalCents * occurrences.length)} total due now.
+                            {/* sp4 audit finding 8: the run total comes from the
+                                live open-dates query, not occurrences[] (which
+                                is empty pre-accept). Confirm stays disabled
+                                until the count is known. */}
+                            {booking.seriesId != null && (openRunDates == null ? (
+                              <p className="font-sora text-sm text-gk-muted">Counting the run&apos;s open dates…</p>
+                            ) : (
+                              <p className="font-sora text-sm font-medium text-gk-text">
+                                {openRunDates} date{openRunDates === 1 ? "" : "s"}, {formatCents(preview.chargePreview.totalCents * openRunDates)} due now.
                               </p>
-                            )}
+                            ))}
                             <p className="font-sora text-sm text-gk-muted">
                               Remaining {100 - DEPOSIT_PERCENT}% + fee auto-charges after each date.
                             </p>
                           </>
                         ) : (
                           <p className="font-sora text-sm text-gk-muted">
-                            The curator&apos;s card is charged the deposit when you accept.
+                            The curator&apos;s card is charged the deposit{booking.seriesId != null ? " for every open date" : ""} when you accept.
                           </p>
                         )}
                         {startsSoonFlash && (
@@ -646,7 +679,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                       </p>
                     )}
                     <div className="flex gap-2">
-                      <Button onClick={accept} disabled={actionBusy !== null || !preview}>
+                      <Button onClick={accept} disabled={actionBusy !== null || !preview || (booking.seriesId != null && openRunDates == null)}>
                         {actionBusy === "accept" ? "Accepting…" : "Confirm accept"}
                       </Button>
                       <Button type="button" variant="secondary" onClick={() => setShowAcceptConfirm(false)} disabled={actionBusy !== null}>Back</Button>

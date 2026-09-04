@@ -27,6 +27,12 @@ import { useTokens } from "../theme/ThemeProvider";
 export const DEPOSIT_HONESTY_LINE =
   `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card at accept.`;
 
+// The whole-run twin (sp4 audit finding 2): on a whole_run series the deposit
+// is charged PER DATE, for every open date of the run, at accept. Rendered
+// wherever DEPOSIT_HONESTY_LINE is, whenever the gig's own fillMode says so.
+export const DEPOSIT_HONESTY_RUN_LINE =
+  `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card per date, for every open date of the run.`;
+
 // The curator-facing reliability sentence, one definition for every surface
 // that renders it (Find musicians cards today; Task 32 adds the inbox rows and
 // the thread header). Counts BOOKINGS, not dates: an 8-date completed

@@ -1,14 +1,17 @@
 "use client";
 import { useEffect, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
+import { formatReliabilityLine } from "./BookingForms";
 import {
   DEPOSIT_PERCENT,
-  type BookingRequestDoc, type BookingSide, type BookingStatus, type GigDoc,
+  type BookingRequestDoc, type BookingSide, type BookingStatus, type CuratorBookingDoc, type GigDoc, type ProfileDoc,
 } from "@gatekeep/shared";
 import { Badge } from "../ui/badge";
 import { DateBlockRow } from "../components/DateBlockRow";
+import { Skeleton } from "../ui/skeleton";
 import { IconBookings } from "../ui/icons";
 import { cn } from "../lib/utils";
 
@@ -120,25 +123,95 @@ function useNextOccurrence(bookingId: string): { startsAt: number } | null {
   return next;
 }
 
+// The other party's name and handle (sp4 audit finding 3). A booking only
+// exists between two approved profiles, so profiles/{id} is a public get;
+// a profile rejected since the booking was made reads permission-denied,
+// which renders as "unavailable" rather than an error. n+1 per row, same
+// sanction as useRowGigTitle above.
+export type Counterparty = { name: string; handle: string | null } | null | "loading";
+export function useCounterparty(profileId: string | undefined): Counterparty {
+  const [state, setState] = useState<Counterparty>("loading");
+  useEffect(() => {
+    if (!profileId) return;
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, "profiles", profileId))
+      .then((s) => {
+        if (cancelled) return;
+        if (!s.exists()) { setState(null); return; }
+        const p = s.data() as ProfileDoc;
+        setState({ name: p.name, handle: p.handle ?? null });
+      })
+      .catch(() => { if (!cancelled) setState(null); });
+    return () => { cancelled = true; };
+  }, [profileId]);
+  return profileId ? state : null;
+}
+
+// Curator side only: the same reliability line Find musicians renders, read
+// from the projection curatorAccess already grants (firestore.rules'
+// curatorBooking read rule). Undefined musicianProfileId (a musician-side
+// viewer) skips the read entirely.
+export function useCounterpartyReliability(musicianProfileId: string | undefined): string | null {
+  const [line, setLine] = useState<string | null>(null);
+  useEffect(() => {
+    if (!musicianProfileId) return;
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, `profiles/${musicianProfileId}/private/curatorBooking`))
+      .then((s) => { if (!cancelled) setLine(s.exists() ? formatReliabilityLine((s.data() as CuratorBookingDoc).reliability) : null); })
+      .catch(() => { if (!cancelled) setLine(null); });
+    return () => { cancelled = true; };
+  }, [musicianProfileId]);
+  return musicianProfileId ? line : null;
+}
+
+// "with {name}" plus, for a curator viewer, the act's reliability. A real
+// <Link> to the public page: /@handle serves both profile types
+// (app/u/[handle]). Rendered as a SIBLING of the row's own anchor (SolidRow's
+// `aside` slot), never inside it: an anchor nested in an anchor is invalid
+// HTML and browsers split it unpredictably.
+export function CounterpartyLine({ musicianProfileId, curatorProfileId, mySide }: {
+  musicianProfileId: string; curatorProfileId: string; mySide: BookingSide;
+}) {
+  const otherId = mySide === "curator" ? musicianProfileId : curatorProfileId;
+  const other = useCounterparty(otherId);
+  const reliability = useCounterpartyReliability(mySide === "curator" ? musicianProfileId : undefined);
+  if (other === "loading") return <Skeleton className="h-3 w-40" />;
+  if (!other) return <span className="font-sora text-xs text-gk-muted">with a profile that is no longer available</span>;
+  return (
+    <span className="flex flex-wrap items-center gap-x-1.5 font-sora text-xs text-gk-muted">
+      with{" "}
+      {other.handle ? (
+        <Link href={`/@${other.handle}`} className="font-medium text-gk-text underline underline-offset-4 hover:text-gk-focus">
+          {other.name}
+        </Link>
+      ) : (
+        <span className="font-medium text-gk-text">{other.name}</span>
+      )}
+      {reliability && <span>· {reliability}</span>}
+    </span>
+  );
+}
+
 // Theme pass (sub-project 9A task 11): spec 6.7, DateBlockRow where a
 // dated shape genuinely fits (ConfirmedRow has a real occurrence date once
 // `next` resolves), a solid row otherwise. Every row is the same
 // rounded-gk/border-gk-border/hover:border-gk-accent/50 shell GigCard
 // already established for a clickable card, just a flat row instead of a
 // photo card.
-function SolidRow({ href, children, className }: { href: string; children: ReactNode; className?: string }) {
+function SolidRow({ href, children, aside, className }: {
+  href: string; children: ReactNode; aside?: ReactNode; className?: string;
+}) {
   return (
-    <li>
-      <a
-        href={href}
-        className={cn(
-          "flex min-w-0 items-center justify-between gap-3 rounded-gk border border-gk-border bg-gk-surface px-4 py-3 outline-none transition-colors",
-          "hover:border-gk-accent/50 focus-visible:ring-2 focus-visible:ring-gk-focus",
-          className,
-        )}
-      >
+    <li
+      className={cn(
+        "grid gap-1 rounded-gk border border-gk-border bg-gk-surface px-4 py-3 transition-colors hover:border-gk-accent/50",
+        className,
+      )}
+    >
+      <a href={href} className="flex min-w-0 items-center justify-between gap-3 outline-none focus-visible:ring-2 focus-visible:ring-gk-focus">
         {children}
       </a>
+      {aside}
     </li>
   );
 }
@@ -147,7 +220,8 @@ function OpenThreadRow({ row, mySide }: { row: BookingRow; mySide: BookingSide }
   const title = useRowGigTitle(row.gigId);
   const yourTurn = row.awaitingSide === mySide;
   return (
-    <SolidRow href={`/dashboard/bookings/${row.id}`}>
+    <SolidRow href={`/dashboard/bookings/${row.id}`}
+      aside={<CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />}>
       <div className="flex min-w-0 items-center gap-2">
         <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
         {/* "your turn" is the one thing on this row that genuinely needs the
@@ -163,13 +237,14 @@ function OpenThreadRow({ row, mySide }: { row: BookingRow; mySide: BookingSide }
   );
 }
 
-function ConfirmedRow({ row }: { row: BookingRow }) {
+function ConfirmedRow({ row, mySide }: { row: BookingRow; mySide: BookingSide }) {
   const title = useRowGigTitle(row.gigId);
   const next = useNextOccurrence(row.id);
   // deposit is already frozen (computeDepositCents ran inside acceptBooking's
   // transaction): no need to recompute it here, only to display the number
   // it already produced.
   const depositDetail = row.deposit ? depositLine(row.deposit.amountCents) : undefined;
+  const aside = <CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />;
   if (next) {
     return (
       // Review round 1: DateBlockRow renders a Link/div, not an <li> itself
@@ -195,21 +270,23 @@ function ConfirmedRow({ row }: { row: BookingRow }) {
           detail={depositDetail && <span className="block max-w-28 whitespace-normal">{depositDetail}</span>}
           className="border border-gk-border bg-gk-surface px-3 hover:border-gk-accent/50 hover:bg-gk-surface"
         />
+        <div className="mt-1 px-3">{aside}</div>
       </li>
     );
   }
   return (
-    <SolidRow href={`/dashboard/bookings/${row.id}`}>
+    <SolidRow href={`/dashboard/bookings/${row.id}`} aside={aside}>
       <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
       {depositDetail && <span className="max-w-40 shrink-0 whitespace-normal text-right font-sora text-xs text-gk-muted">{depositDetail}</span>}
     </SolidRow>
   );
 }
 
-function HistoryRow({ row }: { row: BookingRow }) {
+function HistoryRow({ row, mySide }: { row: BookingRow; mySide: BookingSide }) {
   const title = useRowGigTitle(row.gigId);
   return (
-    <SolidRow href={`/dashboard/bookings/${row.id}`}>
+    <SolidRow href={`/dashboard/bookings/${row.id}`}
+      aside={<CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />}>
       <span className="truncate font-syne text-sm font-semibold text-gk-text">{title}</span>
       <span className="shrink-0 font-sora text-xs text-gk-muted">{bookingHistoryLabel(row)}</span>
     </SolidRow>
@@ -296,7 +373,7 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         {confirmed.length === 0 ? (
           <InboxEmpty>Nothing confirmed yet. Accept an offer in Open threads above and it lands here as a date.</InboxEmpty>
         ) : (
-          <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} />)}</ul>
+          <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
       </section>
       <section className="grid gap-2.5">
@@ -304,7 +381,7 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         {history.length === 0 ? (
           <InboxEmpty>No history yet. Completed and closed bookings will land here.</InboxEmpty>
         ) : (
-          <ul className="grid gap-2">{history.map((row) => <HistoryRow key={row.id} row={row} />)}</ul>
+          <ul className="grid gap-2">{history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
       </section>
     </div>

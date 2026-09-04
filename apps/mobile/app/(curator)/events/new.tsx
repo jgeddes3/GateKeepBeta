@@ -8,7 +8,7 @@ import { useAuth } from "../../../src/auth/AuthProvider";
 import { useProfileContext } from "../../../src/shell/ProfileContext";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields, OneOffDateTimeFields,
-  emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, emptyOneOffDateTime, oneOffDateTimeToMs, endDateInputToUtcMs,
+  emptyContent, emptyBudget, emptyProvisions, emptyRecurrence, emptyOneOffDateTime, oneOffDateTimeToMs, endDateInputToLaunchTzEndMs,
   MAX_ADDRESS_LENGTH,
   type LocationValue, type CreateGigPayload, type CreateSeriesPayload,
 } from "../../../src/gigs/GigForms";
@@ -145,7 +145,7 @@ export default function NewGigOrSeries() {
       if (isSeries) {
         const recurrenceInput = {
           weekday: recurrence.weekday, hour: Number(recurrence.hour), minute: Number(recurrence.minute),
-          cadence: recurrence.cadence, endDate: endDateInputToUtcMs(recurrence.endDate),
+          cadence: recurrence.cadence, endDate: endDateInputToLaunchTzEndMs(recurrence.endDate),
         };
         const rv = validateRecurrence(recurrenceInput, Date.now());
         if (!rv.ok) { setError(rv.reason); setBusy(false); return; }

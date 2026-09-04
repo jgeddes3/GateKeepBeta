@@ -8,11 +8,11 @@ import { useAuth } from "../../../src/auth/AuthProvider";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../../../src/gigs/GigForms";
 import { formatChipLabel } from "../../../src/portfolio/PortfolioForms";
 import {
-  DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, formatDuration, gigLocationLabel,
-  type OfferState,
+  DEPOSIT_HONESTY_LINE, DEPOSIT_HONESTY_RUN_LINE, OfferFields, buildOfferPayload, emptyOffer, formatDuration,
+  gigLocationLabel, type OfferState,
 } from "../../../src/bookings/BookingForms";
 import { GatePrompt } from "../../../src/payments/GatePrompt";
-import type { GigDoc, GigSeriesDoc, ProfileDoc, FillMode } from "@gatekeep/shared";
+import type { GigDoc, ProfileDoc } from "@gatekeep/shared";
 import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../../src/ui/select";
@@ -20,30 +20,6 @@ import { Skeleton } from "../../../src/ui/skeleton";
 import { IconWarning } from "../../../src/ui/icons";
 
 type MusicianOption = { profileId: string; name: string };
-
-// Reveals fillMode only when the viewer can actually read the gigSeries doc
-// (member of the curator profile, or admin): gigSeries has no public
-// disjunct in firestore.rules, so a permission-denied here is the EXPECTED,
-// common case on this public page (not a failure): fall back to "hidden"
-// (no fill-mode detail shown) rather than surfacing an error. Mirrors this
-// task's controller-sanctioned resolution for GigBrowse's softer badge copy:
-// this is the ONE surface allowed to attempt the fetch, per-gig, once.
-// "loading" and "hidden" render identically (see the caller below), so there's
-// no need to track them as separate states: the return expression collapses
-// a null/absent seriesId straight to "hidden" without any effect-driven reset.
-function useSeriesFillMode(seriesId: string | null): FillMode | "hidden" {
-  const [state, setState] = useState<FillMode | "hidden">("hidden");
-  useEffect(() => {
-    if (!seriesId) return;
-    let cancelled = false;
-    const { db } = getFirebase();
-    getDoc(doc(db, "gigSeries", seriesId))
-      .then((s) => { if (!cancelled) setState(s.exists() ? (s.data() as GigSeriesDoc).fillMode : "hidden"); })
-      .catch(() => { if (!cancelled) setState("hidden"); });
-    return () => { cancelled = true; };
-  }, [seriesId]);
-  return seriesId ? state : "hidden";
-}
 
 function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: string }) {
   const [musicianProfiles, setMusicianProfiles] = useState<MusicianOption[] | "loading">("loading");
@@ -145,7 +121,7 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
       <Button type="button" onClick={submit} disabled={busy} className="justify-self-start">
         {busy ? "Applying…" : "Apply"}
       </Button>
-      <p className="font-sora text-xs text-gk-muted">{DEPOSIT_HONESTY_LINE}</p>
+      <p className="font-sora text-xs text-gk-muted">{gig.fillMode === "whole_run" ? DEPOSIT_HONESTY_RUN_LINE : DEPOSIT_HONESTY_LINE}</p>
     </div>
   );
 }
@@ -169,7 +145,6 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
   const { user } = useAuth();
   const [gig, setGig] = useState<GigDoc | null | "loading" | "unavailable">("loading");
   const [curatorName, setCuratorName] = useState<string | null>(null);
-  const fillMode = useSeriesFillMode(gig !== "loading" && gig !== "unavailable" && gig ? gig.seriesId : null);
   const curatorProfileId = gig !== "loading" && gig !== "unavailable" && gig ? gig.curatorProfileId : null;
 
   // No synchronous setGig("loading") reset at the top: gigId is fixed for
@@ -235,8 +210,8 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
     gig.provisions.hasBackline != null ? `Backline: ${gig.provisions.hasBackline ? "provided" : "not provided"}` : null,
     gig.provisions.notes,
   ].filter(Boolean).join(" · ");
-  const seriesLine = fillMode === "whole_run" ? "Books as a run: one act plays every date"
-    : fillMode === "per_occurrence" ? "Part of a recurring series: each date booked separately"
+  const seriesLine = gig.fillMode === "whole_run" ? "Books as a run: one act plays every open date"
+    : gig.fillMode === "per_occurrence" ? "Part of a recurring series: each date booked separately"
     : "Part of a recurring series";
 
   return (
@@ -263,7 +238,14 @@ export default function GigDetail(props: { params: Promise<{ gigId: string }> })
       </div>
 
       {gig.seriesId != null && (
-        <Badge variant="outline" className="mt-4 w-fit">{seriesLine}</Badge>
+        <div className="mt-4 grid gap-1.5">
+          <Badge variant="outline" className="w-fit">{seriesLine}</Badge>
+          {gig.fillMode === "whole_run" && (
+            <p className="font-sora text-sm text-gk-muted">
+              Applying here applies to every open date of this run, plus dates added later, under one booking.
+            </p>
+          )}
+        </div>
       )}
 
       {gig.description && (

@@ -4,7 +4,7 @@ import { collection, onSnapshot, orderBy, query, where } from "firebase/firestor
 import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
-import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, type OfferState } from "./BookingForms";
+import { DEPOSIT_HONESTY_LINE, DEPOSIT_HONESTY_RUN_LINE, OfferFields, buildOfferPayload, emptyOffer, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
 import type { GigDoc } from "@gatekeep/shared";
 import { Button } from "../ui/button";
@@ -126,7 +126,7 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
                 other error falls through to the same plain warning line this
                 used to render directly. */}
             {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={submit} />}
-            <p className="font-sora text-xs text-gk-muted">{DEPOSIT_HONESTY_LINE}</p>
+            <p className="font-sora text-xs text-gk-muted">{selectedGig?.fillMode === "whole_run" ? DEPOSIT_HONESTY_RUN_LINE : DEPOSIT_HONESTY_LINE}</p>
             <div className="flex gap-2">
               <Button onClick={submit} disabled={busy}>{busy ? "Sending…" : "Send offer"}</Button>
               <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>

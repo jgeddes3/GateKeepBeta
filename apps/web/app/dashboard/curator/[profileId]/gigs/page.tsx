@@ -187,7 +187,7 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
                   </div>
                   <p className="mt-1 font-sora text-sm text-gk-muted">
                     {WEEKDAY_LABELS[s.recurrence.weekday]}s, {String(s.recurrence.hour).padStart(2, "0")}:
-                    {String(s.recurrence.minute).padStart(2, "0")}, {formatChipLabel(s.recurrence.cadence)}
+                    {String(s.recurrence.minute).padStart(2, "0")} (UTC), {formatChipLabel(s.recurrence.cadence)}
                   </p>
                 </li>
               ))}

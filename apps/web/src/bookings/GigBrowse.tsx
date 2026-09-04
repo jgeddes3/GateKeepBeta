@@ -13,14 +13,12 @@ import { IconGigs, IconWarning } from "../ui/icons";
 
 type GigRow = GigDoc & { id: string };
 
-// The public "Find gigs" grid can never prove a series' exact recurrence
-// (gigSeries has no public disjunct in firestore.rules: see the query
-// comment below), so the badge names what's actually provable from the
-// public gig doc alone: real status, and whether it belongs to a series at
-// all. A curator-side context with member access to the series doc could
-// pass a real cadence label here instead (formatChipLabel already turns
-// "weekly" into "Weekly"); this page never can, so it never claims to.
+// The badge names only what the public gig doc itself proves: real status,
+// and, since section B3 stamps fillMode onto every occurrence doc, whether
+// the gig books as a run. A cadence ("Weekly") still needs the member-only
+// gigSeries doc and stays off this public grid.
 function gigBadgeLabel(gig: GigRow): string {
+  if (gig.fillMode === "whole_run") return "Books as a run";
   return gig.seriesId != null ? "Recurring series" : "Open for applications";
 }
 

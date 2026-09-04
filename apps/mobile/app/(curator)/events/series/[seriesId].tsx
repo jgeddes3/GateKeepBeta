@@ -7,7 +7,7 @@ import { callFn } from "../../../../src/lib/callable";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
-  contentFrom, provisionsFrom, budgetFrom, recurrenceFrom, endDateInputToUtcMs, MAX_ADDRESS_LENGTH,
+  contentFrom, provisionsFrom, budgetFrom, recurrenceFrom, endDateInputToLaunchTzEndMs, MAX_ADDRESS_LENGTH,
   GIG_STATUS_LABEL, SERIES_STATUS_LABEL, SERIES_STATUS_TONE, WEEKDAY_LABELS, formatGigDateTime,
   type ContentState, type ProvisionsState, type BudgetState, type RecurrenceState, type LocationValue,
   type UpdateSeriesPayload,
@@ -59,7 +59,7 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
 
     const recurrenceInput = {
       weekday: recurrence.weekday, hour: Number(recurrence.hour), minute: Number(recurrence.minute),
-      cadence: recurrence.cadence, endDate: endDateInputToUtcMs(recurrence.endDate),
+      cadence: recurrence.cadence, endDate: endDateInputToLaunchTzEndMs(recurrence.endDate),
     };
     const rv = validateRecurrence(recurrenceInput, Date.now());
     if (!rv.ok) { setError(rv.reason); return; }
@@ -180,7 +180,7 @@ export default function SeriesDetail() {
   const isVenue = subtype === "venue";
   const cadenceSummary =
     `${WEEKDAY_LABELS[series.recurrence.weekday]}s, ` +
-    `${String(series.recurrence.hour).padStart(2, "0")}:${String(series.recurrence.minute).padStart(2, "0")}, ${series.recurrence.cadence}`;
+    `${String(series.recurrence.hour).padStart(2, "0")}:${String(series.recurrence.minute).padStart(2, "0")} (UTC), ${series.recurrence.cadence}`;
 
   const doPause = async () => {
     setPauseBusy(true);
