@@ -163,6 +163,8 @@ describe("validateSearchInput", () => {
     expect(validateSavedSearchInput({ face: "fan", q: "", filters: { nearMe: true } }).ok).toBe(false);
     const v = validateSavedSearchInput({ face: "fan", q: "", filters: { freeOnly: true, nearMe: true } });
     expect(v.ok && v.input.filters.nearMe).toBe(false);
+    expect(validateSavedSearchInput({ face: "fan", q: "", filters: { when: "any" } }).ok).toBe(false);
+    expect(validateSavedSearchInput({ face: "fan", q: "", filters: { genres: [] } }).ok).toBe(false);
   });
 });
 

@@ -26,7 +26,6 @@ export const SAVED_SEARCH_SCAN_CAP = 1000;
 export const SEARCH_BUSY_DAYS_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 export const SEARCH_MONTH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
 
 export function kindForFace(face: SearchFace): SearchKind {
   switch (face) {
@@ -358,19 +357,30 @@ function validateLocation(raw: unknown): { ok: true; location: { lat: number; ln
   return { ok: true, location: { lat, lng } };
 }
 
-export function validateSearchInput(data: unknown): Ok<SearchInput> | Fail {
-  if (typeof data !== "object" || data === null) return fail("Invalid search.");
-  const d = data as Record<string, unknown>;
+// Shared by validateSearchInput and validateSavedSearchInput: the face
+// membership check and the q type/length check, identical in both, with
+// identical messages. Takes the already-object-checked record so each
+// caller keeps its own top-level "is this even an object" message.
+function validateFaceAndQuery(d: Record<string, unknown>): { ok: true; face: SearchFace; q: string } | Fail {
   if (!(SEARCH_FACES as readonly string[]).includes(d.face as string)) return fail("Unknown search face.");
   const face = d.face as SearchFace;
   if (typeof d.q !== "string" || d.q.length > SEARCH_MAX_QUERY_CHARS) return fail(`Search text must be at most ${SEARCH_MAX_QUERY_CHARS} characters.`);
+  return { ok: true, face, q: d.q };
+}
+
+export function validateSearchInput(data: unknown): Ok<SearchInput> | Fail {
+  if (typeof data !== "object" || data === null) return fail("Invalid search.");
+  const d = data as Record<string, unknown>;
+  const base = validateFaceAndQuery(d);
+  if (!base.ok) return base;
+  const { face, q } = base;
   if (typeof d.page !== "number" || !Number.isInteger(d.page) || d.page < 0 || d.page > SEARCH_MAX_PAGE) return fail("Invalid page.");
   if (typeof d.includePins !== "boolean") return fail("includePins must be true or false.");
   const f = validateFilters(face, d.filters ?? {});
   if (!f.ok) return f;
   const l = validateLocation(d.location);
   if (!l.ok) return l;
-  return { ok: true, input: { face, q: d.q, filters: f.filters, location: l.location, page: d.page, includePins: d.includePins } };
+  return { ok: true, input: { face, q, filters: f.filters, location: l.location, page: d.page, includePins: d.includePins } };
 }
 
 export function hasSavedSearchCriteria(q: string, filters: SearchFilters): boolean {
@@ -382,12 +392,12 @@ export function hasSavedSearchCriteria(q: string, filters: SearchFilters): boole
 export function validateSavedSearchInput(data: unknown): Ok<SavedSearchInput> | Fail {
   if (typeof data !== "object" || data === null) return fail("Invalid saved search.");
   const d = data as Record<string, unknown>;
-  if (!(SEARCH_FACES as readonly string[]).includes(d.face as string)) return fail("Unknown search face.");
-  const face = d.face as SearchFace;
-  if (typeof d.q !== "string" || d.q.length > SEARCH_MAX_QUERY_CHARS) return fail(`Search text must be at most ${SEARCH_MAX_QUERY_CHARS} characters.`);
+  const base = validateFaceAndQuery(d);
+  if (!base.ok) return base;
+  const { face, q } = base;
   const f = validateFilters(face, d.filters ?? {});
   if (!f.ok) return f;
   const filters: SearchFilters = { ...f.filters, nearMe: false };
-  if (!hasSavedSearchCriteria(d.q, filters)) return fail("Type something or pick a filter before saving a search.");
-  return { ok: true, input: { face, q: d.q.trim(), filters } };
+  if (!hasSavedSearchCriteria(q, filters)) return fail("Type something or pick a filter before saving a search.");
+  return { ok: true, input: { face, q: q.trim(), filters } };
 }
