@@ -1,15 +1,17 @@
 import { Stack, useRouter, useSegments } from "expo-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { View } from "react-native";
 import * as Sentry from "@sentry/react-native";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { setAudioModeAsync } from "expo-audio";
+import * as Notifications from "expo-notifications";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
 import { VerifyEmailBanner } from "../src/auth/VerifyEmailBanner";
 import { ProfileProvider } from "../src/shell/ProfileContext";
 import { FollowsProvider } from "../src/discover/useFollows";
+import { ensureAndroidChannel, pushHref } from "../src/notifications/push";
 import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
 import { ThemeProvider, useTokens, useThemeChoice } from "../src/theme/ThemeProvider";
 import { tokens } from "../src/theme/tokens";
@@ -51,6 +53,36 @@ function Gate() {
     if (!user && !inAuthGroup) router.replace("/(auth)/sign-in");
     if (user && inAuthGroup) router.replace("/");
   }, [user, loading, segments, router]);
+
+  // Push taps (sp1 audit finding 8, sp4 finding 5, sp6 finding 10). A tap
+  // while the app is running arrives through the response listener; a tap
+  // that cold-starts the app is read once from getLastNotificationResponseAsync.
+  // Both wait for a signed-in user: every destination sits behind the auth
+  // redirect above, and routing first would bounce to sign-in and lose the
+  // href. The ref keeps the cold-start read from firing again on a later
+  // user change (sign-out, sign-in), which would re-open a stale destination.
+  const coldStartHandled = useRef(false);
+  useEffect(() => {
+    if (loading || !user) return;
+    let cancelled = false;
+    void ensureAndroidChannel();
+    if (!coldStartHandled.current) {
+      coldStartHandled.current = true;
+      Notifications.getLastNotificationResponseAsync()
+        .then((response) => {
+          if (cancelled) return;
+          const href = pushHref(response);
+          if (href) router.push(href);
+        })
+        .catch((e) => console.warn("getLastNotificationResponseAsync failed", e));
+    }
+    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const href = pushHref(response);
+      if (href) router.push(href);
+    });
+    return () => { cancelled = true; sub.remove(); };
+  }, [user, loading, router]);
+
   return (
     <View style={{ flex: 1 }}>
       <StatusBar style={active === "light" ? "dark" : "light"} />

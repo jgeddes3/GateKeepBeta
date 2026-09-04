@@ -1,4 +1,5 @@
 import { Linking, ScrollView, View, useWindowDimensions } from "react-native";
+import { useRouter } from "expo-router";
 import QRCode from "react-native-qrcode-svg";
 import type { EventDoc } from "@gatekeep/shared";
 import { gigLocationLabel } from "../bookings/BookingForms";
@@ -7,7 +8,7 @@ import {
   useTicketHolderAddress, mapUrl,
 } from "../events/eventDisplay";
 import type { TicketRow } from "./TicketList";
-import { Text, Button, Card, StatusBadge, Sheet, IconMapPin, IconArrowsLeftRight } from "../ui";
+import { Text, Button, Card, StatusBadge, Sheet, IconMapPin, IconArrowsLeftRight, IconTicket } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -34,6 +35,7 @@ export function TicketDetail({ uid, ticket, event, now, onClose, onTransferPress
   onClose: () => void; onTransferPress: () => void;
 }) {
   const t = useTokens();
+  const router = useRouter();
   const { height } = useWindowDimensions();
   const address = useTicketHolderAddress(ticket.eventId, uid);
   // A live entry credential only while it's still "valid"/"checked_in": a
@@ -102,6 +104,18 @@ export function TicketDetail({ uid, ticket, event, now, onClose, onTransferPress
         )}
 
         <View style={{ gap: tokens.space.sm }}>
+          {/* sp6 audit finding 10: a ticket had no path back to its event. Closes
+              the sheet first so the pushed event screen is not stacked under a
+              Modal that would otherwise stay presented above it. */}
+          <Button variant="secondary" onPress={() => {
+            onClose();
+            router.push({ pathname: "/event/[eventId]", params: { eventId: ticket.eventId } });
+          }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.xs }}>
+              <IconTicket size={16} color={t.text} />
+              <Text variant="label">Event details</Text>
+            </View>
+          </Button>
           {canTransfer && (
             <Button variant="secondary" onPress={onTransferPress}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.xs }}>

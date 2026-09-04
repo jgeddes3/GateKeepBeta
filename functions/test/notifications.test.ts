@@ -4,7 +4,7 @@ import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
 import type { ProfileDraftInput, MemberDoc } from "@gatekeep/shared";
-import { loadPushTokenIds, deadTokenIdsFromExpoResponse } from "../src/notifications.js";
+import { loadPushTokenIds, deadTokenIdsFromExpoResponse, notifyUser } from "../src/notifications.js";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 process.env.FIREBASE_AUTH_EMULATOR_HOST = "localhost:9099";
@@ -141,5 +141,45 @@ describe("push token selection and pruning (SP10 Task 15)", () => {
     expect(deadTokenIdsFromExpoResponse(tokens, null)).toEqual([]);
     expect(deadTokenIdsFromExpoResponse(tokens, { data: "nope" })).toEqual([]);
     expect(deadTokenIdsFromExpoResponse(tokens, { errors: [{ code: "PUSH_TOO_MANY_EXPERIENCE_IDS" }] })).toEqual([]);
+  });
+});
+
+describe("notifyUser push data payload (SP10 Task 29)", () => {
+  // Same in-process stubbing pattern as GoogleGeocoder's tests in
+  // geocode.test.ts: notifyUser is imported straight from src (not called
+  // through a deployed callable), so stubbing global fetch here observes
+  // exactly the request body it builds.
+  it("attaches data: { kind, refId } to every Expo push message", async () => {
+    const { uid } = await signUpTestUser(`nd1-${Date.now()}@test.com`);
+    await adb.doc(`users/${uid}/pushTokens/ExponentPushToken[nd1]`).set({ createdAt: Date.now() });
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [{ status: "ok", id: "x" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await notifyUser(uid, { title: "Booking update", body: "Your booking moved forward", kind: "booking", refId: "book123" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+      expect(body).toEqual([{
+        to: "ExponentPushToken[nd1]", title: "Booking update", body: "Your booking moved forward",
+        data: { kind: "booking", refId: "book123" },
+      }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("sends refId: null when the notification carries no refId", async () => {
+    const { uid } = await signUpTestUser(`nd2-${Date.now()}@test.com`);
+    await adb.doc(`users/${uid}/pushTokens/ExponentPushToken[nd2]`).set({ createdAt: Date.now() });
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [{ status: "ok", id: "x" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await notifyUser(uid, { title: "System", body: "Something happened", kind: "system" });
+      const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+      expect(body[0].data).toEqual({ kind: "system", refId: null });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

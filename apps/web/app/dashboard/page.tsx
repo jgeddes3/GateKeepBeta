@@ -7,7 +7,7 @@ import { getFirebase } from "../../src/lib/firebase";
 import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { cn } from "../../src/lib/utils";
-import type { ProfileType, ProfileStatus, ProfileDoc, NotificationDoc } from "@gatekeep/shared";
+import { notificationHref, type ProfileType, type ProfileStatus, type ProfileDoc, type NotificationDoc } from "@gatekeep/shared";
 import { Button } from "../../src/ui/button";
 import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
@@ -186,12 +186,15 @@ function NotificationListRow({ n, markRead }: { n: NotificationRow; markRead: (i
   // SP7 Task 9: show_announced/show_rescheduled/show_post all carry refId =
   // the eventId, straight to the public event page; new_music carries the
   // artist's own profileId instead, resolved to a handle above.
+  // Task 29: booking/ticket/event-kind hrefs now come from the one map both
+  // clients share (notificationHref); new_music still resolves locally
+  // (above) since its refId is a profileId, not a route, and the shared
+  // helper deliberately returns null for it rather than hard-coding a
+  // per-platform profile URL shape.
   const artistHandle = useProfileHandle(n.kind === "new_music" ? (n.refId ?? null) : null);
-  const isEventKind = n.kind === "show_announced" || n.kind === "show_rescheduled" || n.kind === "show_post";
-  const href = isEventKind && n.refId ? `/e/${n.refId}`
-    : n.kind === "new_music" && artistHandle ? `/u/${artistHandle}`
-    : n.kind === "booking" && n.refId ? `/dashboard/bookings/${n.refId}`
-    : null;
+  const href = n.kind === "new_music"
+    ? (artistHandle ? `/u/${artistHandle}` : null)
+    : notificationHref(n.kind, n.refId, "web");
   const rowBody = (
     <>
       <span

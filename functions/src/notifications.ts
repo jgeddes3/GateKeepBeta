@@ -53,7 +53,13 @@ export async function notifyUser(
   // SP10 Task 15: newest-first, capped selection (see loadPushTokenIds above).
   const tokenIds = await loadPushTokenIds(uid);
   if (tokenIds.length === 0) return true;
-  const messages = tokenIds.map((to) => ({ to, title: note.title, body: note.body }));
+  // Task 29: every push carries data: { kind, refId } so a tap can route
+  // without a second Firestore read; refId is null (not omitted) when the
+  // notification has none, matching pushHref's own optional-field handling.
+  const messages = tokenIds.map((to) => ({
+    to, title: note.title, body: note.body,
+    data: { kind: note.kind, refId: note.refId ?? null },
+  }));
   let body: unknown = null;
   try {
     const res = await fetch(EXPO_PUSH_SEND_URL, {
