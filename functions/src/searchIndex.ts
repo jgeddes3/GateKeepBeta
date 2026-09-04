@@ -33,14 +33,16 @@ const base = (kind: SearchKind, sourceId: string, now: number): SearchIndexDoc =
 export function projectShow(eventId: string, event: EventDoc | undefined, now: number): SearchIndexDoc | null {
   if (!event || event.status !== "published" || event.endsAt < now) return null;
   const venueName = event.location.venueName ?? null;
-  const { words, tokens } = text(event.title, ...event.lineup.map((a) => a.name), venueName, event.location.neighborhood);
+  const lineup = event.lineup ?? [];
+  const lineupMusicianProfileIds = event.lineupMusicianProfileIds ?? [];
+  const { words, tokens } = text(event.title, ...lineup.map((a) => a.name), venueName, event.location.neighborhood);
   return {
     ...base("show", eventId, now), title: event.title, subtitle: venueName ?? event.location.city,
     words, tokens, genres: event.genres ?? [], city: event.location.city ?? null, cityLower: lower(event.location.city),
     neighborhood: event.location.neighborhood ?? null, geo: event.location.geo ?? null,
     startsAt: event.startsAt, endsAt: event.endsAt, priceFromCents: event.priceFromCents ?? null,
     hasFreeTier: event.hasFreeTier ?? false,
-    relatedProfileIds: [...new Set([event.curatorProfileId, ...event.lineupMusicianProfileIds])],
+    relatedProfileIds: [...new Set([event.curatorProfileId, ...lineupMusicianProfileIds])],
     imagePath: event.posterPath ?? null,
   };
 }
