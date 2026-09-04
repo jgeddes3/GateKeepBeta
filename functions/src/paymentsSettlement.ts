@@ -65,6 +65,7 @@ import {
   writeLedger, clawbackAlertId, depositPendingAlertId, depositRacedAlertId, settlementPayoutAlertId,
   settlementPendingAlertId, settlementRacedAlertId, IDEMPOTENCY_WINDOW_MS, setSelfDealInstantHold,
 } from "./paymentsCore.js";
+import { distributeEarnings } from "./payoutShares.js";
 
 // How long `payPastDue` parks a `past_due` occurrence's `nextRetryAt` while the
 // curator confirms its on-session intent in the browser. Elements confirms in
@@ -713,19 +714,38 @@ export async function finalizeSettlementSuccess(args: {
     : (math.chargeTotal === 0 && p.deposit.chargeId && p.deposit.chargeAmountCents != null)
       ? { id: p.deposit.chargeId, amountCents: p.deposit.chargeAmountCents }
       : null;
-  const sourceChargeId = sourceCandidate && math.earnings <= sourceCandidate.amountCents ? sourceCandidate.id : null;
-  const transfer = math.earnings > 0
-    ? await getStripe().transferToAccount({
-      accountId: musicianStripe!.accountId!, amountCents: math.earnings,
+  // SP5c Task 6: routed through distributeEarnings, which is the one place
+  // this profile's earnings split into per-member legs (a member payee's
+  // OWN connected account, when it is transfer-ready) rather than the whole
+  // amount landing on the profile's account. No shares configured, this is
+  // exactly the single transfer above, same idempotency base, same
+  // source-charge fit check, distributeEarnings's no-shares branch is byte
+  // for byte what this used to do inline.
+  const dist = math.earnings > 0
+    ? await distributeEarnings({
+      profileId: p.musicianProfileId, amountCents: math.earnings,
+      source: sourceCandidate ? { chargeId: sourceCandidate.id, remainingCents: sourceCandidate.amountCents } : null,
+      purpose: "earnings", ref: { bookingId, gigId },
       // Attempt-scoped like the charge key: Task 12's restore re-run bumps
       // `settlement.attempts` when it re-opens a clawed-back settlement, and
       // without that the transfer key would silently replay the consumed
       // original and no money would move.
-      idempotencyKey: `${bookingId}:${gigId}:earn:${p.settlement.attempts}`,
+      idempotencyBase: `${bookingId}:${gigId}:earn:${p.settlement.attempts}`,
       meta: { bookingId, gigId, purpose: "earnings" },
-      ...(sourceChargeId ? { sourceChargeId } : {}),
+      profileAccountId: musicianStripe!.accountId!, now,
     })
     : null;
+  // An all-held settlement (every member leg held, none transfer-ready) has
+  // no real Stripe transfer id: `dist.transferId` is null. A deterministic
+  // pseudo id (attempt-scoped, so a re-run of this same finalize replays
+  // rather than minting a new one) keeps `transfer.id` and the
+  // `earnings_transfer` ledger row's doc id populated so the doc still
+  // records that money moved, without inventing a Stripe object that
+  // doesn't exist. Colons are a legal ledger stripeId character (paymentsCore's
+  // isSafeLedgerStripeId), so this keeps its dedup rather than falling back to
+  // a random ledger doc id.
+  const transfer = dist ? { id: dist.transferId ?? `held:${bookingId}:${gigId}:${p.settlement.attempts}` } : null;
+  const sourceChargeId = dist?.sourcedAny ? sourceCandidate!.id : null;
 
   // Set when the absorption below is REFUSED because the deposit still carries
   // an intent of unknown fate; escalated after the terminal write lands (there
@@ -789,6 +809,8 @@ export async function finalizeSettlementSuccess(args: {
     updates["transfer.id"] = transfer.id;
     updates["transfer.amountCents"] = math.earnings;
     updates["transfer.transferredAt"] = now;
+    updates["transfer.legs"] = dist!.legs.length;
+    updates["transfer.heldCents"] = dist!.heldCents;
   }
   try {
     // M2 (branch audit): held to `terminalBaseline`, args.baseline for a
