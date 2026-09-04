@@ -277,6 +277,43 @@
     "fields": [
       { "fieldPath": "status", "order": "ASCENDING" },
       { "fieldPath": "createdAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "searchIndex", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "kind", "order": "ASCENDING" },
+      { "fieldPath": "tokens", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "searchIndex", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "kind", "order": "ASCENDING" },
+      { "fieldPath": "tokens", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "followerCount", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "searchIndex", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "kind", "order": "ASCENDING" },
+      { "fieldPath": "startsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "searchIndex", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "kind", "order": "ASCENDING" },
+      { "fieldPath": "followerCount", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "searchIndex", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "kind", "order": "ASCENDING" },
+      { "fieldPath": "endsAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "savedSearches", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "kind", "order": "ASCENDING" },
+      { "fieldPath": "createdAt", "order": "ASCENDING" }
+    ] },
+  { "collectionGroup": "savedSearches", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "uid", "order": "ASCENDING" },
+      { "fieldPath": "createdAt", "order": "DESCENDING" }
     ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",

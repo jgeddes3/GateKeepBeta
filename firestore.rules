@@ -349,6 +349,19 @@ service cloud.firestore {
       allow write: if false; // Cloud Functions only
     }
 
+    // SP8: the search index is built and read only by Cloud Functions. Its
+    // docs carry facets (busy days, act size) that the search callable
+    // deliberately narrows before anything leaves the server.
+    match /searchIndex/{docId} { allow read, write: if false; }
+    // SP8: per-uid daily search counter, same posture as geocodeBudgets.
+    match /searchBudgets/{uid} { allow read, write: if false; }
+    // SP8: a user's saved searches. Owner-read for the list screens;
+    // saveSearch/deleteSavedSearch own every write.
+    match /savedSearches/{savedId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow write: if false; // Cloud Functions only
+    }
+
     // events/{eventId}/posts/{postId}: a musician's show note. Public when
     // the parent event is public AND the post is live; the event's curator
     // members, the author profile's members, and admin see all (removed
