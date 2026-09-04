@@ -21,6 +21,11 @@ export default function FanTabs() {
           from AccountScreen's own "Saved searches" row, same shape as
           `following` above. */}
       <Tabs.Screen name="saved-searches" options={{ title: "Saved searches", href: null }} />
+      {/* SP5c Task 12: reachable via router.push("/(fan)/payouts") from
+          AccountScreen's own "Payouts" row, and from a tapped
+          share_paid/share_held/share_released/member_payout_failed push
+          (notificationHref), same hidden-tab shape as the two rows above. */}
+      <Tabs.Screen name="payouts" options={{ title: "Payouts", href: null }} />
     </Tabs>
   );
 }

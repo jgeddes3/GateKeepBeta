@@ -34,12 +34,18 @@ export async function ensureAndroidChannel(): Promise<void> {
 // NotificationsList's in-app row does; a legacy push predating this field
 // (or one with refKind: null) just falls back to notificationHref's own
 // null there, same as a profile match (resolved locally, not through this
-// helper).
+// helper). SP5c Task 12: widened to include "payouts" too, so a
+// share_paid/share_held/share_released/member_payout_failed push's refKind
+// (when a sender ever sets one) survives this narrowing instead of being
+// dropped to undefined; notificationHref's own payout branch does not
+// actually read refKind (it routes on kind alone), so this widening is
+// purely for narrowing completeness against NotificationDoc["refKind"].
 export function pushHref(response: Notifications.NotificationResponse | null | undefined): Href | null {
   const data = response?.notification.request.content.data as { kind?: unknown; refId?: unknown; refKind?: unknown } | undefined;
   if (!data || typeof data.kind !== "string") return null;
   const refId = typeof data.refId === "string" ? data.refId : null;
-  const refKind = data.refKind === "event" || data.refKind === "gig" || data.refKind === "profile" ? data.refKind : undefined;
+  const refKind = data.refKind === "event" || data.refKind === "gig" || data.refKind === "profile" || data.refKind === "payouts"
+    ? data.refKind : undefined;
   return notificationHref(data.kind as NotificationKind, refId, "mobile", refKind) as Href | null;
 }
 

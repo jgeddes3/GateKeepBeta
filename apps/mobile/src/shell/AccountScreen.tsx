@@ -73,6 +73,19 @@ export function AccountScreen() {
             <Text variant="label">Saved searches</Text>
             <IconCaretRight size={16} color={t.muted} />
           </Pressable>
+          {/* SP5c Task 12: every signed-in account owns its own payout setup
+              and cash-out (band members included), so this row is
+              unconditional too, same shape as the two rows above. */}
+          <Pressable
+            onPress={() => router.push("/(fan)/payouts")}
+            accessibilityRole="button"
+            accessibilityLabel="Payouts"
+            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.md,
+              borderTopWidth: 1, borderTopColor: t.border, paddingTop: tokens.space.md }}
+          >
+            <Text variant="label">Payouts</Text>
+            <IconCaretRight size={16} color={t.muted} />
+          </Pressable>
         </Card>
         <Button title="Sign out" variant="secondary" onPress={signOutUser} />
         <Button title="Delete account" variant="destructive" onPress={deleteAccount} />
