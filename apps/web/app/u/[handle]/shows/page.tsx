@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import { loadAllPastMusicianShows, loadProfile } from "../page";
 import { PastShowsList } from "./PastShowsList";
 
@@ -15,6 +15,9 @@ export function generateStaticParams() {
 
 export async function generateMetadata(props: { params: Promise<{ handle: string }> }): Promise<Metadata> {
   const { handle } = await props.params;
+  // Same non-redirecting fallback as app/u/[handle]/page.tsx's own
+  // generateMetadata for a mixed-case segment: see that function's comment.
+  if (handle !== handle.toLowerCase()) return { robots: { index: false } };
   const data = await loadProfile(handle);
   if (!data || data.kind !== "musician") return { robots: { index: false } };
   return {
@@ -33,6 +36,9 @@ export async function generateMetadata(props: { params: Promise<{ handle: string
 // client knows who's signed in.
 export default async function PastShowsPage(props: { params: Promise<{ handle: string }> }) {
   const { handle } = await props.params;
+  // Same lowercase-canonical redirect as the parent page (app/u/[handle]/
+  // page.tsx's own PublicProfile): see that function's comment.
+  if (handle !== handle.toLowerCase()) permanentRedirect(`/@${handle.toLowerCase()}/shows`);
   const data = await loadProfile(handle);
   if (!data || data.kind !== "musician") notFound();
   const shows = await loadAllPastMusicianShows(data.profileId);

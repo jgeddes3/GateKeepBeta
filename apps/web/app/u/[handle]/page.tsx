@@ -1,6 +1,6 @@
 import { cache } from "react";
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebase/firestore";
 import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
@@ -9,6 +9,8 @@ import {
 } from "@gatekeep/shared";
 import { MusicianProfile } from "./MusicianProfile";
 import { CuratorProfile } from "./CuratorProfile";
+import { getSiteUrl } from "../../../src/seo/siteUrl";
+import { musicianJsonLd, curatorJsonLd, serializeJsonLd } from "../../../src/seo/jsonLd";
 
 // Takedowns/approvals need to propagate within about a minute, and this page
 // can't be gated behind App Check (it's plain SSR, no client attestation),
@@ -409,6 +411,13 @@ export const loadProfile = cache(async (rawHandle: string): Promise<Loaded | nul
 
 export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise<Metadata> {
   const { handle } = await props.params;
+  // A mixed-case segment redirects to the lowercase canonical URL from the
+  // page component below; metadata resolution can run independently of the
+  // page render (e.g. a metadata-only consumer), so it can't itself
+  // permanentRedirect (that throws NEXT_REDIRECT, which only the page's own
+  // render is set up to let propagate as a real redirect response here).
+  // Simplest safe fallback: don't index the non-canonical URL.
+  if (handle !== handle.toLowerCase()) return { robots: { index: false } };
   const data = await loadProfile(handle);
   // The page component calls notFound() for the same null case, which
   // renders not-found.tsx's own `metadata` (its title) instead of whatever
@@ -448,7 +457,24 @@ export async function generateMetadata(props: PageProps<"/u/[handle]">): Promise
 
 export default async function PublicProfile(props: PageProps<"/u/[handle]">) {
   const { handle } = await props.params;
+  // Handles are stored/looked-up lowercase (loadProfile's own comment); a
+  // mixed-case URL segment still resolves to the same profile today, which
+  // would let search engines index two different URLs for one page. /@:handle
+  // is the canonical public URL (next.config.ts's rewrites/redirects pair),
+  // so redirect BEFORE the loader runs rather than rendering the same content
+  // twice under two URLs.
+  if (handle !== handle.toLowerCase()) permanentRedirect(`/@${handle.toLowerCase()}`);
   const data = await loadProfile(handle);
   if (!data) notFound();
-  return data.kind === "musician" ? <MusicianProfile data={data} /> : <CuratorProfile data={data} />;
+  const siteUrl = getSiteUrl();
+  const url = siteUrl ? `${siteUrl}/@${data.profile.handle}` : `/@${data.profile.handle}`;
+  const ld = data.kind === "musician"
+    ? musicianJsonLd(data.profile, url, data.coverUrl)
+    : curatorJsonLd(data.profile, url, data.photoUrls[0] ?? null);
+  return (
+    <>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(ld) }} />
+      {data.kind === "musician" ? <MusicianProfile data={data} /> : <CuratorProfile data={data} />}
+    </>
+  );
 }

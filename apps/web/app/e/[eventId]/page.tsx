@@ -6,6 +6,8 @@ import { getServerFirebase } from "../../../src/lib/firebase-server";
 import { isValidDocId, type EventDoc, type EventAct, type TicketTierDoc, type ProfileDoc } from "@gatekeep/shared";
 import { posterPublicUrl } from "../../../src/events/posterUrl";
 import { EventPageClient, type EventPageLineupEntry, type EventPageTier } from "./EventPageClient";
+import { getSiteUrl } from "../../../src/seo/siteUrl";
+import { eventJsonLd, serializeJsonLd } from "../../../src/seo/jsonLd";
 
 // Sub-project 6 task 9: the public event page's server half. Mirrors
 // app/u/[handle]/page.tsx's own loadProfile shape exactly (cache()'d loader,
@@ -138,5 +140,15 @@ export default async function EventPage(props: PageProps<"/e/[eventId]">) {
   const { eventId } = await props.params;
   const data = await loadEvent(eventId);
   if (!data) notFound();
-  return <EventPageClient {...data} />;
+  const siteUrl = getSiteUrl();
+  const url = siteUrl ? `${siteUrl}/e/${eventId}` : `/e/${eventId}`;
+  const ld = eventJsonLd(
+    data.event, eventId, url, data.tiers, data.posterUrl, data.lineup.map((l) => l.name),
+  );
+  return (
+    <>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(ld) }} />
+      <EventPageClient {...data} />
+    </>
+  );
 }

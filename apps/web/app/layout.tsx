@@ -5,6 +5,7 @@ import { AuthProvider } from "../src/auth/AuthProvider";
 import { VerifyEmailBanner } from "../src/auth/VerifyEmailBanner";
 import { AppShell } from "../src/shell/AppShell";
 import { MarketingThemeDefault } from "../src/shell/MarketingThemeDefault";
+import { getSiteUrl } from "../src/seo/siteUrl";
 
 const syne = Syne({
   variable: "--font-syne",
@@ -49,15 +50,13 @@ const themeScript = `(function(){try{
   if(p==="/"||p==="/terms"||p==="/privacy"){document.documentElement.setAttribute("data-theme","dark")}
 }catch(e){}})()`;
 
-// NEXT_PUBLIC_SITE_URL is the explicit override (set it once a production
-// domain exists); VERCEL_PROJECT_PRODUCTION_URL is Vercel's own env var,
-// available automatically on Vercel deployments without any config. If
-// neither is set, metadataBase is omitted entirely rather than falling back
-// to a localhost URL. A missing canonical/og:url is invisible, but a
-// canonical link pointing at http://localhost:3000 would ship broken SEO/
-// share metadata into production.
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
-  ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : undefined);
+// getSiteUrl() (src/seo/siteUrl.ts) is the one source of truth for the
+// site's public origin: null when NEXT_PUBLIC_SITE_URL is unset or empty, so
+// metadataBase is omitted entirely rather than falling back to a localhost
+// URL. A missing canonical/og:url is invisible, but a canonical link
+// pointing at http://localhost:3000 would ship broken SEO/share metadata
+// into production.
+const siteUrl = getSiteUrl();
 
 export const metadata: Metadata = {
   ...(siteUrl ? { metadataBase: new URL(siteUrl) } : {}),
