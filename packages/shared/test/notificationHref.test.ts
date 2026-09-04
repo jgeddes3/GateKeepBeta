@@ -42,4 +42,10 @@ describe("notificationHref", () => {
     expect(notificationHref("saved_search_match", null, "web", "event")).toBeNull();
     expect(notificationHref("saved_search_match", undefined, "mobile", "gig")).toBeNull();
   });
+  it("routes payout kinds to the payouts surface", () => {
+    for (const kind of ["share_paid", "share_held", "share_released", "member_payout_failed"] as const) {
+      expect(notificationHref(kind, null, "web", "payouts")).toBe("/dashboard#payouts");
+      expect(notificationHref(kind, null, "mobile", "payouts")).toBe("/(fan)/payouts");
+    }
+  });
 });

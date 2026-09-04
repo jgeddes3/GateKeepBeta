@@ -13,6 +13,8 @@ export type NotificationPlatform = "web" | "mobile";
 // SP8: saved_search_match routes on refKind: event -> the event page, gig ->
 // the gigs page, profile (or a missing refId) -> null, same as new_music,
 // the clients resolve the handle themselves.
+// SP5c: the four payout kinds (share_paid, share_held, share_released,
+// member_payout_failed) all route to the payouts surface regardless of refId.
 export function notificationHref(
   kind: NotificationKind,
   refId: string | null | undefined,
@@ -30,6 +32,9 @@ export function notificationHref(
     if (refKind === "event") return platform === "web" ? `/e/${refId}` : `/event/${refId}`;
     if (refKind === "gig") return platform === "web" ? `/gigs/${refId}` : `/(musician)/gigs?gigId=${refId}`;
     return null;
+  }
+  if (kind === "share_paid" || kind === "share_held" || kind === "share_released" || kind === "member_payout_failed") {
+    return platform === "web" ? "/dashboard#payouts" : "/(fan)/payouts";
   }
   return null;
 }

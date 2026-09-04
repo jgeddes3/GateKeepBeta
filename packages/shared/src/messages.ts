@@ -177,3 +177,9 @@ export const SEARCH_EMPTY_MESSAGE = "Nothing matches yet. Try fewer filters or a
 export const SEARCH_LOCATION_OFF_MESSAGE = "Turn on location to search near you.";
 export const SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE = "Type something or pick a filter before saving a search.";
 export const SEARCH_SIGN_IN_MESSAGE = "Sign in to search.";
+
+// ---------- Sub-project 5c payout splits ----------
+export const SHARES_SUM_MESSAGE = "Shares must add up to 100%.";
+export const SHARES_MEMBER_MESSAGE = "Every share must belong to a current member.";
+export const SHARES_ADMIN_MESSAGE = "Only a profile admin can change payout shares.";
+export const MEMBER_PAYOUT_SETUP_REQUIRED_MESSAGE = "Set up payouts before cashing out.";

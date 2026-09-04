@@ -8,3 +8,4 @@ export * from "./feePreviews.js";
 export * from "./discover.js";
 export * from "./notificationHref.js";
 export * from "./search.js";
+export * from "./payoutShares.js";

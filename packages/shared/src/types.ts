@@ -1,3 +1,5 @@
+import type { PayoutShare } from "./payoutShares.js";
+
 export type ProfileType = "musician" | "curator";
 export type MusicianSubtype = "solo" | "band";
 export type CuratorSubtype = "venue" | "planner" | "individual_host";
@@ -102,7 +104,12 @@ export interface NotificationDoc {
   // SP7: "show_announced", "new_music", "show_rescheduled", "show_post" are added for fan discovery notifications
   // SP8: "saved_search_match" carries the matched source id in refId and
   // says which collection it names in refKind.
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match";
+  // SP5c: "share_paid" is a settlement transfer landing in a member's own
+  // account; "share_held" is that share instead going to heldShares because
+  // the member's account is not enabled yet; "share_released" is a held
+  // share later transferring once the account is enabled; "member_payout_failed"
+  // is a member's own standard/instant cash-out bouncing.
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match" | "share_paid" | "share_held" | "share_released" | "member_payout_failed";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -116,7 +123,9 @@ export interface NotificationDoc {
   refId?: string;
   // SP8: which collection refId names for "saved_search_match" (event, gig,
   // or profile), see notificationHref.ts for the routing.
-  refKind?: "event" | "gig" | "profile";
+  // SP5c: "payouts" for the four share_*/member_payout_failed kinds, which
+  // always route to the payouts surface regardless of refId.
+  refKind?: "event" | "gig" | "profile" | "payouts";
 }
 
 // ---------- Sub-project 10 hardening ----------
@@ -698,6 +707,9 @@ export interface SettlementState {
 export interface TransferState {         // musician earnings for this occurrence
   status: TransferStatus;
   id: string | null; amountCents: number | null; transferredAt: number | null;
+  // SP5c: how many transfer legs this settlement split into (per payee), and
+  // how many cents landed in heldShares instead of transferring directly.
+  legs?: number | null; heldCents?: number | null;
 }
 // bookings/{bookingId}/payments/{gigId}, one doc per occurrence, the money
 // truth for that date. Server-written only; readable by both booking sides.
@@ -761,7 +773,32 @@ export interface StripeProfileDoc {
   // booking; requestPayout refuses an instant payout while `now < instantHoldUntil`.
   // Standard payouts are unaffected.
   instantHoldUntil?: number | null;
+  // SP5c: standing payout shares; absent or null means 100% to this profile's account.
+  shares?: PayoutShare[] | null;
+  sharesUpdatedAt?: number | null;
   updatedAt: number;
+}
+
+// SP5c: a person's own Express account, users/{uid}/private/stripe. Musician half only.
+export interface MemberStripeDoc {
+  accountId: string | null;
+  transfersEnabled: boolean; payoutsEnabled: boolean; instantEligible: boolean;
+  onboardingStartedAt: number | null; onboardedAt: number | null;
+  lastPayout?: PayoutRequestRecord | null;
+  instantHoldUntil?: number | null;
+  updatedAt: number;
+}
+
+export type HeldShareRef = { bookingId: string; gigId: string } | { eventId: string; orderId: string };
+export type HeldShareStatus = "held" | "released" | "failed";
+// heldShares/{idempotencyBase}:{uid}. A member's share of a settlement that
+// could not be transferred because their account is not enabled yet.
+export interface HeldShareDoc {
+  profileId: string; uid: string; amountCents: number;
+  purpose: "earnings" | "ticket_settlement";
+  ref: HeldShareRef;
+  status: HeldShareStatus;
+  createdAt: number; releasedAt: number | null; transferId: string | null; error?: string;
 }
 
 // adminAlerts/{alertId}, SP5 Task 9, extended through Task 11. The money
@@ -895,7 +932,10 @@ export type AdminAlertKind =
   // client SDK's currentUser.delete(), the console, the Admin SDK), bypassing
   // its refusals, while it still owed something: a live ticket, an offered
   // transfer, a pending order, or sole admin of a profile now left with none.
-  | "account_deleted_unclean";
+  | "account_deleted_unclean"
+  // SP5c: a held share could not be transferred after the member's account
+  // was enabled; retried on the member's next status sync.
+  | "held_share_release_failed";
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
@@ -962,7 +1002,13 @@ export type LedgerKind = "deposit_charged" | "settlement_charged" | "refund"
   // charge this platform made, and its two possible resolutions; and a
   // refund issued outside the normal cancellation/refund flows (an operator
   // acting directly in Stripe, reconciled back into the ledger).
-  | "dispute_opened" | "dispute_lost" | "dispute_won" | "external_refund";
+  | "dispute_opened" | "dispute_lost" | "dispute_won" | "external_refund"
+  // SP5c: a payout share transfer to a member's own connected account; a
+  // member's share that could not transfer and was written to heldShares
+  // instead, and the later release of that held share; a member cash-out
+  // through the standard or instant rail, and a failed member payout.
+  | "share_transfer" | "share_held" | "share_released"
+  | "member_payout_standard" | "member_payout_instant" | "member_payout_failed";
 export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute, direction (in vs out, curator vs musician) comes from `kind`, never from sign
@@ -978,6 +1024,11 @@ export interface LedgerEntry {
   // manual/reconciliation entry). Optional so every pre-SP10 ledger row and
   // write site stays valid; absent is treated as false.
   sourced?: boolean;
+  // SP5c: the member uid a share_transfer/share_held/share_released/
+  // member_payout_* row is about, and the ticket order id a per-order
+  // sourced settlement row is about. Optional so every pre-SP5c ledger row
+  // and write site stays valid; absent means "not applicable".
+  uid?: string | null; orderId?: string | null;
 }
 
 export interface DisputeRecord {
@@ -1073,6 +1124,9 @@ export interface TicketOrderDoc {
   // order itself. Optional; absent means "no dispute".
   disputeId?: string;
   disputeStatus?: "open" | "won" | "lost";
+  // SP5c: stamped when the order is completed, for per-order sourced settlement.
+  chargeId?: string | null; chargeAmountCents?: number | null;
+  settledAt?: number | null; settlementLegs?: number | null;
 }
 export type TicketStatus = "valid" | "checked_in" | "refunded" | "transferred";
 export interface TicketDoc {
