@@ -9,6 +9,7 @@ import { useAuth } from "../../src/auth/AuthProvider";
 import { cn } from "../../src/lib/utils";
 import { notificationHref, type ProfileType, type ProfileStatus, type ProfileDoc, type NotificationDoc } from "@gatekeep/shared";
 import { SavedSearches } from "../../src/search/SavedSearches";
+import { MemberPayoutsCard } from "../../src/payments/MemberPayoutsCard";
 import { Button } from "../../src/ui/button";
 import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
@@ -367,6 +368,10 @@ export default function Dashboard() {
       <p className="mt-2 font-sora text-sm text-gk-muted">Your profiles, and anything that needs a look.</p>
 
       <section className="mt-8">
+        <MemberPayoutsCard uid={user.uid} />
+      </section>
+
+      <section className="mt-10">
         <h2 className="font-syne text-lg font-semibold text-gk-text">Your profiles</h2>
         {/* Pre-existing bug fixed in passing (found live during this task's
             browser walkthrough, not introduced by it, see git blame): both
