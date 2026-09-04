@@ -6,6 +6,7 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { LocationFields, MAX_ADDRESS_LENGTH, type LocationValue } from "../gigs/GigForms";
 import { EVENT_STATUS_LABEL, EVENT_STATUS_BADGE } from "./eventDisplay";
+import { PosterField } from "./PosterField";
 import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -498,6 +499,10 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
   const [maxTicketsPerBuyer, setMaxTicketsPerBuyer] = useState(String(event.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER));
   const [lineup, setLineup] = useState<EventAct[]>(event.lineup);
   const [genres, setGenres] = useState<string[]>(event.curatorGenres ?? []);
+  // Seeded once from the event like every other field here; PosterField
+  // hands back the processed public path (or null on Remove) and Save below
+  // carries it in the same full-replace payload as the rest.
+  const [posterPath, setPosterPath] = useState<string | null>(event.posterPath ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -532,17 +537,11 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
         // []`, so an absent field here is what CLEARS a previously-set
         // selection server-side, exactly matching an empty `genres` here.
         curatorGenres: genres.length > 0 ? genres : undefined,
-        // Fix round 1 (Important): updateEvent's own full-replace convention
-        // treats an absent posterPath as "clear it" (resolvePosterPath in
-        // functions/src/events.ts returns null for both undefined and
-        // null), the same discipline this callable family already applies
-        // to every other field. Without this, the first Save on any event
-        // that ever picks up a poster (today: none, since this task ships
-        // poster-less creation, see EventEditor's own header note) would
-        // silently wipe it. Carrying the event's own current value forward
-        // is this form's explicit "no change" signal, not a real edit: this
-        // form has no poster field of its own to edit.
-        posterPath: event.posterPath ?? null,
+        // updateEvent's full-replace convention treats an absent posterPath
+        // as "clear it" (resolvePosterPath returns null for undefined and
+        // null alike), so the current value is always sent explicitly: the
+        // one PosterField picked, or the event's own when it was untouched.
+        posterPath,
       };
       await callFn("updateEvent", payload);
       setSaved(true);
@@ -580,6 +579,13 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
               <Input id="event-edit-max-tix" type="number" min={1} max={20} value={maxTicketsPerBuyer} onChange={(e) => setMaxTicketsPerBuyer(e.target.value)} />
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>Poster</CardTitle></CardHeader>
+        <CardContent>
+          <PosterField curatorProfileId={profileId} value={posterPath} onChange={setPosterPath} disabled={busy} />
         </CardContent>
       </Card>
 

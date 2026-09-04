@@ -7,7 +7,7 @@ import type { EventAct, EventDoc, GigDoc, ProfileDoc, TicketTierDoc } from "@gat
 import { getFirebase } from "../lib/firebase";
 import { formatGigTime } from "../../app/u/[handle]/gigDisplay";
 import { EVENT_STATUS_LABEL, EVENT_STATUS_BADGE, formatEventFullDate } from "./eventDisplay";
-import { usePosterUrl } from "./posterUrl";
+import { posterPublicUrl } from "./posterUrl";
 import {
   EventEditor, tierRowFrom, type EventEditorMode, type EventRow, type EventSourceInput, type TierRowState,
 } from "./EventEditor";
@@ -72,7 +72,7 @@ function TierBars({ eventId }: { eventId: string }) {
 }
 
 function EventListRow({ event, onManage }: { event: EventRow; onManage: () => void }) {
-  const posterUrl = usePosterUrl(event.posterPath);
+  const posterUrl = posterPublicUrl(event.posterPath);
   return (
     <button
       type="button" onClick={onManage}

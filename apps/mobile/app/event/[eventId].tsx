@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { ScrollView, View, Image, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
-import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import {
   DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals,
   EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
@@ -14,7 +13,7 @@ import { useNow } from "../../src/bookings/BookingThread";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import {
   formatCents, formatEventFullDate, formatEventTimeRange, formatTierPrice, tierFeeLine, tierAvailability,
-  TIER_AVAILABILITY_LABEL, eventSalesClosedReason,
+  TIER_AVAILABILITY_LABEL, eventSalesClosedReason, posterPublicUrl,
 } from "../../src/events/eventDisplay";
 import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "../../src/payments/stripe";
 import { PostPurchaseGenrePrompt } from "../../src/discover/GenrePickerSheet";
@@ -191,18 +190,16 @@ export default function EventScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const { db, storage } = getFirebase();
+        const { db } = getFirebase();
         const eventSnap = await getDoc(doc(db, "events", eventId)); // rules deny unless published/completed (or member/admin)
         if (!eventSnap.exists()) { if (!cancelled) setState("notfound"); return; }
         const event = eventSnap.data() as EventDoc;
-        const [curatorSnap, tiersSnap, posterUrl, lineup] = await Promise.all([
+        const [curatorSnap, tiersSnap, lineup] = await Promise.all([
           getDoc(doc(db, "profiles", event.curatorProfileId)),
           getDocs(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder"))),
-          event.posterPath
-            ? getDownloadURL(storageRef(storage, event.posterPath)).catch(() => null)
-            : Promise.resolve(null),
           resolveLineup(db, event.lineup),
         ]);
+        const posterUrl = posterPublicUrl(event.posterPath);
         const curator = curatorSnap.exists() ? (curatorSnap.data() as ProfileDoc) : null;
         const tiers: TierRow[] = tiersSnap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketTierDoc) }));
         if (!cancelled) setState({ event, posterUrl, curatorName: curator?.name ?? "Unknown", tiers, lineup });

@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { doc, getDoc } from "firebase/firestore";
-import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import { LAUNCH_TIMEZONE, ticketServiceFeeCents, type EventStatus, type TicketFeePolicy, type TicketStatus } from "@gatekeep/shared";
-import { getFirebase } from "../lib/firebase";
+import { getFirebase, EMU_HOST, STORAGE_BUCKET } from "../lib/firebase";
 import type { StatusTone } from "../ui";
 
 // Sub-project 6 task 11: the RN twin of apps/web/src/events/eventDisplay.ts
@@ -184,26 +183,15 @@ export function useTicketHolderAddress(eventId: string, uid: string | null): Eve
   return uid ? state : "hidden";
 }
 
-// ---------- Poster resolution ----------
-// RN port of apps/web/src/events/posterUrl.ts's usePosterUrl. storage.rules'
-// public/{kind}/{profileId}/{fileName} match grants an unauthenticated get
-// to anyone, so this needs no auth check of its own.
-export function usePosterUrl(path: string | null | undefined): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  // Render-time reset so switching events never shows the PREVIOUS poster
-  // while the new one is still resolving.
-  const [trackedPath, setTrackedPath] = useState(path);
-  if (path !== trackedPath) {
-    setTrackedPath(path);
-    if (url !== null) setUrl(null);
-  }
-  useEffect(() => {
-    if (!path) return;
-    let cancelled = false;
-    getDownloadURL(storageRef(getFirebase().storage, path))
-      .then((u) => { if (!cancelled) setUrl(u); })
-      .catch((e) => { console.warn("usePosterUrl: resolve failed", path, e); });
-    return () => { cancelled = true; };
-  }, [path]);
-  return path ? url : null;
+// ---------- Poster URL ----------
+// Built from the path, never resolved with getDownloadURL (sp6 audit finding
+// 16, spec 6.5): storage.rules' public/{kind}/{profileId}/{fileName} match
+// grants an unauthenticated read, and this REST form is what Storage serves
+// for a rules-allowed object with no token. RN twin of web's posterUrl.ts;
+// SP7's cards adopt the same helper. Dev builds point at the Storage emulator
+// on the host lib/firebase.ts already resolved for the other emulators.
+export function posterPublicUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  const base = __DEV__ ? `http://${EMU_HOST}:9199` : "https://firebasestorage.googleapis.com";
+  return `${base}/v0/b/${STORAGE_BUCKET}/o/${encodeURIComponent(path)}?alt=media`;
 }

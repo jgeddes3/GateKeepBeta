@@ -11,6 +11,7 @@ import {
   formatEventFullDate, formatEventTimeRange, EVENT_STATUS_LABEL, EVENT_STATUS_TONE,
 } from "../../../../src/events/eventDisplay";
 import { TierEditor, TierSalesStats, tierRowFrom, type TierRowState } from "../../../../src/events/TierEditor";
+import { PosterField } from "../../../../src/events/PosterField";
 import {
   Text, Button, Card, StatusBadge, TextArea, PageBackground, Skeleton, SkeletonCard, ErrorBanner,
 } from "../../../../src/ui";
@@ -83,6 +84,8 @@ export default function EventManagementScreen() {
   const [showCancel, setShowCancel] = useState(false);
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [posterBusy, setPosterBusy] = useState(false);
+  const [posterError, setPosterError] = useState<string | null>(null);
 
   // Render-time reset, same idiom as [gigId].tsx's privLocGigId: this screen
   // does not remount when navigating from one event's management screen
@@ -142,6 +145,26 @@ export default function EventManagementScreen() {
     }
   };
 
+  // The mobile screen has no content editor, so the poster saves on its own
+  // through updateEvent's full-replace payload: every current field of the
+  // live event doc plus the new posterPath. Content stays web-edit-only
+  // (this file's own header), this is the one field mobile writes.
+  const savePoster = async (path: string | null) => {
+    setPosterBusy(true);
+    setPosterError(null);
+    try {
+      await callFn("updateEvent", {
+        curatorProfileId: event.curatorProfileId, eventId,
+        title: event.title, description: event.description, startsAt: event.startsAt, endsAt: event.endsAt,
+        maxTicketsPerBuyer: event.maxTicketsPerBuyer, lineup: event.lineup, posterPath: path,
+      });
+    } catch (e) {
+      setPosterError(e instanceof Error ? e.message : "Could not save the poster.");
+    } finally {
+      setPosterBusy(false);
+    }
+  };
+
   return (
     <View style={{ flex: 1 }}>
       <PageBackground />
@@ -164,6 +187,16 @@ export default function EventManagementScreen() {
             {event.lineup.map((act, i) => (
               <Text key={`${act.kind}-${i}-${act.name}`}>{act.name}</Text>
             ))}
+          </Card>
+        )}
+
+        {editable && (
+          <Card style={{ gap: tokens.space.sm }}>
+            <Text variant="label">Poster</Text>
+            <PosterField
+              curatorProfileId={event.curatorProfileId} value={event.posterPath}
+              onChange={(path) => void savePoster(path)} saving={posterBusy} saveError={posterError}
+            />
           </Card>
         )}
 

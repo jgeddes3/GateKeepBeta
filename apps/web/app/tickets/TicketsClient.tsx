@@ -9,7 +9,7 @@ import {
   formatEventFullDate, formatEventTimeRange, TICKET_STATUS_LABEL, TICKET_STATUS_BADGE,
 } from "../../src/events/eventDisplay";
 import { useTicketHolderAddress, mapUrl } from "../../src/events/ticketHolderAddress";
-import { usePosterUrl } from "../../src/events/posterUrl";
+import { posterPublicUrl } from "../../src/events/posterUrl";
 import { useNow } from "../../src/bookings/BookingThread";
 import { TicketQr } from "./TicketQr";
 import { Badge } from "../../src/ui/badge";
@@ -133,7 +133,7 @@ function CancelledTicketCard({ ticket }: { ticket: TicketRow }) {
 }
 
 function TicketCard({ uid, ticket, event }: { uid: string; ticket: TicketRow; event: EventDoc }) {
-  const posterUrl = usePosterUrl(event.posterPath);
+  const posterUrl = posterPublicUrl(event.posterPath);
   const address = useTicketHolderAddress(ticket.eventId, uid);
   // A live entry credential only while it's still "valid"/"checked_in": a
   // refunded or transferred-away ticket is no longer this holder's to

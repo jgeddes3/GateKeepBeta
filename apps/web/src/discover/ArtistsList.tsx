@@ -2,10 +2,10 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getDocs } from "firebase/firestore";
+import { ref, getDownloadURL } from "firebase/storage";
 import { GENRES, type MusicianSubtype, type ProfileDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { artistsQuery, type ArtistRow } from "./discoverQueries";
-import { usePosterUrl } from "../events/posterUrl";
 import { formatChipLabel } from "../portfolio/PortfolioForms";
 import { Badge } from "../ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -16,13 +16,39 @@ import { FollowButton } from "./FollowButton";
 const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
 const ALL_GENRES = "__all";
 
-// usePosterUrl is named for its original poster call site (posterUrl.ts's
-// own header comment) but its body is a generic "storage path -> download
-// URL" resolver with nothing poster-specific in it; reused here unchanged
-// for a musician's avatar the same way TicketsClient.tsx already reuses it
-// for a ticket card's event poster.
+// Task 28 note: this used to reuse posterUrl.ts's usePosterUrl hook (its
+// body was a generic "storage path -> download URL" resolver with nothing
+// poster-specific in it). posterUrl.ts is now the plain, poster-only
+// posterPublicUrl (built from the path, no round trip, per that file's own
+// header), which is specific to the public `public/photos/...` poster
+// convention; an avatar photo is a profile-photo surface, out of that
+// task's scope (see task-28-report.md), so it keeps resolving the same way
+// CuratorForms.tsx's own GalleryPhoto does: a local getDownloadURL call.
+function useAvatarUrl(path: string | null): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  // Render-time reset (the old usePosterUrl's own idiom, kept here
+  // unchanged): a row re-keyed onto a different artist must never show the
+  // PREVIOUS avatar while the new one is still resolving, and setting state
+  // synchronously inside the effect body below (rather than here, during
+  // render) trips the React Compiler's set-state-in-effect rule.
+  const [trackedPath, setTrackedPath] = useState(path);
+  if (path !== trackedPath) {
+    setTrackedPath(path);
+    if (url !== null) setUrl(null);
+  }
+  useEffect(() => {
+    if (!path) return;
+    let cancelled = false;
+    getDownloadURL(ref(getFirebase().storage, path))
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => { if (!cancelled) setUrl(null); });
+    return () => { cancelled = true; };
+  }, [path]);
+  return path ? url : null;
+}
+
 function ArtistRowItem({ artist }: { artist: ArtistRow }) {
-  const avatarUrl = usePosterUrl(artist.portfolio?.avatarPhotoPath ?? null);
+  const avatarUrl = useAvatarUrl(artist.portfolio?.avatarPhotoPath ?? null);
   const genres = (artist.portfolio?.genres ?? []).slice(0, 3);
   return (
     <div className="flex items-center gap-3 rounded-gk-sm px-2 py-2">

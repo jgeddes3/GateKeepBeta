@@ -7,7 +7,7 @@ import { callFn } from "../lib/callable";
 import { gigLocationLabel } from "../bookings/BookingForms";
 import { useNow } from "../bookings/BookingThread";
 import {
-  formatEventFullDate, formatEventTimeRange, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, usePosterUrl,
+  formatEventFullDate, formatEventTimeRange, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, posterPublicUrl,
 } from "../events/eventDisplay";
 import { TicketDetail } from "./TicketDetail";
 import { TransferSheet } from "./TransferSheet";
@@ -223,7 +223,7 @@ function CancelledTicketCard({ ticket }: { ticket: TicketRow }) {
 
 function TicketRowCard({ ticket, event, onPress }: { ticket: TicketRow; event: EventDoc; onPress: () => void }) {
   const t = useTokens();
-  const posterUrl = usePosterUrl(event.posterPath);
+  const posterUrl = posterPublicUrl(event.posterPath);
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${event.title}, ${ticket.tierName}`}>
       <Card style={{ flexDirection: "row", gap: tokens.space.sm }}>

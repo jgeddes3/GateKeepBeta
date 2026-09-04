@@ -32,6 +32,10 @@ const firebaseConfig = {
   appId: pick(process.env.EXPO_PUBLIC_FIREBASE_APP_ID, "1:894446689930:web:20531390a23a3804b05773"),
 };
 
+// Exported for src/events/eventDisplay.ts's posterPublicUrl: a poster URL is
+// built from the bucket name, never resolved through the SDK.
+export const STORAGE_BUCKET = firebaseConfig.storageBucket;
+
 // Where do the Firebase emulators live, from this device's point of view?
 // A PHYSICAL phone must use the dev machine's LAN IP, which is exactly the
 // host Metro served the bundle from (Constants.expoConfig.hostUri, e.g.

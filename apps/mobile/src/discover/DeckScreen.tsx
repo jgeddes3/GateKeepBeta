@@ -12,7 +12,7 @@ import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { useNow } from "../bookings/BookingThread";
 import { gigLocationLabel } from "../bookings/BookingForms";
-import { formatEventFullDate, formatEventTimeRange, usePosterUrl } from "../events/eventDisplay";
+import { formatEventFullDate, formatEventTimeRange, posterPublicUrl } from "../events/eventDisplay";
 import { useEventCache, useMyTickets } from "../tickets/TicketList";
 import { DeckCardView } from "./DeckCards";
 import { ShowsList } from "./ShowsList";
@@ -124,7 +124,7 @@ function useUpcomingTicketedEvents(uid: string | null): UpcomingEvent[] {
 
 function UpcomingEventRow({ item, onPress }: { item: UpcomingEvent; onPress: () => void }) {
   const t = useTokens();
-  const posterUrl = usePosterUrl(item.event.posterPath);
+  const posterUrl = posterPublicUrl(item.event.posterPath);
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={item.event.title}>
       <Card style={{ flexDirection: "row", gap: tokens.space.sm }}>

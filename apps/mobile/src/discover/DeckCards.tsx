@@ -5,7 +5,9 @@ import { distanceLabel, type DeckCard, type DeckNextShow, type DeckPreview } fro
 import { publicStorageUrl } from "./storageUrl";
 import { FollowButton } from "./FollowButton";
 import { formatChipLabel } from "./discoverQueries";
-import { formatCents, formatEventFullDate, formatEventShortDate, formatEventTimeRange } from "../events/eventDisplay";
+import {
+  formatCents, formatEventFullDate, formatEventShortDate, formatEventTimeRange, posterPublicUrl,
+} from "../events/eventDisplay";
 import {
   Text, Card, Badge, Button, PhotoScrim, PhotoPlaceholder,
   IconMapPin, IconMusicNotes, IconSpeakerSlash, IconTicket, IconUserCircle, IconImages,
@@ -67,10 +69,16 @@ function PreviewLine({ preview }: { preview: DeckPreview }) {
 // One node carries the photo's flex, its floor, and its clipping, so a
 // squeezed card can never paint the image over the text block underneath.
 // It is also the card's large tap target onto the subject's own screen.
-function DeckPhoto({ path, fallback, preview, onPress, label }: {
-  path: string | null; fallback: ReactNode; preview: DeckPreview; onPress: () => void; label: string;
+//
+// Takes an already-resolved `url`, not a raw path: a show card's photo is an
+// event POSTER (posterPublicUrl, Task 28's single canonical poster-url
+// builder), while an artist/venue card's is a profile photo (publicStorageUrl,
+// SP7 Task 11's own path-to-URL builder for those); each caller below picks
+// the resolver that matches what it's actually showing, this component just
+// renders whatever URL it's handed.
+function DeckPhoto({ url, fallback, preview, onPress, label }: {
+  url: string | null; fallback: ReactNode; preview: DeckPreview; onPress: () => void; label: string;
 }) {
-  const url = path ? publicStorageUrl(path) : null;
   return (
     <Pressable
       onPress={onPress}
@@ -165,7 +173,7 @@ export function ShowCard({ card, height }: { card: Extract<DeckCard, { kind: "sh
   return (
     <CardFrame height={height}>
       <DeckPhoto
-        path={card.posterPath}
+        url={posterPublicUrl(card.posterPath)}
         fallback={<IconTicket size={40} color={t.muted} />}
         preview={card.preview}
         onPress={openEvent}
@@ -209,11 +217,12 @@ export function ArtistCard({ card, height }: { card: Extract<DeckCard, { kind: "
   // A const, not `card.nextShow` inline: TypeScript keeps a const's
   // narrowing inside the callbacks below, a property's narrowing it does not.
   const next = card.nextShow;
+  const photoPath = card.coverPhotoPath ?? card.avatarPhotoPath;
 
   return (
     <CardFrame height={height}>
       <DeckPhoto
-        path={card.coverPhotoPath ?? card.avatarPhotoPath}
+        url={photoPath ? publicStorageUrl(photoPath) : null}
         fallback={<IconUserCircle size={44} color={t.muted} />}
         preview={card.preview}
         onPress={openArtist}
@@ -253,7 +262,7 @@ export function VenueCard({ card, height }: { card: Extract<DeckCard, { kind: "v
   return (
     <CardFrame height={height}>
       <DeckPhoto
-        path={card.photoPath}
+        url={card.photoPath ? publicStorageUrl(card.photoPath) : null}
         fallback={<IconImages size={40} color={t.muted} />}
         preview={card.preview}
         onPress={openVenue}

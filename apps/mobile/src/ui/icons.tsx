@@ -72,4 +72,7 @@ export const IconListBullets = wrap(Ph.ListBulletsIcon);
 export const IconCompass = wrap(Ph.CompassIcon);
 export const IconSpeakerHigh = wrap(Ph.SpeakerHighIcon);
 export const IconSpeakerSlash = wrap(Ph.SpeakerSlashIcon);
+// Task 28 (poster picker): the placeholder glyph and the upload action.
+export const IconImage = wrap(Ph.ImageIcon);
+export const IconUploadSimple = wrap(Ph.UploadSimpleIcon);
 // Add more as screen tasks need them; every addition goes HERE, wrapped.

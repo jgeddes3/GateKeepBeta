@@ -2,9 +2,9 @@ import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
-import { ref, getDownloadURL } from "firebase/storage";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
 import { isValidDocId, type EventDoc, type EventAct, type TicketTierDoc, type ProfileDoc } from "@gatekeep/shared";
+import { posterPublicUrl } from "../../../src/events/posterUrl";
 import { EventPageClient, type EventPageLineupEntry, type EventPageTier } from "./EventPageClient";
 
 // Sub-project 6 task 9: the public event page's server half. Mirrors
@@ -34,19 +34,6 @@ type LoadedEvent = {
   // canonical value anyway, cache()'d together with the rest of this load.
   now: number;
 };
-
-async function storageUrl(path: string | null | undefined): Promise<string | null> {
-  if (!path) return null;
-  try { return await getDownloadURL(ref(getServerFirebase().storage, path)); }
-  catch (e) {
-    // Swallowed to null on purpose (a missing/racing poster shouldn't 500
-    // the whole page, same tradeoff app/u/[handle]/page.tsx's own
-    // storageUrl accepts), but a Storage-wide outage would otherwise
-    // silently empty every poster with no signal anywhere: log it.
-    console.warn("storageUrl failed", path, e);
-    return null;
-  }
-}
 
 // Batched lineup-handle lookup, one Promise.all over the UNIQUE booking
 // musicianProfileIds (n+1-avoidance, same idiom app/u/[handle]/page.tsx's
@@ -94,12 +81,14 @@ export const loadEvent = cache(async (eventId: string): Promise<LoadedEvent | nu
     if (!eventSnap.exists()) return null;
     const event = eventSnap.data() as EventDoc;
 
-    const [curatorSnap, tiersSnap, posterUrl, lineup] = await Promise.all([
+    const [curatorSnap, tiersSnap, lineup] = await Promise.all([
       getDoc(doc(db, "profiles", event.curatorProfileId)),
       getDocs(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder"))),
-      storageUrl(event.posterPath),
       resolveLineup(db, event.lineup),
     ]);
+    // Built, not fetched (posterUrl.ts's own header): the OG image and the
+    // poster block both read this string, and no Storage call runs per render.
+    const posterUrl = posterPublicUrl(event.posterPath);
     const curator = curatorSnap.exists() ? (curatorSnap.data() as ProfileDoc) : null;
     const tiers: EventPageTier[] = tiersSnap.docs.map((d) => {
       const t = d.data() as TicketTierDoc;
