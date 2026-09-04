@@ -1,0 +1,207 @@
+import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import { getFirestore, type Firestore, type DocumentReference } from "firebase-admin/firestore";
+import {
+  normalizeWords, buildTokens, dayKeyInLaunchZone, SEARCH_BUSY_DAYS_WINDOW_MS,
+  type SearchIndexDoc, type SearchKind, type EventDoc, type GigDoc, type ProfileDoc, type BookingRequestDoc,
+  type BookingDoc, type ActSize,
+} from "@gatekeep/shared";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const BUSY_BOOKINGS_CAP = 50;
+const BUSY_EVENTS_CAP = 50;
+
+export function indexDocId(kind: SearchKind, sourceId: string): string { return `${kind}_${sourceId}`; }
+
+function text(...parts: Array<string | null | undefined>): { words: string[]; tokens: string[] } {
+  const words = normalizeWords(parts.filter((p): p is string => typeof p === "string" && p.length > 0).join(" "));
+  return { words, tokens: buildTokens(words) };
+}
+
+const lower = (s: string | null | undefined): string | null => (s ? s.toLowerCase() : null);
+
+const base = (kind: SearchKind, sourceId: string, now: number): SearchIndexDoc => ({
+  kind, sourceId, handle: null, title: "", subtitle: "", words: [], tokens: [], genres: [],
+  city: null, cityLower: null, neighborhood: null, geo: null, startsAt: null, endsAt: null,
+  priceFromCents: null, hasFreeTier: false, budgetMinCents: null, budgetMaxCents: null, actSize: null,
+  hasAudio: false, busyDays: [], relatedProfileIds: [], followerCount: 0, imagePath: null, updatedAt: now,
+});
+
+// ---------- pure projections ----------
+
+export function projectShow(eventId: string, event: EventDoc | undefined, now: number): SearchIndexDoc | null {
+  if (!event || event.status !== "published" || event.endsAt < now) return null;
+  const venueName = event.location.venueName ?? null;
+  const { words, tokens } = text(event.title, ...event.lineup.map((a) => a.name), venueName, event.location.neighborhood);
+  return {
+    ...base("show", eventId, now), title: event.title, subtitle: venueName ?? event.location.city,
+    words, tokens, genres: event.genres ?? [], city: event.location.city ?? null, cityLower: lower(event.location.city),
+    neighborhood: event.location.neighborhood ?? null, geo: event.location.geo ?? null,
+    startsAt: event.startsAt, endsAt: event.endsAt, priceFromCents: event.priceFromCents ?? null,
+    hasFreeTier: event.hasFreeTier ?? false,
+    relatedProfileIds: [...new Set([event.curatorProfileId, ...event.lineupMusicianProfileIds])],
+    imagePath: event.posterPath ?? null,
+  };
+}
+
+export function projectGig(gigId: string, gig: GigDoc | undefined, now: number): SearchIndexDoc | null {
+  if (!gig || gig.status !== "open") return null;
+  const venueName = gig.location.venueName ?? null;
+  const { words, tokens } = text(gig.title, venueName, gig.location.neighborhood, gig.location.city);
+  const subtitle = [venueName, gig.location.neighborhood].filter(Boolean).join(", ") || gig.location.city;
+  return {
+    ...base("gig", gigId, now), title: gig.title, subtitle, words, tokens, genres: gig.wants?.genres ?? [],
+    city: gig.location.city ?? null, cityLower: lower(gig.location.city), neighborhood: gig.location.neighborhood ?? null,
+    geo: gig.location.geo ?? null, startsAt: gig.startsAt, endsAt: null,
+    budgetMinCents: gig.budget?.minCents ?? null, budgetMaxCents: gig.budget?.maxCents ?? null,
+    relatedProfileIds: [gig.curatorProfileId],
+  };
+}
+
+export interface ArtistExtras { hasAudio: boolean; busyDays: string[]; actSize: ActSize | null; now: number }
+
+export function projectArtist(profileId: string, profile: ProfileDoc | undefined, extras: ArtistExtras): SearchIndexDoc | null {
+  if (!profile || profile.type !== "musician" || profile.status !== "approved") return null;
+  const { words, tokens } = text(profile.name, profile.handle);
+  const loc = profile.portfolio?.location ?? null;
+  const genres = profile.portfolio?.genres ?? [];
+  return {
+    ...base("artist", profileId, extras.now), handle: profile.handle, title: profile.name, subtitle: genres.join(", "),
+    words, tokens, genres, city: loc?.city ?? null, cityLower: lower(loc?.city), geo: loc?.geo ?? null,
+    actSize: extras.actSize, hasAudio: extras.hasAudio, busyDays: extras.busyDays, relatedProfileIds: [profileId],
+    followerCount: profile.followerCount ?? 0, imagePath: profile.portfolio?.avatarPhotoPath ?? null,
+  };
+}
+
+export function projectVenue(profileId: string, profile: ProfileDoc | undefined, now: number): SearchIndexDoc | null {
+  if (!profile || profile.type !== "curator" || profile.status !== "approved") return null;
+  const c = profile.curator;
+  const { words, tokens } = text(profile.name, profile.handle, c?.location?.city, c?.location?.neighborhood);
+  return {
+    ...base("venue", profileId, now), handle: profile.handle, title: profile.name, subtitle: c?.location?.city ?? "",
+    words, tokens, genres: c?.lookingFor?.genres ?? [], city: c?.location?.city ?? null, cityLower: lower(c?.location?.city),
+    neighborhood: c?.location?.neighborhood ?? null, geo: c?.location?.geo ?? null, relatedProfileIds: [profileId],
+    followerCount: profile.followerCount ?? 0, imagePath: c?.photoPaths?.[0] ?? null,
+  };
+}
+
+// ---------- writer and rebuilds ----------
+
+export async function applyProjection(ref: DocumentReference, doc: SearchIndexDoc | null): Promise<"set" | "deleted"> {
+  if (doc) { await ref.set(doc); return "set"; }
+  await ref.delete();
+  return "deleted";
+}
+
+export async function rebuildArtistIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted"> {
+  const ref = db.doc(`searchIndex/${indexDocId("artist", profileId)}`);
+  const snap = await db.doc(`profiles/${profileId}`).get();
+  const profile = snap.data() as ProfileDoc | undefined;
+  if (!profile || profile.type !== "musician" || profile.status !== "approved") return applyProjection(ref, null);
+  const [trackSnap, bookingSnap, confirmedSnap, eventsSnap] = await Promise.all([
+    db.collection(`profiles/${profileId}/tracks`).where("status", "==", "approved").limit(1).get(),
+    db.doc(`profiles/${profileId}/private/booking`).get(),
+    db.collection("bookings").where("musicianProfileId", "==", profileId).where("status", "==", "confirmed").limit(BUSY_BOOKINGS_CAP).get(),
+    db.collection("events").where("lineupMusicianProfileIds", "array-contains", profileId)
+      .where("status", "==", "published").where("startsAt", ">=", now).orderBy("startsAt").limit(BUSY_EVENTS_CAP).get(),
+  ]);
+  const horizon = now + SEARCH_BUSY_DAYS_WINDOW_MS;
+  const days = new Set<string>();
+  const gigIds = [...new Set(confirmedSnap.docs.map((d) => (d.data() as BookingRequestDoc).gigId))];
+  const gigSnaps = await Promise.all(gigIds.map((id) => db.doc(`gigs/${id}`).get()));
+  for (const g of gigSnaps) {
+    const gig = g.data() as GigDoc | undefined;
+    if (gig && gig.startsAt >= now - DAY_MS && gig.startsAt <= horizon) days.add(dayKeyInLaunchZone(gig.startsAt));
+  }
+  for (const e of eventsSnap.docs) {
+    const ev = e.data() as EventDoc;
+    if (ev.startsAt <= horizon) days.add(dayKeyInLaunchZone(ev.startsAt));
+  }
+  const actSize = (bookingSnap.data() as BookingDoc | undefined)?.preferences?.actSize ?? null;
+  return applyProjection(ref, projectArtist(profileId, profile, { hasAudio: !trackSnap.empty, busyDays: [...days].sort(), actSize, now }));
+}
+
+export async function rebuildVenueIndex(db: Firestore, profileId: string, now: number): Promise<"set" | "deleted"> {
+  const snap = await db.doc(`profiles/${profileId}`).get();
+  return applyProjection(db.doc(`searchIndex/${indexDocId("venue", profileId)}`), projectVenue(profileId, snap.data() as ProfileDoc | undefined, now));
+}
+
+export async function rebuildShowIndex(db: Firestore, eventId: string, now: number): Promise<"set" | "deleted"> {
+  const snap = await db.doc(`events/${eventId}`).get();
+  return applyProjection(db.doc(`searchIndex/${indexDocId("show", eventId)}`), projectShow(eventId, snap.data() as EventDoc | undefined, now));
+}
+
+export async function rebuildGigIndex(db: Firestore, gigId: string, now: number): Promise<"set" | "deleted"> {
+  const snap = await db.doc(`gigs/${gigId}`).get();
+  return applyProjection(db.doc(`searchIndex/${indexDocId("gig", gigId)}`), projectGig(gigId, snap.data() as GigDoc | undefined, now));
+}
+
+// ---------- triggers ----------
+// Every body is wrapped so one poisoned document logs and returns instead
+// of retrying forever (the repo's post-commit fan-out pattern).
+
+export const onProfileWrittenSearch = onDocumentWritten("profiles/{profileId}", async (event) => {
+  const profileId = event.params.profileId;
+  try {
+    const db = getFirestore();
+    const before = event.data?.before.data() as ProfileDoc | undefined;
+    const after = event.data?.after.data() as ProfileDoc | undefined;
+    const type = after?.type ?? before?.type;
+    const now = Date.now();
+    if (type === "musician") await rebuildArtistIndex(db, profileId, now);
+    else if (type === "curator") await rebuildVenueIndex(db, profileId, now);
+  } catch (e) {
+    console.error("searchIndex: profile trigger failed", profileId, e);
+  }
+});
+
+export const onTrackWrittenSearch = onDocumentWritten("profiles/{profileId}/tracks/{trackId}", async (event) => {
+  const profileId = event.params.profileId;
+  try {
+    const before = event.data?.before.data()?.status;
+    const after = event.data?.after.data()?.status;
+    if (before === after) return;
+    await rebuildArtistIndex(getFirestore(), profileId, Date.now());
+  } catch (e) {
+    console.error("searchIndex: track trigger failed", profileId, e);
+  }
+});
+
+export const onEventWrittenSearch = onDocumentWritten("events/{eventId}", async (event) => {
+  const eventId = event.params.eventId;
+  try {
+    const db = getFirestore();
+    const now = Date.now();
+    const before = event.data?.before.data() as EventDoc | undefined;
+    const after = event.data?.after.data() as EventDoc | undefined;
+    await applyProjection(db.doc(`searchIndex/${indexDocId("show", eventId)}`), projectShow(eventId, after, now));
+    const lineup = new Set<string>([...(before?.lineupMusicianProfileIds ?? []), ...(after?.lineupMusicianProfileIds ?? [])]);
+    for (const profileId of lineup) await rebuildArtistIndex(db, profileId, now);
+  } catch (e) {
+    console.error("searchIndex: event trigger failed", eventId, e);
+  }
+});
+
+export const onGigWrittenSearch = onDocumentWritten("gigs/{gigId}", async (event) => {
+  const gigId = event.params.gigId;
+  try {
+    const after = event.data?.after.data() as GigDoc | undefined;
+    await applyProjection(getFirestore().doc(`searchIndex/${indexDocId("gig", gigId)}`), projectGig(gigId, after, Date.now()));
+  } catch (e) {
+    console.error("searchIndex: gig trigger failed", gigId, e);
+  }
+});
+
+export const onBookingWrittenSearch = onDocumentWritten("bookings/{bookingId}", async (event) => {
+  const bookingId = event.params.bookingId;
+  try {
+    const before = event.data?.before.data() as BookingRequestDoc | undefined;
+    const after = event.data?.after.data() as BookingRequestDoc | undefined;
+    const wasConfirmed = before?.status === "confirmed";
+    const isConfirmed = after?.status === "confirmed";
+    if (wasConfirmed === isConfirmed) return;
+    const profileId = after?.musicianProfileId ?? before?.musicianProfileId;
+    if (profileId) await rebuildArtistIndex(getFirestore(), profileId, Date.now());
+  } catch (e) {
+    console.error("searchIndex: booking trigger failed", bookingId, e);
+  }
+});

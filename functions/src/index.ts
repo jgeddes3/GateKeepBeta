@@ -35,3 +35,6 @@ export {
 export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js";
 export { createShowPost, removeShowPost } from "./showPosts.js";
 export { getDiscoverDeck } from "./discover.js";
+export {
+  onProfileWrittenSearch, onTrackWrittenSearch, onEventWrittenSearch, onGigWrittenSearch, onBookingWrittenSearch,
+} from "./searchIndex.js";

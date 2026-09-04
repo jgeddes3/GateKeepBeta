@@ -4,7 +4,7 @@ import {
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { StubGeocoder } from "../src/geocode.js";
-import { type ProfileDraftInput } from "@gatekeep/shared";
+import { type ProfileDraftInput, type SearchIndexDoc } from "@gatekeep/shared";
 import type { User } from "firebase/auth";
 
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
@@ -135,4 +135,19 @@ export async function makePublishedBookingEvent(prefix: string, tiers: Record<st
   }, curator.owner.user);
   await addTiersAndPublish(curator.profileId, eventId, curator.owner.user, tiers);
   return { curator, musician, eventId };
+}
+
+// Triggers run asynchronously in the emulator: poll until the index doc
+// reaches the expected state, and return the last seen state on timeout.
+export async function waitForIndex(
+  id: string, ok: (d: SearchIndexDoc | undefined) => boolean, ms = 15_000,
+): Promise<SearchIndexDoc | undefined> {
+  const until = Date.now() + ms;
+  for (;;) {
+    const snap = await adb.doc(`searchIndex/${id}`).get();
+    const d = snap.exists ? (snap.data() as SearchIndexDoc) : undefined;
+    if (ok(d)) return d;
+    if (Date.now() > until) return d;
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
