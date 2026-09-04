@@ -4,30 +4,14 @@ import { useRouter } from "expo-router";
 import type { SearchFilters, SearchPin } from "@gatekeep/shared";
 import { LocationPromptSheet } from "../discover/LocationPromptSheet";
 import { useDeckLocation } from "../discover/useDeckLocation";
-import { formatGigDateTime } from "../gigs/GigForms";
-import { Button, Card, Text } from "../ui";
 import { tokens } from "../theme/tokens";
 import { ListMapToggle, type ResultsView } from "./ListMapToggle";
+import { MapResults } from "./MapResults";
 import { ResultList } from "./ResultList";
 import { ShowRow } from "./ResultRows";
-import { regionFromLocation, ResultsMap } from "./ResultsMap";
+import { regionFromLocation } from "./ResultsMap";
 import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
-
-// SP8 Task 16: the selected pin's own card in map view, one Card with a
-// date line (only when the pin actually carries one; every SearchPin this
-// face produces does, kind "show", but the shared type doesn't guarantee
-// it) and an "Open" button that does exactly what ShowRow's own press does.
-function SelectedShowCard({ pin, onOpen }: { pin: SearchPin; onOpen: () => void }) {
-  return (
-    <Card style={{ gap: tokens.space.xs }}>
-      <Text variant="label">{pin.title}</Text>
-      <Text variant="meta" muted>{pin.subtitle}</Text>
-      {pin.startsAt != null && <Text variant="meta" muted>{formatGigDateTime(pin.startsAt)}</Text>}
-      <Button title="Open" onPress={onOpen} style={{ marginTop: tokens.space.xs, alignSelf: "flex-start" }} />
-    </Card>
-  );
-}
 
 // The fan Search tab (mobile twin of apps/web/src/search/FanFace.tsx): a
 // free-text box, the "fan" face's filter chips, and a paged list (or, once
@@ -69,8 +53,17 @@ export function FanFace({ initial, headerRight }: {
       {view === "map" ? (
         <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.md }}>
           {header}
-          <ResultsMap pins={state.pins} onSelect={setSelectedPin} initialRegion={regionFromLocation(location.location)} />
-          {selectedPin && <SelectedShowCard pin={selectedPin} onOpen={() => openShow(selectedPin.id)} />}
+          <MapResults
+            pins={state.pins}
+            selected={selectedPin}
+            onSelect={setSelectedPin}
+            onOpen={(pin) => openShow(pin.id)}
+            // regionFromLocation builds a fresh Region object every render;
+            // that's fine here, MapView only reads initialRegion once at
+            // mount (react-native-maps' own naming, "initial"), so this is
+            // deliberately not memoized.
+            initialRegion={regionFromLocation(location.location)}
+          />
         </ScrollView>
       ) : (
         <ResultList

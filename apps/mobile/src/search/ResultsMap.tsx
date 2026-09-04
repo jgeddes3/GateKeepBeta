@@ -34,12 +34,21 @@ export function regionFromLocation(location: { lat: number; lng: number } | null
     : undefined;
 }
 
-export function ResultsMap({ pins, onSelect, initialRegion }: {
+// Fix round 1 (important #1): mapReady lives on this inner component, not
+// on ResultsMap itself, and ResultsMap only ever mounts it once pins is
+// non-empty (see below). That makes "mapReady starts false, then flips
+// true from THIS instance's own onMapReady" a structural guarantee rather
+// than something a manual reset has to remember: pins going empty
+// unmounts this component entirely (ResultsMap's early return swaps in
+// the empty state instead), so a later non-empty pins array always mounts
+// a brand new MapView with a brand new, false-by-default mapReady, and
+// the pins-change effect can never fire fitToCoordinates against a map
+// that hasn't called onMapReady yet.
+function MapWithPins({ pins, onSelect, region }: {
   pins: SearchPin[];
   onSelect: (pin: SearchPin) => void;
-  initialRegion?: Region;
+  region: Region;
 }) {
-  const t = useTokens();
   const mapRef = useRef<MapView>(null);
   const [mapReady, setMapReady] = useState(false);
 
@@ -47,29 +56,12 @@ export function ResultsMap({ pins, onSelect, initialRegion }: {
   // or query change while the map view is already open still reframes it;
   // animated: false matches web's own "jump, don't animate" fitBounds call.
   useEffect(() => {
-    if (!mapReady || pins.length === 0) return;
+    if (!mapReady) return;
     mapRef.current?.fitToCoordinates(pins.map(pinCoordinate), {
       edgePadding: FIT_EDGE_PADDING,
       animated: false,
     });
   }, [pins, mapReady]);
-
-  if (pins.length === 0) {
-    return (
-      <View style={{ alignItems: "center", gap: tokens.space.sm, paddingVertical: tokens.space.xl }}>
-        <IconMapPin size={48} color={t.muted} />
-        <Text variant="heading" style={{ textAlign: "center" }}>Nothing on the map yet</Text>
-        <Text muted style={{ textAlign: "center" }}>{SEARCH_EMPTY_MESSAGE}</Text>
-      </View>
-    );
-  }
-
-  const region = initialRegion ?? {
-    latitude: pins[0].geo.lat,
-    longitude: pins[0].geo.lng,
-    latitudeDelta: FALLBACK_DELTA,
-    longitudeDelta: FALLBACK_DELTA,
-  };
 
   return (
     <MapView
@@ -90,4 +82,31 @@ export function ResultsMap({ pins, onSelect, initialRegion }: {
       ))}
     </MapView>
   );
+}
+
+export function ResultsMap({ pins, onSelect, initialRegion }: {
+  pins: SearchPin[];
+  onSelect: (pin: SearchPin) => void;
+  initialRegion?: Region;
+}) {
+  const t = useTokens();
+
+  if (pins.length === 0) {
+    return (
+      <View style={{ alignItems: "center", gap: tokens.space.sm, paddingVertical: tokens.space.xl }}>
+        <IconMapPin size={48} color={t.muted} />
+        <Text variant="heading" style={{ textAlign: "center" }}>Nothing on the map yet</Text>
+        <Text muted style={{ textAlign: "center" }}>{SEARCH_EMPTY_MESSAGE}</Text>
+      </View>
+    );
+  }
+
+  const region = initialRegion ?? {
+    latitude: pins[0].geo.lat,
+    longitude: pins[0].geo.lng,
+    latitudeDelta: FALLBACK_DELTA,
+    longitudeDelta: FALLBACK_DELTA,
+  };
+
+  return <MapWithPins pins={pins} onSelect={onSelect} region={region} />;
 }

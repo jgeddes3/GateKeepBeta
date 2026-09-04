@@ -5,13 +5,13 @@ import type { SearchFilters, SearchPin } from "@gatekeep/shared";
 import { GigDetailSheet } from "../bookings/GigDetailSheet";
 import { LocationPromptSheet } from "../discover/LocationPromptSheet";
 import { useDeckLocation, type DeckLocationState } from "../discover/useDeckLocation";
-import { formatGigDateTime } from "../gigs/GigForms";
-import { Button, Card, Chip, Text } from "../ui";
+import { Chip } from "../ui";
 import { tokens } from "../theme/tokens";
 import { ListMapToggle, type ResultsView } from "./ListMapToggle";
+import { MapResults } from "./MapResults";
 import { ResultList } from "./ResultList";
 import { GigRow, ProfileRow } from "./ResultRows";
-import { regionFromLocation, ResultsMap } from "./ResultsMap";
+import { regionFromLocation } from "./ResultsMap";
 import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
@@ -46,20 +46,6 @@ function SegmentChips({ segment, onChange }: { segment: Segment; onChange: (s: S
   );
 }
 
-// SP8 Task 16: the selected pin's own card in map view, mirroring FanFace's
-// SelectedShowCard, with an "Open" button that does exactly what GigRow's
-// own press does (open the GigDetailSheet, not a route push).
-function SelectedGigCard({ pin, onOpen }: { pin: SearchPin; onOpen: () => void }) {
-  return (
-    <Card style={{ gap: tokens.space.xs }}>
-      <Text variant="label">{pin.title}</Text>
-      <Text variant="meta" muted>{pin.subtitle}</Text>
-      {pin.startsAt != null && <Text variant="meta" muted>{formatGigDateTime(pin.startsAt)}</Text>}
-      <Button title="Open" onPress={onOpen} style={{ marginTop: tokens.space.xs, alignSelf: "flex-start" }} />
-    </Card>
-  );
-}
-
 function GigsSegment({ segment, onSegmentChange, location, initial, headerRight, onOpenGig }: {
   segment: Segment; onSegmentChange: (s: Segment) => void; location: DeckLocationState;
   initial?: { q: string; filters: SearchFilters }; headerRight?: ReactNode;
@@ -85,8 +71,17 @@ function GigsSegment({ segment, onSegmentChange, location, initial, headerRight,
     return (
       <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.md }}>
         {header}
-        <ResultsMap pins={state.pins} onSelect={setSelectedPin} initialRegion={regionFromLocation(location.location)} />
-        {selectedPin && <SelectedGigCard pin={selectedPin} onOpen={() => onOpenGig(selectedPin.id)} />}
+        <MapResults
+          pins={state.pins}
+          selected={selectedPin}
+          onSelect={setSelectedPin}
+          onOpen={(pin: SearchPin) => onOpenGig(pin.id)}
+          // regionFromLocation builds a fresh Region object every render;
+          // that's fine here, MapView only reads initialRegion once at
+          // mount (react-native-maps' own naming, "initial"), so this is
+          // deliberately not memoized.
+          initialRegion={regionFromLocation(location.location)}
+        />
       </ScrollView>
     );
   }
