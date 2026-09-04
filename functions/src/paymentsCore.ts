@@ -60,15 +60,33 @@ export async function getStripeProfileDoc(profileId: string): Promise<StripeProf
 // failure here must never fail the transfer, it only means this one event's
 // block wasn't recorded (a subsequent self-deal transfer re-stamps it, and
 // standard payout is unaffected regardless).
-export async function setSelfDealInstantHold(musicianProfileId: string, now: number): Promise<void> {
-  const ref = getFirestore().doc(`profiles/${musicianProfileId}/private/stripe`);
+// SP5c final fix wave (I6): generalised to ANY Stripe identity doc, because a
+// split settlement pays members' OWN connected accounts and the hold has to
+// follow the money. Same rule for both shapes: extend to the later of any
+// existing hold and now+SELF_DEAL_HOLD_MS, merge-only, best-effort.
+async function setInstantHoldOn(
+  ref: FirebaseFirestore.DocumentReference, label: string, now: number,
+): Promise<void> {
   try {
-    const existing = (await ref.get()).data() as StripeProfileDoc | undefined;
+    const existing = (await ref.get()).data() as { instantHoldUntil?: number | null } | undefined;
     const until = Math.max(existing?.instantHoldUntil ?? 0, now + SELF_DEAL_HOLD_MS);
     await ref.set({ instantHoldUntil: until, updatedAt: now }, { merge: true });
   } catch (e) {
-    console.error(`setSelfDealInstantHold: failed to set the instant-payout hold for ${musicianProfileId}`, e);
+    console.error(`setSelfDealInstantHold: failed to set the instant-payout hold for ${label}`, e);
   }
+}
+
+export async function setSelfDealInstantHold(musicianProfileId: string, now: number): Promise<void> {
+  await setInstantHoldOn(
+    getFirestore().doc(`profiles/${musicianProfileId}/private/stripe`), `profile ${musicianProfileId}`, now);
+}
+
+// The member sibling: `users/{uid}/private/stripe` (MemberStripeDoc), stamped
+// for every member leg a SELF-DEAL settlement actually transferred.
+// `requestMemberPayout` already refuses an instant payout while the hold
+// stands, exactly as `requestPayout` does for the profile doc.
+export async function setMemberSelfDealInstantHold(uid: string, now: number): Promise<void> {
+  await setInstantHoldOn(getFirestore().doc(`users/${uid}/private/stripe`), `user ${uid}`, now);
 }
 
 // Task 5 booking gates, Task 6 accept-saga outcomes, and the Task 6
@@ -604,6 +622,50 @@ export function markDepositsPendingInTx(
 // to decide whether a stuck saga is still the sweep's to fix or an operator's.
 // FakeStripe's keys never expire, so the emulator cannot surface any of this.
 export const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// An ALLOWLIST, not "has a string code". Every code below is one Stripe only
+// returns when it validated the request and declined to create the transfer,
+// so NO money moved. Deliberately absent, because they do not prove that:
+// `idempotency_error` (the key was already used, so a transfer may well
+// exist), `lock_timeout` and `rate_limit` (Stripe may still have started the
+// work), `api_connection_error` and any error with no code at all (a timeout,
+// a dropped socket). Those are ambiguous and every caller must treat them as
+// "the money may have moved".
+//
+// SP5c final fix wave (I7): moved here from paymentsSweep.ts so
+// payoutShares.ts can use the same judgement for a held-share replay past
+// Stripe's idempotency window without importing the sweep (which imports
+// payoutShares, so that edge would be a cycle).
+const DEFINITE_STRIPE_REFUSAL_CODES = new Set([
+  "balance_insufficient",
+  "account_invalid",
+  "amount_too_small",
+  "amount_too_large",
+  "parameter_invalid_integer",
+  "parameter_invalid_empty",
+  "parameter_missing",
+  "parameter_unknown",
+  "resource_missing",
+  "transfers_not_allowed",
+  "account_country_invalid_address",
+]);
+
+export function isDefiniteStripeRefusalCode(code: string | null | undefined): boolean {
+  return code != null && DEFINITE_STRIPE_REFUSAL_CODES.has(code);
+}
+
+export function isDefiniteStripeRefusal(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && isDefiniteStripeRefusalCode(code);
+}
+
+// The Stripe error code an error carries, or null for an error that carries
+// none at all (a timeout, a dropped socket). Stored on a held share so a later
+// pass can tell a definite refusal from an ambiguous one.
+export function stripeErrorCode(e: unknown): string | null {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : null;
+}
 
 // The first `deposit.depositAttempts` value that means "this birth deposit's
 // retry schedule is over", now DEFINED IN @gatekeep/shared

@@ -31,6 +31,9 @@ import {
   clearDelinquencyIfSettled, declareCuratorDelinquent, disputeAlertId, disputeReversalAlertId,
   externalRefundAlertId, recomputePaymentSummary, recordAdminAlert, writeLedger,
 } from "./paymentsCore.js";
+// SP5c fix wave (I4): a lost dispute cancels any share still HELD for the
+// money it took back, so nothing releases later out of the platform balance.
+import { voidHeldShares } from "./payoutShares.js";
 
 export type DisputePurpose = DisputeRecord["purpose"];
 
@@ -238,6 +241,10 @@ async function reverseForLostDispute(
       | {
         kind: "settled"; faceCents: number; transferId: string | null; transferCents: number | null;
         profileCents: number | null;
+        // SP5c fix wave (I4): the event this order belongs to, so the held
+        // shares of that (eventId, orderId) can be voided once the reversal
+        // has run. Read inside the transaction with the order itself.
+        eventId: string;
       };
     // SP10 Task 6 fix round 1 (Important 2): the order read, the event's
     // settlementClaimedAt re-check, and (when not yet settled) the
@@ -327,10 +334,27 @@ async function reverseForLostDispute(
       const settledRow = settledSnap.empty ? undefined : settledSnap.docs[0].data();
       const transferId = (settledRow?.stripeId as string | null | undefined) ?? null;
       const transferCents = typeof settledRow?.amountCents === "number" ? settledRow.amountCents : null;
-      return { kind: "settled", faceCents, transferId, transferCents, profileCents: order.settlementProfileCents ?? null };
+      return {
+        kind: "settled", faceCents, transferId, transferCents,
+        profileCents: order.settlementProfileCents ?? null, eventId: order.eventId,
+      };
     });
     if (result.kind === "no-op") return nothingReversed(result.reason);
     if (result.kind === "reduced") return nothingReversed(null);
+    // SP5c fix wave (I4): the bank has taken this order's money back off the
+    // platform. Any share of it still WAITING for an unonboarded member has
+    // nothing behind it any more, so it is voided before anything else, and
+    // independently of whether the profile-side reversal below succeeds (that
+    // half recovers the curator's account; this half stops the platform paying
+    // out of its own balance later). Best-effort, same posture as every other
+    // tail in this file: the dispute has already closed.
+    const eventCuratorProfileId = ((await db.doc(`events/${result.eventId}`).get())
+      .data() as EventDoc | undefined)?.curatorProfileId ?? null;
+    if (eventCuratorProfileId) {
+      await voidHeldShares(eventCuratorProfileId, { eventId: result.eventId, orderId: target.orderId! },
+        `held share cancelled: dispute ${disputeId} was lost on this ticket order`, now)
+        .catch((e) => console.error(`charge.dispute.closed: voiding held shares failed for order ${target.orderId}`, e));
+    }
     // SP5c Task 7 (Ruling E, mirrors Task 6's booking-settlement cap): cap the
     // reversal at the PROFILE's own share of this order's settlement, never
     // the split total. `dist.transferId` (payoutShares.ts, distributeEarnings)
@@ -368,6 +392,15 @@ async function reverseForLostDispute(
     // never the split total. `transfer.id` (payoutShares.ts, distributeEarnings)
     // is the profile's own transfer, a member's transferred share is not this
     // profile's account and this path must never reach into it.
+    // SP5c fix wave (I4): same reasoning as the ticket branch above. The
+    // settlement charge behind this date has been taken back by the bank, so a
+    // share still waiting for an unonboarded member has no money behind it and
+    // must never release later out of the platform's own balance. Voided
+    // before the cap check, so an all-held settlement (profileCap 0, nothing
+    // to reverse) still cancels its holds.
+    await voidHeldShares(hit.p.musicianProfileId, { bookingId: target.bookingId!, gigId: hit.gigId },
+      `held share cancelled: dispute ${disputeId} was lost on this settlement`, now)
+      .catch((e) => console.error(`charge.dispute.closed: voiding held shares failed for ${target.bookingId}/${hit.gigId}`, e));
     const profileCap = hit.p.transfer.profileCents ?? hit.p.transfer.amountCents ?? 0;
     if (profileCap <= 0) {
       return nothingReversed("no transfer: the profile's share of this settlement was 0, member shares are not recovered");

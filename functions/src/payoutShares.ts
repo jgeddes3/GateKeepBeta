@@ -10,8 +10,11 @@ import {
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { notifyProfileAdmins, notifyUser } from "./notifications.js";
-import { getStripe } from "./stripeClient.js";
-import { writeLedger, recordAdminAlert } from "./paymentsCore.js";
+import { getStripe, stripeSecretKey } from "./stripeClient.js";
+import {
+  writeLedger, recordAdminAlert, setMemberSelfDealInstantHold,
+  IDEMPOTENCY_WINDOW_MS, isDefiniteStripeRefusalCode, stripeErrorCode,
+} from "./paymentsCore.js";
 import { getMemberStripeDoc, setReleaseHeldSharesHook } from "./memberPayouts.js";
 
 export async function loadShares(db: Firestore, profileId: string): Promise<PayoutShare[] | null> {
@@ -80,9 +83,45 @@ export interface DistributeInput {
   idempotencyBase: string;
   meta: Record<string, string>;
   profileAccountId: string;
+  // SP5c final fix wave (I6): a card->cash conversion with the same person on
+  // both sides. Booking settlement passes the payment doc's own `selfDeal`;
+  // ticket settlement passes false (a fan buying a ticket is never the
+  // curator). When true, every member leg that TRANSFERS gets the same
+  // instant-payout hold `setSelfDealInstantHold` already stamps on the
+  // profile's doc, because the split is what puts self-deal money into member
+  // accounts in the first place.
+  selfDeal: boolean;
   now: number;
 }
 export interface DistributeLeg { payee: PayoutPayee; amountCents: number; outcome: "transferred" | "held"; transferId: string | null; sourced: boolean }
+
+// SP5c final fix wave (I3): thrown when a leg fails AFTER at least one leg has
+// already transferred. The distinction matters to every caller: a bare Stripe
+// refusal on the FIRST leg means no money moved, so a ticket settlement may
+// release its claim and stay cancellable; a partial distribution means money
+// has already reached member (or profile) accounts, so releasing the claim
+// would let a cancel refund buyers on top of transfers that already happened.
+// `legs` carries what this call actually did up to the failure, so an alert
+// can name the moved legs instead of leaving an operator to reconstruct them.
+export class DistributePartialError extends Error {
+  readonly legs: DistributeLeg[];
+  readonly cause: unknown;
+  constructor(cause: unknown, legs: DistributeLeg[]) {
+    const moved = legs.filter((l) => l.outcome === "transferred").length;
+    super(`distributeEarnings: a leg failed after ${moved} leg(s) had already transferred:`
+      + ` ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "DistributePartialError";
+    this.legs = legs;
+    this.cause = cause;
+  }
+}
+
+// "member:uid123 4501c, profile 500c", for an alert detail. Empty string when
+// nothing moved.
+export function describeMovedLegs(legs: DistributeLeg[]): string {
+  return legs.filter((l) => l.outcome === "transferred")
+    .map((l) => `${payeeKey(l.payee)} ${l.amountCents}c`).join(", ");
+}
 // SP5c fix round 1: `transferId` prefers the PROFILE leg's transfer id (a
 // clawback reverses the profile's own account, never a member's), falling
 // back to the first transferred leg only when there is no profile leg to
@@ -94,6 +133,64 @@ function refFields(ref: HeldShareRef) {
   return "bookingId" in ref
     ? { bookingId: ref.bookingId, gigId: ref.gigId, eventId: null, orderId: null }
     : { bookingId: null, gigId: null, eventId: ref.eventId, orderId: ref.orderId };
+}
+
+function sameHeldShareRef(a: HeldShareRef, b: HeldShareRef): boolean {
+  if ("bookingId" in a) return "bookingId" in b && a.bookingId === b.bookingId && a.gigId === b.gigId;
+  return "eventId" in b && a.eventId === b.eventId && a.orderId === b.orderId;
+}
+
+// ---------- Fix wave I2: the FROZEN distribution plan ----------
+//
+// `distributions/{idempotencyBase}`, server-only (firestore.rules' catch-all
+// deny covers it; no client ever reads or writes it).
+//
+// THE BUG THIS CLOSES: distributeEarnings used to re-read `loadShares` on
+// every call, including a RETRY of the same idempotencyBase. A share change
+// between a partial distribution and its retry therefore changed the legs
+// under a base whose member transfers had already gone out: clearing shares
+// mid-retry would send the WHOLE amount to the profile under the bare base
+// key (a key nothing had consumed yet), on top of the member legs already
+// paid. Freezing the plan the first time a base is seen, and distributing
+// from the STORED legs on every later call, makes a base's fan-out immutable
+// no matter what the shares say later.
+//
+// `shared` is load-bearing and not merely descriptive: a no-shares
+// distribution transfers under the BARE base key, while a single 100% profile
+// share transfers under `{base}:share:profile`. The two produce an identical
+// leg list, so without this flag a replay could pick the other key and pay a
+// second time.
+interface DistributionPlanLeg { payee: PayoutPayee; amountCents: number }
+interface DistributionPlanDoc {
+  profileId: string; amountCents: number; shared: boolean;
+  legs: DistributionPlanLeg[]; createdAt: number;
+}
+
+async function freezeDistributionPlan(
+  db: Firestore, input: DistributeInput,
+): Promise<DistributionPlanDoc> {
+  const ref = db.doc(`distributions/${input.idempotencyBase}`);
+  const shares = await loadShares(db, input.profileId);
+  const planned: DistributionPlanDoc = {
+    profileId: input.profileId, amountCents: input.amountCents, shared: shares != null,
+    legs: shares
+      ? splitCents(input.amountCents, shares)
+        .filter((p) => p.amountCents > 0)
+        .map((p) => ({ payee: p.payee, amountCents: p.amountCents }))
+      : [{ payee: { kind: "profile" }, amountCents: input.amountCents }],
+    createdAt: input.now,
+  };
+  try {
+    await ref.create(planned);
+    return planned;
+  } catch (e) {
+    // ALREADY_EXISTS (gRPC 6): this base has been distributed (or attempted)
+    // before, so the stored plan is the only truth about its legs.
+    if ((e as { code?: number }).code !== 6) throw e;
+    const stored = (await ref.get()).data() as DistributionPlanDoc | undefined;
+    if (!stored) throw new Error(`distributeEarnings: distribution plan ${input.idempotencyBase} exists but could not be read`);
+    return stored;
+  }
 }
 
 // The one place SP5c money crosses from "profile got paid" to "who inside
@@ -120,69 +217,107 @@ export async function distributeEarnings(input: DistributeInput): Promise<Distri
   // nonsensical `heldShares/{base}:undefined` (the held branch's `uid` comes
   // from a member payee, not a profile one). Fail loudly up front instead.
   if (!input.profileAccountId) throw new Error("distributeEarnings: profileAccountId is required");
+  // The base becomes a `distributions/{base}` doc id below, and a "/" would
+  // silently address a nested collection instead. Colons are legal in a doc id
+  // (every base in this codebase carries them) and are fine.
+  if (!input.idempotencyBase || input.idempotencyBase.includes("/")) {
+    throw new Error(`distributeEarnings: idempotencyBase ${JSON.stringify(input.idempotencyBase)} must be non-empty and contain no "/"`);
+  }
   const db = getFirestore();
   const stripe = getStripe();
-  const shares = await loadShares(db, input.profileId);
+  // Fix wave I2: the legs are frozen on the FIRST call for this base and
+  // replayed verbatim afterwards, so a share change between a partial
+  // distribution and its retry cannot re-shape (or re-key) the fan-out.
+  const plan = await freezeDistributionPlan(db, input);
   const fits = (cents: number, remaining: number) => input.source !== null && cents <= remaining;
-  if (!shares) {
-    const sourced = fits(input.amountCents, input.source?.remainingCents ?? 0);
-    const t = await stripe.transferToAccount({
-      accountId: input.profileAccountId, amountCents: input.amountCents, idempotencyKey: input.idempotencyBase, meta: input.meta,
-      ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
-    });
-    return { legs: [{ payee: { kind: "profile" }, amountCents: input.amountCents, outcome: "transferred", transferId: t.id, sourced }], transferId: t.id, sourcedAny: sourced, heldCents: 0, profileCents: input.amountCents };
-  }
-  const profileName = ((await db.doc(`profiles/${input.profileId}`).get()).data() as ProfileDoc | undefined)?.name ?? "your band";
+  const profileName = plan.legs.some((l) => l.payee.kind === "member")
+    ? ((await db.doc(`profiles/${input.profileId}`).get()).data() as ProfileDoc | undefined)?.name ?? "your band"
+    : "your band";
   let remaining = input.source?.remainingCents ?? 0;
   const legs: DistributeLeg[] = [];
   let heldCents = 0;
-  for (const part of splitCents(input.amountCents, shares)) {
+  for (const part of plan.legs) {
     if (part.amountCents <= 0) continue;
-    const key = `${input.idempotencyBase}:share:${payeeKey(part.payee)}`;
-    let accountId: string | null = null;
-    if (part.payee.kind === "profile") accountId = input.profileAccountId;
-    else {
-      const ms: MemberStripeDoc | null = await getMemberStripeDoc(part.payee.uid);
-      accountId = ms?.accountId && ms.transfersEnabled ? ms.accountId : null;
+    // A no-shares plan keeps the BARE base as its key, byte for byte what the
+    // pre-SP5c single transfer used, so existing keys and tests keep meaning.
+    const key = plan.shared ? `${input.idempotencyBase}:share:${payeeKey(part.payee)}` : input.idempotencyBase;
+    try {
+      let accountId: string | null = null;
+      if (part.payee.kind === "profile") accountId = input.profileAccountId;
+      else {
+        const ms: MemberStripeDoc | null = await getMemberStripeDoc(part.payee.uid);
+        accountId = ms?.accountId && ms.transfersEnabled ? ms.accountId : null;
+      }
+      if (!accountId) {
+        // Reachable only for a member payee: a profile-kind leg's accountId is
+        // input.profileAccountId, guarded non-empty above, so it never falls
+        // into this branch.
+        if (part.payee.kind !== "member") throw new Error(`distributeEarnings: unexpected held leg for ${payeeKey(part.payee)}`);
+        const uid = part.payee.uid;
+        const heldRef = db.doc(`heldShares/${input.idempotencyBase}:${uid}`);
+        const held: HeldShareDoc = { profileId: input.profileId, uid, amountCents: part.amountCents, purpose: input.purpose, ref: input.ref, status: "held", createdAt: input.now, releasedAt: null, transferId: null };
+        try { await heldRef.create(held); }
+        catch (e) { if ((e as { code?: number }).code !== 6) throw e; }
+        // Fix wave I5: the payee is no longer a member of this profile (they
+        // left, or their account was deleted, between the plan being frozen
+        // and this leg running). The money is still THEIRS, so it is still
+        // held rather than quietly redirected, but nothing will ever surface
+        // this row on the profile's shares card, so it gets a durable ticket.
+        const stillAMember = (await db.doc(`profiles/${input.profileId}/members/${uid}`).get()).exists;
+        if (!stillAMember) {
+          await recordAdminAlert({
+            alertId: `held_share_orphan:${input.idempotencyBase}:${uid}`, kind: "held_share_release_failed",
+            detail: `profile ${input.profileId} holds ${part.amountCents}c for ${uid}, who is no longer a member of it`
+              + ` (heldShares/${heldRef.id}). The money is still theirs and releases when their payouts are set up,`
+              + " but no shares card will show it; decide by hand whether it should be released or voided",
+            bookingId: null, gigId: null, now: input.now,
+          }).catch((e) => console.error(`distributeEarnings: held_share_orphan alert failed for ${key}`, e));
+        }
+        // stripeId is the heldShares doc's own id (there is no Stripe object for
+        // a held share), deterministic per (idempotencyBase, uid) exactly like
+        // writeLedger's `late_fee` convention (paymentsCore.ts's doc comment):
+        // a share_held row must dedupe the same way the heldShares doc itself
+        // does, or a replayed distributeEarnings call (this same base, called
+        // again before the member's account is enabled) would double the row.
+        await writeLedger({ kind: "share_held", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: heldRef.id, ...refFields(input.ref), detail: `share held for ${uid} until their payouts are set up`, at: input.now })
+          .catch((e) => console.error(`distributeEarnings: share_held ledger row failed for ${key}`, e));
+        await notifyUser(uid, { kind: "share_held", refKind: "payouts", title: "Money is waiting for you", body: shareHeldMessage(part.amountCents, profileName) }, `share_held:${key}`)
+          .catch((e) => console.error(`distributeEarnings: share_held notification failed for ${key}`, e));
+        legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "held", transferId: null, sourced: false });
+        heldCents += part.amountCents;
+        continue;
+      }
+      const sourced = fits(part.amountCents, remaining);
+      const uid = part.payee.kind === "member" ? part.payee.uid : null;
+      const t = await stripe.transferToAccount({
+        accountId, amountCents: part.amountCents, idempotencyKey: key,
+        // Fix wave M5: `uid` travels with the transfer, so the
+        // `transfer.reversed` webhook (paymentsSettlement.ts) can record WHOSE
+        // money a reversal took back rather than only which profile it belonged to.
+        meta: { ...input.meta, payee: payeeKey(part.payee), ...(uid ? { uid } : {}) },
+        ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
+      });
+      if (sourced) remaining -= part.amountCents;
+      await writeLedger({ kind: "share_transfer", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: t.id, sourced, ...refFields(input.ref), detail: `${payeeKey(part.payee)} share of ${input.purpose}${sourced ? ", sourced from the charge" : ", drawn on the platform balance"}`, at: input.now })
+        .catch((e) => console.error(`distributeEarnings: share_transfer ledger row failed for ${key}`, e));
+      if (uid) {
+        // Fix wave I6: self-deal money that just landed in a MEMBER's own
+        // account gets the same instant-payout hold the profile's account
+        // already got. Best-effort inside the helper, exactly like the
+        // profile stamp: the transfer has happened either way.
+        if (input.selfDeal) await setMemberSelfDealInstantHold(uid, input.now);
+        await notifyUser(uid, { kind: "share_paid", refKind: "payouts", title: "You were paid", body: `${formatShareCents(part.amountCents)} from ${profileName}.` }, `share_paid:${key}`)
+          .catch((e) => console.error(`distributeEarnings: share_paid notification failed for ${key}`, e));
+      }
+      legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "transferred", transferId: t.id, sourced });
+    } catch (e) {
+      // Fix wave I3: once ANY leg has moved money, the caller must not treat
+      // this failure as "nothing happened". Rethrown as-is while nothing has
+      // transferred, so a first-leg refusal keeps its Stripe `code` and every
+      // existing definite-refusal judgement still works.
+      if (legs.some((l) => l.outcome === "transferred")) throw new DistributePartialError(e, legs);
+      throw e;
     }
-    if (!accountId) {
-      // Reachable only for a member payee: a profile-kind leg's accountId is
-      // input.profileAccountId, guarded non-empty above, so it never falls
-      // into this branch.
-      if (part.payee.kind !== "member") throw new Error(`distributeEarnings: unexpected held leg for ${payeeKey(part.payee)}`);
-      const uid = part.payee.uid;
-      const heldRef = db.doc(`heldShares/${input.idempotencyBase}:${uid}`);
-      const held: HeldShareDoc = { profileId: input.profileId, uid, amountCents: part.amountCents, purpose: input.purpose, ref: input.ref, status: "held", createdAt: input.now, releasedAt: null, transferId: null };
-      try { await heldRef.create(held); }
-      catch (e) { if ((e as { code?: number }).code !== 6) throw e; }
-      // stripeId is the heldShares doc's own id (there is no Stripe object for
-      // a held share), deterministic per (idempotencyBase, uid) exactly like
-      // writeLedger's `late_fee` convention (paymentsCore.ts's doc comment):
-      // a share_held row must dedupe the same way the heldShares doc itself
-      // does, or a replayed distributeEarnings call (this same base, called
-      // again before the member's account is enabled) would double the row.
-      await writeLedger({ kind: "share_held", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: heldRef.id, ...refFields(input.ref), detail: `share held for ${uid} until their payouts are set up`, at: input.now })
-        .catch((e) => console.error(`distributeEarnings: share_held ledger row failed for ${key}`, e));
-      await notifyUser(uid, { kind: "share_held", refKind: "payouts", title: "Money is waiting for you", body: shareHeldMessage(part.amountCents, profileName) }, `share_held:${key}`)
-        .catch((e) => console.error(`distributeEarnings: share_held notification failed for ${key}`, e));
-      legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "held", transferId: null, sourced: false });
-      heldCents += part.amountCents;
-      continue;
-    }
-    const sourced = fits(part.amountCents, remaining);
-    const t = await stripe.transferToAccount({
-      accountId, amountCents: part.amountCents, idempotencyKey: key, meta: { ...input.meta, payee: payeeKey(part.payee) },
-      ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
-    });
-    if (sourced) remaining -= part.amountCents;
-    const uid = part.payee.kind === "member" ? part.payee.uid : null;
-    await writeLedger({ kind: "share_transfer", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: t.id, sourced, ...refFields(input.ref), detail: `${payeeKey(part.payee)} share of ${input.purpose}${sourced ? ", sourced from the charge" : ", drawn on the platform balance"}`, at: input.now })
-      .catch((e) => console.error(`distributeEarnings: share_transfer ledger row failed for ${key}`, e));
-    if (uid) {
-      await notifyUser(uid, { kind: "share_paid", refKind: "payouts", title: "You were paid", body: `${formatShareCents(part.amountCents)} from ${profileName}.` }, `share_paid:${key}`)
-        .catch((e) => console.error(`distributeEarnings: share_paid notification failed for ${key}`, e));
-    }
-    legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "transferred", transferId: t.id, sourced });
   }
   const profileCents = legs.filter((l) => l.payee.kind === "profile").reduce((s, l) => s + l.amountCents, 0);
   return {
@@ -209,6 +344,11 @@ const RELEASE_CLAIM_STALE_MS = 10 * 60 * 1000;
 // account can receive transfers. Unsourced by then: the charge is long gone.
 export async function releaseHeldShares(uid: string, now: number): Promise<number> {
   const db = getFirestore();
+  // Fix wave C1: resolved ONCE, before any doc is claimed. `getStripe()`
+  // throws when the secret is not bound (a configuration bug), and a throw
+  // from inside the loop would have consumed a claim on the doc it was
+  // claiming, wedging that share for RELEASE_CLAIM_STALE_MS for no reason.
+  const stripe = getStripe();
   const ms = await getMemberStripeDoc(uid);
   if (!ms?.accountId || !ms.transfersEnabled) return 0;
   const snap = await db.collection("heldShares").where("uid", "==", uid).where("status", "in", ["held", "failed"]).get();
@@ -234,15 +374,29 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
     // `failed` doc and a `held_share_release_failed` alert for money that
     // already moved. A transactional claim closes both failure modes: only
     // the caller that wins the claim proceeds to transfer.
-    let held: HeldShareDoc | null = null;
+    //
+    // FIX WAVE I7, decided inside the SAME transaction as the claim: a doc
+    // whose last release attempt is older than Stripe's idempotency window
+    // can no longer REPLAY `held:${docId}`, that key is brand new to Stripe
+    // now, so a "retry" would be a genuine SECOND transfer for a first
+    // attempt whose fate we may not know. Only a DEFINITE refusal (the
+    // allowlist in paymentsCore.ts, codes Stripe only returns after refusing
+    // to create the transfer) proves nothing moved and may be replayed past
+    // the window. Anything else is left for an operator.
+    let claim: { verdict: "skip" } | { verdict: "stale" | "go"; doc: HeldShareDoc };
     try {
-      held = await db.runTransaction(async (tx) => {
+      claim = await db.runTransaction(async (tx) => {
         const fresh = await tx.get(d.ref);
         const cur = fresh.data() as HeldShareDoc | undefined;
-        if (!cur || (cur.status !== "held" && cur.status !== "failed")) return null;
-        if (cur.releaseClaimedAt != null && now - cur.releaseClaimedAt < RELEASE_CLAIM_STALE_MS) return null;
-        tx.update(d.ref, { releaseClaimedAt: now });
-        return cur;
+        if (!cur || (cur.status !== "held" && cur.status !== "failed")) return { verdict: "skip" as const };
+        if (cur.releaseClaimedAt != null && now - cur.releaseClaimedAt < RELEASE_CLAIM_STALE_MS) return { verdict: "skip" as const };
+        const attempted = cur.releaseAttemptedAt;
+        if (attempted != null && now - attempted >= IDEMPOTENCY_WINDOW_MS
+          && !isDefiniteStripeRefusalCode(cur.releaseErrorCode)) {
+          return { verdict: "stale" as const, doc: cur };
+        }
+        tx.update(d.ref, { releaseClaimedAt: now, releaseAttemptedAt: now });
+        return { verdict: "go" as const, doc: cur };
       });
     } catch (e) {
       console.error(`releaseHeldShares: claim failed for ${d.id}`, e);
@@ -253,16 +407,30 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
     // terminal write leaves `releaseClaimedAt` in place, and the next sync's
     // claim attempt re-wins it once RELEASE_CLAIM_STALE_MS has passed, then
     // replays the SAME Stripe idempotency key.
-    if (!held) continue;
+    if (claim.verdict === "skip") continue;
+    if (claim.verdict === "stale") {
+      const shouldLog = await recordAdminAlert({
+        alertId: `held_share_stale:${d.id}`, kind: "held_share_release_failed",
+        detail: `held share ${d.id} (${claim.doc.amountCents}c for ${uid}) last attempted its release at`
+          + ` ${new Date(claim.doc.releaseAttemptedAt!).toISOString()}, longer ago than Stripe's idempotency window,`
+          + ` and failed with ${claim.doc.releaseErrorCode ?? "no error code"}, which does not prove the transfer was`
+          + " refused. NOT retried: a fresh key would be a second transfer. An operator must check Stripe for a"
+          + ` transfer under key held:${d.id} and either finish it there or clear this doc's status by hand`,
+        bookingId: null, gigId: null, now,
+      });
+      if (shouldLog) console.error(`releaseHeldShares: ${d.id} is past the idempotency window and was not replayed`);
+      continue;
+    }
+    const held = claim.doc;
     try {
-      const t = await getStripe().transferToAccount({ accountId: ms.accountId, amountCents: held.amountCents, idempotencyKey: `held:${d.id}`, meta: { purpose: "held_share", heldId: d.id, profileId: held.profileId, uid } });
-      await d.ref.update({ status: "released", releasedAt: now, transferId: t.id, error: FieldValue.delete(), releaseClaimedAt: FieldValue.delete() });
+      const t = await stripe.transferToAccount({ accountId: ms.accountId, amountCents: held.amountCents, idempotencyKey: `held:${d.id}`, meta: { purpose: "held_share", heldId: d.id, profileId: held.profileId, uid } });
+      await d.ref.update({ status: "released", releasedAt: now, transferId: t.id, error: FieldValue.delete(), releaseErrorCode: FieldValue.delete(), releaseClaimedAt: FieldValue.delete() });
       await writeLedger({ kind: "share_released", amountCents: held.amountCents, profileId: held.profileId, uid, stripeId: t.id, sourced: false, ...refFields(held.ref), detail: "held share released after payout setup", at: now })
         .catch((e) => console.error(`releaseHeldShares: ledger row failed for ${d.id}`, e));
       releasedCents += held.amountCents;
       releasedIds.push(d.id);
     } catch (e) {
-      await d.ref.update({ status: "failed", error: e instanceof Error ? e.message : String(e), releaseClaimedAt: FieldValue.delete() }).catch(() => undefined);
+      await d.ref.update({ status: "failed", error: e instanceof Error ? e.message : String(e), releaseErrorCode: stripeErrorCode(e), releaseClaimedAt: FieldValue.delete() }).catch(() => undefined);
       const shouldLog = await recordAdminAlert({ alertId: `held_share:${d.id}`, kind: "held_share_release_failed", detail: `held share ${d.id} (${held.amountCents}c for ${uid}) could not be transferred: ${e instanceof Error ? e.message : String(e)}; retried on the member's next status sync`, bookingId: null, gigId: null, now });
       if (shouldLog) console.error(`releaseHeldShares: ${d.id} failed`, e);
     }
@@ -279,6 +447,53 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
   return releasedCents;
 }
 
+// ---------- Fix wave I4: cancelling held shares when the settlement is unwound ----------
+//
+// A held share is a PROMISE against money the platform collected. When that
+// money goes back (a no-show clawback refunds the curator, a lost dispute
+// takes it off the platform, a restore re-run re-prices the date from
+// scratch), the promise has to go with it: otherwise the member's account
+// finishes onboarding weeks later and `releaseHeldShares` transfers, out of
+// the platform's own balance, a share of a night nobody was charged for.
+//
+// Only `held` and `failed` rows are touched, and only those whose `ref`
+// matches. A `released` row is money that has already reached the member and
+// stays theirs (spec section 8: the existing unwind paths recover from the
+// profile's account, never from a member who already has their share).
+// `voided` rows are excluded from both the release query and every held total.
+//
+// Returns the cents voided so a caller can log or report it. Never throws for
+// a per-doc problem; every call site is best-effort and already committed.
+export async function voidHeldShares(
+  profileId: string, ref: HeldShareRef, reason: string, now: number,
+): Promise<number> {
+  const db = getFirestore();
+  const snap = await db.collection("heldShares")
+    .where("profileId", "==", profileId).where("status", "in", ["held", "failed"]).get();
+  let voidedCents = 0;
+  for (const d of snap.docs) {
+    const held = d.data() as HeldShareDoc;
+    // The composite index is (profileId, status); the ref match is in code
+    // because a HeldShareRef is a union of two shapes and Firestore cannot
+    // equality-match either half without a third index per shape.
+    if (!sameHeldShareRef(held.ref, ref)) continue;
+    try {
+      await d.ref.update({ status: "voided", voidedAt: now, error: FieldValue.delete() });
+    } catch (e) {
+      console.error(`voidHeldShares: could not void ${d.id}`, e);
+      continue;
+    }
+    voidedCents += held.amountCents;
+    // stripeId is the heldShares doc id, the same synthetic-id convention
+    // share_held uses, so a re-run of the same unwind dedupes on the row.
+    await writeLedger({
+      kind: "share_voided", amountCents: held.amountCents, profileId, uid: held.uid, stripeId: d.id,
+      ...refFields(held.ref), detail: reason, at: now,
+    }).catch((e) => console.error(`voidHeldShares: share_voided ledger row failed for ${d.id}`, e));
+  }
+  return voidedCents;
+}
+
 // Task 4's two call sites (getMemberPayoutStatus's status-poll path, the
 // account.updated member branch in payments.ts) already call
 // releaseHeldSharesHook; this registration is what turns that hook from a
@@ -292,13 +507,20 @@ setReleaseHeldSharesHook(releaseHeldShares);
 // direct calls: the `held:${docId}` Stripe idempotency key and the doc's
 // `status` CAS (only "held"/"failed" rows are selected) mean a release that
 // already ran, by whichever path got there first, is a no-op here.
-export const onMemberStripeWritten = onDocumentWritten("users/{uid}/private/stripe", async (event) => {
-  const uid = event.params.uid;
-  try {
-    const before = event.data?.before.data() as MemberStripeDoc | undefined;
-    const after = event.data?.after.data() as MemberStripeDoc | undefined;
-    if (after?.transfersEnabled === true && before?.transfersEnabled !== true) await releaseHeldShares(uid, Date.now());
-  } catch (e) {
-    console.error("releaseHeldShares: trigger failed", uid, e);
-  }
-});
+//
+// FIX WAVE C1: `secrets: [stripeSecretKey]` is MANDATORY here. This trigger
+// reaches `getStripe()` through `releaseHeldShares`, and a v2 function that
+// does not declare the secret gets no STRIPE_SECRET_KEY in its environment, so
+// every release would throw in production. The emulator cannot show it:
+// FakeStripe is selected without ever reading the key.
+export const onMemberStripeWritten = onDocumentWritten(
+  { document: "users/{uid}/private/stripe", secrets: [stripeSecretKey] }, async (event) => {
+    const uid = event.params.uid;
+    try {
+      const before = event.data?.before.data() as MemberStripeDoc | undefined;
+      const after = event.data?.after.data() as MemberStripeDoc | undefined;
+      if (after?.transfersEnabled === true && before?.transfersEnabled !== true) await releaseHeldShares(uid, Date.now());
+    } catch (e) {
+      console.error("releaseHeldShares: trigger failed", uid, e);
+    }
+  });

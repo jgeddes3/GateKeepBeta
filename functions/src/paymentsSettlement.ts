@@ -65,7 +65,9 @@ import {
   writeLedger, clawbackAlertId, depositPendingAlertId, depositRacedAlertId, settlementPayoutAlertId,
   settlementPendingAlertId, settlementRacedAlertId, IDEMPOTENCY_WINDOW_MS, setSelfDealInstantHold,
 } from "./paymentsCore.js";
-import { distributeEarnings } from "./payoutShares.js";
+import {
+  distributeEarnings, voidHeldShares, DistributePartialError, describeMovedLegs,
+} from "./payoutShares.js";
 
 // How long `payPastDue` parks a `past_due` occurrence's `nextRetryAt` while the
 // curator confirms its on-session intent in the browser. Elements confirms in
@@ -721,6 +723,12 @@ export async function finalizeSettlementSuccess(args: {
   // exactly the single transfer above, same idempotency base, same
   // source-charge fit check, distributeEarnings's no-shares branch is byte
   // for byte what this used to do inline.
+  // FIX WAVE I3: a PARTIAL distribution (some legs transferred, a later leg
+  // refused) is escalated here, then rethrown unchanged. The control flow is
+  // deliberately untouched, the sweep's own catch still logs and counts the
+  // error and the next run replays the frozen plan under the same keys, but
+  // an operator now gets a durable row naming exactly which legs already moved
+  // rather than having to reconstruct it from Stripe.
   const dist = math.earnings > 0
     ? await distributeEarnings({
       profileId: p.musicianProfileId, amountCents: math.earnings,
@@ -732,7 +740,21 @@ export async function finalizeSettlementSuccess(args: {
       // original and no money would move.
       idempotencyBase: `${bookingId}:${gigId}:earn:${p.settlement.attempts}`,
       meta: { bookingId, gigId, purpose: "earnings" },
-      profileAccountId: musicianStripe!.accountId!, now,
+      profileAccountId: musicianStripe!.accountId!, selfDeal: p.selfDeal === true, now,
+    }).catch(async (e) => {
+      if (e instanceof DistributePartialError) {
+        const detail = `the settlement's earnings split for ${p.musicianProfileId} stopped part way through:`
+          + ` ${describeMovedLegs(e.legs)} already transferred, then a later leg failed with`
+          + ` ${e.cause instanceof Error ? e.cause.message : String(e.cause)}. The settlement is NOT terminal, the`
+          + " next run replays the same frozen plan under the same keys and finishes the remaining legs; nothing"
+          + " already moved is re-sent. Escalated because the money is half out and the doc still reads unsettled";
+        const alertId = settlementPendingAlertId(bookingId, gigId);
+        const shouldLog = await recordAdminAlert({
+          alertId, kind: "settlement_pending_stuck", detail, bookingId, gigId, now,
+        }).catch(() => false);
+        if (shouldLog) console.error(`finalizeSettlementSuccess: ${bookingId}/${gigId}, ${detail} (see adminAlerts/${alertId})`);
+      }
+      throw e;
     })
     : null;
   // An all-held settlement (every member leg held, none transfer-ready) has
@@ -1409,6 +1431,16 @@ export async function clawbackSettledOccurrence(
       }).catch((e) => console.error(`clawbackSettledOccurrence: transfer_reversal ledger row failed for ${bookingId}/${gigId}`, e));
     }
 
+    // FIX WAVE I4: a share that was HELD for this date has no money behind it
+    // any more, the curator is about to be refunded below. Left standing it
+    // would release out of the platform's own balance the moment that member
+    // finished onboarding, for a night nobody was charged for. Best-effort:
+    // the reversal above has already happened and a void failure must not
+    // stop the refunds.
+    await voidHeldShares(p.musicianProfileId, { bookingId, gigId },
+      "held share cancelled: the settlement was clawed back after a no-show report", now)
+      .catch((e) => console.error(`clawbackSettledOccurrence: voiding held shares failed for ${bookingId}/${gigId}`, e));
+
     if (refundsSettlement) {
       settlementRefundId = (await stripe.refund({
         intentId: p.settlement.intentId!, amountCents: refundTotal,
@@ -1578,6 +1610,16 @@ export async function reopenSettlementForRestore(
   // one needs no redoing, and a `pending`/`past_due`/`not_due` one is already
   // (or not yet) the sweep's, so re-opening it would only reset its ladder.
   if (p.settlement.status !== "waived") return false;
+  // FIX WAVE I4: the re-run below bumps `settlement.attempts`, which mints a
+  // brand new `earn:{attempts}` base and therefore a brand new set of held
+  // docs for whichever members are still unonboarded. The PREVIOUS base's held
+  // docs describe a distribution that was unwound (or never charged), so they
+  // are voided first: leaving them would pay the same share twice, once from
+  // the stale hold and once from the re-run's own. Best-effort, and BEFORE the
+  // bump so a failure here leaves the doc untouched for the next restore.
+  await voidHeldShares(p.musicianProfileId, { bookingId, gigId },
+    "held share cancelled: the settlement was re-opened and will be distributed again from scratch", now)
+    .catch((e) => console.error(`reopenSettlementForRestore: voiding held shares failed for ${bookingId}/${gigId}`, e));
   try {
     await ref.update({
       "settlement.status": "pending",
@@ -1899,6 +1941,11 @@ webhookHandlers["transfer.reversed"] = async (object, eventId) => {
   // only ever built from ids that validate.
   const bookingId = meta?.bookingId != null && isValidDocId(meta.bookingId) ? meta.bookingId : null;
   const gigId = meta?.gigId != null && isValidDocId(meta.gigId) ? meta.gigId : null;
+  // SP5c fix wave (M5): distributeEarnings stamps `uid` on every MEMBER leg's
+  // transfer, so a reversal of one of those legs can say whose money came
+  // back, not just which profile it belonged to. Absent (null) for a profile
+  // leg, a pre-SP5c transfer, or a dashboard reversal of something else.
+  const legUid = meta?.uid != null && isValidDocId(meta.uid) ? meta.uid : null;
   const reversalList = (object.reversals as { data?: unknown } | undefined)?.data;
   const newest = Array.isArray(reversalList) ? reversalList[0] as { id?: unknown } | undefined : undefined;
   const reversalId = typeof newest?.id === "string" ? newest.id : null;
@@ -1921,8 +1968,10 @@ webhookHandlers["transfer.reversed"] = async (object, eventId) => {
 
   await writeLedger({
     kind: "transfer_reversal", amountCents, bookingId, gigId,
-    profileId: musicianProfileId, stripeId: reversalId ?? transferId,
-    detail: `transfer ${transferId} reversed (Stripe event)`,
+    profileId: musicianProfileId, uid: legUid, stripeId: reversalId ?? transferId,
+    detail: legUid
+      ? `transfer ${transferId} reversed (Stripe event), member share of ${legUid}`
+      : `transfer ${transferId} reversed (Stripe event)`,
   }).catch((e) => console.error(`transfer.reversed: ledger row failed for transfer ${transferId} (event ${eventId})`, e));
 
   if (transferStatus === "transferred") {

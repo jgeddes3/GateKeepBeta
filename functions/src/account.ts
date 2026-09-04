@@ -121,7 +121,34 @@ export async function cascadeDeleteUser(
     db.doc(`curatorAccess/${uid}`).delete(),
     db.doc(`curatorAccessRetries/${uid}`).delete(),
   ]));
-  await runPhase(uid, "memberships", () => Promise.all(memberships.docs.map((m) => m.ref.delete())));
+  // SP5c fix wave (I5): a membership carries a PAYOUT SHARE, and deleting the
+  // doc without reassigning it leaves the profile's shares summing to less
+  // than 100, which `validatePayoutShares` then refuses on the admins' next
+  // save and which `splitCents` would silently under-distribute in the
+  // meantime. `removeMember` already moves a leaving member's percent to the
+  // band fund and tells the admins; deletion has to do the same. Best-effort
+  // per profile: a share that cannot be reassigned must never block the
+  // deletion of an account, and it leaves a shares editor an admin can fix.
+  // Held shares are deliberately untouched, they are already that person's
+  // money and release (or void) on their own paths.
+  await runPhase(uid, "memberships", async () => {
+    const now = Date.now();
+    // LAZY on purpose, and this is load-bearing: this module is pulled in by
+    // authTriggers.ts, which index.ts loads FIRST. A static import of
+    // payoutShares.ts here drags the whole payments module graph in ahead of
+    // paymentsWebhook.ts and its `webhookHandlers` registry, and every module
+    // that registers a handler onto that registry at module scope then dies
+    // with "Cannot access 'webhookHandlers' before initialization". Deferring
+    // the import to call time (account deletion is rare, and nothing here is
+    // hot) keeps index.ts's load order exactly as it was.
+    const { reassignShareOnRemoval } = await import("./payoutShares.js");
+    for (const m of memberships.docs) {
+      const profileId = m.ref.parent.parent!.id;
+      await reassignShareOnRemoval(db, profileId, uid, now)
+        .catch((e) => console.error("cascadeDeleteUser: share reassignment failed", { uid, profileId }, e));
+    }
+    await Promise.all(memberships.docs.map((m) => m.ref.delete()));
+  });
   // Pending invites naming the uid are revoked (sp1 #10 e). Single-field
   // query plus an in-memory status filter, same shape as helpers.ts's
   // fetchPendingInviteId; bounded by MAX_PENDING_INVITES_PER_PROFILE per profile.

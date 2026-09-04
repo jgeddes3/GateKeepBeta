@@ -176,9 +176,27 @@ export const getMemberPayoutStatus = onCall<object>(
       doc ? { accountId: doc.accountId, payoutsEnabled: doc.payoutsEnabled } : null);
     if (enabledNow) await releaseHeldSharesHook(uid, now);
 
-    const heldSnap = await getFirestore().collection("heldShares")
+    const heldQuery = () => getFirestore().collection("heldShares")
       .where("uid", "==", uid).where("status", "in", ["held", "failed"]).get();
-    const heldCents = heldSnap.docs.reduce((sum, d) => sum + ((d.data().amountCents as number | undefined) ?? 0), 0);
+    let heldSnap = await heldQuery();
+    let heldCents = heldSnap.docs.reduce((sum, d) => sum + ((d.data().amountCents as number | undefined) ?? 0), 0);
+
+    // FIX WAVE I1: `enabledNow` fires only on the false -> true TRANSITION, so
+    // a share whose release FAILED (a transient Stripe error, an account that
+    // was briefly not transfer-ready) was never retried by anything: the
+    // account is already enabled, so no later sync ever flips it again, and
+    // the doc sits `failed` forever. Retrying whenever the account is enabled
+    // AND something is still outstanding is safe by construction: the per-doc
+    // transactional claim and the `held:{docId}` idempotency key make a
+    // redundant call a no-op, and the I7 window guard above refuses a replay
+    // that could double-pay. The total is re-read afterwards so the response
+    // reflects what this call just released.
+    if (doc?.transfersEnabled === true && !heldSnap.empty) {
+      await releaseHeldSharesHook(uid, now)
+        .catch((e) => console.error(`getMemberPayoutStatus: held-share retry failed for ${uid}`, e));
+      heldSnap = await heldQuery();
+      heldCents = heldSnap.docs.reduce((sum, d) => sum + ((d.data().amountCents as number | undefined) ?? 0), 0);
+    }
 
     return {
       hasAccount: doc?.accountId != null,

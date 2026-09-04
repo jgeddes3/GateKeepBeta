@@ -61,7 +61,7 @@ import {
   clearDelinquencyIfSettled, declareCuratorDelinquent, getStripeProfileDoc, isFailedPrecondition,
   isDepositScheduleExhausted, recomputePaymentSummary, recordAdminAlert, resolveDepositPending,
   writeLedger, depositPendingAlertId, stalePendingAlertId, stuckSagaAlertId,
-  IDEMPOTENCY_WINDOW_MS,
+  IDEMPOTENCY_WINDOW_MS, isDefiniteStripeRefusal,
 } from "./paymentsCore.js";
 // Steps 5/6's whole job. Importing it here is ALSO what loads
 // paymentsSettlement's `payment_intent.succeeded` registrations from index.ts
@@ -79,7 +79,7 @@ import {
 } from "./eventsCore.js";
 // SP5c Task 7: routes each ticket order's own T+1 settlement transfer through
 // the same split-at-settlement engine Task 6 wired booking earnings through.
-import { distributeEarnings } from "./payoutShares.js";
+import { distributeEarnings, DistributePartialError, describeMovedLegs } from "./payoutShares.js";
 
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1579,33 +1579,12 @@ async function releaseSettlementClaim(
   });
 }
 
-// SP10 Task 9 fix round 1 (Important 2): an ALLOWLIST, not "has a string
-// code". Every code below is one Stripe only returns when it validated the
-// request and declined to create the transfer, so no money moved: the claim
-// can be released at once and a cancel stays possible between passes.
-// Deliberately absent, because they do NOT prove that: `idempotency_error`
-// (the key was already used, so a transfer may well exist), `lock_timeout` and
-// `rate_limit` (Stripe may still have started the work), `api_connection_error`
-// and any error with no code at all (a timeout, a dropped socket). Those are
-// ambiguous, the claim stands, and it ages out of the 24h window instead.
-const DEFINITE_STRIPE_REFUSAL_CODES = new Set([
-  "balance_insufficient",
-  "account_invalid",
-  "amount_too_small",
-  "amount_too_large",
-  "parameter_invalid_integer",
-  "parameter_invalid_empty",
-  "parameter_missing",
-  "parameter_unknown",
-  "resource_missing",
-  "transfers_not_allowed",
-  "account_country_invalid_address",
-]);
-
-function isDefiniteStripeRefusal(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code;
-  return typeof code === "string" && DEFINITE_STRIPE_REFUSAL_CODES.has(code);
-}
+// SP10 Task 9 fix round 1 (Important 2): the allowlist of Stripe codes that
+// PROVE no money moved (so the claim can be released at once and a cancel
+// stays possible between passes) now lives in paymentsCore.ts and is imported
+// above: SP5c's held-share release path needs the same judgement, and it
+// cannot import this file. See `isDefiniteStripeRefusal`'s own note there for
+// what is deliberately absent from the list and why.
 
 async function settleOneEvent(
   db: FirebaseFirestore.Firestore, doc: FirebaseFirestore.QueryDocumentSnapshot,
@@ -1710,30 +1689,36 @@ async function settleOneEvent(
     // exists, this event was already fully paid under the old model, so
     // every pending order is stamped to MATCH what that single old transfer
     // already covered, with no new transfer at all.
+    //
+    // FIX WAVE M1: the guard is keyed on the legacy LEDGER ROW alone. It used
+    // to be gated behind "no order of this event carries settledAt yet", which
+    // broke on its own per-pass budget: a legacy event with more than
+    // TICKET_SETTLEMENT_ORDERS_PER_PASS pending orders stamps the first batch,
+    // returns, and on the NEXT pass sees those stamps, concludes it is not
+    // legacy after all, and transfers orders 201+ for money the old per-event
+    // transfer already paid. The ledger row is the durable, unambiguous
+    // signal, and re-finding it every pass is what makes the resumption safe.
     let legacySettled = false;
     if (claim === "already_started") {
-      const anyOrderAlreadySettled = ordersSnap.docs.some((o) => (o.data() as TicketOrderDoc).settledAt != null);
-      if (!anyOrderAlreadySettled) {
-        const legacySnap = await db.collection("ledger")
-          .where("kind", "==", "ticket_settlement").where("eventId", "==", doc.id).get();
-        const legacyRow = legacySnap.docs.find((d) => d.data().orderId == null);
-        if (legacyRow) {
-          legacySettled = true;
-          console.info(
-            `paymentsSweep: event ${doc.id} was already fully settled under the old per-event ticket_settlement `
-            + `key (ledger row ${legacyRow.id}); stamping ${pending.length} pending order(s) to match, no new transfer`);
-          for (let i = 0; i < pending.length; i++) {
-            const orderDoc = pending[i];
-            const order = orderDoc.data() as TicketOrderDoc;
-            const legacyAmount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
-            await orderDoc.ref.update({ settledAt: now, settlementLegs: 1, settlementProfileCents: legacyAmount });
-            report.ticketOrdersSettled++;
-            if ((i + 1) % TICKET_SETTLEMENT_ORDERS_PER_PASS === 0 && i < pending.length - 1) {
-              console.info(
-                `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
-                + "stamping legacy-settled orders, with orders still pending; resuming next pass");
-              return;
-            }
+      const legacySnap = await db.collection("ledger")
+        .where("kind", "==", "ticket_settlement").where("eventId", "==", doc.id).get();
+      const legacyRow = legacySnap.docs.find((d) => d.data().orderId == null);
+      if (legacyRow) {
+        legacySettled = true;
+        console.info(
+          `paymentsSweep: event ${doc.id} was already fully settled under the old per-event ticket_settlement `
+          + `key (ledger row ${legacyRow.id}); stamping ${pending.length} pending order(s) to match, no new transfer`);
+        for (let i = 0; i < pending.length; i++) {
+          const orderDoc = pending[i];
+          const order = orderDoc.data() as TicketOrderDoc;
+          const legacyAmount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
+          await orderDoc.ref.update({ settledAt: now, settlementLegs: 1, settlementProfileCents: legacyAmount });
+          report.ticketOrdersSettled++;
+          if ((i + 1) % TICKET_SETTLEMENT_ORDERS_PER_PASS === 0 && i < pending.length - 1) {
+            console.info(
+              `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
+              + "stamping legacy-settled orders, with orders still pending; resuming next pass");
+            return;
           }
         }
       }
@@ -1748,6 +1733,10 @@ async function settleOneEvent(
       // be released again after that point either).
       let settlementStarted = event.settlementStartedAt != null;
       let ordersProcessedThisPass = 0;
+      // FIX WAVE M4: `ticketSettlementsTransferred` counts PASSES that moved
+      // money, so a pass that only stamped zero-owed orders (or found every
+      // pending order already settled) must not report a transfer.
+      let transferredThisPass = false;
 
       for (let i = 0; i < pending.length; i++) {
         const orderDoc = pending[i];
@@ -1788,7 +1777,9 @@ async function settleOneEvent(
               purpose: "ticket_settlement", ref: { eventId: doc.id, orderId: orderDoc.id },
               idempotencyBase: `ticket_settlement:${doc.id}:${orderDoc.id}`,
               meta: { purpose: "ticket_settlement", eventId: doc.id, orderId: orderDoc.id },
-              profileAccountId: curatorStripe.accountId, now,
+              // Ticket revenue is never self-dealt: the payer is a fan buying
+              // a ticket, not the curator being paid.
+              profileAccountId: curatorStripe.accountId, selfDeal: false, now,
             });
             await orderDoc.ref.update({
               settledAt: now, settlementLegs: dist.legs.length, settlementProfileCents: dist.profileCents,
@@ -1821,23 +1812,37 @@ async function settleOneEvent(
             }
             report.ticketOrdersSettled++;
             ordersProcessedThisPass++;
+            transferredThisPass = true;
           } catch (e) {
+            // FIX WAVE I3: a PARTIAL distribution is never a definite refusal,
+            // whatever Stripe code the failing leg carried. Money has already
+            // reached member (or profile) accounts for THIS order, so releasing
+            // the claim would let a cancel refund every buyer of this event on
+            // top of transfers that have already happened. The claim stands and
+            // ages out of the 24h window like any other ambiguous outcome.
+            const partial = e instanceof DistributePartialError;
+            const definite = !partial && isDefiniteStripeRefusal(e);
             // Ruling B: release the claim only when NOTHING for this event has
             // settled yet this pass (or any earlier pass) AND the refusal is
             // definite; once any order has settled, settlementStartedAt is
             // permanent and releasing the claim would not reopen cancel anyway.
-            if (!settlementStarted && isDefiniteStripeRefusal(e)) {
+            if (!settlementStarted && definite) {
               await releaseSettlementClaim(db, doc.ref, claimedAt, now)
                 .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
             }
             const alertId = ticketSettlementFailedAlertId(doc.id);
             const cancelNote = settlementStarted
               ? "stays blocked (an earlier order for this event already settled)"
-              : isDefiniteStripeRefusal(e) ? "stays possible" : "reopens once the claim is 24h old";
+              : definite ? "stays possible" : "reopens once the claim is 24h old";
+            const movedNote = partial
+              ? ` PART OF THIS ORDER ALREADY MOVED: ${describeMovedLegs((e as DistributePartialError).legs)}.`
+                + " The next pass replays the same frozen plan under the same keys and finishes the remaining legs;"
+                + " nothing already moved is re-sent."
+              : "";
             const shouldLog = await recordAdminAlert({
               alertId, kind: "ticket_settlement_failed",
               detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${amount}c for order ${orderDoc.id} to curator `
-                + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}; retried hourly, `
+                + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)};${movedNote} retried hourly, `
                 + `cancel ${cancelNote}`,
               bookingId: null, gigId: null, now,
             });
@@ -1860,7 +1865,7 @@ async function settleOneEvent(
           return;
         }
       }
-      report.ticketSettlementsTransferred++;
+      if (transferredThisPass) report.ticketSettlementsTransferred++;
     }
   } else {
     // Every pending order owes nothing (all free, or all refunded/disputed to

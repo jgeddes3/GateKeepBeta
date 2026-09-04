@@ -248,21 +248,36 @@ export async function completeOrderTx(orderId: string): Promise<void> {
 
   // SP5c Task 7: resolve the order's charge BEFORE the transaction (Stripe
   // calls never run inside a Firestore transaction, the SP5 invariant every
-  // money file in this codebase repeats). A free order (no paymentIntentId)
-  // has no charge to look up, chargeId/chargeAmountCents simply stay null for
-  // it, matching the all-free settlement path. A plain (non-transactional)
-  // read decides whether the lookup is even worth making; a stale read here
-  // (the order resolved by the time this stamps) is harmless, since the
-  // transaction below remains the sole idempotent gate on the "paid"
-  // transition, and a failed/skipped lookup just leaves this order to
-  // paymentsSweep's own fallback lookup at settlement time.
+  // money file in this codebase repeats). A plain (non-transactional) read
+  // decides whether the lookup is even worth making; a stale read here (the
+  // order resolved by the time this stamps) is harmless, since the transaction
+  // below remains the sole idempotent gate on the "paid" transition.
+  //
+  // FIX WAVE M2: the three outcomes are DIFFERENT, and the difference is what
+  // the sweep reads.
+  //  - a free order (no paymentIntentId): explicit `null`, "there is no charge
+  //    and there never will be", so the sweep does not waste a lookup on it;
+  //  - the lookup found a charge: the real ids;
+  //  - the lookup FAILED or returned no charge: both fields are left UNDEFINED
+  //    and omitted from the update, because `paymentsSweep` only runs its own
+  //    fallback lookup when `order.chargeId === undefined`. Stamping `null`
+  //    here would permanently mark the order unsourceable over one transient
+  //    Stripe hiccup, and its whole face value would then transfer off the
+  //    platform balance instead of the buyer's own charge.
   const preOrder = (await orderRef.get()).data() as TicketOrderDoc | undefined;
-  let chargeId: string | null = null;
-  let chargeAmountCents: number | null = null;
-  if (preOrder?.status === "pending" && preOrder.paymentIntentId) {
-    const intent = await getStripe().retrieveIntent(preOrder.paymentIntentId).catch(() => null);
-    chargeId = intent?.chargeId ?? null;
-    chargeAmountCents = intent?.amountCents ?? null;
+  let chargeId: string | null | undefined;
+  let chargeAmountCents: number | null | undefined;
+  if (preOrder?.status === "pending") {
+    if (!preOrder.paymentIntentId) {
+      chargeId = null;
+      chargeAmountCents = null;
+    } else {
+      const intent = await getStripe().retrieveIntent(preOrder.paymentIntentId).catch(() => null);
+      if (intent?.chargeId) {
+        chargeId = intent.chargeId;
+        chargeAmountCents = intent.amountCents ?? null;
+      }
+    }
   }
 
   const completed = await db.runTransaction(async (tx) => {
@@ -300,7 +315,10 @@ export async function completeOrderTx(orderId: string): Promise<void> {
     // buyer's very first ticket for this event needs no extra read here.
     tx.set(db.doc(`users/${order.buyerUid}/ticketIndex/${order.eventId}`),
       { count: FieldValue.increment(totalQty) }, { merge: true });
-    tx.update(orderRef, { status: "paid", paidAt: now, chargeId, chargeAmountCents });
+    tx.update(orderRef, {
+      status: "paid", paidAt: now,
+      ...(chargeId === undefined ? {} : { chargeId, chargeAmountCents }),
+    });
 
     return { order, eventTitle, totalQty };
   });
