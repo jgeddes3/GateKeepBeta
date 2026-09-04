@@ -1,13 +1,17 @@
 import { useState, type ReactNode } from "react";
-import { View } from "react-native";
+import { ScrollView, View } from "react-native";
 import { useRouter } from "expo-router";
-import type { SearchFilters } from "@gatekeep/shared";
+import type { SearchFilters, SearchPin } from "@gatekeep/shared";
 import { GigDetailSheet } from "../bookings/GigDetailSheet";
 import { LocationPromptSheet } from "../discover/LocationPromptSheet";
 import { useDeckLocation, type DeckLocationState } from "../discover/useDeckLocation";
-import { Chip } from "../ui";
+import { formatGigDateTime } from "../gigs/GigForms";
+import { Button, Card, Chip, Text } from "../ui";
+import { tokens } from "../theme/tokens";
+import { ListMapToggle, type ResultsView } from "./ListMapToggle";
 import { ResultList } from "./ResultList";
 import { GigRow, ProfileRow } from "./ResultRows";
+import { regionFromLocation, ResultsMap } from "./ResultsMap";
 import { SearchHeader } from "./SearchHeader";
 import { useSearch } from "./useSearch";
 
@@ -42,19 +46,50 @@ function SegmentChips({ segment, onChange }: { segment: Segment; onChange: (s: S
   );
 }
 
+// SP8 Task 16: the selected pin's own card in map view, mirroring FanFace's
+// SelectedShowCard, with an "Open" button that does exactly what GigRow's
+// own press does (open the GigDetailSheet, not a route push).
+function SelectedGigCard({ pin, onOpen }: { pin: SearchPin; onOpen: () => void }) {
+  return (
+    <Card style={{ gap: tokens.space.xs }}>
+      <Text variant="label">{pin.title}</Text>
+      <Text variant="meta" muted>{pin.subtitle}</Text>
+      {pin.startsAt != null && <Text variant="meta" muted>{formatGigDateTime(pin.startsAt)}</Text>}
+      <Button title="Open" onPress={onOpen} style={{ marginTop: tokens.space.xs, alignSelf: "flex-start" }} />
+    </Card>
+  );
+}
+
 function GigsSegment({ segment, onSegmentChange, location, initial, headerRight, onOpenGig }: {
   segment: Segment; onSegmentChange: (s: Segment) => void; location: DeckLocationState;
   initial?: { q: string; filters: SearchFilters }; headerRight?: ReactNode;
   onOpenGig: (gigId: string) => void;
 }) {
-  const state = useSearch("musician_gigs", { location: location.location, includePins: false, initial });
+  const [view, setView] = useState<ResultsView>("list");
+  const [selectedPin, setSelectedPin] = useState<SearchPin | null>(null);
+  const state = useSearch("musician_gigs", { location: location.location, includePins: view === "map", initial });
   const header = (
     <SearchHeader
       value={state.q} onChangeText={state.setQ} placeholder="Search gigs"
       face="musician_gigs" filters={state.filters} onFiltersChange={state.setFilters} location={location}
-      above={<SegmentChips segment={segment} onChange={onSegmentChange} />} right={headerRight}
+      above={<SegmentChips segment={segment} onChange={onSegmentChange} />}
+      right={
+        <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+          <ListMapToggle view={view} onChange={(v) => { setView(v); setSelectedPin(null); }} />
+          {headerRight}
+        </View>
+      }
     />
   );
+  if (view === "map") {
+    return (
+      <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+        {header}
+        <ResultsMap pins={state.pins} onSelect={setSelectedPin} initialRegion={regionFromLocation(location.location)} />
+        {selectedPin && <SelectedGigCard pin={selectedPin} onOpen={() => onOpenGig(selectedPin.id)} />}
+      </ScrollView>
+    );
+  }
   return (
     <ResultList state={state} header={header} renderRow={(r) => <GigRow r={r} onPress={() => onOpenGig(r.id)} />} />
   );

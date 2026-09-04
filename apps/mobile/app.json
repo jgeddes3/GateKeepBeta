@@ -25,6 +25,7 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
+      "config": { "googleMaps": { "apiKey": "REPLACE_WITH_ANDROID_MAPS_KEY" } },
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.RECORD_AUDIO",
