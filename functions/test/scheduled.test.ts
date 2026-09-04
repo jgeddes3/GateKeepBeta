@@ -257,7 +257,46 @@ describe("runDailySweep, series materialization", () => {
     const occs = await occurrencesFor(seriesId);
     expect(occs.map((d) => d.data().startsAt)).toEqual([anchor, anchor + 7 * DAY_MS, anchor + 14 * DAY_MS]);
     const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
-    expect(series.materializedThrough).toBe(endDate);
+    expect(series.materializedThrough).toBe(endDate + 1); // inclusive endDate: the exclusive edge is one ms past it
+  });
+
+  it("SP10 Task 23 (sp3 #11): an occurrence landing EXACTLY on endDate is created (endDate is inclusive)", async () => {
+    const createdAt = Date.now();
+    const anchor = expectedAnchor(createdAt, 5, 20, 0);
+    const endDate = anchor + 14 * DAY_MS; // on-grid: the third weekly slot
+    const { seriesId } = await seedSeries({
+      createdAt, updatedAt: createdAt, recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate },
+    });
+
+    await runDailySweep(anchor);
+    const occs = await occurrencesFor(seriesId);
+    expect(occs.map((d) => d.data().startsAt)).toEqual([anchor, anchor + 7 * DAY_MS, anchor + 14 * DAY_MS]);
+    const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+    expect(series.materializedThrough).toBe(endDate + 1);
+    expect(series.status).toBe("active"); // endDate is still ahead of `now`
+
+    // A later run past the end date creates nothing more and ends the series.
+    const report = await runDailySweep(endDate + DAY_MS);
+    expect((await occurrencesFor(seriesId)).length).toBe(3);
+    expect((await adb.doc(`gigSeries/${seriesId}`).get()).data()?.status).toBe("ended");
+    expect(report.seriesEnded).toBeGreaterThanOrEqual(1);
+  });
+
+  it("SP10 Task 23 (sp3 #5): an active series whose endDate has passed is flipped to ended and materializes nothing", async () => {
+    const now = Date.now();
+    const createdAt = now - 70 * DAY_MS;
+    const { seriesId } = await seedSeries({
+      createdAt, updatedAt: createdAt, materializedThrough: now - 8 * DAY_MS,
+      recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: now - 3 * DAY_MS },
+    });
+
+    const report = await runDailySweep(now);
+
+    const series = (await adb.doc(`gigSeries/${seriesId}`).get()).data() as GigSeriesDoc;
+    expect(series.status).toBe("ended");
+    expect(series.updatedAt).toBe(now);
+    expect(await occurrencesFor(seriesId)).toHaveLength(0);
+    expect(report.seriesEnded).toBeGreaterThanOrEqual(1);
   });
 
   it("INVARIANT: a paused series materializes nothing, even though it matches every other condition", async () => {

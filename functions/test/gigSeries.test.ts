@@ -273,6 +273,26 @@ describe("updateSeries", () => {
     expect(openOcc?.title).toBe("Propagated Title"); // still updates
   });
 
+  it("SP10 Task 23 (sp3 #10): propagation SKIPS taken_down and cancelled occurrences; a draft sibling still updates", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("usmod", "venue");
+    const seriesId = await createSeries(profileId, owner.user);
+    const takenDownId = await seedOccurrence(seriesId, profileId, { status: "taken_down", title: "Taken down original" });
+    const cancelledId = await seedOccurrence(seriesId, profileId, { status: "cancelled", title: "Cancelled original" });
+    const draftId = await seedOccurrence(seriesId, profileId, { status: "draft", title: "Draft original" });
+    await callFn("updateSeries", { seriesId, ...seriesContent({ title: "Propagated Title" }) }, owner.user);
+    expect((await adb.doc(`gigs/${takenDownId}`).get()).data()?.title).toBe("Taken down original");
+    expect((await adb.doc(`gigs/${cancelledId}`).get()).data()?.title).toBe("Cancelled original");
+    expect((await adb.doc(`gigs/${draftId}`).get()).data()?.title).toBe("Propagated Title");
+  });
+
+  it("SP10 Task 23: propagation restamps fillMode on an open occurrence", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("usfill", "venue");
+    const seriesId = await createSeries(profileId, owner.user);
+    const openId = await seedOccurrence(seriesId, profileId);
+    await callFn("updateSeries", { seriesId, ...seriesContent({ fillMode: "whole_run" }) }, owner.user);
+    expect((await adb.doc(`gigs/${openId}`).get()).data()?.fillMode).toBe("whole_run");
+  });
+
   it("does NOT propagate to a DETACHED future occurrence", async () => {
     const { owner, profileId } = await makeApprovedCuratorProfile("us3", "venue");
     const seriesId = await createSeries(profileId, owner.user);

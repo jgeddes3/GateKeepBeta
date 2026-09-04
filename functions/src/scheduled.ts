@@ -106,17 +106,19 @@ function skipAheadTo(base: number, threshold: number, step: number): number {
   return base + stepsToSkip * step;
 }
 
-// Pure planning function (no I/O), computes which occurrence startsAt
+// Pure planning function (no I/O): computes which occurrence startsAt
 // values fall newly inside the [materializedThrough, windowEnd) slice, plus
-// the watermark to advance to. Window end is exclusive: an occurrence
-// exactly AT now+SERIES_MATERIALIZE_WEEKS (or exactly at endDate) is left for
-// the following day's run, keeping the boundary convention identical for
-// both the window cap and the endDate cap.
+// the watermark to advance to. The rolling window end is exclusive: an
+// occurrence exactly AT now+SERIES_MATERIALIZE_WEEKS is left for the
+// following day's run. recurrence.endDate is INCLUSIVE (SP10 Task 23, sp3
+// #11): it is the last instant an occurrence may start, so the exclusive
+// edge it imposes is endDate + 1. Both forms submit the end-of-day instant
+// in LAUNCH_TIMEZONE for the chosen calendar date.
 function computeOccurrences(series: GigSeriesDoc, now: number): MaterializePlan {
   const step = CADENCE_STEP_MS[series.recurrence.cadence];
   const rawWindowEnd = now + SERIES_MATERIALIZE_WEEKS * 7 * DAY_MS;
   const windowEnd = series.recurrence.endDate != null
-    ? Math.min(rawWindowEnd, series.recurrence.endDate)
+    ? Math.min(rawWindowEnd, series.recurrence.endDate + 1)
     : rawWindowEnd;
 
   // Idempotency guard: if the window hasn't advanced past the watermark
@@ -262,6 +264,9 @@ export interface SweepReport {
   // this series' own linkage), self-healed by birthing this run's
   // occurrences "open" instead and clearing the stale linkage.
   seriesSelfHealed: number;
+  // SP10 Task 23, step 1: active series whose recurrence.endDate had passed
+  // at this run's `now`, flipped to "ended" (sp3 #5).
+  seriesEnded: number;
   // SP4 Task 8, step 6: "open" bookings expired because their target gig
   // became unavailable (elapsed startsAt, or any non-"open" status) without
   // ever being resolved by acceptBooking's sibling-supersede fan-out or
@@ -339,7 +344,7 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
   const report: SweepReport = {
     occurrencesCreated: 0, seriesAdvanced: 0, pastGigsClosed: 0, tracksFailed: 0, invitesRevoked: 0,
     seriesSkippedCapped: 0, seriesSkippedRace: 0, curatorAccessRetried: 0,
-    occurrencesBornFilled: 0, seriesSelfHealed: 0,
+    occurrencesBornFilled: 0, seriesSelfHealed: 0, seriesEnded: 0,
     bookingsExpired: 0, bookingsCompleted: 0, wholeRunResolutions: 0,
     eventRemindersSent: 0,
     eventCascadeRetried: 0,
@@ -375,6 +380,26 @@ export async function runDailySweep(now: number): Promise<SweepReport> {
         // `continue`s to the next series in this page.
         try {
           const series = seriesDoc.data() as GigSeriesDoc;
+
+          // SP10 Task 23 (sp3 #5): a series past its inclusive endDate has no
+          // date left to create; it stops counting against
+          // MAX_ACTIVE_SERIES_PER_PROFILE and stops costing a scan. The flip
+          // re-checks status transactionally (same TOCTOU concern as the
+          // freshSnap re-read below) so it never overwrites a curator's own
+          // pause/end that landed between the page scan and this write. Any
+          // still-linked run booking resolves through step 7 as usual: every
+          // one of its dates has already started.
+          if (series.recurrence.endDate != null && series.recurrence.endDate <= now) {
+            const ended = await db.runTransaction(async (tx) => {
+              const fresh = (await tx.get(seriesDoc.ref)).data() as GigSeriesDoc | undefined;
+              if (fresh?.status !== "active") return false;
+              tx.update(seriesDoc.ref, { status: "ended", updatedAt: now });
+              return true;
+            });
+            if (ended) report.seriesEnded++; else report.seriesSkippedRace++;
+            continue;
+          }
+
           const { startsAtList, newMaterializedThrough } = computeOccurrences(series, now);
           if (newMaterializedThrough <= series.materializedThrough) continue; // nothing new for this series
 

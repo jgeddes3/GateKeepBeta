@@ -252,20 +252,16 @@ export const updateSeries = onCall<UpdateSeriesInput>(
     .where("seriesId", "==", input.seriesId).where("startsAt", ">", now).get();
   for (const doc of futureSnap.docs) {
     if (doc.data().detachedFromTemplate === true) continue;
-    // F2 (security audit wave): a FILLED (or CLOSED) occurrence is a
-    // booked, contract-locked date, the two sides negotiated and accepted
-    // its specific terms via acceptBooking, exactly like updateGig now
-    // refuses to edit a filled/closed gig directly (gigs.ts). A template
-    // propagation sweep is a SILENT, no-confirmation write path, it must
-    // never retroactively rewrite a booked date's schedule/terms out from
-    // under an already-confirmed booking just because the curator edited
-    // some OTHER future occurrence's template.
+    // F2 (security audit wave): a FILLED or CLOSED occurrence is a booked,
+    // contract-locked date. SP10 Task 23 (sp3 #10): a TAKEN_DOWN or
+    // CANCELLED one is moderation/curator history and must not be rewritten
+    // either. Only a still-fillable occurrence follows the template.
     const occStatus = doc.data().status as GigStatus;
-    if (occStatus === "filled" || occStatus === "closed") continue;
+    if (occStatus !== "open" && occStatus !== "draft") continue;
     batch.update(doc.ref, {
       title: template.title, description: template.description, wants: template.wants,
       budget: template.budget, durationMinutes: template.durationMinutes, provisions: template.provisions,
-      location: template.location, updatedAt: now,
+      location: template.location, fillMode: input.fillMode, updatedAt: now,
     });
     if (locationChanged) {
       // A plain set, not update: pre-Task-7 there's no materializer yet, so
