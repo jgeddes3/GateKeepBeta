@@ -1,6 +1,6 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-09-04, after the 10
+Read this first in any new session or on a new machine. Last updated 2026-09-04, after the 8
 merge. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
@@ -45,6 +45,17 @@ Done and merged (each has a rulings doc that is the authority for its area):
    (`expo-location` joined the native deps for the deck's distance sort) and is entirely unverified
    off device, same posture as sub-6's door scanner before it. The Discover-page marketing capture
    for the landing page's fan section is also still owed (it currently reuses artist-page.jpg).
+8. Search (`sp8-rulings.md`): a server-only `searchIndex` collection maintained by triggers, a
+   daily expiry step, and a `search` callable with three role faces (fan text search, musician Gigs
+   | Venues, curator musicians directory) backing a web `/search` and the rewired `/gigs` and
+   curator musicians pages, a Google Maps results map behind
+   `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY`, saved searches with `saved_search_match` alerts, the SEO
+   pack (sitemap, robots, JSON-LD, lowercase handle redirects), and the mobile twins (fan Search
+   tab, musician Find Gigs, curator Find Musicians, a hidden saved-searches tab under Account,
+   react-native-maps). `scripts/seed-test-discovery.ts`'s fixtures are indexed automatically by the
+   same triggers, no separate search-seed step exists. Owner smoke owed: the sub-8 checklist in
+   README, both platforms, both themes; a new EAS dev build for `react-native-maps`; the results
+   map path is entirely unverified off device.
 
 10. Hardening, branches A and B (`sp10b-rulings.md`): no new features. Branch A (merged
    2026-09-02 at `ee433d4`, plan `plans/2026-09-02-hardening-sweep.md`): every em dash removed
@@ -63,13 +74,6 @@ Done and merged (each has a rulings doc that is the authority for its area):
 
 ## Roadmap
 
-- **8 Search**: text search, ranking, the map view, venue filter chips, saved searches and alerts,
-  sitemap, handle redirects, reserved handles, a rate-limit helper, and the internals of both
-  placeholder directories (`apps/web/app/gigs/`, the curator musicians directory, and their
-  mobile twins). Spec (`docs/superpowers/specs/2026-09-02-search-design.md`) and plan
-  (`docs/superpowers/plans/2026-09-02-search.md`, 19 tasks) are on main, merged in by
-  Task 35. Owner decision 2026-09-03: run it subagent-driven in a fresh worktree from main as
-  soon as 10B lands, re-running its plan's pre-flight scan against the merged main first.
 - **From the SP7 reconciliation**:
   - Add a share affordance to event pages and universal or app links (associatedDomains,
     intentFilters) so a shared event URL opens the app; today `app.json` carries only the custom
@@ -165,8 +169,8 @@ roadmap above. Detail reports live in `docs/superpowers/audit/` and
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (174), `pnpm emu:test` (871,
-  single blocking call), `pnpm emu:rules` (132), web lint + build, mobile lint.
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (199), `pnpm emu:test` (895,
+  single blocking call), `pnpm emu:rules` (134), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
   locally; EAS cloud is unaffected). Node 22 is the functions runtime since sub-project 10
@@ -242,3 +246,9 @@ section names refer to the README as rewritten in sub-project 10.
 | 58 | Deploy and confirm the new composite indexes `payments (musicianProfileId, settlement.status)` and `orders (buyerUid, status)`, and the repaired `tickets.orderId` and `members.uid` overrides, all show Enabled | Launch | spec 10 section 11 |
 | 59 | Confirm the deployed functions run Node 22 (`firebase.json` runtime `nodejs22`) | Launch | `plans/2026-09-02-hardening-sweep.md` |
 | 60 | Turn OFF the "Delete account" user action (Firebase Authentication settings / Identity Platform user actions) so self-service deletion goes through `deleteAccount`; until then the `account_deleted_unclean` alert is the backstop | Launch | README "Manual follow-ups" |
+| 61 | Deploy and confirm the seven new composite indexes (5 `searchIndex`, 2 `savedSearches`) finish building after `firebase deploy --only firestore:indexes` | Launch | README "Sub-project 8 launch checklist" |
+| 62 | Run `backfillSearchIndex` from `/admin` once after the first functions deploy | Launch | README "Sub-project 8 launch checklist" |
+| 63 | `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY` on the web host, Maps JavaScript API enabled, HTTP-referrer restricted | Launch (Optional if the map stays off) | README "Sub-project 8 launch checklist" |
+| 64 | Replace the `app.json` Android Maps key placeholder (`REPLACE_WITH_ANDROID_MAPS_KEY`) with a key restricted by package name and signing certificate | Device | README "Sub-project 8 launch checklist" |
+| 65 | New EAS dev build for `react-native-maps` | Device | README "Sub-project 8 launch checklist" |
+| 66 | Confirm `LAUNCH_TIMEZONE` | Launch | README "Sub-project 8 launch checklist" |

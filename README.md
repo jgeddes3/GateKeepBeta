@@ -259,6 +259,10 @@ FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 pnpm tsx scripts/seed-admin.ts someon
 GOOGLE_APPLICATION_CREDENTIALS=./service-account.json pnpm tsx scripts/seed-admin.ts someone@example.com
 ```
 
+The `searchIndex` triggers index every seeded profile, gig, and event automatically, no separate
+search-seed step is needed; the `/admin` "Rebuild search index" button only matters for data
+seeded before the functions were running.
+
 ## Gigs & series (sub-project 3)
 
 **Concepts.** A `gigs` doc is one dated posting (title, budget, wants, location, one of
@@ -660,6 +664,12 @@ string / no-op) by default and only matters for a production deploy.
 | `WEB_PORT` | scripts | the web dev-server port `scripts/seed-test-event.ts` prints its `/e/[eventId]` URL against | `3000` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | scripts | service-account JSON path that lets `scripts/seed-admin.ts` and `scripts/seed-test-accounts.ts` run against a real project instead of the emulator | the scripts refuse to run when neither this nor the emulator hosts are set |
 | `GCLOUD_PROJECT` | scripts | the project id `scripts/seed-admin.ts` and `scripts/seed-test-accounts.ts` (via `scripts/projectId.ts`) write to, checked after a `--project` argument and before the credentials file; printed before any write | a `--project` argument, else the credentials file's `project_id`, else `gatekeep-dev-jg` when an emulator host is set, else the script refuses |
+| `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY` | web | Google Maps JavaScript API key for the search results map (`apps/web/src/search/ResultsMap.tsx`); optional, HTTP-referrer restricted | unset → the map toggle stays hidden, text/list search still works |
+
+The Android Maps key is not an environment variable: `apps/mobile/app.json`'s
+`android.config.googleMaps.apiKey` carries the placeholder `REPLACE_WITH_ANDROID_MAPS_KEY`, swap it
+for a Maps SDK for Android key restricted by package name and signing certificate before a device
+build, `react-native-maps` reads it from the native config, not from an env var.
 
 Web App Check only initializes when `NODE_ENV === "production"` **and** the site key is set
 (`apps/web/src/lib/firebase.ts`). Mobile Sentry is additionally gated on `!__DEV__`
@@ -1279,6 +1289,61 @@ dependency list, see the launch checklist above):
 - Each notification kind deep-links to the right place on tap: show announced, show rescheduled,
   a new post, and new music from someone followed.
 - The show-post composer's caps hold: 3 posts per event, one post per 10 minutes.
+
+### Sub-project 8 launch checklist (search)
+
+- **New composite indexes deploy with `firebase deploy`**: sub-project 8 adds 7 composite indexes
+  to `firestore.indexes.json` (5 `searchIndex`, 2 `savedSearches`):
+  - `searchIndex (kind, tokens ARRAY_CONTAINS, startsAt)`
+  - `searchIndex (kind, tokens ARRAY_CONTAINS, followerCount desc)`
+  - `searchIndex (kind, startsAt)`
+  - `searchIndex (kind, followerCount desc)`
+  - `searchIndex (kind, endsAt)`
+  - `savedSearches (kind, createdAt)`
+  - `savedSearches (uid, createdAt desc)`
+
+  Same caveat as every prior sub-project's indexes: the emulator does not enforce composite
+  indexes, so a green `pnpm emu:test`/`pnpm emu:rules` proves nothing about them, confirm they
+  build on the real project (Firebase console → Firestore → Indexes) after the first deploy before
+  search, ranking, and saved-search queries that depend on them will work in production.
+- **Run "Rebuild search index" from `/admin` once after the first functions deploy.** The
+  `backfillSearchIndex` callable walks every eligible profile, gig, and event into `searchIndex`;
+  after that, the create/update/delete triggers keep it current on their own.
+- **Web: set `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY` on the web host** (Maps JavaScript API enabled,
+  HTTP-referrer restricted); the results map toggle stays hidden without it.
+- **Mobile: replace `REPLACE_WITH_ANDROID_MAPS_KEY` in `app.json`** with a Maps SDK for Android key
+  restricted by package name and signing certificate, then a new EAS dev build
+  (`npx eas-cli build --profile development --platform all`), react-native-maps joined the native
+  dependency list this sub-project.
+- Confirm `LAUNCH_TIMEZONE`.
+
+### Sub-project 8 smoke checklist (search)
+
+Sub-project 8 opens text search across profiles, gigs, and events: a fan/musician/curator search
+experience on both platforms, a results map behind the Maps key, saved searches with match alerts,
+and an SEO pack (sitemap, robots, JSON-LD, lowercase handle redirects).
+
+**Web, both themes:**
+- Fan face: the search box returns results for a name/genre/city query, and each filter chip
+  narrows them.
+- The map toggle and pin tap work when `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY` is set.
+- Musician face (`/gigs`): the Gigs and Venues segments both return results, and the apply sheet's
+  filters narrow them.
+- Curator face: the musicians directory filters work, including "Free on".
+- Save a search, see it on the dashboard, delete it.
+- Publish an event or gig that matches a saved search and receive the `saved_search_match` alert.
+- `sitemap.xml` and `robots.txt` render at the site root.
+- A mixed-case handle in a profile URL redirects to the lowercase canonical.
+- A musician or curator portfolio's home city field saves and reflects in results.
+
+**Mobile, both themes, needs a new EAS dev-client build** (`react-native-maps` joined the native
+dependency list, see the launch checklist above):
+- Fan Search tab: text plus each chip returns results, and the map toggle and pin tap work.
+- Musician Find Gigs tab: the Gigs and Venues segments both return results with the apply sheet.
+- Curator Find Musicians tab: filters work, including "Free on".
+- Save a search, see it under the hidden Account tab, delete it.
+- Receive a push for a `saved_search_match` alert and tap it to the matching result.
+- Portfolio home city field saves on both the musician and curator editors.
 
 ### Sub-project 2 polish follow-ups (non-blocking)
 
