@@ -292,16 +292,30 @@ export async function distributeEarnings(input: DistributeInput): Promise<Distri
         ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
       });
       if (sourced) remaining -= part.amountCents;
-      await writeLedger({ kind: "share_transfer", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: t.id, sourced, ...refFields(input.ref), detail: `${payeeKey(part.payee)} share of ${input.purpose}${sourced ? ", sourced from the charge" : ", drawn on the platform balance"}`, at: input.now })
-        .catch((e) => console.error(`distributeEarnings: share_transfer ledger row failed for ${key}`, e));
+      // ROUND 2 (Important): per-leg rows and notifications belong to a SPLIT
+      // settlement only. A no-shares plan makes exactly one transfer, and the
+      // caller's own summary row (`earnings_transfer` for a booking,
+      // `ticket_settlement` for an order) is that transfer's record, per spec
+      // section 5. Writing a `share_transfer` row for it too put TWO rows
+      // against one Stripe transfer id on every default-state settlement, and
+      // both clients then nested a "Share paid" line under the settlement as
+      // if the money had moved twice.
+      if (plan.shared) {
+        await writeLedger({ kind: "share_transfer", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: t.id, sourced, ...refFields(input.ref), detail: `${payeeKey(part.payee)} share of ${input.purpose}${sourced ? ", sourced from the charge" : ", drawn on the platform balance"}`, at: input.now })
+          .catch((e) => console.error(`distributeEarnings: share_transfer ledger row failed for ${key}`, e));
+      }
       if (uid) {
         // Fix wave I6: self-deal money that just landed in a MEMBER's own
         // account gets the same instant-payout hold the profile's account
         // already got. Best-effort inside the helper, exactly like the
-        // profile stamp: the transfer has happened either way.
+        // profile stamp: the transfer has happened either way. NOT gated on
+        // `plan.shared`: only a shared plan has member legs at all, but the
+        // hold follows the money regardless of how the row is recorded.
         if (input.selfDeal) await setMemberSelfDealInstantHold(uid, input.now);
-        await notifyUser(uid, { kind: "share_paid", refKind: "payouts", title: "You were paid", body: `${formatShareCents(part.amountCents)} from ${profileName}.` }, `share_paid:${key}`)
-          .catch((e) => console.error(`distributeEarnings: share_paid notification failed for ${key}`, e));
+        if (plan.shared) {
+          await notifyUser(uid, { kind: "share_paid", refKind: "payouts", title: "You were paid", body: `${formatShareCents(part.amountCents)} from ${profileName}.` }, `share_paid:${key}`)
+            .catch((e) => console.error(`distributeEarnings: share_paid notification failed for ${key}`, e));
+        }
       }
       legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "transferred", transferId: t.id, sourced });
     } catch (e) {

@@ -48,7 +48,7 @@ const KIND_LABELS: Record<LedgerKind, string> = {
   member_payout_failed: "Payout failed",
 };
 
-const SHARE_KINDS = new Set<LedgerKind>(["share_transfer", "share_held", "share_released"]);
+const SHARE_KINDS = new Set<LedgerKind>(["share_transfer", "share_held", "share_released", "share_voided"]);
 
 // The only two kinds distributeEarnings (functions/src/payoutShares.ts) is
 // ever called from (paymentsSettlement.ts's booking settlement, and

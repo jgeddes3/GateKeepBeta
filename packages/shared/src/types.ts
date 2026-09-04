@@ -1144,6 +1144,16 @@ export interface EventDoc {
   // CAS above), used by the hardening sweep's own claim discipline. Optional;
   // absent means "no claim in flight".
   settlementClaimedAt?: number;
+  // SP5c final fix wave (M1 round 2): this event was fully paid under the
+  // PRE-per-order ticket settlement model, one event-wide transfer recorded by
+  // a `ticket_settlement` ledger row carrying no `orderId`. Stamped the first
+  // time the sweep's migration guard finds that row, and sticky thereafter, so
+  // a legacy event with more orders than one pass's budget keeps taking the
+  // stamp-only path on every later pass instead of transferring orders the old
+  // transfer already covered. It is also what lets a MODERN event (orders
+  // already carrying `settledAt`) skip the ledger scan entirely. Absent means
+  // "not legacy, or never checked".
+  legacySettlement?: boolean;
 }
 export interface TicketTierDoc {
   name: string; priceCents: number;        // 0 = free RSVP

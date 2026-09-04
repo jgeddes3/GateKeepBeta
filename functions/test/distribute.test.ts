@@ -181,13 +181,26 @@ describe("distributeEarnings", () => {
     expect(after.heldCents).toBe(0);
   });
 
-  it("with no shares makes a single transfer under the base key", async () => {
+  it("with no shares makes a single transfer under the base key and writes no share_transfer row", async () => {
     const solo = await makeApprovedMusicianProfile("di2");
     await readyProfileAccount(solo.profileId, solo.owner.user);
     const sp = (await adb.doc(`profiles/${solo.profileId}/private/stripe`).get()).data()!;
-    const r = await distributeEarnings({ profileId: solo.profileId, amountCents: 700, source: null, purpose: "earnings", ref: { bookingId: "b", gigId: "g" }, idempotencyBase: `test:di2:${Date.now()}`, meta: {}, profileAccountId: sp.accountId as string, selfDeal: false, now: Date.now() });
+    const base = `test:di2:${Date.now()}`;
+    const r = await distributeEarnings({ profileId: solo.profileId, amountCents: 700, source: null, purpose: "earnings", ref: { bookingId: "b", gigId: "g" }, idempotencyBase: base, meta: {}, profileAccountId: sp.accountId as string, selfDeal: false, now: Date.now() });
     expect(r.legs).toHaveLength(1);
     expect(r.transferId).toMatch(/^tr/);
     expect(await fakeBalance(sp.accountId as string)).toBe(700);
+    // ROUND 2 (Important): a no-shares plan makes ONE transfer, and the
+    // caller's own summary row (earnings_transfer / ticket_settlement) is its
+    // record. A per-leg share_transfer row here would put a second ledger row
+    // against the same Stripe transfer id, and both clients would nest a
+    // phantom "Share paid" line under every default-state settlement.
+    const shareRows = await adb.collection("ledger")
+      .where("kind", "==", "share_transfer").where("profileId", "==", solo.profileId).get();
+    expect(shareRows.empty).toBe(true);
+    expect((await adb.doc(`ledger/share_transfer:${r.transferId}`).get()).exists).toBe(false);
+    // The plan doc records that this base was NOT a split, which is what keeps
+    // a replay on the bare base key rather than the :share:profile one.
+    expect((await adb.doc(`distributions/${base}`).get()).data()?.shared).toBe(false);
   });
 });

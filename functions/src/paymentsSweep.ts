@@ -1690,35 +1690,47 @@ async function settleOneEvent(
     // every pending order is stamped to MATCH what that single old transfer
     // already covered, with no new transfer at all.
     //
-    // FIX WAVE M1: the guard is keyed on the legacy LEDGER ROW alone. It used
-    // to be gated behind "no order of this event carries settledAt yet", which
-    // broke on its own per-pass budget: a legacy event with more than
-    // TICKET_SETTLEMENT_ORDERS_PER_PASS pending orders stamps the first batch,
-    // returns, and on the NEXT pass sees those stamps, concludes it is not
-    // legacy after all, and transfers orders 201+ for money the old per-event
-    // transfer already paid. The ledger row is the durable, unambiguous
-    // signal, and re-finding it every pass is what makes the resumption safe.
+    // FIX WAVE M1, refined in round 2. The gate used to be "no order of this
+    // event carries settledAt yet", which broke on its own per-pass budget: a
+    // legacy event with more than TICKET_SETTLEMENT_ORDERS_PER_PASS pending
+    // orders stamps the first batch, returns, and on the NEXT pass sees those
+    // stamps, concludes it is not legacy after all, and transfers orders 201+
+    // for money the old per-event transfer already paid.
+    //
+    // The fix is a STICKY flag rather than an unconditional scan: the first
+    // pass that finds the legacy row stamps `legacySettlement: true` on the
+    // event, and every later pass takes the legacy path off that flag. So the
+    // resumption is safe AND a modern event, whose orders already carry
+    // `settledAt`, never pays for the ledger scan at all (it would otherwise
+    // have run on every `already_started` pass, for every event, forever).
     let legacySettled = false;
     if (claim === "already_started") {
-      const legacySnap = await db.collection("ledger")
-        .where("kind", "==", "ticket_settlement").where("eventId", "==", doc.id).get();
-      const legacyRow = legacySnap.docs.find((d) => d.data().orderId == null);
-      if (legacyRow) {
-        legacySettled = true;
-        console.info(
-          `paymentsSweep: event ${doc.id} was already fully settled under the old per-event ticket_settlement `
-          + `key (ledger row ${legacyRow.id}); stamping ${pending.length} pending order(s) to match, no new transfer`);
-        for (let i = 0; i < pending.length; i++) {
-          const orderDoc = pending[i];
-          const order = orderDoc.data() as TicketOrderDoc;
-          const legacyAmount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
-          await orderDoc.ref.update({ settledAt: now, settlementLegs: 1, settlementProfileCents: legacyAmount });
-          report.ticketOrdersSettled++;
-          if ((i + 1) % TICKET_SETTLEMENT_ORDERS_PER_PASS === 0 && i < pending.length - 1) {
-            console.info(
-              `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
-              + "stamping legacy-settled orders, with orders still pending; resuming next pass");
-            return;
+      const anyOrderAlreadySettled = ordersSnap.docs.some((o) => (o.data() as TicketOrderDoc).settledAt != null);
+      if (!anyOrderAlreadySettled || event.legacySettlement === true) {
+        const legacySnap = await db.collection("ledger")
+          .where("kind", "==", "ticket_settlement").where("eventId", "==", doc.id).get();
+        const legacyRow = legacySnap.docs.find((d) => d.data().orderId == null);
+        if (legacyRow) {
+          legacySettled = true;
+          if (event.legacySettlement !== true) {
+            await doc.ref.update({ legacySettlement: true, updatedAt: now })
+              .catch((e) => console.error(`paymentsSweep: failed to stamp legacySettlement on event ${doc.id}`, e));
+          }
+          console.info(
+            `paymentsSweep: event ${doc.id} was already fully settled under the old per-event ticket_settlement `
+            + `key (ledger row ${legacyRow.id}); stamping ${pending.length} pending order(s) to match, no new transfer`);
+          for (let i = 0; i < pending.length; i++) {
+            const orderDoc = pending[i];
+            const order = orderDoc.data() as TicketOrderDoc;
+            const legacyAmount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
+            await orderDoc.ref.update({ settledAt: now, settlementLegs: 1, settlementProfileCents: legacyAmount });
+            report.ticketOrdersSettled++;
+            if ((i + 1) % TICKET_SETTLEMENT_ORDERS_PER_PASS === 0 && i < pending.length - 1) {
+              console.info(
+                `paymentsSweep: event ${doc.id} hit the per-pass order budget (${TICKET_SETTLEMENT_ORDERS_PER_PASS}) `
+                + "stamping legacy-settled orders, with orders still pending; resuming next pass");
+              return;
+            }
           }
         }
       }
@@ -1822,6 +1834,18 @@ async function settleOneEvent(
             // ages out of the 24h window like any other ambiguous outcome.
             const partial = e instanceof DistributePartialError;
             const definite = !partial && isDefiniteStripeRefusal(e);
+            // ROUND 2 (I3 residual): a partial distribution has ALREADY moved
+            // money for this order, so it earns the same permanent cancel
+            // refusal a fully settled order does. The claim alone is not
+            // enough: it ages out in 24h, and a cancel after that would refund
+            // every buyer of this event on top of legs that already landed in
+            // member and profile accounts. Stamped before the note below is
+            // built, so the alert says "blocked" rather than "reopens".
+            if (partial && !settlementStarted) {
+              await doc.ref.update({ settlementStartedAt: now, updatedAt: now })
+                .catch((we) => console.error(`paymentsSweep: failed to stamp settlementStartedAt after a partial split on event ${doc.id}`, we));
+              settlementStarted = true;
+            }
             // Ruling B: release the claim only when NOTHING for this event has
             // settled yet this pass (or any earlier pass) AND the refusal is
             // definite; once any order has settled, settlementStartedAt is
@@ -1831,9 +1855,11 @@ async function settleOneEvent(
                 .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
             }
             const alertId = ticketSettlementFailedAlertId(doc.id);
-            const cancelNote = settlementStarted
-              ? "stays blocked (an earlier order for this event already settled)"
-              : definite ? "stays possible" : "reopens once the claim is 24h old";
+            const cancelNote = partial
+              ? "stays blocked permanently (part of this order's split already reached its payees)"
+              : settlementStarted
+                ? "stays blocked (an earlier order for this event already settled)"
+                : definite ? "stays possible" : "reopens once the claim is 24h old";
             const movedNote = partial
               ? ` PART OF THIS ORDER ALREADY MOVED: ${describeMovedLegs((e as DistributePartialError).legs)}.`
                 + " The next pass replays the same frozen plan under the same keys and finishes the remaining legs;"

@@ -26,6 +26,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { FieldValue } from "firebase-admin/firestore";
 import { adb } from "./discoverFixtures";
+import { callFn } from "./helpers";
+import { addMember, enableMemberAccount, memberStripe } from "./payoutFixtures";
 import {
   makeDraftEvent, addTiersAndPublish, tierIdByName, makeBuyer, payOrder, makeCuratorPayoutReady,
   pushEventPastSettleWindow, ledgerRowsForEvent,
@@ -187,5 +189,60 @@ describe("per-order ticket settlement", () => {
     const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");
     const orderRows = rows.filter((r) => r.data().orderId === orderA);
     expect(orderRows).toHaveLength(1);
+  });
+
+  // ROUND 2 (I3 residual): the case the two failure tests above do NOT cover.
+  // They fail on the curator's ONLY leg, so nothing moved and cancel rightly
+  // stays open. With shares configured, a member leg can land BEFORE the
+  // profile leg refuses, and that money is gone: from then on a cancel would
+  // refund every buyer of this event on top of a transfer a member already
+  // holds. Holding the settlement claim alone is not enough, since it ages out
+  // in 24h, so the partial stamps `settlementStartedAt` and the refusal
+  // becomes permanent, exactly as a fully settled order's does.
+  it("stamps settlementStartedAt when a split leaves an order part paid, so a cancel can never refund over it", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("prt1");
+    const accountId = await makeCuratorPayoutReady(profileId, owner.user);
+    const bass = await addMember(profileId, "prt1b");
+    await callFn("createMemberOnboardingLink", {}, bass.user);
+    expect(await enableMemberAccount(bass.uid)).toBe(200);
+    // The member leg is FIRST, so splitCents runs it before the profile leg
+    // the knob refuses: that ordering is what makes this a PARTIAL
+    // distribution rather than a clean first-leg failure.
+    await callFn("setPayoutShares", { profileId, shares: [
+      { payee: { kind: "member", uid: bass.uid }, percent: 60 },
+      { payee: { kind: "profile" }, percent: 40 },
+    ] }, owner.user);
+    await addTiersAndPublish(profileId, eventId, owner.user,
+      [{ name: "GA", priceCents: 2000, capacity: 50, saleStartsAt: null, saleEndsAt: null }]);
+    const ga = await tierIdByName(eventId, "GA");
+    const buyer = await makeBuyer("prt1a");
+    const orderId = await payOrder(eventId, ga, 1, buyer.user);
+    await pushEventPastSettleWindow(eventId);
+
+    let report;
+    try {
+      await setTransferKnob(accountId, true);
+      report = await runPaymentsSweep(Date.now());
+    } finally {
+      await setTransferKnob(accountId, false);
+    }
+    expect(report.errors.ticketSettlementTransfer).toBeGreaterThanOrEqual(1);
+
+    // The member's 60% moved; the curator's 40% did not, and the order is
+    // still pending so the next pass finishes it under the same frozen plan.
+    const memberAccountId = (await memberStripe(bass.uid))!.accountId!;
+    expect((await adb.doc(`stripeFake/state/objects/${memberAccountId}`).get()).data()?.balanceCents).toBe(1200);
+    expect((await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data()?.balanceCents ?? 0).toBe(0);
+    expect((await adb.doc(`orders/${orderId}`).get()).data()!.settledAt).toBeUndefined();
+
+    const ev = (await adb.doc(`events/${eventId}`).get()).data()!;
+    expect(typeof ev.settlementStartedAt).toBe("number");
+    // The exact message, not merely "it threw": this must be the
+    // settlement-has-started refusal, never the 24h claim one (which would
+    // lapse and let the cancel through tomorrow).
+    await expect(callFn("cancelEvent", { curatorProfileId: profileId, eventId }, owner.user))
+      .rejects.toMatchObject({
+        message: "This event's ticket settlement has already started and can no longer be cancelled.",
+      });
   });
 });

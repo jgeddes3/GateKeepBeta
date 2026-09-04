@@ -390,21 +390,34 @@ async function reverseForLostDispute(
     .map((d) => ({ ref: d.ref, gigId: d.id, p: d.data() as PaymentDoc }))
     .filter(({ gigId, p }) => target.gigId ? gigId === target.gigId : p.deposit.intentId === target.intentId);
   if (target.purpose === "settlement" || target.purpose === "paydue") {
+    // SP5c fix wave (I4), moved ABOVE the transfer lookup in round 2. The
+    // settlement charge behind this date has been taken back by the bank, so a
+    // share still waiting for an unonboarded member has no money behind it and
+    // must never release later out of the platform's own balance. This runs
+    // before `hit`, not after it, because a PARTIAL distribution never wrote
+    // its terminal transfer record: `transfer.status` is not "transferred", so
+    // `hit` is undefined and the old placement returned before voiding
+    // anything, leaving exactly the holds that most need cancelling.
+    //
+    // Scoped to the occurrence(s) this disputed charge actually funded: the
+    // named gig when the intent's metadata carries one (in which case `docs`
+    // is already just that gig), else only the docs whose settlement intent
+    // matches. Never the whole deposit-funded run, whose other occurrences
+    // were not disputed.
+    const settlementDocs = target.gigId != null
+      ? docs
+      : docs.filter(({ p }) => p.settlement.intentId === target.intentId);
+    for (const d of settlementDocs) {
+      await voidHeldShares(d.p.musicianProfileId, { bookingId: target.bookingId!, gigId: d.gigId },
+        `held share cancelled: dispute ${disputeId} was lost on this settlement`, now)
+        .catch((e) => console.error(`charge.dispute.closed: voiding held shares failed for ${target.bookingId}/${d.gigId}`, e));
+    }
     const hit = docs.find(({ p }) => p.settlement.intentId === target.intentId && p.transfer.status === "transferred" && p.transfer.id);
     if (!hit) return nothingReversed("no transfer: the settlement has no live earnings transfer to reverse");
     // Fix round 1 (Critical): cap the reversal at the PROFILE's own share,
     // never the split total. `transfer.id` (payoutShares.ts, distributeEarnings)
     // is the profile's own transfer, a member's transferred share is not this
     // profile's account and this path must never reach into it.
-    // SP5c fix wave (I4): same reasoning as the ticket branch above. The
-    // settlement charge behind this date has been taken back by the bank, so a
-    // share still waiting for an unonboarded member has no money behind it and
-    // must never release later out of the platform's own balance. Voided
-    // before the cap check, so an all-held settlement (profileCap 0, nothing
-    // to reverse) still cancels its holds.
-    await voidHeldShares(hit.p.musicianProfileId, { bookingId: target.bookingId!, gigId: hit.gigId },
-      `held share cancelled: dispute ${disputeId} was lost on this settlement`, now)
-      .catch((e) => console.error(`charge.dispute.closed: voiding held shares failed for ${target.bookingId}/${hit.gigId}`, e));
     const profileCap = hit.p.transfer.profileCents ?? hit.p.transfer.amountCents ?? 0;
     if (profileCap <= 0) {
       return nothingReversed("no transfer: the profile's share of this settlement was 0, member shares are not recovered");
