@@ -32,13 +32,13 @@ import { getFirestore } from "firebase-admin/firestore";
 import {
   computeInstantFeeCents, isValidDocId, INSTANT_FEE_MIN_CENTS, INSTANT_FEE_PCT, INSTANT_PAYOUT_MIN_CENTS,
   PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, PAYOUT_INSTANT_HELD_MESSAGE,
-  type PayoutRequestRecord, type StripeProfileDoc,
+  type PayoutRequestRecord,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { requireProfileAdmin } from "./profiles.js";
 import { getStripe, stripeSecretKey } from "./stripeClient.js";
 import { getStripeProfileDoc, payoutFeeAlertId, recordAdminAlert, writeLedger } from "./paymentsCore.js";
-import { notifyProfileMembers } from "./notifications.js";
+import { notifyProfileMembers, notifyUser } from "./notifications.js";
 import { webhookHandlers, webhookHandlerScopes } from "./paymentsWebhook.js";
 
 // The same ceiling money.ts's assertCents enforces, mirrored here so a
@@ -116,7 +116,12 @@ export interface PayoutBalances {
 // a transient Stripe failure): a musician must still be able to see their
 // onboarding state during a Stripe blip, so a balance read that fails is
 // LOGGED and degraded, never propagated as a 500 that blanks the page.
-export async function readPayoutBalances(sp: StripeProfileDoc | null): Promise<PayoutBalances> {
+// SP5c Task 4: widened from `StripeProfileDoc | null` so a member's own
+// identity doc (`MemberStripeDoc`, users/{uid}/private/stripe) can call this
+// too, both doc shapes structurally satisfy it; behavior below is unchanged.
+export async function readPayoutBalances(
+  sp: { accountId: string | null; payoutsEnabled: boolean } | null,
+): Promise<PayoutBalances> {
   // `payoutsEnabled !== true` (not `=== false`) for the same fail-closed reason
   // requireCuratorChargeable checks its flags that way: these docs are cast
   // unchecked from Firestore and a partial one must read as "not ready".
@@ -345,15 +350,21 @@ export const requestPayout = onCall<RequestPayoutInput>(
 // SP5 webhook treats it (the payload is signature-verified, never
 // shape-validated), so it is validated before it is used to build a doc path.
 
-// Reads and validates the shared shape of both payout events.
+// Reads and validates the shared shape of both payout events. SP5c Task 4:
+// also reads `metadata.uid`, requestMemberPayout's own payout/debit stamp,
+// the profile and member paths are mutually exclusive in practice (a payout
+// carries one or the other), but both are read defensively rather than
+// assuming that.
 function readPayoutEvent(object: Record<string, unknown>): {
-  payoutId: string | null; profileId: string | null; amountCents: number;
+  payoutId: string | null; profileId: string | null; uid: string | null; amountCents: number;
 } {
   const meta = object.metadata as Record<string, string> | undefined;
   const rawProfileId = meta?.profileId;
+  const rawUid = meta?.uid;
   return {
     payoutId: typeof object.id === "string" ? object.id : null,
     profileId: typeof rawProfileId === "string" && isValidDocId(rawProfileId) ? rawProfileId : null,
+    uid: typeof rawUid === "string" && isValidDocId(rawUid) ? rawUid : null,
     amountCents: typeof object.amount === "number" ? object.amount : 0,
   };
 }
@@ -371,6 +382,19 @@ async function eventAccountMatchesProfile(account: string | undefined, profileId
   return account != null && account === sp?.accountId;
 }
 
+// SP5c Task 4: the member-account twin of eventAccountMatchesProfile above,
+// same threat model, a forged payout event carrying a real uid but a foreign
+// account must not be trusted to record money (or notify) against that
+// user's own doc. Reads `users/{uid}/private/stripe` INLINE rather than
+// through memberPayouts.ts's getMemberStripeDoc: memberPayouts.ts imports
+// this file's PAYOUT_* messages and readPayoutBalances, so an import back
+// from here would be a cycle.
+async function eventAccountMatchesUser(account: string | undefined, uid: string): Promise<boolean> {
+  const snap = await getFirestore().doc(`users/${uid}/private/stripe`).get();
+  const accountId = (snap.data() as { accountId?: string | null } | undefined)?.accountId ?? null;
+  return account != null && account === accountId;
+}
+
 // NO LEDGER ROW BY DESIGN. `payout.paid` is the expected outcome of a payout
 // this file already wrote a `payout_standard`/`payout_instant` row for at
 // request time, so a second row here would double-count every successful
@@ -378,7 +402,7 @@ async function eventAccountMatchesProfile(account: string | undefined, profileId
 // to the "unknown type" branch) so the event is visibly accounted for and lands
 // its `stripeEvents` audit doc.
 webhookHandlers["payout.paid"] = async (object, eventId, account) => {
-  const { payoutId, profileId, amountCents } = readPayoutEvent(object);
+  const { payoutId, profileId, uid, amountCents } = readPayoutEvent(object);
   // M1: pin the connected account when the event names a profile (see
   // eventAccountMatchesProfile). payout.paid only logs, so a mismatch is a
   // logged no-op, but the same threat model as payout.failed applies, and
@@ -388,8 +412,15 @@ webhookHandlers["payout.paid"] = async (object, eventId, account) => {
       `payout.paid: event.account ${account ?? "none"} does not match the cached account for profile ${profileId}, ignored (event ${eventId})`);
     return;
   }
+  // SP5c Task 4: the member twin of the guard above.
+  if (uid && !(await eventAccountMatchesUser(account, uid))) {
+    console.warn(
+      `payout.paid: event.account ${account ?? "none"} does not match the cached account for user ${uid}, ignored (event ${eventId})`);
+    return;
+  }
+  const owner = profileId ? `profile ${profileId}` : uid ? `user ${uid}` : "an unknown owner";
   console.info(
-    `payout.paid: payout ${String(payoutId)} (${amountCents}c) for profile ${String(profileId)} completed, already recorded at request time (event ${eventId})`);
+    `payout.paid: payout ${String(payoutId)} (${amountCents}c) for ${owner} completed, already recorded at request time (event ${eventId})`);
 };
 // SP10 Task 5 review addition: payout.* is a Connect-endpoint event (see
 // stripeClient.ts's WebhookScope comment), the dispatcher refuses a
@@ -411,8 +442,14 @@ webhookHandlerScopes["payout.paid"] = "connect";
 // Stripe's own instant-payout fee behaves the same way, the amount is bounded
 // by INSTANT_FEE_MIN_CENTS at the low end, and an automatic refund here would
 // need a credit path to the connected account that SP5 does not have.
+// The copy every payout-failed notification shows, word for word regardless
+// of whether the payout was a profile's or a member's own: the situation and
+// the fix are identical, only the audience differs.
+const PAYOUT_FAILED_NOTIFICATION_BODY =
+  "Your payout couldn't be completed and the funds are back in your balance. Check your bank details, then cash out again.";
+
 webhookHandlers["payout.failed"] = async (object, eventId, account) => {
-  const { payoutId, profileId, amountCents } = readPayoutEvent(object);
+  const { payoutId, profileId, uid, amountCents } = readPayoutEvent(object);
   if (!payoutId) {
     console.warn(`payout.failed: payload carries no payout id (event ${eventId})`);
     return;
@@ -427,30 +464,51 @@ webhookHandlers["payout.failed"] = async (object, eventId, account) => {
       `payout.failed: event.account ${account ?? "none"} does not match the cached account for profile ${profileId}, ignored, no ledger row written (event ${eventId})`);
     return;
   }
+  // SP5c Task 4: the member twin of the guard above.
+  if (uid && !(await eventAccountMatchesUser(account, uid))) {
+    console.warn(
+      `payout.failed: event.account ${account ?? "none"} does not match the cached account for user ${uid}, ignored, no ledger row written (event ${eventId})`);
+    return;
+  }
   const failureCode = typeof object.failure_code === "string" ? object.failure_code : null;
   const failureMessage = typeof object.failure_message === "string" ? object.failure_message : null;
+  const detail = `payout failed (${failureCode ?? "no code"}${failureMessage ? `: ${failureMessage}` : ""})`
+    + ", funds returned to the connected account's balance";
+
+  // SP5c Task 4: a member's OWN cash-out, a distinct branch (not the
+  // profileId path below with uid substituted in): the ledger kind is
+  // `member_payout_failed` (not `payout_failed`) so a member's failed
+  // cash-outs are never confused with a profile's in any total derived from
+  // the ledger, and the notification goes to the ONE user, never a whole
+  // profile's membership.
+  if (uid) {
+    await writeLedger({
+      kind: "member_payout_failed", amountCents, bookingId: null, gigId: null,
+      profileId: null, uid, stripeId: payoutId, detail,
+    }).catch((e) => console.error(`payout.failed: member ledger row failed for payout ${payoutId} (event ${eventId})`, e));
+    try {
+      await notifyUser(uid, { kind: "member_payout_failed", refKind: "payouts", title: "Payout failed", body: PAYOUT_FAILED_NOTIFICATION_BODY });
+    } catch (e) {
+      console.error(`payout.failed: notification failed for user ${uid} (event ${eventId})`, e);
+    }
+    return;
+  }
 
   await writeLedger({
     kind: "payout_failed", amountCents, bookingId: null, gigId: null,
-    profileId, stripeId: payoutId,
-    detail: `payout failed (${failureCode ?? "no code"}${failureMessage ? `: ${failureMessage}` : ""})`
-      + ", funds returned to the connected account's balance",
+    profileId, stripeId: payoutId, detail,
   }).catch((e) => console.error(`payout.failed: ledger row failed for payout ${payoutId} (event ${eventId})`, e));
 
   if (!profileId) {
-    // No usable profile in the metadata (a payout created outside this
-    // callable, an operator's dashboard payout, say). The ledger row above is
-    // still the record; there is simply nobody to notify.
+    // No usable profile (or uid) in the metadata (a payout created outside
+    // this callable, an operator's dashboard payout, say). The ledger row
+    // above is still the record; there is simply nobody to notify.
     console.warn(
-      `payout.failed: payout ${payoutId} carries no valid metadata.profileId, ledger row written, nobody notified (event ${eventId})`);
+      `payout.failed: payout ${payoutId} carries no valid metadata.profileId/uid, ledger row written, nobody notified (event ${eventId})`);
     return;
   }
   try {
-    await notifyProfileMembers(profileId, {
-      kind: "system",
-      title: "Payout failed",
-      body: "Your payout couldn't be completed and the funds are back in your balance. Check your bank details, then cash out again.",
-    });
+    await notifyProfileMembers(profileId, { kind: "system", title: "Payout failed", body: PAYOUT_FAILED_NOTIFICATION_BODY });
   } catch (e) {
     // Best-effort, like every other notification in SP5: the ledger row is the
     // durable record and a failed delivery must not fail the event (which would

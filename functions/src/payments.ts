@@ -32,6 +32,9 @@ import { webhookHandlers, webhookHandlerScopes } from "./paymentsWebhook.js";
 // Task 13's balance surface. One-way edge: paymentsPayouts.ts owns the payout
 // callable and the payout webhooks and knows nothing about this file.
 import { readPayoutBalances } from "./paymentsPayouts.js";
+// SP5c Task 4: a person's own Express account (users/{uid}/private/stripe),
+// the account.updated webhook's other branch below.
+import { getMemberStripeDoc, syncMemberAccountFlags, releaseHeldSharesHook } from "./memberPayouts.js";
 
 export function emptyStripeProfile(now: number): StripeProfileDoc {
   return {
@@ -307,41 +310,76 @@ export const getStripeStatus = onCall<{ profileId: string }>(
 // can ever fire.
 webhookHandlers["account.updated"] = async (object, eventId, account) => {
   const accountId = object.id as string | undefined;
-  const profileId = (object.metadata as Record<string, string> | undefined)?.profileId;
-  if (!accountId || !profileId) return;
-  // Review round 1 (M4): validate BEFORE building a doc path from
-  // attacker/Stripe-controlled metadata, event payloads are only signature-
-  // verified, not shape-validated, so metadata.profileId is untrusted input.
-  if (!isValidDocId(profileId)) {
-    // Review round 2 (log nit): this is corrupt metadata on an account
-    // Stripe itself sent us, more log-worthy than the ordinary accountId
-    // mismatch case below (that one's often just a stale/replayed event).
-    console.warn(`account.updated webhook: metadata.profileId is not a valid doc id, accountId=${accountId}, profileId=${JSON.stringify(profileId)} (event ${eventId})`);
+  const meta = object.metadata as Record<string, string> | undefined;
+  const profileId = meta?.profileId;
+  const uid = meta?.uid;
+  // Both absent (or no accountId at all): keep today's behaviour, a no-op.
+  // Neither branch below runs.
+  if (!accountId) return;
+
+  if (profileId) {
+    // Review round 1 (M4): validate BEFORE building a doc path from
+    // attacker/Stripe-controlled metadata, event payloads are only signature-
+    // verified, not shape-validated, so metadata.profileId is untrusted input.
+    if (!isValidDocId(profileId)) {
+      // Review round 2 (log nit): this is corrupt metadata on an account
+      // Stripe itself sent us, more log-worthy than the ordinary accountId
+      // mismatch case below (that one's often just a stale/replayed event).
+      console.warn(`account.updated webhook: metadata.profileId is not a valid doc id, accountId=${accountId}, profileId=${JSON.stringify(profileId)} (event ${eventId})`);
+      return;
+    }
+    const sp = await getStripeProfileDoc(profileId);
+    if (sp?.accountId !== accountId) {
+      // Review round 1 (M3): a mismatch here means either a stale/replayed
+      // event for an account this profile no longer owns, or (more
+      // concerning) an event whose metadata.profileId doesn't match the
+      // account it claims to describe, worth a log line either way.
+      console.warn(
+        `account.updated webhook: accountId mismatch for profile ${profileId}, event accountId=${accountId}, cached accountId=${sp?.accountId ?? "none"} (event ${eventId})`);
+      return;
+    }
+    // M1 (branch audit): account.updated is delivered to the platform endpoint FOR
+    // a connected account, so Stripe stamps the event's TOP-LEVEL `account` with
+    // that account id, pin it to the cached account too. object.id already pins
+    // the account here (and is checked above), but requiring event.account makes
+    // the platform/connected boundary explicit and identical to the payout
+    // handlers, and forecloses a future Standard/metadata-bearing connected
+    // account driving a flag sync on a profile it does not own.
+    if (account !== accountId) {
+      console.warn(
+        `account.updated webhook: event.account ${account ?? "none"} does not match the event's account ${accountId} for profile ${profileId}, ignored (event ${eventId})`);
+      return;
+    }
+    await syncStripeAccountFlags(profileId, Date.now());
     return;
   }
-  const sp = await getStripeProfileDoc(profileId);
-  if (sp?.accountId !== accountId) {
-    // Review round 1 (M3): a mismatch here means either a stale/replayed
-    // event for an account this profile no longer owns, or (more
-    // concerning) an event whose metadata.profileId doesn't match the
-    // account it claims to describe, worth a log line either way.
-    console.warn(
-      `account.updated webhook: accountId mismatch for profile ${profileId}, event accountId=${accountId}, cached accountId=${sp?.accountId ?? "none"} (event ${eventId})`);
-    return;
+
+  // SP5c Task 4: the member twin of the branch above, entered only when the
+  // event carries NO profileId (a Connect account is either a profile's or a
+  // member's own, never both). Same three guards, same order: validate the
+  // untrusted metadata id, pin the cached account, pin event.account.
+  if (uid) {
+    if (!isValidDocId(uid)) {
+      console.warn(`account.updated webhook: metadata.uid is not a valid doc id, accountId=${accountId}, uid=${JSON.stringify(uid)} (event ${eventId})`);
+      return;
+    }
+    const ms = await getMemberStripeDoc(uid);
+    if (ms?.accountId !== accountId) {
+      console.warn(
+        `account.updated webhook: accountId mismatch for user ${uid}, event accountId=${accountId}, cached accountId=${ms?.accountId ?? "none"} (event ${eventId})`);
+      return;
+    }
+    if (account !== accountId) {
+      console.warn(
+        `account.updated webhook: event.account ${account ?? "none"} does not match the event's account ${accountId} for user ${uid}, ignored (event ${eventId})`);
+      return;
+    }
+    const now = Date.now();
+    const { enabledNow } = await syncMemberAccountFlags(uid, now);
+    // releaseHeldShares (Task 5's own function) is stubbed until Task 5 wires
+    // it in via setReleaseHeldSharesHook; a no-op today.
+    if (enabledNow) await releaseHeldSharesHook(uid, now);
   }
-  // M1 (branch audit): account.updated is delivered to the platform endpoint FOR
-  // a connected account, so Stripe stamps the event's TOP-LEVEL `account` with
-  // that account id, pin it to the cached account too. object.id already pins
-  // the account here (and is checked above), but requiring event.account makes
-  // the platform/connected boundary explicit and identical to the payout
-  // handlers, and forecloses a future Standard/metadata-bearing connected
-  // account driving a flag sync on a profile it does not own.
-  if (account !== accountId) {
-    console.warn(
-      `account.updated webhook: event.account ${account ?? "none"} does not match the event's account ${accountId} for profile ${profileId}, ignored (event ${eventId})`);
-    return;
-  }
-  await syncStripeAccountFlags(profileId, Date.now());
 };
 // SP10 Task 5 review addition: account.updated is a Connect-endpoint event
 // (see stripeClient.ts's WebhookScope comment), the dispatcher refuses a
