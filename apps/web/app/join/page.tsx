@@ -2,8 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../../src/lib/firebase";
+import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { validateProfileDraft, type ProfileDraftInput, type MusicianSubtype, type CuratorSubtype } from "@gatekeep/shared";
 import { Button } from "../../src/ui/button";
@@ -84,8 +83,7 @@ export default function Join() {
     if (!v.ok) { setError(v.reason); return; }
     setBusy(true); setError(null);
     try {
-      const { data } = await httpsCallable<ProfileDraftInput, { profileId: string }>(
-        getFirebase().functions, "createProfileDraft")(input);
+      const { data } = await callFn<ProfileDraftInput, { profileId: string }>("createProfileDraft", input);
       router.push(type === "musician" ? `/dashboard/portfolio/${data.profileId}` : `/dashboard/curator/${data.profileId}`);
     } catch (e) {
       // Server errors are user-ready here too, e.g. "That handle is taken."

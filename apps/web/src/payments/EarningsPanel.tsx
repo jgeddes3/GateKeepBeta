@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useId, useRef, useState } from "react";
 import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { rememberOnboardingProfileId } from "./onboardingRedirect";
 import {
@@ -17,8 +17,9 @@ import { Skeleton } from "../ui/skeleton";
 import { IconEarnings, IconWarning } from "../ui/icons";
 
 // SP5 Task 14: the musician's payouts surface. House idiom throughout (see
-// src/bookings/CancelDialog.tsx): "use client", httpsCallable + inline
-// styles, verbatim server-error surfacing, busy/error local state.
+// src/bookings/CancelDialog.tsx): "use client", callFn(...) (lib/callable.ts,
+// Task 27) + inline styles, verbatim server-error surfacing, busy/error
+// local state.
 
 interface RequestPayoutResult { payoutId: string; feeCents: number; netCents: number; replayed: boolean; }
 
@@ -214,8 +215,7 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
     let cancelled = false;
     (async () => {
       try {
-        const res = await httpsCallable<{ profileId: string }, StripeStatusResult>(
-          getFirebase().functions, "getStripeStatus")({ profileId });
+        const res = await callFn<{ profileId: string }, StripeStatusResult>("getStripeStatus", { profileId });
         if (cancelled) return;
         setStatus(res.data);
         // Default the amount field to the full available balance, but only
@@ -235,8 +235,7 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
     setOnboardBusy(true);
     setOnboardError(null);
     try {
-      const res = await httpsCallable<{ profileId: string }, { url: string }>(
-        getFirebase().functions, "createOnboardingLink")({ profileId });
+      const res = await callFn<{ profileId: string }, { url: string }>("createOnboardingLink", { profileId });
       // Stripe's return/refresh URLs carry no query params of their own
       // (see onboardingRedirect.ts): stash the profile here first so the
       // return page can re-sync THIS profile's status.
@@ -266,10 +265,10 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
       if (!requestRef.current || requestRef.current.method !== method || requestRef.current.amountCents !== amountCents) {
         requestRef.current = { id: crypto.randomUUID(), method, amountCents };
       }
-      const res = await httpsCallable<
+      const res = await callFn<
         { profileId: string; amountCents: number; method: "standard" | "instant"; requestId: string },
         RequestPayoutResult
-      >(getFirebase().functions, "requestPayout")(
+      >("requestPayout", 
         { profileId, amountCents, method, requestId: requestRef.current.id });
       const verb = res.data.replayed ? "Already sent" : "Sent";
       setPayoutMessage(res.data.feeCents > 0

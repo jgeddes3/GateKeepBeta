@@ -1,8 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../../../../../src/lib/firebase";
+import { callFn } from "../../../../../src/lib/callable";
 import { readOnboardingProfileId } from "../../../../../src/payments/onboardingRedirect";
 import { Button } from "../../../../../src/ui/button";
 import { Card, CardContent } from "../../../../../src/ui/card";
@@ -29,8 +28,7 @@ export default function OnboardingRefreshPage() {
         return;
       }
       try {
-        const res = await httpsCallable<{ profileId: string }, { url: string }>(
-          getFirebase().functions, "createOnboardingLink")({ profileId });
+        const res = await callFn<{ profileId: string }, { url: string }>("createOnboardingLink", { profileId });
         if (!cancelled) window.location.assign(res.data.url);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Could not restart payout setup.");

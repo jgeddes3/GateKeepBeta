@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { View, Pressable, AppState } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import {
   PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
@@ -17,8 +17,9 @@ import { tokens } from "../theme/tokens";
 // SP5b Task 7: the musician's payouts surface, mobile's full-featured
 // counterpart to apps/web/src/payments/EarningsPanel.tsx (which this is a
 // direct port of, every helper below travels, comments included). House
-// idiom throughout (see src/bookings/CancelDialog.tsx): httpsCallable +
-// inline styles, verbatim server-error surfacing, busy/error local state.
+// idiom throughout (see src/bookings/CancelDialog.tsx): callFn(...)
+// (lib/callable.ts, Task 27) + inline styles, verbatim server-error
+// surfacing, busy/error local state.
 // Replaces the read-only EarningsCard (SP5 Task 16) that used to sit here,
 // mobile now does onboarding and cash-outs natively instead of punting to
 // the web app.
@@ -206,8 +207,7 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await httpsCallable<{ profileId: string }, StripeStatusResult>(
-          getFirebase().functions, "getStripeStatus")({ profileId });
+        const res = await callFn<{ profileId: string }, StripeStatusResult>("getStripeStatus", { profileId });
         if (cancelled) return;
         setStatus(res.data);
         // Default the amount field to the full available balance, but only
@@ -234,8 +234,7 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
     setOnboardBusy(true);
     setOnboardError(null);
     try {
-      const res = await httpsCallable<{ profileId: string }, { url: string }>(
-        getFirebase().functions, "createOnboardingLink")({ profileId });
+      const res = await callFn<{ profileId: string }, { url: string }>("createOnboardingLink", { profileId });
       onboardingInFlight.current = true;
       // expo-web-browser's openBrowserAsync resolves at a DIFFERENT moment per
       // platform (see the installed package's own source comments): iOS
@@ -287,10 +286,10 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
       if (!requestRef.current || requestRef.current.method !== method || requestRef.current.amountCents !== amountCents) {
         requestRef.current = { id: mintRequestId(), method, amountCents };
       }
-      const res = await httpsCallable<
+      const res = await callFn<
         { profileId: string; amountCents: number; method: "standard" | "instant"; requestId: string },
         RequestPayoutResult
-      >(getFirebase().functions, "requestPayout")(
+      >("requestPayout", 
         { profileId, amountCents, method, requestId: requestRef.current.id });
       const verb = res.data.replayed ? "Already sent" : "Sent";
       setPayoutMessage(res.data.feeCents > 0

@@ -1,12 +1,12 @@
 "use client";
 import { useEffect, useState } from "react";
-import { httpsCallable } from "firebase/functions";
 import { collection, onSnapshot } from "firebase/firestore";
 import {
   TICKET_NOT_REFUNDABLE_MESSAGE, TICKET_REFUND_WINDOW_CLOSED_MESSAGE, EVENT_CANCELLED_MESSAGE,
   type AttendeeDoc, type EventStatus,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useNow } from "../bookings/BookingThread";
 import { formatGigTime } from "../../app/u/[handle]/gigDisplay";
 import { formatEventFullDate, TICKET_STATUS_LABEL, TICKET_STATUS_BADGE } from "./eventDisplay";
@@ -61,7 +61,7 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
     if (!window.confirm(`Refund ${row.ownerName}'s "${row.tierName}" ticket? This can't be undone.`)) return;
     setBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "refundTicket")(
+      await callFn("refundTicket", 
         { curatorProfileId, eventId, ticketId: row.id });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not refund this ticket.";

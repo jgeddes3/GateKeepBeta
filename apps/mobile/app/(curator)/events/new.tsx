@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ScrollView, View } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, onSnapshot } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../src/lib/firebase";
+import { callFn } from "../../../src/lib/callable";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { useProfileContext } from "../../../src/shell/ProfileContext";
 import {
@@ -153,15 +153,13 @@ export default function NewGigOrSeries() {
           profileId, ...contentInput, budget: budgetInput,
           recurrence: recurrenceInput, fillMode: recurrence.fillMode, location: locationInput,
         };
-        const { data } = await httpsCallable<CreateSeriesPayload, { seriesId: string }>(
-          getFirebase().functions, "createSeries")(payload);
+        const { data } = await callFn<CreateSeriesPayload, { seriesId: string }>("createSeries", payload);
         router.replace({ pathname: "/(curator)/events/series/[seriesId]", params: { seriesId: data.seriesId } });
       } else {
         const startsAt = oneOffDateTimeToMs(oneOffDateTime);
         if (startsAt === null || startsAt <= 0) { setError("Pick a date and time."); setBusy(false); return; }
         const payload: CreateGigPayload = { profileId, ...contentInput, budget: budgetInput, startsAt, location: locationInput };
-        const { data } = await httpsCallable<CreateGigPayload, { gigId: string }>(
-          getFirebase().functions, "createGig")(payload);
+        const { data } = await callFn<CreateGigPayload, { gigId: string }>("createGig", payload);
         router.replace({ pathname: "/(curator)/events/[gigId]", params: { gigId: data.gigId } });
       }
     } catch (e) {

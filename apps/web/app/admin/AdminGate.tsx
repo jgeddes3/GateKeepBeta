@@ -25,7 +25,7 @@ function ClaimCheck({ children }: { children: ReactNode }) {
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
-    user?.getIdTokenResult().then((t) => { if (!cancelled) setIsAdmin(t.claims.admin === true); });
+    user?.getIdTokenResult(true).then((t) => { if (!cancelled) setIsAdmin(t.claims.admin === true); });
     return () => { cancelled = true; };
   }, [user]);
   if (isAdmin === null) return null;

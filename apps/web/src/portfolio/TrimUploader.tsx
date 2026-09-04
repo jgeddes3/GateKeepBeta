@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import {
   validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, MAX_AUDIO_UPLOAD_BYTES, type CreateTrackInput,
 } from "@gatekeep/shared";
@@ -118,9 +118,8 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
     // "Processing…" row with nothing behind it).
     let created: { trackId: string; uploadPath: string } | null = null;
     try {
-      const { functions, storage } = getFirebase();
-      const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
-        functions, "createTrack")(input);
+      const { storage } = getFirebase();
+      const { data } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>("createTrack", input);
       created = data;
       // uploadPath comes straight from createTrack's response, never
       // reconstructed client-side, so the client and server always agree on
@@ -142,7 +141,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
       console.error(e); // the error banner below is deliberately generic; keep the real error in the console
       if (created) {
         try {
-          await httpsCallable(getFirebase().functions, "deleteTrack")({ profileId, trackId: created.trackId });
+          await callFn("deleteTrack", { profileId, trackId: created.trackId });
           setError("Upload failed. Try again.");
         } catch {
           // Best-effort cleanup itself failed: tell the musician exactly

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { View, Pressable, Alert } from "react-native";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
 import { Text, Input, Card, StatusBadge } from "../ui";
@@ -47,7 +47,7 @@ export function TrackManager({ profileId }: { profileId: string }) {
   // fire-and-forget caller having to handle a return value it doesn't need.
   const call = async (name: string, data: object): Promise<boolean> => {
     setBusy(true);
-    try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+    try { await callFn(name, data); return true; }
     catch (e) { Alert.alert("Error", e instanceof Error ? e.message : "That didn't work, try again."); return false; }
     finally { setBusy(false); }
   };

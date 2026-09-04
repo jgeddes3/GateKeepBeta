@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { View, Pressable, KeyboardAvoidingView, Platform } from "react-native";
 import { collection, getDocs, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import {
   SHOW_POST_MAX_CHARS, SHOW_POST_LIMIT_MESSAGE, SHOW_POST_RATE_MESSAGE, SHOW_POST_EVENT_CLOSED_MESSAGE,
   type ShowPostDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useProfileContext } from "../shell/ProfileContext";
 import { Text, Card, Button, TextArea, Sheet, ErrorBanner, IconTrash } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -88,7 +88,7 @@ function PostRowItem({ post, canRemove, onRemoved }: {
     setBusy(true);
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "removeShowPost")({ eventId: post.eventId, postId: post.id });
+      await callFn("removeShowPost", { eventId: post.eventId, postId: post.id });
       onRemoved(post.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove. Try again.");
@@ -195,7 +195,7 @@ export function PostComposerSheet({ visible, onClose, eventId, musicianProfileId
     setPosting(true);
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "createShowPost")({ eventId, musicianProfileId, text: trimmed });
+      await callFn("createShowPost", { eventId, musicianProfileId, text: trimmed });
       setText("");
       onPosted();
     } catch (e) {

@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { ScrollView, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, collection, getDocs, orderBy, query } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
+import { callFn } from "../../../../src/lib/callable";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import type { EventDoc, TicketTierDoc } from "@gatekeep/shared";
 import { gigLocationLabel } from "../../../../src/bookings/BookingForms";
@@ -42,7 +42,7 @@ function CancelEventPanel({ curatorProfileId, eventId, title, onClose, onCancell
     setBusy(true);
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "cancelEvent")(
+      await callFn("cancelEvent", 
         { curatorProfileId, eventId, reason: reason.trim() || undefined });
       onCancelled();
     } catch (e) {
@@ -134,7 +134,7 @@ export default function EventManagementScreen() {
     setPublishBusy(true);
     setPublishError(null);
     try {
-      await httpsCallable(getFirebase().functions, "publishEvent")({ curatorProfileId: event.curatorProfileId, eventId });
+      await callFn("publishEvent", { curatorProfileId: event.curatorProfileId, eventId });
     } catch (e) {
       setPublishError(e instanceof Error ? e.message : "Could not publish.");
     } finally {

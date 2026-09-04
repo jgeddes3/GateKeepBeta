@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { collection, doc, getDoc, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { formatDuration, type OfferPayload } from "./BookingForms";
 import { bookingHistoryLabel, depositLine } from "./BookingInbox";
@@ -407,7 +407,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const counter = async (payload: OfferPayload) => {
     setActionBusy("counter"); setActionError(null);
     try {
-      await httpsCallable(getFirebase().functions, "counterBooking")({ bookingId, offer: payload });
+      await callFn("counterBooking", { bookingId, offer: payload });
       setShowCounterForm(false);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Could not send this counter-offer.");
@@ -419,7 +419,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     if (!window.confirm("Decline this booking request?")) return;
     setActionBusy("decline"); setActionError(null);
     try {
-      await httpsCallable(getFirebase().functions, "declineBooking")({ bookingId });
+      await callFn("declineBooking", { bookingId });
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Could not decline.");
     } finally {
@@ -430,7 +430,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     if (!window.confirm("Withdraw this booking request?")) return;
     setActionBusy("withdraw"); setActionError(null);
     try {
-      await httpsCallable(getFirebase().functions, "withdrawBooking")({ bookingId });
+      await callFn("withdrawBooking", { bookingId });
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Could not withdraw.");
     } finally {
@@ -440,7 +440,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const accept = async () => {
     setActionBusy("accept"); setActionError(null);
     try {
-      await httpsCallable(getFirebase().functions, "acceptBooking")({ bookingId });
+      await callFn("acceptBooking", { bookingId });
       setShowAcceptConfirm(false);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Could not accept.");
@@ -461,7 +461,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
       // this booking." No client-side "already reported" special-case
       // needed; the friendly-wrapper pattern this whole app uses already
       // reads correctly as-is.
-      await httpsCallable(getFirebase().functions, "reportNoShow")({ bookingId, reason: trimmed });
+      await callFn("reportNoShow", { bookingId, reason: trimmed });
       setShowReportForm(false);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Could not report a no-show.");

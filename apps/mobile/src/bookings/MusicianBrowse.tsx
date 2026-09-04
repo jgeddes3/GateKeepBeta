@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { View, ScrollView } from "react-native";
 import { useRouter } from "expo-router";
 import { collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type BookingRates, type GigDoc } from "@gatekeep/shared";
 import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, formatReliabilityLine, type OfferState } from "./BookingForms";
@@ -87,8 +87,7 @@ function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onCl
     if (buildError || !payload) { setError(buildError ?? "Invalid offer."); return; }
     setBusy(true);
     try {
-      const { data } = await httpsCallable<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>(
-        getFirebase().functions, "offerGig")({ gigId: selectedGig.id, musicianProfileId, offer: payload });
+      const { data } = await callFn<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>("offerGig", { gigId: selectedGig.id, musicianProfileId, offer: payload });
       setBookingId(data.bookingId);
     } catch (e) {
       if (errorCode(e) === "functions/already-exists") setAlreadySent(true);

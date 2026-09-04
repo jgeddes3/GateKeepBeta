@@ -1,12 +1,12 @@
 "use client";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import {
   SHOW_POST_MAX_CHARS, SHOW_POST_LIMIT_MESSAGE, SHOW_POST_RATE_MESSAGE, SHOW_POST_EVENT_CLOSED_MESSAGE,
   type ShowPostDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { Textarea } from "../ui/textarea";
 import { Button } from "../ui/button";
@@ -61,7 +61,7 @@ function PostRowItem({ post, canRemove, onRemoved }: {
     setBusy(true);
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "removeShowPost")({ eventId: post.eventId, postId: post.id });
+      await callFn("removeShowPost", { eventId: post.eventId, postId: post.id });
       onRemoved(post.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove. Try again.");
@@ -132,7 +132,7 @@ export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt
     setPosting(true);
     setPostError(null);
     try {
-      await httpsCallable(getFirebase().functions, "createShowPost")({ eventId, musicianProfileId, text: trimmed });
+      await callFn("createShowPost", { eventId, musicianProfileId, text: trimmed });
       setText("");
       refresh();
     } catch (e) {

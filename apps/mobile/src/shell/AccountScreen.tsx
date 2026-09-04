@@ -1,9 +1,8 @@
 import { useState } from "react";
 import { View, Pressable, Alert } from "react-native";
 import { useRouter } from "expo-router";
-import { httpsCallable } from "firebase/functions";
 import { useAuth } from "../auth/AuthProvider";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { NotificationsList } from "./NotificationsList";
 import { Text, Button, Card, ThemeToggle, PageBackground, IconCaretRight, ErrorBanner } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -28,7 +27,7 @@ export function AccountScreen() {
        { text: "Delete", style: "destructive", onPress: async () => {
           setDeleteError(null);
           try {
-            await httpsCallable(getFirebase().functions, "deleteAccount")({});
+            await callFn("deleteAccount", {});
             // The callable already deleted the auth user server-side; sign
             // out locally too so client state (and the Gate redirect) don't
             // depend on onAuthStateChanged noticing the now-invalid token.

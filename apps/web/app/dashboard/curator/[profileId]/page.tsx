@@ -3,8 +3,8 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
+import { callFn } from "../../../../src/lib/callable";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { AboutForm, LocationForm, LookingForForm, AmenitiesForm, GalleryPhotosSection } from "../../../../src/curator/CuratorForms";
 import { BookingInbox } from "../../../../src/bookings/BookingInbox";
@@ -118,7 +118,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
     setSubmitBusy(true);
     setSubmitError(null);
     try {
-      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+      await callFn("submitProfileForReview", { profileId });
     } catch (e) {
       // The 24h resubmit cooldown (failed-precondition) and the 1-pending-
       // curator-profile cap (resource-exhausted) both land here verbatim:
@@ -141,7 +141,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      await callFn("deleteProfile", { profileId });
       router.push("/dashboard");
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : "Could not delete this profile.");

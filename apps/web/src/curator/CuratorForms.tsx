@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { Chip, formatChipLabel, PhotoUploader } from "../portfolio/PortfolioForms";
 import {
   GENRES, ACT_SIZES, MAX_CURATOR_PHOTOS, validateLookingFor,
@@ -26,7 +26,7 @@ import { IconTrash } from "../ui/icons";
 // file now reuses too, see their comments).
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
-  try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+  try { await callFn(name, data); return true; }
   catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
 };
 
@@ -315,7 +315,7 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
     if (!window.confirm("Remove this photo?")) return;
     setBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "removeCuratorPhoto")({ profileId, path });
+      await callFn("removeCuratorPhoto", { profileId, path });
       // No local state update needed on success: the parent editor's
       // profile subscription delivers the shrunk photoPaths array, which
       // drops this path from the list and unmounts this tile (keyed by

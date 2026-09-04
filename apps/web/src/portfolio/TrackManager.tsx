@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -42,7 +42,7 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
   const call = async (name: string, data: object) => {
     setBusy(true);
-    try { await httpsCallable(getFirebase().functions, name)(data); }
+    try { await callFn(name, data); }
     catch (e) { window.alert(e instanceof Error ? e.message : "That didn't work. Try again."); }
     finally { setBusy(false); }
   };

@@ -1,8 +1,8 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { parseGenreTarget, type FollowDoc, type FollowTargetType } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 
 // SP7 Task 11: RN twin of apps/web/src/discover/useFollows.tsx's own
@@ -110,9 +110,9 @@ export function useFollowsContext(): FollowState {
 }
 
 export async function follow(targetId: string, targetType: FollowTargetType): Promise<void> {
-  await httpsCallable(getFirebase().functions, "followTarget")({ targetId, targetType });
+  await callFn("followTarget", { targetId, targetType });
 }
 
 export async function unfollow(targetId: string): Promise<void> {
-  await httpsCallable(getFirebase().functions, "unfollowTarget")({ targetId });
+  await callFn("unfollowTarget", { targetId });
 }

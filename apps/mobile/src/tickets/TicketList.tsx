@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { View, Pressable, ScrollView, Image } from "react-native";
 import { collection, doc, getDoc, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import type { EventDoc, TicketDoc, TicketTransferDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { gigLocationLabel } from "../bookings/BookingForms";
 import { useNow } from "../bookings/BookingThread";
 import {
@@ -165,7 +165,7 @@ function IncomingTransferCard({ transfer }: { transfer: TransferRow }) {
     setBusy(accept ? "accept" : "decline");
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "respondToTransfer")({ transferId: transfer.id, accept });
+      await callFn("respondToTransfer", { transferId: transfer.id, accept });
       // The onSnapshot above drops this row itself once its status flips
       // away from "offered", so there's nothing left to set on success.
     } catch (e) {

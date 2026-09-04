@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { ScrollView, View, Alert } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, getDoc } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../src/lib/firebase";
+import { callFn } from "../../../src/lib/callable";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, OneOffDateTimeFields,
@@ -73,7 +73,7 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
         ? { gigId, ...contentInput, budget: budgetInput, startsAt,
             location: { address: trimmedAddress || null, addressVisibility: location.visibility } }
         : { gigId, ...contentInput, budget: budgetInput, startsAt };
-      await httpsCallable(getFirebase().functions, "updateGig")(payload);
+      await callFn("updateGig", payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save changes.");
     } finally {
@@ -186,7 +186,7 @@ export default function GigEditor() {
   const publish = async () => {
     setPublishBusy(true); setPublishError(null);
     try {
-      await httpsCallable(getFirebase().functions, "publishGig")({ gigId });
+      await callFn("publishGig", { gigId });
     } catch (e) {
       // The MAX_OPEN_GIGS_PER_PROFILE cap error (resource-exhausted) lands
       // here verbatim, this is the one place that error can ever surface.
@@ -198,7 +198,7 @@ export default function GigEditor() {
   const doCancel = async () => {
     setCancelBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "cancelGig")({ gigId });
+      await callFn("cancelGig", { gigId });
     } catch (e) {
       Alert.alert("Could not cancel this gig", e instanceof Error ? e.message : "Try again.");
     } finally {

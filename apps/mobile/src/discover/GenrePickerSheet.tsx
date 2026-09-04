@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { View } from "react-native";
 import { doc, getDoc } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { GENRES, genreTargetId, type UserDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { follow, useFollowsContext } from "./useFollows";
 import { formatChipLabel } from "./discoverQueries";
@@ -17,7 +17,7 @@ import { tokens } from "../theme/tokens";
 // mirrors that grouping exactly, just as a Sheet instead of a Dialog).
 
 async function callMarkGenrePickerSeen(): Promise<void> {
-  await httpsCallable(getFirebase().functions, "markGenrePickerSeen")({});
+  await callFn("markGenrePickerSeen", {});
 }
 
 // Whether the genre picker should open for this account: it hasn't been

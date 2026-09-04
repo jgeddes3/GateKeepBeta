@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { View } from "react-native";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { stripeEnabled, runSetupSheet, setupIntentIdFromClientSecret, sheetAppearanceFromTokens } from "./stripe";
 import { Text, Button, Card, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -33,8 +32,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
     setBusy(true);
     setError(null);
     try {
-      const res = await httpsCallable<{ profileId: string }, { clientSecret: string; customerId: string }>(
-        getFirebase().functions, "createSetupIntent")({ profileId });
+      const res = await callFn<{ profileId: string }, { clientSecret: string; customerId: string }>("createSetupIntent", { profileId });
       if (!stripeEnabled) {
         setFakeSaved(true);
         return;
@@ -47,7 +45,7 @@ export function SaveCardSheet({ profileId, onSaved, onClose }: {
       // The card and SetupIntent both succeeded with Stripe; only our own
       // follow-up can fail past here, same honest distinction web draws.
       try {
-        await httpsCallable(getFirebase().functions, "refreshPaymentMethod")({
+        await callFn("refreshPaymentMethod", {
           profileId, setupIntentId: setupIntentIdFromClientSecret(res.data.clientSecret),
         });
         onSaved();

@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { View, Alert, ScrollView } from "react-native";
-import { httpsCallable } from "firebase/functions";
 import { useRouter } from "expo-router";
-import { getFirebase } from "../src/lib/firebase";
+import { callFn } from "../src/lib/callable";
 import { useProfileContext } from "../src/shell/ProfileContext";
 import { validateProfileDraft, type ProfileType } from "@gatekeep/shared";
 import { Text, Button, Input, Chip, PageBackground, ErrorBanner } from "../src/ui";
@@ -36,9 +35,7 @@ export default function Join() {
     if (!v.ok) { setError(v.reason); return; }
     setBusy(true);
     try {
-      const { functions } = getFirebase();
-      const { data } = await httpsCallable<typeof input, { profileId: string }>(
-        functions, "createProfileDraft")(input);
+      const { data } = await callFn<typeof input, { profileId: string }>("createProfileDraft", input);
       if (type === "musician") {
         // MUST FIX (SP2 Task 14): do NOT auto-submit a musician draft. Task
         // 9's minimum-content gate (bio, >=1 genre, avatar, >=1 listenable

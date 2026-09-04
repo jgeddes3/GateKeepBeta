@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ScrollView, View, Pressable } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, getDoc, onSnapshot, collection, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../src/lib/firebase";
+import { callFn } from "../../../src/lib/callable";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { useProfileContext } from "../../../src/shell/ProfileContext";
 import {
@@ -234,7 +234,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
         curatorProfileId: profileId, source: resolvedSource, title: trimmedTitle, description: description.trim(), startsAt, endsAt, lineup,
         curatorGenres: genres.length > 0 ? genres : undefined,
       };
-      const { data } = await httpsCallable<CreateEventPayload, { eventId: string }>(getFirebase().functions, "createEvent")(payload);
+      const { data } = await callFn<CreateEventPayload, { eventId: string }>("createEvent", payload);
       onCreated(data.eventId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create this event.");

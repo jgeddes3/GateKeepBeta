@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { View, FlatList, Image, Pressable, RefreshControl, ScrollView, StyleSheet, type ViewToken } from "react-native";
 import { useRouter } from "expo-router";
-import { httpsCallable } from "firebase/functions";
 import {
   DECK_MAX_EXCLUDE_IDS,
   type DeckCard,
@@ -9,7 +8,7 @@ import {
   type GetDiscoverDeckInput,
   type GetDiscoverDeckResult,
 } from "@gatekeep/shared";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { useNow } from "../bookings/BookingThread";
 import { gigLocationLabel } from "../bookings/BookingForms";
@@ -218,9 +217,7 @@ export function DeckScreen() {
         if (shownIds.current.length > 0) input.excludeIds = shownIds.current;
         if (seed.current != null) input.seed = seed.current;
       }
-      const { data } = await httpsCallable<GetDiscoverDeckInput, GetDiscoverDeckResult>(
-        getFirebase().functions, "getDiscoverDeck",
-      )(input);
+      const { data } = await callFn<GetDiscoverDeckInput, GetDiscoverDeckResult>("getDiscoverDeck", input);
       // Nothing above is cleared before the await: a refresh that fails
       // leaves the deck the fan was already swiping exactly as it was.
       seed.current = data.seed;

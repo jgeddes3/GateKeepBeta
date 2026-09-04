@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { collectionGroup, collection, query, where, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
+import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { cn } from "../../src/lib/utils";
 import type { ProfileType, ProfileStatus, ProfileDoc, NotificationDoc } from "@gatekeep/shared";
@@ -308,7 +308,7 @@ function AdminEntry() {
   const [isAdmin, setIsAdmin] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    user?.getIdTokenResult().then((t) => { if (!cancelled) setIsAdmin(t.claims.admin === true); });
+    user?.getIdTokenResult(true).then((t) => { if (!cancelled) setIsAdmin(t.claims.admin === true); });
     return () => { cancelled = true; };
   }, [user]);
   if (!isAdmin) return null;
@@ -338,7 +338,7 @@ export default function Dashboard() {
     if (!window.confirm("This permanently deletes your account and data. Continue?")) return;
     try {
       setDeleteError(null);
-      await httpsCallable(getFirebase().functions, "deleteAccount")({});
+      await callFn("deleteAccount", {});
       // Navigate away first: this unmounts Dashboard (and its auth-guard
       // effect above), so that effect can't race signOutUser() below and
       // redirect to /sign-in first, landing the user somewhere other than

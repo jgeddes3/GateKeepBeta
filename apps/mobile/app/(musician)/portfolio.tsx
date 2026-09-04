@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ScrollView, View, Alert, Linking } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, onSnapshot, getDoc, collection, query, orderBy } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
+import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../src/portfolio/PortfolioForms";
@@ -227,7 +227,7 @@ export default function Portfolio() {
   const submit = async () => {
     setSubmitBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+      await callFn("submitProfileForReview", { profileId });
     } catch (e) {
       // The server's failed-precondition message is user-ready, surface it
       // verbatim. This is the backstop for a race the client gate's snapshot
@@ -244,7 +244,7 @@ export default function Portfolio() {
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      await callFn("deleteProfile", { profileId });
       // Nothing here nulls activeContext itself, fall back to "fan" (the
       // same switch ContextSwitcher's own "Me (fan)" row performs) so this
       // screen doesn't keep pointing at a profile that no longer exists.

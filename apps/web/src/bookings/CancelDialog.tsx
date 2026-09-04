@@ -1,7 +1,6 @@
 "use client";
 import { useState } from "react";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatCents } from "../gigs/GigForms";
 // useNow lives in BookingThread.tsx (its primary/originating consumer, and
 // not a field-group, see BookingForms.tsx's Task 10 review comment); this
@@ -89,9 +88,9 @@ export function CancelDialog({ bookingId, gigId, side, startsAt, depositAmountCe
     setError(null);
     try {
       if (mode === "booking") {
-        await httpsCallable(getFirebase().functions, "cancelBooking")({ bookingId, reason: trimmed });
+        await callFn("cancelBooking", { bookingId, reason: trimmed });
       } else {
-        await httpsCallable(getFirebase().functions, "cancelOccurrence")({ bookingId, gigId, reason: trimmed });
+        await callFn("cancelOccurrence", { bookingId, gigId, reason: trimmed });
       }
       onDone();
     } catch (e) {

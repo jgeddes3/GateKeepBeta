@@ -1,8 +1,7 @@
 "use client";
 import { useMemo, useState } from "react";
-import { httpsCallable } from "firebase/functions";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { getStripeJs, stripeEnabled } from "./stripeLoader";
 import { gkStripeAppearance } from "./stripeAppearance";
 import { Button } from "../ui/button";
@@ -10,7 +9,7 @@ import { Card, CardContent } from "../ui/card";
 import { IconWarning } from "../ui/icons";
 
 // House idiom (see src/bookings/CancelDialog.tsx): "use client",
-// httpsCallable(getFirebase().functions, ...), inline styles, verbatim
+// callFn(...) (lib/callable.ts, Task 27), inline styles, verbatim
 // server-error surfacing, a busy/error pair of local state.
 //
 // FLOW:
@@ -55,8 +54,7 @@ export function SaveCardModal({ profileId, onSaved, onClose }: {
     setBusy(true);
     setError(null);
     try {
-      const res = await httpsCallable<{ profileId: string }, { clientSecret: string; customerId: string }>(
-        getFirebase().functions, "createSetupIntent")({ profileId });
+      const res = await callFn<{ profileId: string }, { clientSecret: string; customerId: string }>("createSetupIntent", { profileId });
       if (stripeEnabled) {
         setClientSecret(res.data.clientSecret);
       } else {
@@ -137,7 +135,7 @@ function CardConfirmForm({ profileId, onSaved, onCancel }: {
     try {
       // Passes the CONFIRMED SetupIntent's id, see the header note on why
       // this (not a bare refresh) is what pins THIS card as the default.
-      await httpsCallable(getFirebase().functions, "refreshPaymentMethod")(
+      await callFn("refreshPaymentMethod", 
         { profileId, setupIntentId: setupIntent.id });
       onSaved();
     } catch (e) {

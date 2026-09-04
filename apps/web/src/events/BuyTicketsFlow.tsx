@@ -2,7 +2,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import {
@@ -11,6 +10,7 @@ import {
   type EventStatus, type TicketOrderStatus, type TicketTierDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { getStripeJs } from "../payments/stripeLoader";
 import { gkStripeAppearance } from "../payments/stripeAppearance";
@@ -22,7 +22,7 @@ import { IconWarning } from "../ui/icons";
 
 // Sub-project 6 task 9: the fan buy flow. Mirrors the house payment idiom
 // (src/payments/SaveCardModal.tsx, src/payments/PayPastDueButton.tsx):
-// "use client", httpsCallable(getFirebase().functions, ...), an Elements
+// "use client", callFn(...) (lib/callable.ts, Task 27), an Elements
 // mount keyed off a server-issued clientSecret, verbatim server-error
 // surfacing, a busy/error pair of local state. apps/web never depends on
 // functions/src types (same boundary those two components' own headers
@@ -264,8 +264,8 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
     setError(null);
     setPhase("creating");
     try {
-      const res = await httpsCallable<{ eventId: string; items: Array<{ tierId: string; quantity: number }> },
-        CreateTicketOrderResult>(getFirebase().functions, "createTicketOrder")({ eventId, items });
+      const res = await callFn<{ eventId: string; items: Array<{ tierId: string; quantity: number }> },
+        CreateTicketOrderResult>("createTicketOrder", { eventId, items });
       setOrderId(res.data.orderId);
       setPurchasedQty(totalQty);
       if (res.data.clientSecret) {
@@ -305,8 +305,7 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
     if (!orderId) return;
     setPhase("finalizing");
     try {
-      const res = await httpsCallable<{ orderId: string }, FinalizeTicketOrderResult>(
-        getFirebase().functions, "finalizeTicketOrder")({ orderId });
+      const res = await callFn<{ orderId: string }, FinalizeTicketOrderResult>("finalizeTicketOrder", { orderId });
       setOrderStatus(res.data.orderStatus);
       setPhase("done");
     } catch (e) {

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { View } from "react-native";
-import { httpsCallable } from "firebase/functions";
 import { collection, getDocs, onSnapshot, orderBy, query } from "firebase/firestore";
 import type { EventStatus, TicketTierDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import {
   OneOffDateTimeFields, oneOffDateTimeToMs, oneOffDateTimeFrom, emptyOneOffDateTime,
   type OneOffDateTimeState,
@@ -89,7 +89,7 @@ export function TierEditor({ curatorProfileId, eventId, eventStatus, initialTier
     }
     setBusy(true);
     try {
-      await httpsCallable<SetEventTiersPayload, { ok: true }>(getFirebase().functions, "setEventTiers")(
+      await callFn<SetEventTiersPayload, { ok: true }>("setEventTiers", 
         { curatorProfileId, eventId, tiers });
       setSaved(true);
       // Refetch (one-shot, same idiom the web twin uses): picks up

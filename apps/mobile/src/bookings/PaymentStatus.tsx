@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { View, Pressable } from "react-native";
 import { collection, doc, onSnapshot } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { useRouter } from "expo-router";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { useRole, useOccurrences } from "./BookingThread";
 import { SaveCardSheet } from "../payments/SaveCardSheet";
@@ -176,7 +176,7 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
     // useState("loading") already covers first mount, and a reload just
     // leaves the PREVIOUS status on screen until the new one resolves,
     // rather than flashing back to "loading".
-    httpsCallable<{ profileId: string }, StripeStatusResult>(getFirebase().functions, "getStripeStatus")({ profileId: curatorProfileId })
+    callFn<{ profileId: string }, StripeStatusResult>("getStripeStatus", { profileId: curatorProfileId })
       .then((res) => { if (!cancelled) setStripeStatus(res.data); })
       .catch(() => { if (!cancelled) setStripeStatus("error"); });
     return () => { cancelled = true; };

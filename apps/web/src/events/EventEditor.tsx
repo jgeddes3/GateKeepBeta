@@ -1,9 +1,9 @@
 "use client";
 import { useState } from "react";
-import { httpsCallable } from "firebase/functions";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { GENRES, type EventAct, type EventDoc, type EventStatus, type TicketTierDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { LocationFields, MAX_ADDRESS_LENGTH, type LocationValue } from "../gigs/GigForms";
 import { EVENT_STATUS_LABEL, EVENT_STATUS_BADGE } from "./eventDisplay";
 import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
@@ -239,7 +239,7 @@ function TierEditor({ profileId, eventId, eventStatus, initialTiers }: {
     }
     setBusy(true);
     try {
-      await httpsCallable<SetEventTiersPayload, { ok: true }>(getFirebase().functions, "setEventTiers")(
+      await callFn<SetEventTiersPayload, { ok: true }>("setEventTiers", 
         { curatorProfileId: profileId, eventId, tiers });
       setSaved(true);
       // Refetch (a one-shot read, same idiom BuyTicketsFlow.tsx's own
@@ -340,7 +340,7 @@ function CancelPanel({ profileId, eventId, title, onClose, onCancelled }: {
     setBusy(true);
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "cancelEvent")(
+      await callFn("cancelEvent", 
         { curatorProfileId: profileId, eventId, reason: reason.trim() || undefined });
       onCancelled();
     } catch (e) {
@@ -416,8 +416,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
         curatorProfileId: profileId, source: resolvedSource, title: trimmedTitle, description: description.trim(),
         startsAt, endsAt, lineup, curatorGenres: genres.length > 0 ? genres : undefined,
       };
-      const { data } = await httpsCallable<CreateEventPayload, { eventId: string }>(
-        getFirebase().functions, "createEvent")(payload);
+      const { data } = await callFn<CreateEventPayload, { eventId: string }>("createEvent", payload);
       onCreated(data.eventId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create this event.");
@@ -545,7 +544,7 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
         // form has no poster field of its own to edit.
         posterPath: event.posterPath ?? null,
       };
-      await httpsCallable(getFirebase().functions, "updateEvent")(payload);
+      await callFn("updateEvent", payload);
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save changes.");
@@ -636,7 +635,7 @@ export function EventEditor({ profileId, isVenue, curatorAddress, mode, onClose,
     setPublishBusy(true);
     setPublishError(null);
     try {
-      await httpsCallable(getFirebase().functions, "publishEvent")({ curatorProfileId: profileId, eventId: event.id });
+      await callFn("publishEvent", { curatorProfileId: profileId, eventId: event.id });
     } catch (e) {
       setPublishError(e instanceof Error ? e.message : "Could not publish.");
     } finally {

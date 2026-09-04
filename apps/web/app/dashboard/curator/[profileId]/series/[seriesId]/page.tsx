@@ -3,8 +3,8 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot, collection, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../../../src/lib/firebase";
+import { callFn } from "../../../../../../src/lib/callable";
 import { useAuth } from "../../../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
@@ -89,7 +89,7 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
         ? { seriesId, ...contentInput, budget: budgetInput, recurrence: recurrenceInput, fillMode: recurrence.fillMode,
             location: { address: trimmedAddress || null, addressVisibility: location.visibility } }
         : { seriesId, ...contentInput, budget: budgetInput, recurrence: recurrenceInput, fillMode: recurrence.fillMode };
-      await httpsCallable(getFirebase().functions, "updateSeries")(payload);
+      await callFn("updateSeries", payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the template.");
     } finally {
@@ -226,7 +226,7 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     if (!window.confirm("Pause this series? No new dates will be created going forward. Already-open dates stay open. This can't be undone.")) return;
     setPauseBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "pauseSeries")({ seriesId });
+      await callFn("pauseSeries", { seriesId });
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Could not pause this series.");
     } finally {
@@ -237,7 +237,7 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     if (!window.confirm("End this series? Future open or draft dates will be cancelled and no new dates will be created. This can't be undone.")) return;
     setEndBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "endSeries")({ seriesId });
+      await callFn("endSeries", { seriesId });
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Could not end this series.");
     } finally {

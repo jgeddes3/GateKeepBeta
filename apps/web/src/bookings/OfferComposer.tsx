@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useId, useState } from "react";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
@@ -60,8 +60,7 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
     if (buildError || !payload) { setError(buildError ?? "Invalid offer."); return; }
     setBusy(true);
     try {
-      const { data } = await httpsCallable<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>(
-        getFirebase().functions, "offerGig")({ gigId: selectedGig.id, musicianProfileId, offer: payload });
+      const { data } = await callFn<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>("offerGig", { gigId: selectedGig.id, musicianProfileId, offer: payload });
       setBookingId(data.bookingId);
     } catch (e) {
       const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;

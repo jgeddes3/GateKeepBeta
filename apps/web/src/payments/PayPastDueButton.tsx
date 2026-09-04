@@ -1,8 +1,7 @@
 "use client";
 import { useMemo, useState } from "react";
-import { httpsCallable } from "firebase/functions";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { getStripeJs } from "./stripeLoader";
 import { gkStripeAppearance } from "./stripeAppearance";
 import { Button } from "../ui/button";
@@ -99,8 +98,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
     setBusy(true);
     setError(null);
     try {
-      const res = await httpsCallable<{ bookingId: string; gigId: string }, PayPastDueResult>(
-        getFirebase().functions, "payPastDue")({ bookingId, gigId });
+      const res = await callFn<{ bookingId: string; gigId: string }, PayPastDueResult>("payPastDue", { bookingId, gigId });
       if (res.data.done) {
         setDone(true);
         onDone?.();

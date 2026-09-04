@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import { doc, getDoc } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { GENRES, genreTargetId, type UserDoc } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { follow, useFollowsContext } from "./useFollows";
 import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
@@ -11,7 +11,7 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 
 async function callMarkGenrePickerSeen(): Promise<void> {
-  await httpsCallable(getFirebase().functions, "markGenrePickerSeen")({});
+  await callFn("markGenrePickerSeen", {});
 }
 
 // Whether /discover (and, later, the post-purchase prompt) should open the

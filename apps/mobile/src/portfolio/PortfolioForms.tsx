@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { View, Pressable, Alert } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
-import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import {
   GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
   type PortfolioData, type BookingDoc, type BookingPreferences, type BookingRates, type BookingVisibility,
@@ -23,7 +23,7 @@ import { tokens } from "../theme/tokens";
 // remount won't happen and the PREVIOUS profile's bio/links/rates will leak
 // into the new one.
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
-  try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+  try { await callFn(name, data); return true; }
   catch (e) { Alert.alert("Save failed", e instanceof Error ? e.message : "Try again."); return false; }
 };
 

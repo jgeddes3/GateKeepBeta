@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { View } from "react-native";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "./stripe";
 import { Text, Button, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -43,8 +42,7 @@ export function PayPastDueButton({ bookingId, gigId, onDone }: {
     setBusy(true);
     setError(null);
     try {
-      const res = await httpsCallable<{ bookingId: string; gigId: string }, PayPastDueResult>(
-        getFirebase().functions, "payPastDue")({ bookingId, gigId });
+      const res = await callFn<{ bookingId: string; gigId: string }, PayPastDueResult>("payPastDue", { bookingId, gigId });
       if (res.data.done) {
         setDone(true);
         onDone?.();

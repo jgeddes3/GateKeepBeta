@@ -4,9 +4,9 @@ import {
   collection, collectionGroup, query, where, onSnapshot, orderBy, limit, getDoc, getDocs, doc,
   type DocumentReference,
 } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getDownloadURL, ref as storageRef } from "firebase/storage";
 import { getFirebase } from "../../src/lib/firebase";
+import { callFn } from "../../src/lib/callable";
 import { AdminGate } from "./AdminGate";
 import { GIG_STATUS_LABEL, formatGigDateTime } from "../../src/gigs/GigForms";
 import { bookingHistoryLabel } from "../../src/bookings/BookingInbox";
@@ -243,7 +243,7 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
   const approve = async () => {
     setBusyAction("approve"); setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "reviewProfile")({ profileId: p.id, decision: "approved" });
+      await callFn("reviewProfile", { profileId: p.id, decision: "approved" });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not submit the review, try again.");
     } finally {
@@ -264,13 +264,12 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
     }
     setBusyAction("reject"); setError(null);
     try {
-      const { functions } = getFirebase();
-      await httpsCallable(functions, "reviewProfile")({ profileId: p.id, decision: "rejected", reason: trimmed });
+      await callFn("reviewProfile", { profileId: p.id, decision: "rejected", reason: trimmed });
       if (flagChecked) {
         try {
           const ownerUid = await resolveProfileOwnerUid(p.id);
           if (!ownerUid) throw new Error("Could not find an account on this profile to flag.");
-          await httpsCallable(functions, "flagAccount")({ uid: ownerUid, text: trimmedFlagNote });
+          await callFn("flagAccount", { uid: ownerUid, text: trimmedFlagNote });
           // Only clear the flag fields once the flag itself actually landed.
           // The reject above already committed regardless of what happens
           // here, so a flagAccount failure below must not erase the note the
@@ -491,7 +490,7 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
   const approve = async () => {
     setBusyAction("approve"); setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "reviewTrack")(
+      await callFn("reviewTrack", 
         { profileId: t.profileId, trackId: t.id, decision: "approved" });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not submit the review, try again.");
@@ -507,7 +506,7 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
     }
     setBusyAction("reject"); setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "reviewTrack")(
+      await callFn("reviewTrack", 
         { profileId: t.profileId, trackId: t.id, decision: "rejected", reason: trimmed });
       setShowReject(false); setReason("");
     } catch (e) {
@@ -692,7 +691,7 @@ function GigModerationRow({ g }: { g: GigModRow }) {
     }
     setBusy(true); setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "takedownGig")({ gigId: g.id, scope, reason: trimmed });
+      await callFn("takedownGig", { gigId: g.id, scope, reason: trimmed });
       setScope(null); setReason("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not take down the gig, try again.");
@@ -894,7 +893,7 @@ function ReliabilityPanel({ profileId }: { profileId: string }) {
     const key = `${mark.bookingId}-${mark.kind}`;
     setBusyKey(key); setRemoveError(null);
     try {
-      await httpsCallable(getFirebase().functions, "removeReliabilityMark")(
+      await callFn("removeReliabilityMark", 
         { musicianProfileId: profileId, bookingId: mark.bookingId, kind: mark.kind });
       setMarks((prev) => (prev === "loading" ? prev : prev.map((m) => (
         m.bookingId === mark.bookingId && m.kind === mark.kind ? { ...m, removedByAdmin: true } : m))));
@@ -1050,7 +1049,7 @@ function LiveTrackRow({ profileId, track, onRemoved }: {
     }
     setBusy(true); setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "reviewTrack")(
+      await callFn("reviewTrack", 
         { profileId, trackId: track.id, decision: "rejected", reason: trimmed });
       onRemoved(track.id);
     } catch (e) {
@@ -1205,7 +1204,7 @@ function EventsTakedown() {
     if (trimmed.length < 1 || trimmed.length > 500) { setTakedownError("Reason must be 1-500 characters."); return; }
     setTakedownBusy(true); setTakedownError(null);
     try {
-      await httpsCallable(getFirebase().functions, "takedownEvent")({ eventId, reason: trimmed });
+      await callFn("takedownEvent", { eventId, reason: trimmed });
       const fresh = await loadEventCounts(eventId);
       setEvents((rows) => rows.map((r) => (r.id === eventId ? { ...r, status: "cancelled" } : r)));
       setCounts((c) => ({ ...c, [eventId]: fresh }));
@@ -1359,7 +1358,7 @@ function TakedownsPanel() {
     }
     setProfileBusy(true); setUnpublishError(null);
     try {
-      await httpsCallable(getFirebase().functions, "reviewProfile")(
+      await callFn("reviewProfile", 
         { profileId, decision: "rejected", reason: trimmed });
       setProfile((p) => (p ? { ...p, status: "rejected", rejectionReason: trimmed } : p));
       setShowUnpublish(false); setUnpublishReason("");
@@ -1512,7 +1511,7 @@ function ShowPostsPanel() {
   const remove = async (row: ShowPostRow) => {
     setRemovingId(row.id);
     try {
-      await httpsCallable(getFirebase().functions, "removeShowPost")({ eventId: row.eventId, postId: row.id });
+      await callFn("removeShowPost", { eventId: row.eventId, postId: row.id });
       setRows((prev) => (prev === "loading" ? prev : prev.filter((r) => r.id !== row.id)));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove that post, try again.");
@@ -1683,7 +1682,7 @@ function UserLookup() {
     setSearched(true);
     setSearchError(null);
     try {
-      const { db, functions } = getFirebase();
+      const { db } = getFirebase();
       let mapped: UserResult[];
       if (mode === "email") {
         const s = await getDocs(query(collection(db, "users"), where("email", "==", q)));
@@ -1692,9 +1691,7 @@ function UserLookup() {
           return { id: d.id, displayName: data.displayName, email: data.email };
         });
       } else {
-        const res = await httpsCallable<{ q: string }, { results: { uid: string; displayName: string; email: string }[] }>(
-          functions, "searchUsersByName",
-        )({ q });
+        const res = await callFn<{ q: string }, { results: { uid: string; displayName: string; email: string }[] }>("searchUsersByName", { q });
         mapped = res.data.results.map((r) => ({ id: r.uid, displayName: r.displayName, email: r.email }));
       }
       if (mySeq !== searchSeq.current) return; // superseded by a newer search
@@ -1877,7 +1874,7 @@ function AdminAlertRow({ a }: { a: AlertRow }) {
     if (!a.bookingId) return;
     setBusy(true); setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "releaseStuckSaga")({ bookingId: a.bookingId });
+      await callFn("releaseStuckSaga", { bookingId: a.bookingId });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not release, try again.");
     } finally {

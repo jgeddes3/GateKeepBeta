@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Syne, Sora } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "../src/auth/AuthProvider";
+import { VerifyEmailBanner } from "../src/auth/VerifyEmailBanner";
 import { AppShell } from "../src/shell/AppShell";
 import { MarketingThemeDefault } from "../src/shell/MarketingThemeDefault";
 
@@ -73,6 +74,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body>
         <MarketingThemeDefault />
         <AuthProvider>
+          <VerifyEmailBanner />
           <AppShell>{children}</AppShell>
         </AuthProvider>
       </body>

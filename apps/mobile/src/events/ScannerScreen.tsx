@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Linking, StyleSheet, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { FunctionsError, httpsCallable } from "firebase/functions";
+import { FunctionsError } from "firebase/functions";
 import { TICKET_ALREADY_CHECKED_IN_MESSAGE } from "@gatekeep/shared";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatGigTime } from "./eventDisplay";
 import {
   Text, Button, Callout, PageBackground, PhotoScrim,
@@ -145,7 +145,7 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
       return;
     }
     setBusy(true);
-    httpsCallable<CheckInTicketInput, CheckInTicketResult>(getFirebase().functions, "checkInTicket")({
+    callFn<CheckInTicketInput, CheckInTicketResult>("checkInTicket", {
       curatorProfileId, eventId, ticketId: payload.ticketId, qrSecret: payload.qrSecret,
     })
       .then(({ data: res }) => setResult({ kind: "success", ownerName: res.ownerName, tierName: res.tierName }))

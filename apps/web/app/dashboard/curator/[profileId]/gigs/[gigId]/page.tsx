@@ -3,8 +3,8 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot, getDoc } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../../../src/lib/firebase";
+import { callFn } from "../../../../../../src/lib/callable";
 import { useAuth } from "../../../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields,
@@ -90,7 +90,7 @@ function GigEditForm({ gigId, gig, isVenue, currentLabel }: {
         ? { gigId, ...contentInput, budget: budgetInput, startsAt,
             location: { address: trimmedAddress || null, addressVisibility: location.visibility } }
         : { gigId, ...contentInput, budget: budgetInput, startsAt };
-      await httpsCallable(getFirebase().functions, "updateGig")(payload);
+      await callFn("updateGig", payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save changes.");
     } finally {
@@ -229,7 +229,7 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
   const publish = async () => {
     setPublishBusy(true); setPublishError(null);
     try {
-      await httpsCallable(getFirebase().functions, "publishGig")({ gigId });
+      await callFn("publishGig", { gigId });
     } catch (e) {
       // The MAX_OPEN_GIGS_PER_PROFILE cap error (resource-exhausted) lands
       // here verbatim: this is the one place that error can ever surface.
@@ -242,7 +242,7 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
     if (!window.confirm(`Cancel "${gig.title}"? Musicians will no longer see or apply to it. This can't be undone.`)) return;
     setCancelBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "cancelGig")({ gigId });
+      await callFn("cancelGig", { gigId });
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Could not cancel this gig.");
     } finally {

@@ -1,8 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../../../../../src/lib/firebase";
+import { callFn } from "../../../../../src/lib/callable";
 import { clearOnboardingProfileId, readOnboardingProfileId } from "../../../../../src/payments/onboardingRedirect";
 import { Button } from "../../../../../src/ui/button";
 import { Card, CardContent } from "../../../../../src/ui/card";
@@ -32,8 +31,7 @@ export default function OnboardingReturnPage() {
       }
       clearOnboardingProfileId(); // one-shot: this page is the terminal step of one onboarding attempt
       try {
-        const res = await httpsCallable<{ profileId: string }, { payoutsEnabled: boolean }>(
-          getFirebase().functions, "getStripeStatus")({ profileId });
+        const res = await callFn<{ profileId: string }, { payoutsEnabled: boolean }>("getStripeStatus", { profileId });
         if (!cancelled) setResult({ payoutsEnabled: res.data.payoutsEnabled });
       } catch {
         if (!cancelled) setResult("error");

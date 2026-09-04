@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { cn } from "../lib/utils";
 import {
   GENRES, GIG_TYPES, MAX_PHOTO_UPLOAD_BYTES, stagingPhotoPath, validatePortfolioUpdate, validateBookingUpdate,
@@ -28,7 +28,7 @@ import { formatChipLabel } from "../../app/u/[handle]/chipLabel";
 export { formatChipLabel };
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
-  try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+  try { await callFn(name, data); return true; }
   catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
 };
 

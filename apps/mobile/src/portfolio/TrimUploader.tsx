@@ -4,9 +4,9 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystemLegacy from "expo-file-system/legacy";
 import Slider from "@react-native-community/slider";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
-import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import {
   validateTrackCreate, AUDIO_CONTENT_TYPES, MAX_CLIP_SECONDS, type CreateTrackInput,
 } from "@gatekeep/shared";
@@ -231,9 +231,8 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
     // "Processing…" row with nothing behind it).
     let created: { trackId: string; uploadPath: string } | null = null;
     try {
-      const { functions, storage } = getFirebase();
-      const { data } = await httpsCallable<CreateTrackInput, { trackId: string; uploadPath: string }>(
-        functions, "createTrack")(input);
+      const { storage } = getFirebase();
+      const { data } = await callFn<CreateTrackInput, { trackId: string; uploadPath: string }>("createTrack", input);
       created = data;
       const blob = prefetchedBlob ?? await (await fetch(picked.uri)).blob();
       const task = uploadBytesResumable(storageRef(storage, data.uploadPath), blob,
@@ -253,7 +252,7 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
       console.error(e); // the alerts below are deliberately generic, keep the real error in the console
       if (created) {
         try {
-          await httpsCallable(getFirebase().functions, "deleteTrack")({ profileId, trackId: created.trackId });
+          await callFn("deleteTrack", { profileId, trackId: created.trackId });
           Alert.alert("Upload failed", "Try again.");
         } catch {
           // Best-effort cleanup itself failed, tell the musician exactly

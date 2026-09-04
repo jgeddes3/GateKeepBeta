@@ -2,8 +2,8 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { collectionGroup, doc, getDoc, onSnapshot, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../src/lib/firebase";
+import { callFn } from "../../../src/lib/callable";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../../../src/gigs/GigForms";
 import { formatChipLabel } from "../../../src/portfolio/PortfolioForms";
@@ -102,8 +102,7 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
     if (buildError || !payload) { setError(buildError ?? "Invalid offer."); return; }
     setBusy(true);
     try {
-      await httpsCallable<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>(
-        getFirebase().functions, "applyToGig")({ gigId, musicianProfileId: selected, offer: payload });
+      await callFn<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>("applyToGig", { gigId, musicianProfileId: selected, offer: payload });
       setApplied(true);
     } catch (e) {
       const code = typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : undefined;

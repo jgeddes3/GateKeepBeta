@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { View } from "react-native";
-import { httpsCallable } from "firebase/functions";
 import { TRANSFER_OFFER_SENT_MESSAGE } from "@gatekeep/shared";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { Text, Button, Input, Sheet, Callout, ErrorBanner, IconPaperPlaneTilt } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
@@ -34,8 +33,7 @@ export function TransferSheet({ ticketId, ticketLabel, onClose }: {
     setBusy(true);
     setError(null);
     try {
-      await httpsCallable<{ ticketId: string; target: string }, { message: string }>(
-        getFirebase().functions, "offerTransfer")({ ticketId, target });
+      await callFn<{ ticketId: string; target: string }, { message: string }>("offerTransfer", { ticketId, target });
       setSent(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not send this transfer.");

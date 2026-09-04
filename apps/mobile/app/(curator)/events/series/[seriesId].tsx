@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { ScrollView, View, Pressable, Alert } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, collection, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
+import { callFn } from "../../../../src/lib/callable";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import {
   ContentFields, BudgetFields, ProvisionsFields, LocationFields, RecurrenceFields,
@@ -78,7 +78,7 @@ function SeriesTemplateForm({ seriesId, series, isVenue }: { seriesId: string; s
         ? { seriesId, ...contentInput, budget: budgetInput, recurrence: recurrenceInput, fillMode: recurrence.fillMode,
             location: { address: trimmedAddress || null, addressVisibility: location.visibility } }
         : { seriesId, ...contentInput, budget: budgetInput, recurrence: recurrenceInput, fillMode: recurrence.fillMode };
-      await httpsCallable(getFirebase().functions, "updateSeries")(payload);
+      await callFn("updateSeries", payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the template.");
     } finally {
@@ -185,7 +185,7 @@ export default function SeriesDetail() {
   const doPause = async () => {
     setPauseBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "pauseSeries")({ seriesId });
+      await callFn("pauseSeries", { seriesId });
     } catch (e) {
       Alert.alert("Could not pause this series", e instanceof Error ? e.message : "Try again.");
     } finally {
@@ -199,7 +199,7 @@ export default function SeriesDetail() {
   const doEnd = async () => {
     setEndBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "endSeries")({ seriesId });
+      await callFn("endSeries", { seriesId });
     } catch (e) {
       Alert.alert("Could not end this series", e instanceof Error ? e.message : "Try again.");
     } finally {

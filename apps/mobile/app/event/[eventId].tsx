@@ -3,13 +3,13 @@ import { ScrollView, View, Image, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
-import { httpsCallable } from "firebase/functions";
 import {
   DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals,
   EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
   type EventAct, type EventDoc, type ProfileDoc, type TicketOrderStatus, type TicketTierDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../../src/lib/firebase";
+import { callFn } from "../../src/lib/callable";
 import { useNow } from "../../src/bookings/BookingThread";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import {
@@ -306,8 +306,7 @@ export default function EventScreen() {
   const finalize = async (orderIdArg: string) => {
     setPhase("finalizing");
     try {
-      const res = await httpsCallable<{ orderId: string }, FinalizeTicketOrderResult>(
-        getFirebase().functions, "finalizeTicketOrder")({ orderId: orderIdArg });
+      const res = await callFn<{ orderId: string }, FinalizeTicketOrderResult>("finalizeTicketOrder", { orderId: orderIdArg });
       setOrderStatus(res.data.orderStatus);
       setPhase("done");
     } catch (e) {
@@ -343,8 +342,7 @@ export default function EventScreen() {
     setError(null);
     setPhase("creating");
     try {
-      const res = await httpsCallable<{ eventId: string; items: { tierId: string; quantity: number }[] }, CreateTicketOrderResult>(
-        getFirebase().functions, "createTicketOrder")({ eventId, items: [{ tierId: selectedTier.id, quantity }] });
+      const res = await callFn<{ eventId: string; items: { tierId: string; quantity: number }[] }, CreateTicketOrderResult>("createTicketOrder", { eventId, items: [{ tierId: selectedTier.id, quantity }] });
       setOrderId(res.data.orderId);
       setPurchasedQty(quantity);
       if (!res.data.clientSecret) {

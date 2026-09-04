@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ScrollView, View, Alert, Linking } from "react-native";
 import { useRouter } from "expo-router";
 import { doc, onSnapshot } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../src/lib/firebase";
+import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { AboutForm, LocationForm, LookingForForm, AmenitiesForm, GalleryPhotosSection } from "../../src/curator/CuratorForms";
@@ -141,7 +141,7 @@ export default function CuratorDashboard() {
     setSubmitBusy(true);
     setSubmitError(null);
     try {
-      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+      await callFn("submitProfileForReview", { profileId });
     } catch (e) {
       // The 24h resubmit cooldown (failed-precondition) and the
       // 1-pending-curator-profile cap (resource-exhausted) both land here
@@ -158,7 +158,7 @@ export default function CuratorDashboard() {
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      await callFn("deleteProfile", { profileId });
       // Nothing here nulls activeContext itself, fall back to "fan" (same
       // switch ContextSwitcher's own "Me (fan)" row performs) so this screen
       // doesn't keep pointing at a profile that no longer exists.

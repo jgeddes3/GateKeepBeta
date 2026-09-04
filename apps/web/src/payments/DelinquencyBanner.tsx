@@ -1,8 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
 import type { StripeStatusResult } from "@gatekeep/shared";
 import { IconWarning } from "../ui/icons";
@@ -20,7 +19,7 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    httpsCallable<{ profileId: string }, StripeStatusResult>(getFirebase().functions, "getStripeStatus")({ profileId })
+    callFn<{ profileId: string }, StripeStatusResult>("getStripeStatus", { profileId })
       .then((res) => { if (!cancelled) setStatus(res.data); })
       .catch(() => { if (!cancelled) setStatus(null); });
     return () => { cancelled = true; };

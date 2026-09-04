@@ -3,8 +3,8 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot, getDoc, collection, query, orderBy } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../../../../src/lib/firebase";
+import { callFn } from "../../../../src/lib/callable";
 import { useAuth } from "../../../../src/auth/AuthProvider";
 import { BioGenresForm, LinksForm, PhotoUploader, BookingForm } from "../../../../src/portfolio/PortfolioForms";
 import { TrackManager } from "../../../../src/portfolio/TrackManager";
@@ -171,7 +171,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const submit = async () => {
     setSubmitBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "submitProfileForReview")({ profileId });
+      await callFn("submitProfileForReview", { profileId });
     } catch (e) {
       // The server's failed-precondition message is user-ready, surface it
       // verbatim. This is the backstop for a race the client gate's snapshot
@@ -192,7 +192,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await httpsCallable(getFirebase().functions, "deleteProfile")({ profileId });
+      await callFn("deleteProfile", { profileId });
       router.push("/dashboard");
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : "Could not delete this profile.");

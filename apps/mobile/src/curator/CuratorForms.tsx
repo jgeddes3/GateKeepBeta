@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { View, Pressable, Alert, Image } from "react-native";
-import { httpsCallable } from "firebase/functions";
 import { ref as storageRef, getDownloadURL } from "firebase/storage";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { PhotoUploader } from "../portfolio/PortfolioForms";
 import {
   GENRES, ACT_SIZES, MAX_CURATOR_PHOTOS, validateLookingFor,
@@ -32,7 +32,7 @@ import { useTokens } from "../theme/ThemeProvider";
 //   contract as BioGenresForm/LinksForm/BookingForm.
 
 const callOrAlert = async (name: string, data: object): Promise<boolean> => {
-  try { await httpsCallable(getFirebase().functions, name)(data); return true; }
+  try { await callFn(name, data); return true; }
   catch (e) { Alert.alert("Save failed", e instanceof Error ? e.message : "Try again."); return false; }
 };
 
@@ -251,7 +251,7 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
   const doRemove = async () => {
     setBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "removeCuratorPhoto")({ profileId, path });
+      await callFn("removeCuratorPhoto", { profileId, path });
       // No local state update needed on success: the parent screen's
       // profile subscription delivers the shrunk photoPaths array, which
       // drops this path from the list and unmounts this tile (keyed by

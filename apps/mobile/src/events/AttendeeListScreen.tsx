@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { Alert, FlatList, Pressable, View } from "react-native";
-import { httpsCallable } from "firebase/functions";
 import { collection, onSnapshot } from "firebase/firestore";
 import {
   TICKET_NOT_REFUNDABLE_MESSAGE, TICKET_REFUND_WINDOW_CLOSED_MESSAGE, EVENT_CANCELLED_MESSAGE,
   type AttendeeDoc, type EventStatus,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { useNow } from "../bookings/BookingThread";
 import { formatEventFullDate, formatGigTime, TICKET_STATUS_LABEL, TICKET_STATUS_TONE } from "./eventDisplay";
 import {
@@ -68,8 +68,7 @@ function CheckInSheet({ curatorProfileId, eventId, row, onClose }: {
     setBusy(true);
     setError(null);
     try {
-      const { data } = await httpsCallable<CheckInTicketInput, CheckInTicketResult>(
-        getFirebase().functions, "checkInTicket")({ curatorProfileId, eventId, ticketId: row.id, override: true });
+      const { data } = await callFn<CheckInTicketInput, CheckInTicketResult>("checkInTicket", { curatorProfileId, eventId, ticketId: row.id, override: true });
       setDone(data);
     } catch (e) {
       // Verbatim server error (e.g. "Ticket already checked in.", "This
@@ -165,7 +164,7 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
     setRefundBusyId(row.id);
     setError(null);
     try {
-      await httpsCallable(getFirebase().functions, "refundTicket")({ curatorProfileId, eventId, ticketId: row.id });
+      await callFn("refundTicket", { curatorProfileId, eventId, ticketId: row.id });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not refund this ticket.";
       // Recognized by name (===-compared shared constants, GatePrompt

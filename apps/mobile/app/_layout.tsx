@@ -1,11 +1,13 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect } from "react";
 import type { ReactElement, ReactNode } from "react";
+import { View } from "react-native";
 import * as Sentry from "@sentry/react-native";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { setAudioModeAsync } from "expo-audio";
 import { AuthProvider, useAuth } from "../src/auth/AuthProvider";
+import { VerifyEmailBanner } from "../src/auth/VerifyEmailBanner";
 import { ProfileProvider } from "../src/shell/ProfileContext";
 import { FollowsProvider } from "../src/discover/useFollows";
 import { stripeEnabled, publishableKey, MERCHANT_IDENTIFIER } from "../src/payments/stripe";
@@ -50,8 +52,9 @@ function Gate() {
     if (user && inAuthGroup) router.replace("/");
   }, [user, loading, segments, router]);
   return (
-    <>
+    <View style={{ flex: 1 }}>
       <StatusBar style={active === "light" ? "dark" : "light"} />
+      <VerifyEmailBanner />
       <Stack screenOptions={{
         headerShown: false,
         // Border separates, shadow does not (DESIGN.md), but this Stack's
@@ -89,7 +92,7 @@ function Gate() {
             themed native header as artist/[handle] above. */}
         <Stack.Screen name="venue/[handle]" options={{ headerShown: true, title: "Venue" }} />
       </Stack>
-    </>
+    </View>
   );
 }
 

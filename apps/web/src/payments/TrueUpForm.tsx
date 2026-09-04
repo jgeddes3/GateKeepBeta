@@ -1,7 +1,6 @@
 "use client";
 import { useState } from "react";
-import { httpsCallable } from "firebase/functions";
-import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { formatCents } from "../gigs/GigForms";
 import {
   MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS, TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage,
@@ -92,7 +91,7 @@ export function TrueUpForm({
     if (belowCurrent) { setError(TRUE_UP_INCREASE_ONLY_MESSAGE); return; }
     setBusy(true);
     try {
-      await httpsCallable(getFirebase().functions, "confirmOccurrenceActuals")({
+      await callFn("confirmOccurrenceActuals", {
         bookingId, gigId, extraMinutes: nextExtraMinutes, extraSongs: nextExtraSongs,
       });
       onDone();

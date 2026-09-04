@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { View, Pressable, Modal, ScrollView } from "react-native";
 import { collection, getDocs, orderBy, query, where, type QueryConstraint } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
+import { callFn } from "../lib/callable";
 import { GENRES, type GigDoc, type BudgetStructure } from "@gatekeep/shared";
 import { formatGigDateTime, formatCents, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
 import {
@@ -72,8 +72,7 @@ function ApplyPanel({ gig, gigId }: { gig: GigRow; gigId: string }) {
     if (buildError || !payload) { setError(buildError ?? "Invalid offer."); return; }
     setBusy(true);
     try {
-      await httpsCallable<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>(
-        getFirebase().functions, "applyToGig")({ gigId, musicianProfileId: selected, offer: payload });
+      await callFn<{ gigId: string; musicianProfileId: string; offer: typeof payload }, { bookingId: string }>("applyToGig", { gigId, musicianProfileId: selected, offer: payload });
       setApplied(true);
     } catch (e) {
       if (errorCode(e) === "functions/already-exists") setAlreadyApplied(true);
