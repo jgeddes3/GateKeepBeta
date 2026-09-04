@@ -1,12 +1,13 @@
 "use client";
 import Link from "next/link";
 import { useState, type ReactNode } from "react";
-import type { SearchPin } from "@gatekeep/shared";
+import type { SearchFilters, SearchPin } from "@gatekeep/shared";
 import { DateBlockRow } from "../components/DateBlockRow";
 import { FilterBar } from "./FilterBar";
 import { ListMapToggle, type ResultsView } from "./ListMapToggle";
 import { ResultList, ShowRow } from "./ResultRows";
 import { hasMapsKey, ResultsMap } from "./ResultsMap";
+import { SaveSearchButton } from "./SaveSearchButton";
 import { SearchInputField } from "./SearchInputField";
 import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
@@ -44,10 +45,12 @@ function SelectedShowCard({ pin }: { pin: SearchPin }) {
 // Without a Maps browser key, hasMapsKey() is false: view can never leave
 // "list", the toggle never renders, and includePins is always false, so
 // this behaves exactly as it did before this task (Task 8's own contract).
-export function FanFace({ location, headerSlot }: { location: UseBrowserLocationState; headerSlot?: ReactNode }) {
+export function FanFace({
+  location, headerSlot, initial,
+}: { location: UseBrowserLocationState; headerSlot?: ReactNode; initial?: { q: string; filters: SearchFilters } }) {
   const [view, setView] = useState<ResultsView>("list");
   const [selectedPin, setSelectedPin] = useState<SearchPin | null>(null);
-  const state = useSearch("fan", { location: location.location, includePins: view === "map" });
+  const state = useSearch("fan", { location: location.location, includePins: view === "map", initial });
   return (
     <div className="grid gap-4">
       <div className="flex items-center gap-3">
@@ -63,6 +66,7 @@ export function FanFace({ location, headerSlot }: { location: UseBrowserLocation
             onChange={(v) => { setView(v); setSelectedPin(null); }}
           />
         )}
+        <SaveSearchButton face="fan" q={state.q} filters={state.filters} />
         {headerSlot}
       </div>
       <FilterBar face="fan" filters={state.filters} onChange={state.setFilters} location={location} />

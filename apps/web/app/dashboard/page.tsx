@@ -8,6 +8,7 @@ import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { cn } from "../../src/lib/utils";
 import { notificationHref, type ProfileType, type ProfileStatus, type ProfileDoc, type NotificationDoc } from "@gatekeep/shared";
+import { SavedSearches } from "../../src/search/SavedSearches";
 import { Button } from "../../src/ui/button";
 import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
@@ -191,10 +192,15 @@ function NotificationListRow({ n, markRead }: { n: NotificationRow; markRead: (i
   // (above) since its refId is a profileId, not a route, and the shared
   // helper deliberately returns null for it rather than hard-coding a
   // per-platform profile URL shape.
-  const artistHandle = useProfileHandle(n.kind === "new_music" ? (n.refId ?? null) : null);
-  const href = n.kind === "new_music"
+  // SP8 Task 11: saved_search_match resolves the same way as new_music when
+  // its refKind is "profile" (refId is a profileId, not a route); the
+  // event/gig refKinds already round-trip through notificationHref via the
+  // fourth `refKind` argument.
+  const resolveProfile = n.kind === "new_music" || (n.kind === "saved_search_match" && n.refKind === "profile");
+  const artistHandle = useProfileHandle(resolveProfile ? (n.refId ?? null) : null);
+  const href = resolveProfile
     ? (artistHandle ? `/u/${artistHandle}` : null)
-    : notificationHref(n.kind, n.refId, "web");
+    : notificationHref(n.kind, n.refId, "web", n.refKind);
   const rowBody = (
     <>
       <span
@@ -381,6 +387,10 @@ export default function Dashboard() {
           <NotificationsList key={`notifications-${user.uid}`} uid={user.uid} />
         </div>
       </section>
+
+      <div className="mt-10">
+        <SavedSearches key={`saved-searches-${user.uid}`} uid={user.uid} />
+      </div>
 
       <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-gk-border pt-6">
         <Link

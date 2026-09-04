@@ -1,18 +1,23 @@
 "use client";
 import Link from "next/link";
 import { useState, type ReactNode } from "react";
-import type { SearchPin } from "@gatekeep/shared";
+import type { SearchFace, SearchFilters, SearchPin } from "@gatekeep/shared";
 import { DateBlockRow } from "../components/DateBlockRow";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { FilterBar } from "./FilterBar";
 import { ListMapToggle, type ResultsView } from "./ListMapToggle";
 import { GigRow, ProfileRow, ResultList } from "./ResultRows";
 import { hasMapsKey, ResultsMap } from "./ResultsMap";
+import { SaveSearchButton } from "./SaveSearchButton";
 import { SearchInputField } from "./SearchInputField";
 import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
 
-type PanelProps = { location: UseBrowserLocationState; headerSlot?: ReactNode };
+type PanelProps = {
+  location: UseBrowserLocationState;
+  headerSlot?: ReactNode;
+  initial?: { q: string; filters: SearchFilters };
+};
 
 // SearchPin.startsAt is typed number | null; every pin this panel actually
 // produces (kind "gig") has one, but the type doesn't guarantee it, so
@@ -48,10 +53,10 @@ function SelectedGigCard({ pin }: { pin: SearchPin }) {
 // task. Without a Maps browser key, hasMapsKey() is false, view can never
 // leave "list", and includePins is always false: same behaviour as before
 // this task.
-export function MusicianGigsPanel({ location, headerSlot }: PanelProps) {
+export function MusicianGigsPanel({ location, headerSlot, initial }: PanelProps) {
   const [view, setView] = useState<ResultsView>("list");
   const [selectedPin, setSelectedPin] = useState<SearchPin | null>(null);
-  const state = useSearch("musician_gigs", { location: location.location, includePins: view === "map" });
+  const state = useSearch("musician_gigs", { location: location.location, includePins: view === "map", initial });
   return (
     <div className="grid gap-4">
       <div className="flex items-center gap-3">
@@ -62,6 +67,7 @@ export function MusicianGigsPanel({ location, headerSlot }: PanelProps) {
             onChange={(v) => { setView(v); setSelectedPin(null); }}
           />
         )}
+        <SaveSearchButton face="musician_gigs" q={state.q} filters={state.filters} />
         {headerSlot}
       </div>
       <FilterBar face="musician_gigs" filters={state.filters} onChange={state.setFilters} location={location} />
@@ -77,12 +83,13 @@ export function MusicianGigsPanel({ location, headerSlot }: PanelProps) {
   );
 }
 
-export function MusicianVenuesPanel({ location, headerSlot }: PanelProps) {
-  const state = useSearch("musician_venues", { location: location.location, includePins: false });
+export function MusicianVenuesPanel({ location, headerSlot, initial }: PanelProps) {
+  const state = useSearch("musician_venues", { location: location.location, includePins: false, initial });
   return (
     <div className="grid gap-4">
       <div className="flex items-center gap-3">
         <SearchInputField value={state.q} onChange={state.setQ} placeholder="Search venues" className="min-w-0 flex-1" />
+        <SaveSearchButton face="musician_venues" q={state.q} filters={state.filters} />
         {headerSlot}
       </div>
       <FilterBar face="musician_venues" filters={state.filters} onChange={state.setFilters} location={location} />
@@ -96,15 +103,27 @@ export function MusicianVenuesPanel({ location, headerSlot }: PanelProps) {
 // only mounts the active panel (same as DiscoverClient's Shows/Artists
 // tabs), so switching tabs remounts the inactive one and its useSearch
 // resets to a fresh query, the same tradeoff Discover already accepts.
-export function MusicianFace({ location, headerSlot }: PanelProps) {
+//
+// initialFace picks which tab opens (Task 11's ?saved= restore path);
+// initial itself (the saved q/filters) only ever reaches the ONE panel
+// whose own face matches, the other panel mounts with its ordinary blank
+// state exactly as before this task.
+export function MusicianFace({
+  location, headerSlot, initialFace, initial,
+}: PanelProps & { initialFace?: SearchFace }) {
+  const defaultTab = initialFace === "musician_venues" ? "venues" : "gigs";
   return (
-    <Tabs defaultValue="gigs">
+    <Tabs defaultValue={defaultTab}>
       <TabsList>
         <TabsTrigger value="gigs">Gigs</TabsTrigger>
         <TabsTrigger value="venues">Venues</TabsTrigger>
       </TabsList>
-      <TabsContent value="gigs"><MusicianGigsPanel location={location} headerSlot={headerSlot} /></TabsContent>
-      <TabsContent value="venues"><MusicianVenuesPanel location={location} headerSlot={headerSlot} /></TabsContent>
+      <TabsContent value="gigs">
+        <MusicianGigsPanel location={location} headerSlot={headerSlot} initial={initialFace === "musician_gigs" ? initial : undefined} />
+      </TabsContent>
+      <TabsContent value="venues">
+        <MusicianVenuesPanel location={location} headerSlot={headerSlot} initial={initialFace === "musician_venues" ? initial : undefined} />
+      </TabsContent>
     </Tabs>
   );
 }

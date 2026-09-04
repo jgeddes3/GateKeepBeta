@@ -1,7 +1,10 @@
 "use client";
+import type { ReactNode } from "react";
+import type { SearchFilters } from "@gatekeep/shared";
 import { CuratorArtistRow } from "./CuratorArtistRow";
 import { FilterBar } from "./FilterBar";
 import { ResultList } from "./ResultRows";
+import { SaveSearchButton } from "./SaveSearchButton";
 import { SearchInputField } from "./SearchInputField";
 import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
@@ -19,11 +22,17 @@ const NO_LOCATION: UseBrowserLocationState = { location: null, status: "unsuppor
 // ProfileRow the brief names for a venue row: a curator result needs the
 // private booking read and "Offer a gig" action ProfileRow has no business
 // doing.
-export function CuratorFace({ curatorProfileId }: { curatorProfileId: string }) {
-  const state = useSearch("curator", { location: null, includePins: false });
+export function CuratorFace({
+  curatorProfileId, headerSlot, initial,
+}: { curatorProfileId: string; headerSlot?: ReactNode; initial?: { q: string; filters: SearchFilters } }) {
+  const state = useSearch("curator", { location: null, includePins: false, initial });
   return (
     <div className="grid gap-4">
-      <SearchInputField value={state.q} onChange={state.setQ} placeholder="Search artists by name" />
+      <div className="flex items-center gap-3">
+        <SearchInputField value={state.q} onChange={state.setQ} placeholder="Search artists by name" className="min-w-0 flex-1" />
+        <SaveSearchButton face="curator" q={state.q} filters={state.filters} />
+        {headerSlot}
+      </div>
       <FilterBar face="curator" filters={state.filters} onChange={state.setFilters} location={NO_LOCATION} />
       <ResultList state={state} row={(props) => <CuratorArtistRow curatorProfileId={curatorProfileId} r={props.r} />} />
     </div>

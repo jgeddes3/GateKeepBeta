@@ -1565,6 +1565,61 @@ function ShowPostsPanel() {
   );
 }
 
+type SearchIndexCounts = { artists: number; venues: number; shows: number; gigs: number; deleted: number };
+
+// Task 11 (SP8): admin-only rebuild of the whole searchIndex collection from
+// its sources (profiles, events, gigs). Safe to run again: backfillSearchIndex
+// (functions/src/searchIndex.ts) always sets or deletes the same
+// deterministic doc id per source rather than appending, the same "set" set
+// verb ShowPostsPanel's own remove() relies on for its callable.
+function SearchIndexPanel() {
+  const [busy, setBusy] = useState(false);
+  const [counts, setCounts] = useState<SearchIndexCounts | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const rebuild = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { data } = await callFn<Record<string, never>, SearchIndexCounts>("backfillSearchIndex", {});
+      setCounts(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not rebuild the search index.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="grid gap-3">
+      <h2 className="font-syne text-lg font-semibold text-gk-text">Search index</h2>
+      <p className="font-sora text-sm text-gk-muted">
+        Rebuilds every artist, venue, show, and gig entry. Safe to run again.
+      </p>
+      <div>
+        <Button size="sm" disabled={busy} onClick={() => void rebuild()}>
+          {busy ? "Rebuilding…" : "Rebuild search index"}
+        </Button>
+      </div>
+      {error && (
+        <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          {error}
+        </p>
+      )}
+      {counts && (
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-sora text-sm sm:grid-cols-5">
+          <div><dt className="text-gk-muted">Artists</dt><dd className="text-gk-text">{counts.artists}</dd></div>
+          <div><dt className="text-gk-muted">Venues</dt><dd className="text-gk-text">{counts.venues}</dd></div>
+          <div><dt className="text-gk-muted">Shows</dt><dd className="text-gk-text">{counts.shows}</dd></div>
+          <div><dt className="text-gk-muted">Gigs</dt><dd className="text-gk-text">{counts.gigs}</dd></div>
+          <div><dt className="text-gk-muted">Deleted</dt><dd className="text-gk-text">{counts.deleted}</dd></div>
+        </dl>
+      )}
+    </section>
+  );
+}
+
 // Loads and displays one user's profiles + statuses (spec §6: "profiles and
 // statuses"), via the same collectionGroup('members').where('uid', ...)
 // pattern the mobile/web dashboards use for "my profiles", admins can read
@@ -1971,6 +2026,7 @@ export default function AdminPage() {
           <GigsAdmin />
           <TakedownsPanel />
           <ShowPostsPanel />
+          <SearchIndexPanel />
           <UserLookup />
           <AuditLog />
         </div>
