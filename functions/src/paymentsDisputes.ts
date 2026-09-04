@@ -235,9 +235,12 @@ async function reverseForLostDispute(
     type TicketTxResult =
       | { kind: "no-op"; reason: string }
       | { kind: "reduced" }
-      | { kind: "settled"; faceCents: number; transferId: string | null; transferCents: number | null };
+      | {
+        kind: "settled"; faceCents: number; transferId: string | null; transferCents: number | null;
+        profileCents: number | null;
+      };
     // SP10 Task 6 fix round 1 (Important 2): the order read, the event's
-    // settlementStartedAt re-check, and (when not yet settled) the
+    // settlementClaimedAt re-check, and (when not yet settled) the
     // refundedFaceCents/refundedCents increment all happen inside ONE
     // transaction, so a settlement that starts in the window since an
     // earlier look can never be silently missed (which would otherwise shrink
@@ -251,23 +254,27 @@ async function reverseForLostDispute(
       if (!order) return { kind: "no-op", reason: "order missing" };
       const faceCents = order.faceTotalCents - order.refundedFaceCents;
       if (faceCents <= 0) return { kind: "no-op", reason: "order has no unrefunded face value" };
-      const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
-      const event = eventSnap.data() as EventDoc | undefined;
-      if (event?.settlementStartedAt == null) {
+      // SP5c Task 7: settled is now a PER-ORDER question (`order.settledAt`),
+      // not the event's own `settlementStartedAt`, since settlement now walks
+      // one order at a time and other orders of the same event can be settled
+      // (or still pending) independently of this one.
+      if (order.settledAt == null) {
         // SP10 Task 9 fix round 1 (Critical 1): a FRESH `settlementClaimedAt`
-        // with no `settlementStartedAt` is the window between the sweep's claim
-        // write and its post-transfer stamp. The transfer may be in flight, or
-        // may already have landed with only the stamp outstanding, so this is
-        // NOT a pre-settlement order. Reducing the basis here would change the
-        // faceCents the next sweep pass replays under the STATIC
-        // `ticket_settlement:{eventId}` key (real Stripe answers a changed
-        // amount under a used key with `idempotency_error`), and would shrink
-        // revenue that may already have reached the curator. Same predicate and
-        // same 24h window `cancelEventCore` refuses a cancel on: touch nothing
-        // and hand back a reason, so `dispute_reversal_failed` fires and an
-        // operator finishes the unwind in Stripe. A STALE claim belongs to a
-        // settlement that kept failing and falls through to the pre-settlement
-        // reduction below.
+        // means a settlement pass for this event may be mid-flight RIGHT NOW,
+        // and this order could be the very one it is about to transfer (or has
+        // already transferred, with only its own `settledAt` stamp
+        // outstanding). Reducing the basis here would change the amount the
+        // next pass replays under this order's own
+        // `ticket_settlement:{eventId}:{orderId}` key (real Stripe answers a
+        // changed amount under a used key with `idempotency_error`), and could
+        // shrink revenue that may already have reached the curator. Same
+        // predicate and same 24h window `cancelEventCore` refuses a cancel on:
+        // touch nothing and hand back a reason, so `dispute_reversal_failed`
+        // fires and an operator finishes the unwind in Stripe. A STALE claim
+        // belongs to a settlement that kept failing and falls through to the
+        // pre-settlement reduction below.
+        const eventSnap = await tx.get(db.doc(`events/${order.eventId}`));
+        const event = eventSnap.data() as EventDoc | undefined;
         const claimedAt = event?.settlementClaimedAt;
         if (claimedAt != null && now - claimedAt < SETTLEMENT_CLAIM_STALE_MS) {
           return {
@@ -276,31 +283,42 @@ async function reverseForLostDispute(
               + " reverse manually once it lands",
           };
         }
-        // Not settled yet: shrink the basis settleOneEvent will sum (and keep
-        // refundedCents in step, so refundOrderForCancelledEvent's own
-        // "remaining" math stays consistent with this reduction). No transfer
-        // exists to reverse, and none is needed.
+        // Not settled yet: shrink the basis settleOneEvent will sum for THIS
+        // order (and keep refundedCents in step, so
+        // refundOrderForCancelledEvent's own "remaining" math stays consistent
+        // with this reduction). No transfer exists to reverse, and none is
+        // needed.
         tx.update(orderRef, {
           refundedFaceCents: FieldValue.increment(faceCents), refundedCents: FieldValue.increment(faceCents),
         });
         return { kind: "reduced" };
       }
       const settledSnap = await tx.get(db.collection("ledger")
-        .where("kind", "==", "ticket_settlement").where("eventId", "==", order.eventId).limit(1));
+        .where("kind", "==", "ticket_settlement").where("eventId", "==", order.eventId)
+        .where("orderId", "==", target.orderId).limit(1));
       const settledRow = settledSnap.empty ? undefined : settledSnap.docs[0].data();
       const transferId = (settledRow?.stripeId as string | null | undefined) ?? null;
       const transferCents = typeof settledRow?.amountCents === "number" ? settledRow.amountCents : null;
-      return { kind: "settled", faceCents, transferId, transferCents };
+      return { kind: "settled", faceCents, transferId, transferCents, profileCents: order.settlementProfileCents ?? null };
     });
     if (result.kind === "no-op") return nothingReversed(result.reason);
     if (result.kind === "reduced") return nothingReversed(null);
     if (!result.transferId) {
-      return nothingReversed("no transfer: the event is marked settled but no ticket_settlement row names its transfer");
+      return nothingReversed("no transfer: the order is marked settled but no ticket_settlement row names its transfer");
+    }
+    // SP5c Task 7 (Ruling E, mirrors Task 6's booking-settlement cap): cap the
+    // reversal at the PROFILE's own share of this order's settlement, never
+    // the split total. `dist.transferId` (payoutShares.ts, distributeEarnings)
+    // is the profile's own transfer, a member's transferred share is not this
+    // profile's account and this path must never reach into it.
+    const profileCap = Math.min(result.faceCents, result.profileCents ?? result.faceCents);
+    if (profileCap <= 0) {
+      return nothingReversed("no transfer: the profile's share of this order was 0, member shares are not recovered");
     }
     const r = await stripe.reverseTransfer({
-      transferId: result.transferId, amountCents: result.faceCents, idempotencyKey: `dispute_reverse:${disputeId}`,
+      transferId: result.transferId, amountCents: profileCap, idempotencyKey: `dispute_reverse:${disputeId}`,
     });
-    return { reversalIds: [r.id], reason: null, reversedCents: result.faceCents, transferCents: result.transferCents };
+    return { reversalIds: [r.id], reason: null, reversedCents: profileCap, transferCents: result.transferCents };
   }
 
   const paymentsSnap = await db.collection(`bookings/${target.bookingId}/payments`).get();

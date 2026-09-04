@@ -330,9 +330,11 @@ describe("paymentsSweep: post-event ticket settlement", () => {
     expect(afterRetry.status).toBe("completed");
     expect(afterRetry.settlementStartedAt).toBe(afterFirst.settlementStartedAt); // claimed once, never re-stamped
 
-    // The idempotency key (`ticket_settlement:{eventId}`) protected the
-    // retry: Stripe replayed the SAME transfer instead of minting a second
-    // one, so the account balance moved by 2400 total, not 4800.
+    // The order's own idempotency key (`ticket_settlement:{eventId}:{orderId}`)
+    // protected the retry: the order is already `settledAt`-stamped from the
+    // first pass, so the second pass finds nothing pending to transfer at
+    // all (rather than replaying the key), and the account balance moved by
+    // 2400 total, not 4800.
     const acct = (await adb.doc(`stripeFake/state/objects/${accountId}`).get()).data();
     expect(acct?.balanceCents).toBe(2400);
     const rows = await ledgerRowsForEvent(eventId, "ticket_settlement");

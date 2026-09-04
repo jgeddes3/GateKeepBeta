@@ -577,18 +577,20 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect(await accountBalanceCents(accountId)).toBe(3000); // only the undisputed order settles
   });
 
-  // SP10 Task 6 fix round 1 (Important 2): the order read, the event's
-  // settlementStartedAt re-check, and the refundedFaceCents increment must be
-  // one atomic transaction. Simulates the race by pre-setting
-  // settlementStartedAt (as paymentsSweep.ts's claimSettlementStart would,
-  // mid-settlement) before ANY ticket_settlement transfer exists for this
-  // event: the reversal must never silently shrink refundedFaceCents once
-  // settlement has started, it must instead surface as a failed reversal.
-  it("lost ticket dispute race: settlement claims itself between the check and the reversal, so the basis is never silently reduced", async () => {
+  // SP10 Task 6 fix round 1 (Important 2), updated for SP5c Task 7's
+  // per-order settlement: settled is now `order.settledAt`, not the event's
+  // own `settlementStartedAt`, and settleOneEvent's per-order loop stamps
+  // `settledAt` BEFORE its best-effort `ticket_settlement` ledger write
+  // lands (never inside the same transaction, an SP5 money invariant). This
+  // simulates the race by pre-setting `settledAt` on the order directly
+  // (as that loop would, mid-write) with no matching ledger row: the
+  // reversal must never silently shrink refundedFaceCents once THIS ORDER
+  // is marked settled, it must instead surface as a failed reversal.
+  it("lost ticket dispute race: this order's settledAt lands before its ledger row, so the basis is never silently reduced", async () => {
     const { eventId, tierId } = await makePublishedEvent("dl7", 1000);
     const a = await payOrder(eventId, tierId, 2, "dl7a");
     const disputeId = await openDispute({ intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338 });
-    await adb.doc(`events/${eventId}`).update({ settlementStartedAt: Date.now() });
+    await adb.doc(`orders/${a.orderId}`).update({ settledAt: Date.now() });
 
     expect((await closeDispute({ disputeId, intentId: a.intentId, chargeId: a.chargeId, amountCents: 2338, status: "lost" })).status).toBe(200);
 

@@ -1136,6 +1136,11 @@ export interface TicketOrderDoc {
   // SP5c: stamped when the order is completed, for per-order sourced settlement.
   chargeId?: string | null; chargeAmountCents?: number | null;
   settledAt?: number | null; settlementLegs?: number | null;
+  // SP5c Task 7: cents that reached the curator PROFILE's own connected
+  // account for this order's settlement (distributeEarnings's `profileCents`,
+  // 0 for the free/zero path); a member's transferred or held share is not
+  // this. What reverseForLostDispute's ticket branch caps its clawback at.
+  settlementProfileCents?: number | null;
 }
 export type TicketStatus = "valid" | "checked_in" | "refunded" | "transferred";
 export interface TicketDoc {

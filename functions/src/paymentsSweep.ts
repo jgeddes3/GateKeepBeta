@@ -77,6 +77,9 @@ import { completeOrderTx, refundOrdersForCancelledEvent } from "./ticketing.js";
 import {
   EVENT_SETTLE_DELAY_MS, ticketOrderStuckAlertId, ticketSettlementBlockedAlertId, ticketSettlementFailedAlertId,
 } from "./eventsCore.js";
+// SP5c Task 7: routes each ticket order's own T+1 settlement transfer through
+// the same split-at-settlement engine Task 6 wired booking earnings through.
+import { distributeEarnings } from "./payoutShares.js";
 
 const PAGE_SIZE = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -205,13 +208,19 @@ export interface PaymentsSweepReport {
   // events.ts's cancelEvent).
   cancelledEventOrdersRefunded: number;
   cancelledEventOrdersPendingExpired: number;
-  // --- step 10: T+1 ticket revenue settlement (SP6 Task 7) ---
+  // --- step 10: T+1 ticket revenue settlement (SP6 Task 7, per-order SP5c Task 7) ---
   // Events flipped "published" -> "completed" this run, whether or not any
   // money moved for them (a zero-revenue event still completes).
   ticketSettlementsCompleted: number;
-  // Of those, the subset whose curator actually received a transfer: a
-  // strict subset of ticketSettlementsCompleted, never additional to it.
+  // Of those, the subset whose curator actually received a transfer for at
+  // least one order this pass: a strict subset of ticketSettlementsCompleted,
+  // never additional to it.
   ticketSettlementsTransferred: number;
+  // SP5c Task 7: individual ORDERS settled this run (across every event),
+  // whether or not their own amount was zero. Finer-grained than
+  // ticketSettlementsTransferred/ticketSettlementsCompleted, which both count
+  // EVENTS.
+  ticketOrdersSettled: number;
   // Curator has no payout-ready Stripe account: left "published" for the
   // next pass (see ticketSettlementBlockedAlertId), never counted above.
   ticketSettlementsBlocked: number;
@@ -240,7 +249,7 @@ function emptyReport(): PaymentsSweepReport {
     delinquenciesDeclared: 0, expiredRefunds: 0,
     ticketOrdersExpired: 0, ticketOrdersExpiryDeferred: 0, ticketOrdersReconciled: 0, ticketOrdersStuck: 0,
     cancelledEventOrdersRefunded: 0, cancelledEventOrdersPendingExpired: 0,
-    ticketSettlementsCompleted: 0, ticketSettlementsTransferred: 0, ticketSettlementsBlocked: 0,
+    ticketSettlementsCompleted: 0, ticketSettlementsTransferred: 0, ticketOrdersSettled: 0, ticketSettlementsBlocked: 0,
     ticketTransfersExpired: 0,
     errors: {},
   };
@@ -1425,40 +1434,53 @@ async function retryCancelledEventRefunds(
 // Step 10: SETTLE ticket revenue T+1 (SP6 Task 7)
 // ---------------------------------------------------------------------------
 // A "published" event whose endsAt is more than EVENT_SETTLE_DELAY_MS (T+1)
-// in the past owes its curator the face value of every ticket actually sold:
-// summed across the event's "paid" orders as faceTotalCents minus
+// in the past owes its curator the face value of every one of its ticket
+// orders actually sold: PER ORDER (SP5c Task 7), as faceTotalCents minus
 // refundedFaceCents (Task 6's grace refunds and cancellations both maintain
 // that field, so this is a field read, never a join). "cancelled" orders are
-// excluded by the "paid" filter alone.
+// excluded by the "paid" filter alone, and an order already settled
+// (`settledAt != null`) is excluded from `pending` on every later pass.
 //
 // THE AMOUNT IS FROZEN BEFORE THIS STEP EVER RUNS (fix round 1, money review
 // Critical 1): ticketing.ts's refundTicket refuses once `now >= event.endsAt`
 // (TICKET_REFUND_WINDOW_CLOSED_MESSAGE), and EVENT_SETTLE_DELAY_MS is a full
 // 24h AFTER endsAt. So by the time an event is even ELIGIBLE for this step,
 // no grace refund can ever land again, and re-summing the same "paid" orders
-// on every retry is GUARANTEED to reproduce the exact same faceCents. That is
-// what makes the static per-event idempotency key `ticket_settlement:{id}`
-// safe to replay: a fingerprint-checking fake (or a same-key-different-amount
-// rejection from real Stripe) would otherwise catch a drifted retry and wedge
-// the event forever with only a counter as the operator's signal.
+// on every retry is GUARANTEED to reproduce the exact same per-order amount.
+// That is what makes each order's own idempotency key
+// `ticket_settlement:{eventId}:{orderId}` safe to replay: a fingerprint-
+// checking fake (or a same-key-different-amount rejection from real Stripe)
+// would otherwise catch a drifted retry and wedge that order forever with
+// only a counter as the operator's signal.
 //
-// Mirrors SP5's settlement discipline (paymentsSettlement.ts): the Stripe
-// transfer happens OUTSIDE any Firestore transaction, then the event flips to
-// "completed" and the ledger row is written. `claimSettlementStart` below is
-// the CAS a retry re-enters, and it now owns two separate fields (SP10 Task 9,
-// sp6 #14): `settlementStartedAt` is stamped only after the transfer
-// succeeds, never before it; `settlementClaimedAt` is the pre-transfer claim,
-// stamped transactionally immediately before the Stripe call (24h stale
-// window, SETTLEMENT_CLAIM_STALE_MS, same idiom as chargingSince), so a
-// transfer that throws no longer wedges the event: a definite Stripe refusal
-// releases the claim at once, and an ambiguous one ages out in 24h either
-// way. A retry whose transfer succeeded but whose completion write then
-// failed finds `settlementStartedAt` ALREADY set on its next pass and
-// proceeds straight to replaying the SAME idempotency key. `settlementClaimedAt`
-// is also what cancelEventCore now refuses a cancel through while fresh (see
-// claimSettlementStart's own comment); `settlementStartedAt` remains the
-// PERMANENT refusal (Important 2): once it is set, a cancel can never refund
-// buyers on top of a transfer the curator already received.
+// Each order's transfer is routed through `distributeEarnings`
+// (payoutShares.ts), which is also what SOURCES it off the order's own
+// charge when one is known (see the `chargeId`/`chargeAmountCents` fields
+// ticketing.ts's completeOrderTx stamps at order completion, and the
+// fallback lookup below for an older order that predates that stamp).
+//
+// Mirrors SP5's settlement discipline (paymentsSettlement.ts): every Stripe
+// transfer happens OUTSIDE any Firestore transaction, then, once every
+// pending order for this pass has resolved, the event flips to "completed".
+// `claimSettlementStart` below is the CAS a retry re-enters, and it now owns
+// two separate fields (SP10 Task 9, sp6 #14): `settlementStartedAt` is
+// stamped once, immediately after the FIRST pending order of a pass
+// transfers successfully (SP5c Task 7), never before any order's transfer
+// and never re-stamped once set; `settlementClaimedAt` is the pre-loop
+// claim, stamped transactionally immediately before this pass's first Stripe
+// call (24h stale window, SETTLEMENT_CLAIM_STALE_MS, same idiom as
+// chargingSince), so a transfer that throws no longer wedges the event: a
+// definite Stripe refusal releases the claim at once (but ONLY while
+// `settlementStartedAt` is still unset, see the per-order catch below), and
+// an ambiguous one ages out in 24h either way. A retry whose first order
+// transferred but whose stamp write then failed finds `settlementStartedAt`
+// ALREADY set on its next pass (claim "already_started") and walks the
+// remaining pending orders straight to their own key replays.
+// `settlementClaimedAt` is also what cancelEventCore now refuses a cancel
+// through while fresh (see claimSettlementStart's own comment);
+// `settlementStartedAt` remains the PERMANENT refusal (Important 2): once
+// ANY order for this event has settled, a cancel can never refund buyers on
+// top of a transfer the curator already received for another order.
 //
 // RESIDUAL EXPOSURE, accepted (SP10 Task 9 fix round 1, minor): if the
 // transfer succeeds but the `settlementStartedAt` write keeps failing for
@@ -1475,9 +1497,13 @@ async function retryCancelledEventRefunds(
 // throttle signal (Important 3, so a slow onboarder is nudged once a day, not
 // once an hour); the event is left "published" for the next hourly pass
 // rather than wedged or silently dropped. An unexpected Stripe error DURING
-// the transfer call gets its own escalated adminAlert (Critical 1d): the
-// event is now wedged (settlementStartedAt is set, so it can't be cancelled
-// either), and a bare error counter is not an escalation an operator sees.
+// an order's transfer call gets its own escalated adminAlert (Critical 1d),
+// naming the order: if this was this event's FIRST order to settle,
+// settlementStartedAt is still unset and (on a definite refusal) the claim is
+// released, so the event stays cancellable; if an earlier order in this same
+// event already settled, settlementStartedAt is already set and the event is
+// permanently wedged shut against cancel either way. A bare error counter is
+// not an escalation an operator sees.
 //
 // A zero-revenue event (every ticket free, or every paid ticket refunded
 // away) still completes: there is simply nothing to transfer or to ledger,
@@ -1486,15 +1512,17 @@ async function retryCancelledEventRefunds(
 
 type SettlementClaim = "claimed" | "already_started" | "not_published";
 
-// SP10 Task 9 (sp6 #14). Two fields, two jobs:
-//  - `settlementClaimedAt` is stamped HERE, before the Stripe call, and is the
-//    cancel guard while a transfer may be in flight (24h stale window, the
-//    chargingSince idiom). A fresh claim from an earlier pass is left alone
-//    (the ticket_settlement:{id} key replays inside Stripe's window); a stale
-//    one is re-stamped, a genuine re-claim.
-//  - `settlementStartedAt` is stamped by settleOneEvent ONLY after the
-//    transfer succeeds, and is the permanent cancel refusal: money reached the
-//    curator, so a cancel can never refund buyers on top of it.
+// SP10 Task 9 (sp6 #14), extended by SP5c Task 7 for per-order settlement.
+// Two fields, two jobs:
+//  - `settlementClaimedAt` is stamped HERE, before this pass's first Stripe
+//    call, and is the cancel guard while a transfer may be in flight (24h
+//    stale window, the chargingSince idiom). A fresh claim from an earlier
+//    pass is left alone (every order's own key replays inside Stripe's
+//    window); a stale one is re-stamped, a genuine re-claim.
+//  - `settlementStartedAt` is stamped by settleOneEvent ONLY once, right
+//    after the FIRST pending order of a pass transfers successfully, and is
+//    the permanent cancel refusal: money reached the curator for at least
+//    one order, so a cancel can never refund buyers on top of it.
 // Returns already_started when the transfer succeeded on an earlier pass whose
 // completion write then failed: the caller replays the same key (a no-op) and
 // goes straight to the completion write.
@@ -1605,25 +1633,33 @@ async function settleOneEvent(
 
   const ordersSnap = await db.collection("orders")
     .where("eventId", "==", doc.id).where("status", "==", "paid").get();
-  let faceCents = 0;
-  for (const orderDoc of ordersSnap.docs) {
-    const order = orderDoc.data() as TicketOrderDoc;
-    // SP10 Task 6 fix round 1 (Important 3): a lost ticket dispute settled
-    // BEFORE this event's own settlement can increment refundedFaceCents past
-    // faceTotalCents in a pathological ordering (a dispute reduces the basis
-    // for more than one order's remaining face, or a race with a grace
-    // refund); clamp so one bad order can never send the whole event's
-    // settlement basis negative.
-    faceCents += Math.max(0, order.faceTotalCents - order.refundedFaceCents);
-  }
+  // SP5c Task 7: PER-ORDER settlement. An order already settled on an earlier
+  // pass (`settledAt != null`) is done; only the still-pending ones owe this
+  // pass anything. `owedCents` mirrors the pre-Task-7 `faceCents` sum, clamped
+  // per order for the same reason as before (SP10 Task 6 fix round 1,
+  // Important 3): a lost ticket dispute settled BEFORE this event's own
+  // settlement can increment one order's refundedFaceCents past its
+  // faceTotalCents, and that must never send the sum negative.
+  // Sorted by `createdAt` (oldest first): the query itself carries no
+  // `orderBy`, and Firestore does not otherwise promise any particular
+  // ordering for an equality-only filter, so this is what makes "settle
+  // orders oldest-first" (and a retry pass resuming in that same order)
+  // deterministic rather than incidental.
+  const pending = ordersSnap.docs
+    .filter((o) => (o.data() as TicketOrderDoc).settledAt == null)
+    .sort((a, b) => (a.data() as TicketOrderDoc).createdAt - (b.data() as TicketOrderDoc).createdAt);
+  const owedCents = pending.reduce((s, o) => {
+    const od = o.data() as TicketOrderDoc;
+    return s + Math.max(0, od.faceTotalCents - od.refundedFaceCents);
+  }, 0);
 
-  if (faceCents > 0) {
+  if (owedCents > 0) {
     const curatorStripe = await getStripeProfileDoc(event.curatorProfileId);
     if (!curatorStripe?.accountId || curatorStripe.transfersEnabled !== true) {
       const alertId = ticketSettlementBlockedAlertId(doc.id);
       const shouldLog = await recordAdminAlert({
         alertId, kind: "ticket_settlement_blocked",
-        detail: `event ${doc.id} ("${event.title}") owes ${faceCents}c in ticket settlement, but curator `
+        detail: `event ${doc.id} ("${event.title}") owes ${owedCents}c in ticket settlement, but curator `
           + `${event.curatorProfileId} has no payout-ready Stripe account; left "published" for the next sweep pass`,
         bookingId: null, gigId: null, now,
       });
@@ -1650,52 +1686,102 @@ async function settleOneEvent(
     const { claim, claimedAt } = await claimSettlementStart(db, doc.ref, now);
     if (claim === "not_published") return; // raced (cancelled, or resolved) since the read above
 
-    let transfer: { id: string };
-    try {
-      transfer = await getStripe().transferToAccount({
-        accountId: curatorStripe.accountId, amountCents: faceCents,
-        idempotencyKey: `ticket_settlement:${doc.id}`,
-        meta: { purpose: "ticket_settlement", eventId: doc.id },
-      });
-    } catch (e) {
-      // NOT wedged any more (SP10 Task 9): settlementStartedAt was never
-      // stamped, so cancelEventCore can still refund buyers once the claim is
-      // stale (or at once, on a definite refusal). Every hourly pass retries
-      // the same key. Escalated durably (Critical 1d) rather than left as a
-      // bare error count; the per-event try/catch in settleTicketRevenue still
-      // lets every OTHER due event settle this run.
-      if (isDefiniteStripeRefusal(e)) {
-        await releaseSettlementClaim(db, doc.ref, claimedAt, now)
-          .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
-      }
-      const alertId = ticketSettlementFailedAlertId(doc.id);
-      const shouldLog = await recordAdminAlert({
-        alertId, kind: "ticket_settlement_failed",
-        detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${faceCents}c to curator `
-          + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}; retried hourly, `
-          + `cancel ${isDefiniteStripeRefusal(e) ? "stays possible" : "reopens once the claim is 24h old"}`,
-        bookingId: null, gigId: null, now,
-      });
-      if (shouldLog) {
-        console.error(
-          `paymentsSweep: event ${doc.id} ticket settlement transfer failed (see adminAlerts/${alertId})`, e);
-      }
-      bumpError(report, "ticketSettlementTransfer");
-      return;
-    }
+    // Tracks the field's REAL state through this pass: true already when
+    // `claim === "already_started"` (claimSettlementStart only returns that
+    // when settlementStartedAt is already set), and flips true the moment
+    // this pass's first order transfers successfully (Important 2: once ANY
+    // order has settled, cancel is refused forever, so the claim must never
+    // be released again after that point either).
+    let settlementStarted = event.settlementStartedAt != null;
 
-    if (claim === "claimed") {
-      // The transfer succeeded: from here a cancel can never be allowed.
-      await doc.ref.update({ settlementStartedAt: now, updatedAt: now });
+    for (const orderDoc of pending) {
+      const order = orderDoc.data() as TicketOrderDoc;
+      const amount = Math.max(0, order.faceTotalCents - order.refundedFaceCents);
+      if (amount === 0) {
+        // Nothing owed for this order (every ticket free, or refunded/
+        // disputed down to zero already): settle it with no transfer and no
+        // ledger row, same as the all-free event path below.
+        await orderDoc.ref.update({ settledAt: now, settlementLegs: 0, settlementProfileCents: 0 });
+        continue;
+      }
+      // SOURCING (Ruling F): prefer the charge completeOrderTx already
+      // stamped on the order; fall back to a lookup for an order that
+      // predates that stamp. A charge that still can't be resolved leaves
+      // `source: null` below, an UNSOURCED transfer, never a failure.
+      let chargeId = order.chargeId ?? null;
+      let chargeAmountCents = order.chargeAmountCents ?? null;
+      if (!chargeId && order.paymentIntentId) {
+        const intent = await getStripe().retrieveIntent(order.paymentIntentId).catch(() => null);
+        chargeId = intent?.chargeId ?? null;
+        chargeAmountCents = intent?.amountCents ?? null;
+        if (chargeId) {
+          await orderDoc.ref.update({ chargeId, chargeAmountCents }).catch(() => undefined);
+        }
+      }
+      try {
+        const dist = await distributeEarnings({
+          profileId: event.curatorProfileId, amountCents: amount,
+          source: chargeId && chargeAmountCents != null
+            ? { chargeId, remainingCents: chargeAmountCents - order.refundedCents } : null,
+          purpose: "ticket_settlement", ref: { eventId: doc.id, orderId: orderDoc.id },
+          idempotencyBase: `ticket_settlement:${doc.id}:${orderDoc.id}`,
+          meta: { purpose: "ticket_settlement", eventId: doc.id, orderId: orderDoc.id },
+          profileAccountId: curatorStripe.accountId, now,
+        });
+        await orderDoc.ref.update({
+          settledAt: now, settlementLegs: dist.legs.length, settlementProfileCents: dist.profileCents,
+        });
+        // Ruling A: stamped ONCE, right after the first successful order
+        // transfer of this pass, not after the whole loop, so an event whose
+        // order A settles and whose order B then refuses cannot be cancelled
+        // out from under order A's already-received transfer.
+        if (!settlementStarted) {
+          await doc.ref.update({ settlementStartedAt: now, updatedAt: now });
+          settlementStarted = true;
+        }
+        await writeLedger({
+          kind: "ticket_settlement", amountCents: amount, bookingId: null, gigId: null,
+          profileId: event.curatorProfileId, stripeId: dist.transferId, sourced: dist.sourcedAny,
+          detail: `ticket settlement (T+1) for "${event.title}", order ${orderDoc.id}`,
+          eventId: doc.id, orderId: orderDoc.id, buyerUid: order.buyerUid,
+        }).catch((e) => console.error(`paymentsSweep: ticket_settlement ledger row failed for order ${orderDoc.id}`, e));
+        report.ticketOrdersSettled++;
+      } catch (e) {
+        // Ruling B: release the claim only when NOTHING for this event has
+        // settled yet this pass (or any earlier pass) AND the refusal is
+        // definite; once any order has settled, settlementStartedAt is
+        // permanent and releasing the claim would not reopen cancel anyway.
+        if (!settlementStarted && isDefiniteStripeRefusal(e)) {
+          await releaseSettlementClaim(db, doc.ref, claimedAt, now)
+            .catch((we) => console.error(`paymentsSweep: failed to release the settlement claim on event ${doc.id}`, we));
+        }
+        const alertId = ticketSettlementFailedAlertId(doc.id);
+        const cancelNote = settlementStarted
+          ? "stays blocked (an earlier order for this event already settled)"
+          : isDefiniteStripeRefusal(e) ? "stays possible" : "reopens once the claim is 24h old";
+        const shouldLog = await recordAdminAlert({
+          alertId, kind: "ticket_settlement_failed",
+          detail: `event ${doc.id} ("${event.title}") ticket settlement transfer of ${amount}c for order ${orderDoc.id} to curator `
+            + `${event.curatorProfileId} failed: ${e instanceof Error ? e.message : String(e)}; retried hourly, `
+            + `cancel ${cancelNote}`,
+          bookingId: null, gigId: null, now,
+        });
+        if (shouldLog) {
+          console.error(
+            `paymentsSweep: event ${doc.id} ticket settlement transfer failed for order ${orderDoc.id} (see adminAlerts/${alertId})`, e);
+        }
+        bumpError(report, "ticketSettlementTransfer");
+        return;
+      }
     }
-
-    await writeLedger({
-      kind: "ticket_settlement", amountCents: faceCents, bookingId: null, gigId: null,
-      profileId: event.curatorProfileId, stripeId: transfer.id,
-      detail: `ticket settlement (T+1) for "${event.title}"`,
-      eventId: doc.id, buyerUid: null,
-    }).catch((e) => console.error(`paymentsSweep: ticket_settlement ledger row failed for event ${doc.id}`, e));
     report.ticketSettlementsTransferred++;
+  } else {
+    // Every pending order owes nothing (all free, or all refunded/disputed to
+    // zero): settle them all with no transfer and no ledger row, same as the
+    // all-free event path.
+    for (const orderDoc of pending) {
+      await orderDoc.ref.update({ settledAt: now, settlementLegs: 0, settlementProfileCents: 0 });
+    }
   }
 
   try {
