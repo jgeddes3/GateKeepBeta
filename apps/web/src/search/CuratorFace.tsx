@@ -1,9 +1,8 @@
 "use client";
-import { Input } from "../ui/input";
-import { IconSearch } from "../ui/icons";
 import { CuratorArtistRow } from "./CuratorArtistRow";
 import { FilterBar } from "./FilterBar";
 import { ResultList } from "./ResultRows";
+import { SearchInputField } from "./SearchInputField";
 import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
 
@@ -24,15 +23,7 @@ export function CuratorFace({ curatorProfileId }: { curatorProfileId: string }) 
   const state = useSearch("curator", { location: null, includePins: false });
   return (
     <div className="grid gap-4">
-      <div className="relative">
-        <IconSearch size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gk-muted" aria-hidden="true" />
-        <Input
-          value={state.q}
-          onChange={(e) => state.setQ(e.target.value)}
-          placeholder="Search artists by name"
-          className="pl-9"
-        />
-      </div>
+      <SearchInputField value={state.q} onChange={state.setQ} placeholder="Search artists by name" />
       <FilterBar face="curator" filters={state.filters} onChange={state.setFilters} location={NO_LOCATION} />
       <ResultList state={state} row={(props) => <CuratorArtistRow curatorProfileId={curatorProfileId} r={props.r} />} />
     </div>

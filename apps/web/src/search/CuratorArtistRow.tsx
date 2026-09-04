@@ -2,14 +2,13 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { doc, getDoc } from "firebase/firestore";
-import { distanceLabel, type ActSize, type CuratorBookingDoc, type SearchResult } from "@gatekeep/shared";
+import { distanceLabel, type CuratorBookingDoc, type SearchResult } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { formatChipLabel } from "../portfolio/PortfolioForms";
 import { formatReliabilityLine } from "../bookings/BookingForms";
 import { OfferComposer } from "../bookings/OfferComposer";
 import { Button } from "../ui/button";
-
-const ACT_SIZE_LABEL: Record<ActSize, string> = { solo: "Solo", duo: "Duo", band: "Band" };
+import { ACT_SIZE_LABEL } from "./ResultRows";
 
 // The curator search result row: same private/curatorBooking per-card read
 // MusicianBrowse.tsx's MusicianGridItem already does (controller ruling 2,

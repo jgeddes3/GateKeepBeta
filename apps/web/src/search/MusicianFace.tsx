@@ -1,10 +1,9 @@
 "use client";
 import type { ReactNode } from "react";
-import { Input } from "../ui/input";
-import { IconSearch } from "../ui/icons";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { FilterBar } from "./FilterBar";
 import { GigRow, ProfileRow, ResultList } from "./ResultRows";
+import { SearchInputField } from "./SearchInputField";
 import { useSearch } from "./useSearch";
 import type { UseBrowserLocationState } from "./useBrowserLocation";
 
@@ -20,10 +19,7 @@ export function MusicianGigsPanel({ location, headerSlot }: PanelProps) {
   return (
     <div className="grid gap-4">
       <div className="flex items-center gap-3">
-        <div className="relative min-w-0 flex-1">
-          <IconSearch size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gk-muted" aria-hidden="true" />
-          <Input value={state.q} onChange={(e) => state.setQ(e.target.value)} placeholder="Search gigs" className="pl-9" />
-        </div>
+        <SearchInputField value={state.q} onChange={state.setQ} placeholder="Search gigs" className="min-w-0 flex-1" />
         {headerSlot}
       </div>
       <FilterBar face="musician_gigs" filters={state.filters} onChange={state.setFilters} location={location} />
@@ -37,10 +33,7 @@ export function MusicianVenuesPanel({ location, headerSlot }: PanelProps) {
   return (
     <div className="grid gap-4">
       <div className="flex items-center gap-3">
-        <div className="relative min-w-0 flex-1">
-          <IconSearch size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gk-muted" aria-hidden="true" />
-          <Input value={state.q} onChange={(e) => state.setQ(e.target.value)} placeholder="Search venues" className="pl-9" />
-        </div>
+        <SearchInputField value={state.q} onChange={state.setQ} placeholder="Search venues" className="min-w-0 flex-1" />
         {headerSlot}
       </div>
       <FilterBar face="musician_venues" filters={state.filters} onChange={state.setFilters} location={location} />

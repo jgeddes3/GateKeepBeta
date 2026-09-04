@@ -9,7 +9,9 @@ import { Skeleton } from "../ui/skeleton";
 import { IconSearch, IconWarning } from "../ui/icons";
 import type { UseSearchState } from "./useSearch";
 
-const ACT_SIZE_LABEL: Record<ActSize, string> = { solo: "Solo", duo: "Duo", band: "Band" };
+// Exported: CuratorArtistRow.tsx needs the identical act-size label map for
+// its own meta line and imports this rather than keeping a second copy.
+export const ACT_SIZE_LABEL: Record<ActSize, string> = { solo: "Solo", duo: "Duo", band: "Band" };
 
 function joinDetail(parts: (string | null)[]): string | undefined {
   const filtered = parts.filter((p): p is string => !!p);

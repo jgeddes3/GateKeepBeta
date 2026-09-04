@@ -94,13 +94,21 @@ export function useSearch(face: SearchFace, opts: {
   }
 
   // No setState here outside the .then/.catch callbacks: see this hook's
-  // own header comment.
-  const runFetch = useCallback((pageToFetch: number, append: boolean) => {
+  // own header comment. Returns a cancel() function (the other half of the
+  // GigBrowse.tsx/ShowsList.tsx "let cancelled = false; ...; return () =>
+  // { cancelled = true }" convention): the seqRef check alone only guards
+  // against a NEWER request superseding this one while the hook is still
+  // mounted, it says nothing about the hook itself having unmounted (or a
+  // Tabs panel remounting into a fresh hook instance) while this promise
+  // was still in flight, which would otherwise call setState on a
+  // component that's gone.
+  const runFetch = useCallback((pageToFetch: number, append: boolean): (() => void) => {
     pageRef.current = pageToFetch;
     const mySeq = ++seqRef.current;
+    let cancelled = false;
     runSearch(buildInput(face, debouncedQ, filters, opts.location, pageToFetch, opts.includePins))
       .then((res) => {
-        if (seqRef.current !== mySeq) return;
+        if (cancelled || seqRef.current !== mySeq) return;
         setItems((prev) => (append ? [...prev, ...res.items] : res.items));
         setPins(res.pins ?? []);
         setMatched(res.matched);
@@ -109,16 +117,21 @@ export function useSearch(face: SearchFace, opts: {
         setLoading(false);
       })
       .catch((e: unknown) => {
-        if (seqRef.current !== mySeq) return;
+        if (cancelled || seqRef.current !== mySeq) return;
         setLoading(false);
-        if (callableCode(e) === "functions/resource-exhausted") {
+        const code = callableCode(e);
+        if (code === "functions/resource-exhausted") {
           setBudgetHit(true);
           setError(SEARCH_LIMIT_MESSAGE);
+        } else if (code === "functions/unauthenticated") {
+          setBudgetHit(false);
+          setError("Sign in to search.");
         } else {
           setBudgetHit(false);
           setError(e instanceof Error ? e.message : "Search failed.");
         }
       });
+    return () => { cancelled = true; };
   }, [face, debouncedQ, filters, opts.location, opts.includePins]);
 
   // runFetch's own dependency list IS the "reset to page 0 and refetch"
@@ -126,9 +139,11 @@ export function useSearch(face: SearchFace, opts: {
   // location, includePins); this effect only has to react to runFetch's
   // identity changing, not restate that list a second time. The render-time
   // reset above already flipped loading/error/budgetHit before this runs.
-  useEffect(() => {
-    runFetch(0, false);
-  }, [runFetch]);
+  // The cleanup (runFetch's own returned cancel()) fires both when a
+  // dependency changes (superseding this request, redundant with but no
+  // less correct than the seqRef guard) and on true unmount, which is the
+  // case the seqRef guard alone can't cover.
+  useEffect(() => runFetch(0, false), [runFetch]);
 
   const loadMore = useCallback(() => {
     if (loading || !hasMore) return;
