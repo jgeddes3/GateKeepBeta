@@ -51,11 +51,12 @@ const themeScript = `(function(){try{
 }catch(e){}})()`;
 
 // getSiteUrl() (src/seo/siteUrl.ts) is the one source of truth for the
-// site's public origin: null when NEXT_PUBLIC_SITE_URL is unset or empty, so
-// metadataBase is omitted entirely rather than falling back to a localhost
-// URL. A missing canonical/og:url is invisible, but a canonical link
-// pointing at http://localhost:3000 would ship broken SEO/share metadata
-// into production.
+// site's public origin: NEXT_PUBLIC_SITE_URL when set, else Vercel's own
+// VERCEL_PROJECT_PRODUCTION_URL when set, else null, so metadataBase is
+// omitted entirely rather than falling back to a localhost URL. A missing
+// canonical/og:url is invisible, but a canonical link pointing at
+// http://localhost:3000 would ship broken SEO/share metadata into
+// production.
 const siteUrl = getSiteUrl();
 
 export const metadata: Metadata = {
