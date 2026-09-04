@@ -93,3 +93,11 @@ export async function notifyProfileMembers(profileId: string, note: Omit<Notific
   const members = await getFirestore().collection(`profiles/${profileId}/members`).get();
   await Promise.all(members.docs.map((m) => notifyUser(m.id, note)));
 }
+
+// SP5c: some notes (e.g. a payout-share change) are for profile admins only,
+// not every member. Same query shape and error posture as notifyProfileMembers
+// above, just filtered to role == "admin".
+export async function notifyProfileAdmins(profileId: string, note: Omit<NotificationDoc, "read" | "createdAt">) {
+  const admins = await getFirestore().collection(`profiles/${profileId}/members`).where("role", "==", "admin").get();
+  await Promise.all(admins.docs.map((m) => notifyUser(m.id, note)));
+}

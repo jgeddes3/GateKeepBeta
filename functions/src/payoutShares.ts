@@ -2,7 +2,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { isValidDocId, validatePayoutShares, SHARES_ADMIN_MESSAGE, type PayoutShare, type StripeProfileDoc } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
-import { notifyProfileMembers } from "./notifications.js";
+import { notifyProfileAdmins } from "./notifications.js";
 
 export async function loadShares(db: Firestore, profileId: string): Promise<PayoutShare[] | null> {
   const snap = await db.doc(`profiles/${profileId}/private/stripe`).get();
@@ -23,9 +23,9 @@ export const setPayoutShares = onCall<{ profileId: string; shares: PayoutShare[]
     requireVerifiedEmail(req);
     const { profileId, shares } = req.data ?? ({} as { profileId: string; shares: null });
     if (!isValidDocId(profileId)) throw new HttpsError("invalid-argument", "A profile id is required.");
-    const member = await getFirestore().doc(`profiles/${profileId}/members/${uid}`).get();
-    if (!member.exists || member.data()?.role !== "admin") throw new HttpsError("permission-denied", SHARES_ADMIN_MESSAGE);
     const db = getFirestore();
+    const member = await db.doc(`profiles/${profileId}/members/${uid}`).get();
+    if (!member.exists || member.data()?.role !== "admin") throw new HttpsError("permission-denied", SHARES_ADMIN_MESSAGE);
     const ref = db.doc(`profiles/${profileId}/private/stripe`);
     if (shares === null) {
       await ref.set({ shares: null, sharesUpdatedAt: Date.now(), updatedAt: Date.now() }, { merge: true });
@@ -51,7 +51,7 @@ export async function reassignShareOnRemoval(db: Firestore, profileId: string, u
     : [...rest, { payee: { kind: "profile" }, percent: leaving.percent }];
   await db.doc(`profiles/${profileId}/private/stripe`).set({ shares: next, sharesUpdatedAt: now, updatedAt: now }, { merge: true });
   try {
-    await notifyProfileMembers(profileId, {
+    await notifyProfileAdmins(profileId, {
       kind: "system", title: "Payout shares changed",
       body: `A member left, so their ${leaving.percent}% share now goes to the band fund. Review the shares if that is not what you want.`,
     });

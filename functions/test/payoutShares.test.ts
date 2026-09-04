@@ -28,9 +28,10 @@ describe("setPayoutShares", () => {
 });
 
 describe("removeMember with a share", () => {
-  it("moves the removed member's share to the band fund and tells the admins", async () => {
+  it("moves the removed member's share to the band fund and tells the admins, not every member", async () => {
     const band = await makeApprovedMusicianProfile("ps2");
     const bass = await addMember(band.profileId, "ps2b");
+    const drummer = await addMember(band.profileId, "ps2d");
     await callFn("setPayoutShares", { profileId: band.profileId, shares: [
       { payee: { kind: "member", uid: band.owner.uid }, percent: 70 },
       { payee: { kind: "member", uid: bass.uid }, percent: 30 },
@@ -42,5 +43,7 @@ describe("removeMember with a share", () => {
     ]);
     const notes = await adb.collection(`users/${band.owner.uid}/notifications`).where("kind", "==", "system").get();
     expect(notes.docs.some((d) => (d.data() as NotificationDoc).title === "Payout shares changed")).toBe(true);
+    const drummerNotes = await adb.collection(`users/${drummer.uid}/notifications`).where("kind", "==", "system").get();
+    expect(drummerNotes.docs.some((d) => (d.data() as NotificationDoc).title === "Payout shares changed")).toBe(false);
   });
 });
