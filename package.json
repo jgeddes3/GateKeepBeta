@@ -16,8 +16,8 @@
     "emu:rules": "firebase emulators:exec --only firestore,storage \"pnpm --filter @gatekeep/tests-rules test\""
   },
   "devDependencies": {
-    "firebase-tools": "^15.28.1",
-    "tsx": "^4.23.12"
+    "firebase-tools": "^15.28.2",
+    "tsx": "^4.23.13"
   },
   "dependencies": {
     "firebase": "^11.10.0",
