@@ -1,7 +1,7 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-09-04, after the 8
-merge. Update this file whenever a sub-project merges.
+Read this first in any new session or on a new machine. Last updated 2026-09-04, after the 8 and
+5c merges. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
 
@@ -57,6 +57,19 @@ Done and merged (each has a rulings doc that is the authority for its area):
    README, both platforms, both themes; a new EAS dev build for `react-native-maps`; the results
    map path is entirely unverified off device.
 
+5c. Band payout splits (`sp5c-rulings.md`): admin-set member payout shares (`PayoutShare[]`,
+   integer percents summing to 100) split each settlement through `distributeEarnings`, the ONLY
+   path earnings reach a profile; held-share holding and release for a member not yet payout-ready;
+   member Express accounts with their own onboarding, status, payouts, and webhook routing
+   (`functions/src/memberPayouts.ts`); per-order ticket settlement (`ticket_settlement:{eventId}:
+   {orderId}`, sourced from each order's own charge) replacing the old per-event transfer; and
+   ledger-backed payout history. Both platforms gained a shares editor, a member "Your payouts"
+   surface (`/dashboard#payouts`, `/(fan)/payouts`), and the `share_paid`/`share_held`/
+   `share_released`/`member_payout_failed` notification kinds. Owner smoke owed: the sp5c
+   checklist in README, both platforms; confirming the Connect webhook, `APP_ORIGIN` payout paths,
+   the four new composite indexes, and a real Stripe test-mode smoke (README "Sub-project 5c
+   launch checklist").
+
 10. Hardening, branches A and B (`sp10b-rulings.md`): no new features. Branch A (merged
    2026-09-02 at `ee433d4`, plan `plans/2026-09-02-hardening-sweep.md`): every em dash removed
    repo-wide, Cloud Functions on Node 22 (`.nvmrc`), the `tickets.orderId` and `members.uid` index
@@ -85,8 +98,6 @@ Done and merged (each has a rulings doc that is the authority for its area):
   - Add doorsAt and an age-restriction field to the event model; neither exists in the schema.
   - Add artist linkage for standalone events that are not tied to a booking (curator tags an
     artist, artist accepts), so artist-page discovery is not limited to promoted gigs.
-- **5c Band payout splits**: admin-initiated member payout splits, per-order ticket settlement
-  transfers (`source_transaction`), payout history, member roles on payout buttons.
 - **Messaging**: general musician to curator chat beyond the terms-only booking thread.
   Unscheduled; the mobile Messages tabs stay coming-soon until it gets a number.
 - **Follow-on if wanted**: the accessibility and state-coverage findings (antislop #10 to #29)
@@ -149,6 +160,8 @@ roadmap above. Detail reports live in `docs/superpowers/audit/` and
    `STRIPE_CONNECT_WEBHOOK_SECRET`. An event whose scope does not match the secret that verified
    it is refused, so a new handler must be registered on the endpoint of the scope it belongs to
    (`sp10b-rulings.md` ruling 6).
+7. `distributeEarnings` is the only way earnings reach a profile; a new settlement path must call
+   it, never `transferToAccount` directly (`sp5c-rulings.md` ruling 1).
 
 ## Dev environment quickstart
 
@@ -169,8 +182,9 @@ roadmap above. Detail reports live in `docs/superpowers/audit/` and
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (201), web tests (7), `pnpm emu:test`
-  (896, single blocking call), `pnpm emu:rules` (134), web lint + build, mobile lint.
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (209), web tests (7), `pnpm emu:test`
+  (917 across 54 files, single blocking call), `pnpm emu:rules` (137 across 8 files), web lint (0
+  errors) + build, mobile lint (0 new warnings) + `expo export` bundles.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
   locally; EAS cloud is unaffected). Node 22 is the functions runtime since sub-project 10
@@ -236,7 +250,7 @@ section names refer to the README as rewritten in sub-project 10.
 | 48 | Register the second Stripe webhook endpoint ("Connected accounts") and set `STRIPE_CONNECT_WEBHOOK_SECRET`; re-run the README test-mode walkthrough with both endpoints | Launch | README "Sub-project 5 launch checklist" |
 | 49 | Simulate a dispute with card 4000 0000 0000 0259 on a deposit and on a ticket order; confirm the alert, the delinquency flag, and the reversal on a lost outcome | Launch | README "Sub-project 5 launch checklist" |
 | 50 | Stripe Radar default rules on; read the Connect dispute-liability setting | Live | README "Sub-project 5 launch checklist" |
-| 51 | Decide the platform float for ticket settlement (or move to per-order sourced transfers in 5c) | Launch | README "Sub-project 5 launch checklist" |
+| 51 | Decide the platform float for ticket settlement (or move to per-order sourced transfers in 5c) | Closed by 5c (per-order sourced ticket settlement) | README "Sub-project 5 launch checklist" |
 | 52 | Enable 1099 delivery for Express accounts | Live | README "Sub-project 5 launch checklist" |
 | 53 | Cloud Monitoring alert policies: function error rate, and a log-based metric on `adminAlerts` document creation | Launch | audit cross-cutting #15 |
 | 54 | Firestore PITR on, a daily scheduled export bucket, and a GCP budget alert (the `ledger` has no off-Firestore copy otherwise) | Launch | audit cross-cutting #30 |
@@ -252,3 +266,7 @@ section names refer to the README as rewritten in sub-project 10.
 | 64 | Replace the `app.json` Android Maps key placeholder (`REPLACE_WITH_ANDROID_MAPS_KEY`) with a key restricted by package name and signing certificate | Device | README "Sub-project 8 launch checklist" |
 | 65 | New EAS dev build for `react-native-maps` | Device | README "Sub-project 8 launch checklist" |
 | 66 | Confirm `LAUNCH_TIMEZONE` | Launch | README "Sub-project 8 launch checklist" |
+| 67 | Confirm the Connect webhook endpoint delivers `account.updated`, `payout.paid`, and `payout.failed` for user-owned accounts (same endpoint, no new subscription) | Launch | README "Sub-project 5c launch checklist" |
+| 68 | `APP_ORIGIN` covers `/dashboard/payouts/onboarding/return` and `/refresh` | Launch | README "Sub-project 5c launch checklist" |
+| 69 | Deploy and confirm the four new composite indexes (`heldShares` by uid and status, by profileId and status; `ledger` by profileId and at, by uid and at) finish building after `firebase deploy --only firestore:indexes` | Launch | README "Sub-project 5c launch checklist" |
+| 70 | Real Stripe test-mode smoke for 5c: onboard a member, set shares on a band, settle a booking and a ticketed event, watch the split legs and a held release, cash out as the member (standard and instant), report a no-show and confirm only the band's leg reverses | Launch | README "Sub-project 5c launch checklist" |

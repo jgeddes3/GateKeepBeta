@@ -553,7 +553,10 @@ file; the name in parentheses is the step's key in the sweep report):
    complete.
 10. paymentsSweep step 10 (`ticketSettlement`): transfers face value to the curator T+1 after
     `endsAt`, claiming the event with `settlementClaimedAt` before the transfer and stamping
-    `settlementStartedAt` only after it succeeds (sub-project 10).
+    `settlementStartedAt` only after it succeeds (sub-project 10). Sub-project 5c replaced the
+    single un-sourced per-event transfer with one sourced transfer per paid order
+    (`ticket_settlement:{eventId}:{orderId}`, sourced from that order's own charge); see
+    `sp5c-rulings.md`.
 11. paymentsSweep step 11 (`ticketTransferExpiry`): expires ticket transfer offers past their 24h
     TTL.
 
@@ -961,13 +964,10 @@ before a real launch:
   `disputeStatus: "open"` (ticket), and, after closing the dispute as lost from the dashboard, a
   `dispute_lost` row plus the reversal, or a `dispute_reversal_failed` alert when no transfer
   exists yet.
-- **Platform float for ticket settlement (decision owed).** Ticket settlement is one transfer per
-  event (paymentsSweep step 10) that is not sourced from a specific charge, so it draws on the
-  platform's available balance; on Stripe's standard payout timing the platform needs enough
-  float to cover an event's face value on T+1, or the transfer fails with `balance_insufficient`
-  and retries hourly (cancel stays possible because `settlementStartedAt` is stamped only after
-  success). Decide before launch: hold a float, delay platform payouts, or move to per-order
-  sourced transfers (sub-project 5c).
+- **Platform float for ticket settlement: resolved by sub-project 5c.** Ticket settlement is now
+  one sourced transfer per paid order (`ticket_settlement:{eventId}:{orderId}`,
+  `source_transaction` from the order's own charge), so no platform float decision is owed; see
+  `sp5c-rulings.md`.
 - **1099 delivery.** Enable tax form delivery for Express accounts in the Connect settings for the
   tax year; nothing in code depends on it.
 - **Re-verify `debitConnectedAccount` against current Stripe Connect documentation BEFORE live
@@ -1346,6 +1346,43 @@ dependency list, see the launch checklist above):
 - Receive a push for a `saved_search_match` alert and tap it to the matching result.
 - Portfolio home city field saves on the musician editor (the curator editor has no home city
   field).
+
+### Sub-project 5c launch checklist (payout splits)
+
+- **Deploy the four new composite indexes** in `firestore.indexes.json`:
+  - `heldShares (uid, status)`
+  - `heldShares (profileId, status)`
+  - `ledger (profileId, at)`
+  - `ledger (uid, at)`
+
+  Same caveat as every prior sub-project's indexes: the emulator does not enforce composite
+  indexes, so confirm all four show Enabled in the Firebase console after `firebase deploy --only
+  firestore:indexes`.
+- **Confirm the Connect webhook endpoint delivers `account.updated`, `payout.paid`, and
+  `payout.failed` for user-owned accounts.** Same endpoint as sub-project 5's "Connected accounts"
+  scope; no new webhook subscription is needed.
+- **`APP_ORIGIN` covers `/dashboard/payouts/onboarding/return` and `/refresh`.** Member payout
+  onboarding returns to these web pages the same way musician onboarding does.
+- **Real Stripe test-mode smoke.** Onboard a member, set shares on a band, settle a booking and a
+  ticketed event, watch the split legs and a held release, cash out as the member (standard and
+  instant), report a no-show and confirm only the band's leg reverses.
+
+### Sub-project 5c smoke checklist (payout splits)
+
+Sub-project 5c adds admin-set member payout shares split at settlement, a held-share release path
+for a member not yet payout-ready, a member "Your payouts" surface, and per-order ticket
+settlement.
+
+**Both platforms, both themes:**
+- Shares editor: set and save shares as a profile admin; a non-admin member sees the same shares
+  read-only.
+- The held line appears whenever a member's leg cannot be transferred yet.
+- Member "Your payouts" surface end to end: onboarding, balance, held money, standard and instant
+  cash-out.
+- History paging loads a second page of ledger rows.
+- The curator's history shows one settlement row per paid order for a ticketed event.
+- Each payout notification kind (`share_paid`, `share_held`, `share_released`,
+  `member_payout_failed`) deep-links to the payouts surface on tap.
 
 ### Sub-project 2 polish follow-ups (non-blocking)
 
