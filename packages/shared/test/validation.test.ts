@@ -39,6 +39,12 @@ describe("validateHandle", () => {
     expect(validateHandle(null as unknown as string).ok).toBe(false);
     expect(validateHandle(undefined as unknown as string).ok).toBe(false);
   });
+  it("rejects the expanded reserved handles and still accepts ordinary ones", () => {
+    for (const h of ["search", "discover", "sign_up", "null", "undefined", "test", "team"]) {
+      expect(validateHandle(h).ok).toBe(false);
+    }
+    expect(validateHandle("night_owls").ok).toBe(true);
+  });
 });
 
 describe("validateProfileDraft", () => {

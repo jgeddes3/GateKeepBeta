@@ -11,7 +11,11 @@ import {
 } from "./types.js";
 
 export const RESERVED_HANDLES = [
-  "admin", "gatekeep", "support", "help", "api", "www",
+  "admin", "administrator", "gatekeep", "gatekeeper", "support", "help", "api", "www",
+  "about", "contact", "legal", "terms", "privacy", "login", "signin", "sign_in", "signup", "sign_up", "join",
+  "account", "settings", "dashboard", "search", "discover", "events", "event", "gigs", "gig", "tickets", "ticket",
+  "artist", "artists", "venue", "venues", "u", "e", "app", "mobile", "web", "root", "system", "staff", "moderator",
+  "mod", "official", "team", "null", "undefined", "test",
 ] as const;
 
 const HANDLE_RE = /^[a-z0-9_]{3,30}$/;
