@@ -216,9 +216,18 @@ export const disputeCreatedHandler: WebhookHandler = async (object, eventId) => 
 // back more from the musician than the platform actually lost (branch audit,
 // LOW). The ticket branch already reasons in per-order face value and is
 // unchanged.
+// `reversedCents` is what actually came back and `transferCents` what had gone
+// out (null when this branch cannot name a single figure), so the ledger row
+// the caller writes can say so where the cap bit.
+interface LostDisputeReversal {
+  reversalIds: string[]; reason: string | null; reversedCents: number; transferCents: number | null;
+}
+const nothingReversed = (reason: string | null): LostDisputeReversal =>
+  ({ reversalIds: [], reason, reversedCents: 0, transferCents: null });
+
 async function reverseForLostDispute(
   target: ChargeTarget, disputeId: string, now: number, disputeAmountCents: number,
-): Promise<{ reversalIds: string[]; reason: string | null }> {
+): Promise<LostDisputeReversal> {
   const db = getFirestore();
   const stripe = getStripe();
   if (target.purpose === "tickets") {
@@ -226,7 +235,7 @@ async function reverseForLostDispute(
     type TicketTxResult =
       | { kind: "no-op"; reason: string }
       | { kind: "reduced" }
-      | { kind: "settled"; faceCents: number; transferId: string | null };
+      | { kind: "settled"; faceCents: number; transferId: string | null; transferCents: number | null };
     // SP10 Task 6 fix round 1 (Important 2): the order read, the event's
     // settlementStartedAt re-check, and (when not yet settled) the
     // refundedFaceCents/refundedCents increment all happen inside ONE
@@ -278,16 +287,20 @@ async function reverseForLostDispute(
       }
       const settledSnap = await tx.get(db.collection("ledger")
         .where("kind", "==", "ticket_settlement").where("eventId", "==", order.eventId).limit(1));
-      const transferId = settledSnap.empty ? null : (settledSnap.docs[0].data().stripeId as string | null);
-      return { kind: "settled", faceCents, transferId };
+      const settledRow = settledSnap.empty ? undefined : settledSnap.docs[0].data();
+      const transferId = (settledRow?.stripeId as string | null | undefined) ?? null;
+      const transferCents = typeof settledRow?.amountCents === "number" ? settledRow.amountCents : null;
+      return { kind: "settled", faceCents, transferId, transferCents };
     });
-    if (result.kind === "no-op") return { reversalIds: [], reason: result.reason };
-    if (result.kind === "reduced") return { reversalIds: [], reason: null };
-    if (!result.transferId) return { reversalIds: [], reason: "no transfer: the event is marked settled but no ticket_settlement row names its transfer" };
+    if (result.kind === "no-op") return nothingReversed(result.reason);
+    if (result.kind === "reduced") return nothingReversed(null);
+    if (!result.transferId) {
+      return nothingReversed("no transfer: the event is marked settled but no ticket_settlement row names its transfer");
+    }
     const r = await stripe.reverseTransfer({
       transferId: result.transferId, amountCents: result.faceCents, idempotencyKey: `dispute_reverse:${disputeId}`,
     });
-    return { reversalIds: [r.id], reason: null };
+    return { reversalIds: [r.id], reason: null, reversedCents: result.faceCents, transferCents: result.transferCents };
   }
 
   const paymentsSnap = await db.collection(`bookings/${target.bookingId}/payments`).get();
@@ -296,10 +309,11 @@ async function reverseForLostDispute(
     .filter(({ gigId, p }) => target.gigId ? gigId === target.gigId : p.deposit.intentId === target.intentId);
   if (target.purpose === "settlement" || target.purpose === "paydue") {
     const hit = docs.find(({ p }) => p.settlement.intentId === target.intentId && p.transfer.status === "transferred" && p.transfer.id);
-    if (!hit) return { reversalIds: [], reason: "no transfer: the settlement has no live earnings transfer to reverse" };
+    if (!hit) return nothingReversed("no transfer: the settlement has no live earnings transfer to reverse");
+    const transferCents = hit.p.transfer.amountCents ?? null;
+    const reversedCents = Math.min(disputeAmountCents, transferCents ?? disputeAmountCents);
     const r = await stripe.reverseTransfer({
-      transferId: hit.p.transfer.id!, idempotencyKey: `dispute_reverse:${disputeId}`,
-      amountCents: Math.min(disputeAmountCents, hit.p.transfer.amountCents ?? disputeAmountCents),
+      transferId: hit.p.transfer.id!, idempotencyKey: `dispute_reverse:${disputeId}`, amountCents: reversedCents,
     });
     // The doc still reads "reversed" on a PARTIAL reversal: this occurrence's
     // earnings transfer is no longer whole, and nothing downstream treats
@@ -309,7 +323,7 @@ async function reverseForLostDispute(
       .catch((e) => console.error(`charge.dispute.closed: transfer.status write failed for ${target.bookingId}/${hit.gigId}`, e));
     await recomputePaymentSummary(target.bookingId!)
       .catch((e) => console.error(`charge.dispute.closed: summary recompute failed for ${target.bookingId}`, e));
-    return { reversalIds: [r.id], reason: null };
+    return { reversalIds: [r.id], reason: null, reversedCents, transferCents };
   }
   // deposit / paydue_deposit: every forfeit funded by THIS charge (SP10 Task 6
   // fix round 1, minor: the intentId check guards against a booking doc that
@@ -317,21 +331,32 @@ async function reverseForLostDispute(
   // so a stale disputed intent can never reverse a forfeit it did not fund).
   const forfeits = docs.filter(({ p }) => p.deposit.status === "forfeited" && p.deposit.forfeitTransferId
     && p.deposit.intentId === target.intentId);
-  if (forfeits.length === 0) return { reversalIds: [], reason: "no transfer: the deposit was never forfeited to the musician" };
+  if (forfeits.length === 0) return nothingReversed("no transfer: the deposit was never forfeited to the musician");
   const ids: string[] = [];
+  // Fix round 2 (item 2): ONE deposit intent funds every occurrence of a
+  // whole-run booking, so a late cancel can leave several forfeit transfers
+  // behind one disputed charge. Capping each reversal at the dispute amount
+  // INDEPENDENTLY would claw back up to that amount per forfeit, i.e. more
+  // than the bank ever took off the platform. The cap is therefore a running
+  // remainder spent across the forfeits in order, and once it is gone the
+  // remaining forfeits are left alone.
+  let remaining = disputeAmountCents;
+  const transferCents = forfeits.reduce((sum, f) => sum + f.p.deposit.sliceCents, 0);
   for (const f of forfeits) {
+    if (remaining <= 0) break;
+    // The forfeit transfer moved exactly the deposit slice (paymentsCore's
+    // forfeit_transfer ledger row is written for that amount).
+    const amountCents = Math.min(remaining, f.p.deposit.sliceCents);
     const key = forfeits.length === 1 ? `dispute_reverse:${disputeId}` : `dispute_reverse:${disputeId}:${f.gigId}`;
     const r = await stripe.reverseTransfer({
-      transferId: f.p.deposit.forfeitTransferId!, idempotencyKey: key,
-      // The forfeit transfer moved exactly the deposit slice (paymentsCore's
-      // forfeit_transfer ledger row is written for that amount).
-      amountCents: Math.min(disputeAmountCents, f.p.deposit.sliceCents),
+      transferId: f.p.deposit.forfeitTransferId!, idempotencyKey: key, amountCents,
     });
+    remaining -= amountCents;
     ids.push(r.id);
   }
   await recomputePaymentSummary(target.bookingId!)
     .catch((e) => console.error(`charge.dispute.closed: summary recompute failed for ${target.bookingId}`, e));
-  return { reversalIds: ids, reason: null };
+  return { reversalIds: ids, reason: null, reversedCents: disputeAmountCents - remaining, transferCents };
 }
 
 export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
@@ -414,10 +439,20 @@ export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
   // so the loss lands where the money went (owner decision 4).
   let reversalIds: string[] = [];
   let failure: string | null = null;
+  // Fix round 2 (item 3): what actually came back, against what had gone out.
+  // A capped reversal (a partial chargeback, or a dispute smaller than the
+  // forfeits it funded) leaves the difference with the musician, and this row
+  // is the only place an operator can read that difference off.
+  let reversedNote = "";
   try {
     const r = await reverseForLostDispute(target, d.disputeId, now, d.amountCents);
     reversalIds = r.reversalIds;
     failure = r.reason;
+    if (r.reversalIds.length > 0) {
+      reversedNote = r.transferCents === null
+        ? `, reversed ${r.reversedCents}c`
+        : `, reversed ${r.reversedCents}c of the ${r.transferCents}c transfer`;
+    }
   } catch (e) {
     failure = e instanceof Error ? e.message : String(e);
   }
@@ -427,7 +462,7 @@ export const disputeClosedHandler: WebhookHandler = async (object, eventId) => {
     kind: "dispute_lost", amountCents: d.amountCents, bookingId: target.bookingId ?? null, gigId: target.gigId ?? null,
     profileId: target.curatorProfileId, stripeId: d.disputeId,
     detail: reversalIds.length > 0
-      ? `dispute lost on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c; transfer reversed (${reversalIds.join(", ")})`
+      ? `dispute lost on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c; transfer reversed (${reversalIds.join(", ")})${reversedNote}`
       : `dispute lost on ${scope}: ${d.amountCents}c plus fee ${d.feeCents}c; ${failure ?? "settlement basis reduced, no transfer to reverse"}`,
   });
   await recRef.set({

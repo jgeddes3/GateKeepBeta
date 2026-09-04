@@ -10,6 +10,10 @@ import { rankDeck, type DeckCandidate } from "./discoverRank.js";
 
 const EVENT_LIMIT = 100; const ARTIST_LIMIT = 150; const VENUE_LIMIT = 100;
 type Geo = { lat: number; lng: number };
+// An event AFTER the normalization below: `genres` is optional on the stored
+// doc (absent on an event whose curator never set one, and derivable from the
+// lineup), and every read in this file wants an array either way.
+type DeckEvent = EventDoc & { genres: string[] };
 
 function validateInput(data: unknown): { location: Geo | null; excludeIds: Set<string>; seed: number } {
   const d = (data ?? {}) as GetDiscoverDeckInput;
@@ -78,7 +82,24 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
     db.collection("profiles").where("type", "==", "curator").where("subtype", "==", "venue")
       .where("status", "==", "approved").orderBy("updatedAt", "desc").limit(VENUE_LIMIT).get(),
   ]);
-  const events = eventsSnap.docs.map((d) => ({ id: d.id, ev: d.data() as EventDoc }));
+  // Fix round 2 (item 4): normalized ONCE, here. Every read below (the
+  // next-show maps, the candidate loop, the card builder) walks these arrays,
+  // and this deck is the whole app's front door: one published event written
+  // without a lineup array, by an older client or a hand-seeded fixture, used
+  // to throw INTERNAL for every caller of getDiscoverDeck, not just for the
+  // page that event landed on. `location.geo` gets the same treatment because
+  // the distance helper is called with it unguarded.
+  const events = eventsSnap.docs.map((d) => {
+    const raw = d.data() as EventDoc;
+    const ev: DeckEvent = {
+      ...raw,
+      lineupMusicianProfileIds: raw.lineupMusicianProfileIds ?? [],
+      lineup: raw.lineup ?? [],
+      genres: raw.genres ?? [],
+      location: { ...raw.location, geo: raw.location?.geo ?? null },
+    };
+    return { id: d.id, ev };
+  });
   const artists = artistsSnap.docs.map((d) => ({ id: d.id, p: d.data() as ProfileDoc }));
   const venues = venuesSnap.docs.map((d) => ({ id: d.id, p: d.data() as ProfileDoc }));
 
@@ -95,7 +116,7 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
   for (const e of events) {
     if (excludeIds.has(e.id)) continue;
     const boost = followedProfiles.has(e.ev.curatorProfileId) || e.ev.lineupMusicianProfileIds.some((m) => followedProfiles.has(m));
-    candidates.push({ id: e.id, kind: "show", genres: e.ev.genres ?? [], startsAt: e.ev.startsAt, distanceMeters: dist(e.ev.location.geo), followedBoost: boost });
+    candidates.push({ id: e.id, kind: "show", genres: e.ev.genres, startsAt: e.ev.startsAt, distanceMeters: dist(e.ev.location.geo), followedBoost: boost });
   }
   for (const a of artists) {
     if (excludeIds.has(a.id) || followedProfiles.has(a.id)) continue;
@@ -139,7 +160,7 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
         posterPath: ev.posterPath, lineupNames: ev.lineup.map((a) => a.name), curatorProfileId: ev.curatorProfileId, curatorHandle: curator.handle,
         priceFromCents: ev.priceFromCents ?? null, hasFreeTier: ev.hasFreeTier ?? false,
         latestPost: post ? { text: post.text, artistName: nameOf(post.musicianProfileId) } : null,
-        genres: ev.genres ?? [], preview };
+        genres: ev.genres, preview };
     }
     if (c.kind === "artist") {
       const p = artistById.get(c.id)!;

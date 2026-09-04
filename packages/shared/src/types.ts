@@ -884,8 +884,14 @@ export type AdminAlertKind =
 export interface AdminAlertDoc {
   kind: AdminAlertKind;
   detail: string;
-  // Null ONLY for `payout_fee_uncollected` (see above), every other kind is
-  // raised about a specific occurrence of a specific booking.
+  // Set when the alert is about one occurrence of one booking, null when it is
+  // not booking-scoped at all: the profile-scoped `payout_fee_uncollected`, the
+  // event- and order-scoped ticket kinds (`ticket_cancel_refund_failed`,
+  // `ticket_settlement_blocked`, `ticket_settlement_failed`,
+  // `ticket_refund_convergence_failed`, `ticket_order_stuck`,
+  // `event_cascade_stuck`), the account-scoped `account_deleted_unclean`, and a
+  // dispute raised on a ticket charge or on an intent that resolved to nothing.
+  // Whatever the row IS about is always named in `detail`.
   bookingId: string | null; gigId: string | null;
   // The start of the ORIGINAL episode, preserved across reopens: a sweep that
   // observes this condition again after an operator set `resolvedAt` clears

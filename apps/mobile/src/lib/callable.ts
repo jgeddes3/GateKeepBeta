@@ -37,7 +37,17 @@ export async function callFn<Req = unknown, Res = unknown>(name: string, data: R
     // genuinely stale claim gets the forced refresh and the one retry, so an
     // unverified user hammering a gated action no longer mints a fresh token
     // (and a second callable round trip) on every attempt.
-    await auth.currentUser.reload();
+    //
+    // Fix round 2: reload() is a network call, and offline it throws its own
+    // auth/network-request-failed. That error says nothing about verification,
+    // so every screen keyed off EMAIL_NOT_VERIFIED_MESSAGE would fall through
+    // to a generic failure. Rethrow the ORIGINAL error instead: the server's
+    // answer is still the best thing we know.
+    try {
+      await auth.currentUser.reload();
+    } catch {
+      throw e;
+    }
     if (!auth.currentUser.emailVerified) throw e;
     await auth.currentUser.getIdToken(true);
     return await fn(data);

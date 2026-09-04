@@ -74,8 +74,10 @@ function gigContent(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
-async function createOpenGig(profileId: string, user: import("firebase/auth").User): Promise<string> {
-  const { gigId } = await callFn<Record<string, unknown>, { gigId: string }>("createGig", { profileId, ...gigContent() }, user);
+async function createOpenGig(
+  profileId: string, user: import("firebase/auth").User, overrides: Record<string, unknown> = {},
+): Promise<string> {
+  const { gigId } = await callFn<Record<string, unknown>, { gigId: string }>("createGig", { profileId, ...gigContent(overrides) }, user);
   await callFn("publishGig", { gigId }, user);
   return gigId;
 }
@@ -92,6 +94,52 @@ async function makeConfirmedBooking(prefix: string, opts: { pastStartHours?: num
   if (opts.pastStartHours != null) await setGigStartsAt(gigId, -opts.pastStartHours);
   await callFn("acceptBooking", { bookingId }, curator.owner.user);
   return { curator, musician, gigId, bookingId };
+}
+
+// A whole-run booking (the payments.test.ts fixture, same "never leave an
+// active series behind in the shared emulator" contract: every caller flips it
+// to "ended" in a finally). ONE deposit intent funds BOTH occurrences, which is
+// the only way a single disputed charge can sit behind two forfeit transfers.
+function seedSeries(curatorProfileId: string) {
+  const ref = adb.collection("gigSeries").doc();
+  return ref.set({
+    curatorProfileId, fillMode: "whole_run", status: "active",
+    recurrence: { weekday: 5, hour: 20, minute: 0, cadence: "weekly", endDate: null },
+    template: {
+      title: "Friday Night Jazz", description: "A cozy weekly set.",
+      wants: { genres: ["rock"], actSizes: ["band"] },
+      budget: { minCents: 10_000, maxCents: 20_000, structure: "perHour" },
+      durationMinutes: DURATION_MINUTES,
+      provisions: { hasPA: null, hasBackline: null, notes: null },
+      location: {
+        venueName: "The Green Room", neighborhood: "Downtown", city: "Austin",
+        geo: { lat: 30.27, lng: -97.74 }, addressVisibility: "public", address: "123 Main St, Austin, TX",
+      },
+    },
+    templatePrivateLocation: { address: "123 Main St, Austin, TX", geo: { lat: 30.27, lng: -97.74 } },
+    materializedThrough: 0, createdAt: Date.now(), updatedAt: Date.now(),
+    activeBookingId: null, bookedMusicianProfileId: null,
+  }).then(() => ref);
+}
+
+async function makeConfirmedRunBooking(prefix: string, offsetsHours: number[]) {
+  const curator = await makeApprovedCuratorProfile(`${prefix}c`);
+  const musician = await makeApprovedMusicianProfile(`${prefix}m`);
+  await makeMoneyReady(curator, musician);
+  const series = await seedSeries(curator.profileId);
+  const gigIds: string[] = [];
+  for (const hours of offsetsHours) {
+    const gigId = await createOpenGig(curator.profileId, curator.owner.user, { startsAt: Date.now() + hours * HOUR_MS });
+    await adb.doc(`gigs/${gigId}`).update({ seriesId: series.id });
+    gigIds.push(gigId);
+  }
+  // A whole-run accept stages EVERY open occurrence of the series behind one
+  // deposit intent, whichever one the offer came in on.
+  const { bookingId } = await callFn<Record<string, unknown>, { bookingId: string }>(
+    "applyToGig", { gigId: gigIds[0], musicianProfileId: musician.profileId, offer: { amountCents: RATE_CENTS, note: "Hi" } },
+    musician.owner.user);
+  await callFn("acceptBooking", { bookingId }, curator.owner.user);
+  return { curator, musician, series, gigIds, bookingId };
 }
 
 async function settleBooking(bookingId: string, gigId: string): Promise<PaymentDoc> {
@@ -390,6 +438,52 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect((await disputeDoc(disputeId))?.status).toBe("lost");
   });
 
+  // Fix round 2 (item 2): one deposit intent, TWO forfeit transfers. Capping
+  // each reversal at the dispute amount independently would take that amount
+  // back TWICE, more than the bank ever took off the platform.
+  it("lost deposit with TWO forfeits under one intent: the reversals together never exceed the dispute", async () => {
+    // Three dates on one run, two of them cancelled late one at a time (a
+    // whole-run cancel forfeits only the NEXT date, so it can never produce
+    // two forfeits). The third keeps its escrow and stays out of this.
+    const { curator, musician, series, gigIds, bookingId } = await makeConfirmedRunBooking("dlrun", [10, 20, 200]);
+    try {
+      await ageConfirmedAt(bookingId);
+      for (const gigId of gigIds.slice(0, 2)) {
+        await callFn("cancelOccurrence", { bookingId, gigId, reason: "Room double-booked." }, curator.owner.user);
+      }
+
+      const byGig = new Map((await adb.collection(`bookings/${bookingId}/payments`).get()).docs
+        .map((d) => [d.id, d.data() as PaymentDoc]));
+      expect(byGig.size).toBe(3);
+      const forfeited = gigIds.slice(0, 2).map((id) => byGig.get(id)!);
+      expect(forfeited.every((p) => p.deposit.status === "forfeited" && p.deposit.forfeitTransferId !== null)).toBe(true);
+      expect(byGig.get(gigIds[2])!.deposit.status).toBe("held");
+      const intentId = forfeited[0].deposit.intentId!;
+      expect(forfeited[1].deposit.intentId).toBe(intentId); // one charge behind both
+      const accountId = (await getStripeDoc(musician.profileId))!.accountId!;
+      expect(await accountBalanceCents(accountId)).toBe(2 * SLICE_CENTS);
+
+      // The bank took back MORE than one slice but LESS than both together.
+      const disputeCents = SLICE_CENTS + 500;
+      const chargeId = forfeited[0].deposit.chargeId;
+      const disputeId = await openDispute({ intentId, chargeId, amountCents: disputeCents });
+      expect((await closeDispute({ disputeId, intentId, chargeId, amountCents: disputeCents, status: "lost" })).status).toBe(200);
+
+      // Exactly the disputed amount comes back in total, spread across the two
+      // forfeits: the first is reversed whole, the second only for the rest.
+      expect(await accountBalanceCents(accountId)).toBe(2 * SLICE_CENTS - disputeCents);
+      const reversed = await Promise.all(forfeited.map(
+        (p) => fakeObject(p.deposit.forfeitTransferId!).then((t) => (t?.reversedCents as number | undefined) ?? 0)));
+      expect(reversed.reduce((a, b) => a + b, 0)).toBe(disputeCents);
+      expect(reversed.filter((c) => c > 0)).toHaveLength(2);
+      // Fix round 2 (item 3): the operator can read the cap off the row.
+      const row = await ledgerRow(`dispute_lost:${disputeId}`);
+      expect(row?.detail).toContain(`reversed ${disputeCents}c of the ${2 * SLICE_CENTS}c transfer`);
+    } finally {
+      await adb.doc(`gigSeries/${series.id}`).update({ status: "ended" });
+    }
+  }, 60_000);
+
   // Branch audit (LOW): a PARTIAL chargeback. The reversal used to be
   // amount-less, i.e. "reverse the whole transfer", which claws back more from
   // the musician than the bank actually took off the platform.
@@ -413,6 +507,10 @@ describe("SP10 Task 6: charge.dispute.closed", () => {
     expect(t?.reversedCents).toBe(partial);
     expect(t?.reversed).toBe(false); // still partly live, not a full reversal
     expect((await disputeDoc(disputeId))?.status).toBe("lost");
+    // Fix round 2 (item 3): what came back, against what had gone out, on the
+    // one row an operator reads when the cap bites.
+    expect((await ledgerRow(`dispute_lost:${disputeId}`))?.detail)
+      .toContain(`reversed ${partial}c of the ${transferred}c transfer`);
   });
 
   it("lost deposit with NO transfer (still held): dispute_reversal_failed, nothing moves", async () => {

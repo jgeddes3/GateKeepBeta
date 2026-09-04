@@ -141,6 +141,33 @@ describe("getDiscoverDeck", () => {
     }
   });
 
+  // Fix round 2 (item 4): the deck reads EVERY published event in its window,
+  // so one malformed event used to throw INTERNAL for every caller, not just
+  // for the page it landed on. Written straight through the Admin SDK, which
+  // is exactly how a hand-seeded fixture (or an older client) can produce one.
+  it("a published in-window event missing its lineup and genre arrays does not break the deck", async () => {
+    const now = Date.now();
+    const eventId = `dk4-halfshaped-${now}`;
+    const startsAt = now + 3 * 86_400_000; // inside DECK_WINDOW_MS
+    await adb.doc(`events/${eventId}`).set({
+      curatorProfileId: "dk4-curator", title: "Half shaped", description: "",
+      location: { venueName: "Nowhere", neighborhood: null, city: "Austin", addressVisibility: "neighborhood", address: null },
+      startsAt, endsAt: startsAt + 3 * 3_600_000, status: "published",
+      createdAt: now, updatedAt: now,
+    });
+    try {
+      const fan = await makeFan("dk4f");
+      const res = await deck(fan.user, { seed: 7 });
+      expect(Array.isArray(res.cards)).toBe(true);
+      // With a location too: the distance helper reads location.geo, which
+      // this event does not have either.
+      const located = await deck(fan.user, { seed: 7, location: { lat: 30.27, lng: -97.74 } });
+      expect(Array.isArray(located.cards)).toBe(true);
+    } finally {
+      await adb.doc(`events/${eventId}`).delete();
+    }
+  });
+
   it("interleaves kinds and caps at the page size", async () => {
     for (let i = 0; i < 4; i++) await makeApprovedMusicianProfile(`dk3m${i}`);
     const fan = await makeFan("dk3f");

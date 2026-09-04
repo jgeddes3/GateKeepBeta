@@ -36,33 +36,93 @@ export const onUserCreated = functionsV1.auth.user().onCreate(async (user) => {
 // Branch audit (MEDIUM): `currentUser.delete()` on either client is a THIRD
 // path, and Firebase offers no blocking delete trigger, so deleteAccount's
 // refusals (live tickets, offered transfers, pending orders) can be walked
-// straight past. The obligations are therefore read BEFORE the cascade
-// removes the evidence, and anything found, plus a sole-admin profile the
-// cascade just orphaned, is escalated as one row an operator can work.
+// straight past. The obligations are therefore read AND alerted on BEFORE the
+// cascade removes the evidence, and a sole-admin profile the cascade just
+// orphaned folds into the same row an operator can work.
 // Until the "Delete account" user action is disabled in the Identity
 // Platform console (README "Manual follow-ups", and the owner-owed table in
 // docs/superpowers/HANDOFF.md), this alert is the only backstop.
-export const onUserDeleted = functionsV1.auth.user().onDelete(async (user) => {
-  const now = Date.now();
-  // Tolerated, never fatal: a read failure here must not stop the cascade,
-  // which is the part that actually has to happen.
-  const reasons = await listOutstandingObligations(getFirestore(), user.uid, now)
-    .catch((e) => {
-      console.error("onUserDeleted: could not read outstanding obligations", { uid: user.uid }, e);
-      return [] as string[];
-    });
-  const { soleAdminOf } = await cascadeDeleteUser(user.uid, { allowSoleAdmin: true });
-  if (reasons.length === 0 && soleAdminOf.length === 0) return;
+export const onUserDeleted = functionsV1.auth.user().onDelete((user) => handleUserDeleted(user.uid, {
+  now: Date.now(),
+  listObligations: (uid, now) => listOutstandingObligations(getFirestore(), uid, now),
+  cascade: (uid) => cascadeDeleteUser(uid, { allowSoleAdmin: true }),
+  recordAlert: (a) => recordAdminAlert({
+    alertId: a.alertId, kind: "account_deleted_unclean", detail: a.detail,
+    bookingId: null, gigId: null, now: a.now,
+  }),
+}));
 
-  const detail = `account ${user.uid} was deleted through the Auth client SDK or console; `
+// The seam the trigger above is a one-line wrapper around. Everything it
+// touches arrives as a dependency so the ORDER of the two writes (alert, then
+// cascade) is testable without an emulator: once the cascade has run there is
+// no evidence left to re-derive, and the ordering is the whole point of the
+// fix, not an implementation detail.
+export interface UserDeletedDeps {
+  now: number;
+  listObligations: (uid: string, now: number) => Promise<string[]>;
+  cascade: (uid: string) => Promise<{ soleAdminOf: string[] }>;
+  recordAlert: (a: { alertId: string; detail: string; now: number }) => Promise<unknown>;
+}
+
+// `soleAdminOf` is null while the answer is still unknown: the alert written
+// before the cascade cannot claim "none", it has not been asked yet.
+function soleAdminPhrase(soleAdminOf: string[] | null): string {
+  if (soleAdminOf === null) return "not known yet, the cascade had not run";
+  return soleAdminOf.length > 0 ? soleAdminOf.join(", ") : "none";
+}
+
+function uncleanDetail(uid: string, reasons: string[], soleAdminOf: string[] | null): string {
+  return `account ${uid} was deleted through the Auth client SDK or console; `
     + `tickets, transfers, orders, or a sole-admin profile need manual follow-up. `
     + `Outstanding at deletion: ${reasons.length > 0 ? reasons.join(" ") : "none"}. `
-    + `Profiles left with no admin: ${soleAdminOf.length > 0 ? soleAdminOf.join(", ") : "none"}.`;
-  const alertId = accountDeletedUncleanAlertId(user.uid);
-  await recordAdminAlert({ alertId, kind: "account_deleted_unclean", detail, bookingId: null, gigId: null, now })
-    .catch((e) => console.error("onUserDeleted: could not record the unclean-deletion alert", { uid: user.uid }, e));
-  console.error("onUserDeleted: unclean deletion", { uid: user.uid, reasons, soleAdminOf, alertId });
-});
+    + `Profiles left with no admin: ${soleAdminPhrase(soleAdminOf)}.`;
+}
+
+export async function handleUserDeleted(uid: string, deps: UserDeletedDeps): Promise<void> {
+  const { now } = deps;
+  // Tolerated, never fatal: a read failure here must not stop the cascade,
+  // which is the part that actually has to happen.
+  const reasons = await deps.listObligations(uid, now)
+    .catch((e) => {
+      console.error("onUserDeleted: could not read outstanding obligations", { uid }, e);
+      return [] as string[];
+    });
+  const alertId = accountDeletedUncleanAlertId(uid);
+  const record = (detail: string) => deps.recordAlert({ alertId, detail, now })
+    .catch((e) => console.error("onUserDeleted: could not record the unclean-deletion alert", { uid }, e));
+
+  // Fix round 2 (item 1): the obligations are already known here, and the
+  // cascade is the thing that destroys the evidence behind them. A phase that
+  // throws hands the trigger's retry policy an idempotent re-run, but until
+  // that re-run succeeds nothing would record that this deletion was unclean,
+  // so the row goes down FIRST. The sole-admin half is not knowable yet (only
+  // the cascade reports it), which is what the "not known yet" clause says.
+  if (reasons.length > 0) {
+    await record(uncleanDetail(uid, reasons, null));
+    console.error("onUserDeleted: unclean deletion", { uid, reasons, alertId });
+  }
+
+  let soleAdminOf: string[] = [];
+  let cascadeError: unknown = null;
+  try {
+    ({ soleAdminOf } = await deps.cascade(uid));
+  } catch (e) {
+    cascadeError = e;
+  }
+  try {
+    // The one fact only the cascade can report. The upsert re-stamps the
+    // detail, so a row written above now names the orphaned profiles too.
+    if (soleAdminOf.length > 0) {
+      await record(uncleanDetail(uid, reasons, soleAdminOf));
+      console.error("onUserDeleted: unclean deletion", { uid, reasons, soleAdminOf, alertId });
+    }
+  } finally {
+    // A CascadePhaseError still has to escape (the trigger's retry policy
+    // re-runs the idempotent cascade), but only AFTER the alert attempt above,
+    // never instead of it.
+    if (cascadeError !== null) throw cascadeError;
+  }
+}
 
 // Task 8: the single consistency rule for users/{uid}.displayNameLower,
 // "what should it be, given the doc's current displayName, and does it need

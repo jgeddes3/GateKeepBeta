@@ -7,7 +7,8 @@ import { signUpTestUser, db, wait, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
-import { computeDisplayNameLowerFix } from "../src/authTriggers.js";
+import { computeDisplayNameLowerFix, handleUserDeleted, type UserDeletedDeps } from "../src/authTriggers.js";
+import { CascadePhaseError } from "../src/account.js";
 import type { ProfileDraftInput } from "@gatekeep/shared";
 
 const admin = adminApp.getApps()[0] ?? adminApp.initializeApp({ projectId: "gatekeep-dev-jg" });
@@ -174,6 +175,84 @@ describe("onUserDocWritten", () => {
     },
     15_000,
   );
+});
+
+// Fix round 2 (item 1): the ORDER of the alert and the cascade. Against a live
+// emulator the two writes are indistinguishable after the fact (the users doc
+// the cascade deletes carries no clock the alert can be compared against), so
+// the trigger body is exercised through its dependency seam instead, where the
+// call order is exactly what the test can see.
+describe("handleUserDeleted", () => {
+  // Each dependency records its own name in `calls` before handing over to the
+  // per-test behavior, so a test never has to remember to log the call itself.
+  function spyDeps(over: {
+    obligations?: () => Promise<string[]>;
+    cascade?: () => Promise<{ soleAdminOf: string[] }>;
+  } = {}) {
+    const calls: string[] = [];
+    const alerts: Array<{ alertId: string; detail: string }> = [];
+    const deps: UserDeletedDeps = {
+      now: 1_700_000_000_000,
+      listObligations: async () => { calls.push("obligations"); return over.obligations ? over.obligations() : []; },
+      cascade: async () => { calls.push("cascade"); return over.cascade ? over.cascade() : { soleAdminOf: [] }; },
+      recordAlert: async (a) => { calls.push("alert"); alerts.push({ alertId: a.alertId, detail: a.detail }); },
+    };
+    return { calls, alerts, deps };
+  }
+
+  it("writes the unclean-deletion alert BEFORE the cascade, and a phase failure still escapes afterwards", async () => {
+    const boom = new CascadePhaseError("memberships");
+    const { calls, alerts, deps } = spyDeps({
+      obligations: async () => ["A live ticket is outstanding."],
+      cascade: async () => { throw boom; },
+    });
+
+    await expect(handleUserDeleted("uOrder", deps)).rejects.toBe(boom);
+
+    // The cascade is what destroys the evidence, so the row an operator works
+    // exists even when the cascade never finished.
+    expect(calls).toEqual(["obligations", "alert", "cascade"]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].alertId).toBe("account-deleted-unclean:uOrder");
+    expect(alerts[0].detail).toContain("A live ticket is outstanding.");
+    expect(alerts[0].detail).toContain("not known yet");
+  });
+
+  it("folds the sole-admin profiles the cascade reports into the same row, after it", async () => {
+    const { calls, alerts, deps } = spyDeps({
+      obligations: async () => ["A live ticket is outstanding."],
+      cascade: async () => ({ soleAdminOf: ["The Quartet"] }),
+    });
+
+    await handleUserDeleted("uBoth", deps);
+
+    expect(calls).toEqual(["obligations", "alert", "cascade", "alert"]);
+    expect(alerts[1].detail).toContain("The Quartet");
+    expect(alerts[1].detail).toContain("A live ticket is outstanding.");
+  });
+
+  it("a sole admin with nothing outstanding is alerted only after the cascade reports it", async () => {
+    const { calls, alerts, deps } = spyDeps({ cascade: async () => ({ soleAdminOf: ["Solo"] }) });
+
+    await handleUserDeleted("uSole", deps);
+
+    expect(calls).toEqual(["obligations", "cascade", "alert"]);
+    expect(alerts[0].detail).toContain("Solo");
+  });
+
+  it("a clean deletion writes no alert at all", async () => {
+    const { calls, alerts, deps } = spyDeps();
+    await handleUserDeleted("uClean", deps);
+    expect(calls).toEqual(["obligations", "cascade"]);
+    expect(alerts).toEqual([]);
+  });
+
+  it("an obligations read that throws is tolerated: the cascade still runs", async () => {
+    const { calls, alerts, deps } = spyDeps({ obligations: async () => { throw new Error("firestore down"); } });
+    await handleUserDeleted("uReadFail", deps);
+    expect(calls).toEqual(["obligations", "cascade"]);
+    expect(alerts).toEqual([]);
+  });
 });
 
 async function waitForUserDocGone(uid: string, deadline = Date.now() + 15_000) {
