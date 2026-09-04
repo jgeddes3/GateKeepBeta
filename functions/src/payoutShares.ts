@@ -1,6 +1,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import { createHash } from "node:crypto";
 import {
   isValidDocId, validatePayoutShares, SHARES_ADMIN_MESSAGE,
   splitCents, payeeKey, shareHeldMessage, formatShareCents,
@@ -107,6 +108,13 @@ function refFields(ref: HeldShareRef) {
 // (`{idempotencyBase}:{uid}`) makes the held branch equally idempotent, a
 // second call's .create() hits ALREADY_EXISTS (gRPC 6) and is swallowed.
 export async function distributeEarnings(input: DistributeInput): Promise<DistributeResult> {
+  // Fix round 1 (Minor 2): a profile-kind leg (the whole amount when there
+  // are no shares, or the band-fund share when there are) always resolves
+  // `accountId = input.profileAccountId` with no further check, an empty
+  // string would otherwise fall into the held branch below and write a
+  // nonsensical `heldShares/{base}:undefined` (the held branch's `uid` comes
+  // from a member payee, not a profile one). Fail loudly up front instead.
+  if (!input.profileAccountId) throw new Error("distributeEarnings: profileAccountId is required");
   const db = getFirestore();
   const stripe = getStripe();
   const shares = await loadShares(db, input.profileId);
@@ -133,7 +141,11 @@ export async function distributeEarnings(input: DistributeInput): Promise<Distri
       accountId = ms?.accountId && ms.transfersEnabled ? ms.accountId : null;
     }
     if (!accountId) {
-      const uid = (part.payee as { uid: string }).uid;
+      // Reachable only for a member payee: a profile-kind leg's accountId is
+      // input.profileAccountId, guarded non-empty above, so it never falls
+      // into this branch.
+      if (part.payee.kind !== "member") throw new Error(`distributeEarnings: unexpected held leg for ${payeeKey(part.payee)}`);
+      const uid = part.payee.uid;
       const heldRef = db.doc(`heldShares/${input.idempotencyBase}:${uid}`);
       const held: HeldShareDoc = { profileId: input.profileId, uid, amountCents: part.amountCents, purpose: input.purpose, ref: input.ref, status: "held", createdAt: input.now, releasedAt: null, transferId: null };
       try { await heldRef.create(held); }
@@ -178,6 +190,14 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
   if (!ms?.accountId || !ms.transfersEnabled) return 0;
   const snap = await db.collection("heldShares").where("uid", "==", uid).where("status", "in", ["held", "failed"]).get();
   let releasedCents = 0;
+  // Fix round 1 (Important 1): the doc ids this RUN actually released, not a
+  // timestamp. Two independent callers (the account.updated/status-poll sync
+  // hook and the onMemberStripeWritten trigger below) can both observe the
+  // same "held" -> "ready" transition and both call this function; the
+  // Stripe transfer and the ledger row already dedupe on the doc id
+  // (`held:${docId}`), but a dedupe key built from `now` differs between the
+  // two calls and would let the notification through twice.
+  const releasedIds: string[] = [];
   for (const d of snap.docs) {
     const held = d.data() as HeldShareDoc;
     try {
@@ -186,6 +206,7 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
       await writeLedger({ kind: "share_released", amountCents: held.amountCents, profileId: held.profileId, uid, stripeId: t.id, sourced: false, ...refFields(held.ref), detail: "held share released after payout setup", at: now })
         .catch((e) => console.error(`releaseHeldShares: ledger row failed for ${d.id}`, e));
       releasedCents += held.amountCents;
+      releasedIds.push(d.id);
     } catch (e) {
       await d.ref.update({ status: "failed", error: e instanceof Error ? e.message : String(e) }).catch(() => undefined);
       const shouldLog = await recordAdminAlert({ alertId: `held_share:${d.id}`, kind: "held_share_release_failed", detail: `held share ${d.id} (${held.amountCents}c for ${uid}) could not be transferred: ${e instanceof Error ? e.message : String(e)}; retried on the member's next status sync`, bookingId: null, gigId: null, now });
@@ -193,7 +214,12 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
     }
   }
   if (releasedCents > 0) {
-    await notifyUser(uid, { kind: "share_released", refKind: "payouts", title: "Held money released", body: `${formatShareCents(releasedCents)} that was waiting for you is now in your balance.` }, `share_released:${uid}:${now}`)
+    // Deterministic per the SET of docs released, sorted so the two racing
+    // callers (which can observe the same snap.docs in a different order)
+    // land on the exact same key and dedupe against each other, not merely
+    // against themselves.
+    const setKey = createHash("sha1").update(releasedIds.slice().sort().join(",")).digest("hex").slice(0, 16);
+    await notifyUser(uid, { kind: "share_released", refKind: "payouts", title: "Held money released", body: `${formatShareCents(releasedCents)} that was waiting for you is now in your balance.` }, `share_released:${uid}:${setKey}`)
       .catch((e) => console.error(`releaseHeldShares: notification failed for ${uid}`, e));
   }
   return releasedCents;

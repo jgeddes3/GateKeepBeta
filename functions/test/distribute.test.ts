@@ -77,6 +77,13 @@ describe("distributeEarnings", () => {
     expect(await fakeBalance(drumsAcct)).toBe(300);
     const rows = await adb.collection("ledger").where("uid", "==", drums.uid).get();
     expect(rows.docs.map((d) => (d.data() as LedgerEntry).kind).sort()).toEqual(["share_held", "share_released"]);
+    // Fix round 1 (Important 1): enableMemberAccount's webhook drives release
+    // through TWO independent paths off the same underlying doc write, the
+    // account.updated handler's own releaseHeldSharesHook call and the
+    // onMemberStripeWritten trigger firing off that same write, so this is
+    // exactly the race the deterministic (not time-based) dedupe key guards.
+    const releasedNote = await adb.collection(`users/${drums.uid}/notifications`).where("kind", "==", "share_released").get();
+    expect(releasedNote.size).toBe(1);
   });
 
   it("with no shares makes a single transfer under the base key", async () => {

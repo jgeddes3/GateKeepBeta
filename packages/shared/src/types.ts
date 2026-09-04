@@ -1013,7 +1013,7 @@ export interface LedgerEntry {
   kind: LedgerKind;
   amountCents: number;                     // ALWAYS positive/absolute, direction (in vs out, curator vs musician) comes from `kind`, never from sign
   bookingId: string | null; gigId: string | null; profileId: string | null;
-  stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id
+  stripeId: string | null;                 // PaymentIntent/transfer/payout/refund id, or a deterministic synthetic id for a row with no Stripe object (e.g. late_fee, share_held's heldShares doc id), used the same way for writeLedger's dedupe
   detail: string; at: number;
   // SP6 ticketing rows only (eventId/buyerUid have no SP5 booking-money
   // equivalent, so every SP5 entry simply omits them). Optional so every
