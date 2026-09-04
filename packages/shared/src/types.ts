@@ -803,6 +803,11 @@ export interface HeldShareDoc {
   ref: HeldShareRef;
   status: HeldShareStatus;
   createdAt: number; releasedAt: number | null; transferId: string | null; error?: string;
+  // SP5c fix round 2: server-only claim stamp so two release paths (the
+  // account.updated sync hook and the onMemberStripeWritten trigger firing
+  // off the same doc write) never both transfer this doc; stale after 10
+  // minutes.
+  releaseClaimedAt?: number | null;
 }
 
 // adminAlerts/{alertId}, SP5 Task 9, extended through Task 11. The money

@@ -199,6 +199,12 @@ export async function distributeEarnings(input: DistributeInput): Promise<Distri
   };
 }
 
+// Fix round 2: how long a transactional release claim (below) is honored
+// before a later caller is allowed to retry the same doc, protects against a
+// crash between the claim write and the terminal status write, not against
+// the ordinary double-caller race (that race is closed by the claim itself).
+const RELEASE_CLAIM_STALE_MS = 10 * 60 * 1000;
+
 // Transfers every held (or previously failed) share of a user once their
 // account can receive transfers. Unsourced by then: the charge is long gone.
 export async function releaseHeldShares(uid: string, now: number): Promise<number> {
@@ -216,16 +222,47 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
   // two calls and would let the notification through twice.
   const releasedIds: string[] = [];
   for (const d of snap.docs) {
-    const held = d.data() as HeldShareDoc;
+    // Fix round 2: claim the doc BEFORE touching Stripe. The idempotency key
+    // (`held:${docId}`) alone does not make the double-caller race above
+    // safe for the TRANSFER itself: both callers can read this doc as
+    // "held" before either writes a terminal status, and both then call
+    // transferToAccount under the same key. FakeStripe has no mutual
+    // exclusion for two concurrent calls sharing a key (see stripeClient.ts's
+    // own comment on `idem()`), so both apply the balance change and the
+    // held amount is credited twice; real Stripe would instead answer the
+    // loser with a 409 conflict, which this loop would otherwise record as a
+    // `failed` doc and a `held_share_release_failed` alert for money that
+    // already moved. A transactional claim closes both failure modes: only
+    // the caller that wins the claim proceeds to transfer.
+    let held: HeldShareDoc | null = null;
+    try {
+      held = await db.runTransaction(async (tx) => {
+        const fresh = await tx.get(d.ref);
+        const cur = fresh.data() as HeldShareDoc | undefined;
+        if (!cur || (cur.status !== "held" && cur.status !== "failed")) return null;
+        if (cur.releaseClaimedAt != null && now - cur.releaseClaimedAt < RELEASE_CLAIM_STALE_MS) return null;
+        tx.update(d.ref, { releaseClaimedAt: now });
+        return cur;
+      });
+    } catch (e) {
+      console.error(`releaseHeldShares: claim failed for ${d.id}`, e);
+      continue;
+    }
+    // Lost the claim (a racer already holds it, or already finished it): not
+    // this call's doc to touch. A crash between a winning claim and its
+    // terminal write leaves `releaseClaimedAt` in place, and the next sync's
+    // claim attempt re-wins it once RELEASE_CLAIM_STALE_MS has passed, then
+    // replays the SAME Stripe idempotency key.
+    if (!held) continue;
     try {
       const t = await getStripe().transferToAccount({ accountId: ms.accountId, amountCents: held.amountCents, idempotencyKey: `held:${d.id}`, meta: { purpose: "held_share", heldId: d.id, profileId: held.profileId, uid } });
-      await d.ref.update({ status: "released", releasedAt: now, transferId: t.id, error: FieldValue.delete() });
+      await d.ref.update({ status: "released", releasedAt: now, transferId: t.id, error: FieldValue.delete(), releaseClaimedAt: FieldValue.delete() });
       await writeLedger({ kind: "share_released", amountCents: held.amountCents, profileId: held.profileId, uid, stripeId: t.id, sourced: false, ...refFields(held.ref), detail: "held share released after payout setup", at: now })
         .catch((e) => console.error(`releaseHeldShares: ledger row failed for ${d.id}`, e));
       releasedCents += held.amountCents;
       releasedIds.push(d.id);
     } catch (e) {
-      await d.ref.update({ status: "failed", error: e instanceof Error ? e.message : String(e) }).catch(() => undefined);
+      await d.ref.update({ status: "failed", error: e instanceof Error ? e.message : String(e), releaseClaimedAt: FieldValue.delete() }).catch(() => undefined);
       const shouldLog = await recordAdminAlert({ alertId: `held_share:${d.id}`, kind: "held_share_release_failed", detail: `held share ${d.id} (${held.amountCents}c for ${uid}) could not be transferred: ${e instanceof Error ? e.message : String(e)}; retried on the member's next status sync`, bookingId: null, gigId: null, now });
       if (shouldLog) console.error(`releaseHeldShares: ${d.id} failed`, e);
     }
