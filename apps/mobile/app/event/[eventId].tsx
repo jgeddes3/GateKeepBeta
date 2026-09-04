@@ -3,7 +3,7 @@ import { ScrollView, View, Image, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
 import {
-  DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals,
+  DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals, SALES_FINAL_LINE,
   EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
   type EventAct, type EventDoc, type ProfileDoc, type TicketOrderStatus, type TicketTierDoc,
 } from "@gatekeep/shared";
@@ -300,6 +300,18 @@ export default function EventScreen() {
     setPaymentConfirmed(false); setKeylessBlocked(false);
   };
 
+  // Buyer-side release (sp6 audit finding 2), same best-effort shape as web's
+  // cancelOrder: the local reset happens regardless of the call's outcome.
+  const cancelOrder = async (orderIdArg: string | null) => {
+    try {
+      if (orderIdArg) await callFn("cancelTicketOrder", { orderId: orderIdArg });
+    } catch (e) {
+      console.warn("cancelTicketOrder failed, the expiry job releases the hold", orderIdArg, e);
+    } finally {
+      resetPurchase();
+    }
+  };
+
   const finalize = async (orderIdArg: string) => {
     setPhase("finalizing");
     try {
@@ -324,9 +336,9 @@ export default function EventScreen() {
       return;
     }
     if (outcome.cancelled) {
-      // Silent, matching PayPastDueButton.tsx's own cancel handling: the
-      // abandoned pending order simply expires via the TTL sweep.
-      resetPurchase();
+      // A swiped-away sheet used to leave the hold in place for the TTL
+      // sweep to find; now it is released immediately (sp6 audit finding 2).
+      await cancelOrder(orderIdArg);
       return;
     }
     setError(outcome.message ?? "Could not complete the payment.");
@@ -438,7 +450,7 @@ export default function EventScreen() {
                 <>
                   <ErrorBanner message={error} />
                   <Button title="Try payment again" onPress={() => void runSheetFlow(clientSecret!, orderId!)} style={{ alignSelf: "flex-start" }} />
-                  <Button variant="secondary" title="Cancel" onPress={resetPurchase} style={{ alignSelf: "flex-start" }} />
+                  <Button variant="secondary" title="Cancel" onPress={() => void cancelOrder(orderId)} style={{ alignSelf: "flex-start" }} />
                 </>
               ) : (
                 <Text muted>Opening the payment sheet…</Text>
@@ -541,11 +553,19 @@ export default function EventScreen() {
               <Text variant="label">Order total: {formatCents(totalCents)}</Text>
             </View>
           )}
+          {/* The native PaymentSheet is the Pay step, so the sales-final line
+              sits above the button that opens it; a free tier never opens a
+              sheet and never charges, so it gets no money sentence. */}
+          {selectedTier && selectedTier.priceCents > 0 && quantity > 0 && (
+            <Text variant="meta" muted>{SALES_FINAL_LINE}</Text>
+          )}
           <Button
             onPress={() => void startPurchase()}
             disabled={!selectedTier || quantity <= 0 || !!unavailable || phase !== "idle"}
           >
-            <Text variant="label" color={t.onAccent}>{phase === "creating" ? "Starting…" : "Buy tickets"}</Text>
+            <Text variant="label" color={t.onAccent}>
+              {phase === "creating" ? "Starting…" : selectedTier?.priceCents === 0 ? "RSVP" : "Buy tickets"}
+            </Text>
           </Button>
         </View>
       </ScrollView>

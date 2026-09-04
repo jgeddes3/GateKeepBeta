@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import {
-  DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals,
+  DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals, SALES_FINAL_LINE,
   EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
   type EventStatus, type TicketOrderStatus, type TicketTierDoc,
 } from "@gatekeep/shared";
@@ -44,7 +44,7 @@ import { IconWarning } from "../ui/icons";
 //     finalizeTicketOrder({orderId}), a synchronous confirm-then-verify
 //     round trip so the buyer doesn't have to wait on the
 //     payment_intent.succeeded webhook. Branches on the returned
-//     orderStatus ("pending"|"paid"|"expired"|"cancelled_refunded") per the
+//     orderStatus ("pending"|"paid"|"expired"|"cancelled"|"cancelled_refunded") per the
 //     controller's ruling: "paid" is success, "pending" means the webhook
 //     will finish it shortly (a legitimate, if rare, transient state per
 //     finalizeTicketOrder's own doc comment), anything else is a genuine
@@ -132,7 +132,9 @@ function StickyBuyBar({ totalQty, totalCents, label, onClick, disabled }: {
 // Split out so useStripe()/useElements() only run inside the live <Elements>
 // context BuyTicketsFlow renders this into, mirroring PayPastDueButton's own
 // ConfirmForm split for the identical reason.
-function PayConfirmForm({ onConfirmed, onCancel }: { onConfirmed: () => void; onCancel: () => void }) {
+function PayConfirmForm({ onConfirmed, onCancel, cancelling }: {
+  onConfirmed: () => void; onCancel: () => void; cancelling: boolean;
+}) {
   const stripe = useStripe();
   const elements = useElements();
   const [busy, setBusy] = useState(false);
@@ -155,9 +157,14 @@ function PayConfirmForm({ onConfirmed, onCancel }: { onConfirmed: () => void; on
     <div className="grid gap-3 rounded-gk border border-gk-border bg-gk-surface p-4">
       <PaymentElement />
       {error && <ErrorBox message={error} />}
+      {/* sp6 audit finding 7: the one sentence a fan reads before money moves.
+          Shared constant so mobile renders it byte-identically. */}
+      <p className="font-sora text-xs text-gk-muted">{SALES_FINAL_LINE}</p>
       <div className="flex gap-2">
-        <Button onClick={confirm} disabled={busy || !stripe || !elements}>{busy ? "Paying…" : "Pay now"}</Button>
-        <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
+        <Button onClick={confirm} disabled={busy || cancelling || !stripe || !elements}>{busy ? "Paying…" : "Pay now"}</Button>
+        <Button type="button" variant="secondary" onClick={onCancel} disabled={busy || cancelling}>
+          {cancelling ? "Cancelling…" : "Cancel"}
+        </Button>
       </div>
     </div>
   );
@@ -193,6 +200,7 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
   const [orderStatus, setOrderStatus] = useState<TicketOrderStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [purchasedQty, setPurchasedQty] = useState(0);
+  const [cancelling, setCancelling] = useState(false);
   const now = useLiveNow(initialNow);
   const feePolicy = DEFAULT_TICKET_FEE_POLICY;
   const appearance = useMemo(() => gkStripeAppearance(), []);
@@ -210,6 +218,12 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
   const totalQty = items.reduce((sum, it) => sum + it.quantity, 0);
   const totalCents = totals.faceTotalCents + totals.serviceFeeCents;
   const unavailable = eventSalesClosedReason(eventStatus, startsAt, now);
+
+  // Every selected tier free: createTicketOrder completes the order inline
+  // with no PaymentIntent, so the one primary CTA says what will actually
+  // happen. "RSVP", not "Buy tickets".
+  const allFree = items.length > 0
+    && items.every((it) => liveTiers.find((t) => t.id === it.tierId)?.priceCents === 0);
 
   // Fix round 1 finding (money-critical, Critical): a one-shot live read of
   // the tier docs, called after a sold-out/sale-closed rejection so the
@@ -314,6 +328,23 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
     }
   };
 
+  // Buyer-side release (sp6 audit finding 2): a pending order holds inventory
+  // and the buyer's own cap count until it is cancelled or expires (five
+  // minutes now, section B3's ticketOrderExpiry). Best effort: if the release
+  // call fails the expiry job still frees the hold, so the local reset happens
+  // regardless and the failure is only logged.
+  const cancelOrder = async () => {
+    setCancelling(true);
+    try {
+      if (orderId) await callFn("cancelTicketOrder", { orderId });
+    } catch (e) {
+      console.warn("cancelTicketOrder failed, the expiry job releases the hold", orderId, e);
+    } finally {
+      setCancelling(false);
+      setPhase("idle"); setClientSecret(null); setOrderId(null);
+    }
+  };
+
   if (phase === "done") {
     if (orderStatus === "paid") {
       return (
@@ -369,10 +400,7 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
       {error && <ErrorBox message={error} />}
       {phase === "confirm" && clientSecret && (
         <Elements stripe={getStripeJs()} options={{ clientSecret, appearance }}>
-          <PayConfirmForm
-            onConfirmed={finalize}
-            onCancel={() => { setPhase("idle"); setClientSecret(null); setOrderId(null); }}
-          />
+          <PayConfirmForm onConfirmed={finalize} onCancel={cancelOrder} cancelling={cancelling} />
         </Elements>
       )}
       {/* Fix round 1 (Critical): "idle"/"creating" ONLY. The bar used to
@@ -391,7 +419,9 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
         <StickyBuyBar
           totalQty={totalQty}
           totalCents={totalCents}
-          label={!user ? "Sign in to buy tickets" : phase === "creating" ? "Starting…" : "Buy tickets"}
+          label={!user
+            ? (allFree ? "Sign in to RSVP" : "Sign in to buy tickets")
+            : phase === "creating" ? "Starting…" : allFree ? "RSVP" : "Buy tickets"}
           onClick={startPurchase}
           disabled={phase !== "idle"}
         />
