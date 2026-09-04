@@ -10,7 +10,7 @@ import { Footer } from "./Footer";
 import {
   Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger,
 } from "../ui/sheet";
-import { IconBookings, IconCompass, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconTicket, type IconProps } from "../ui/icons";
+import { IconBookings, IconCompass, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconSearch, IconTicket, type IconProps } from "../ui/icons";
 
 // Routes that get the signed-in shell (slim top bar + footer). An allowlist
 // of prefixes rather than a blocklist: everything under these is the
@@ -46,7 +46,12 @@ import { IconBookings, IconCompass, IconEarnings, IconEvents, IconGigs, IconHous
 // the fan-facing signed-in home SignedInRedirect sends a no-profile account
 // to), so it needs the identical shell chrome every other primary-nav
 // destination already gets.
-const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs", "/tickets", "/discover"];
+//
+// Sub-project 8 task 8: /search joins the list for the same reason as
+// /discover right above it: it's now a primary-nav destination in every
+// context's array (right after Discover), so leaving it out would strand
+// whoever clicks Search on a page with no shell chrome at all.
+const SHELL_PREFIXES = ["/dashboard", "/admin", "/join", "/gigs", "/tickets", "/discover", "/search"];
 
 function isShellRoute(pathname: string): boolean {
   return SHELL_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
@@ -112,14 +117,22 @@ function resolveContext(pathname: string, profiles: ProfileSummary[]): NavContex
 // right after Dashboard for a musician or curator, ahead of that profile's
 // own work (Gigs/Bookings/Earnings/Events): a working musician or curator
 // is also, on this product, a fan of other people's shows.
+//
+// Search (sub-project 8 task 8) sits right after Discover in every
+// context's array for the identical reason: it's a role-aware but
+// profile-agnostic destination (SearchFaces resolves fan/musician/curator/
+// both on its own), so every signed-in account gets a way to it regardless
+// of what profiles it holds.
 function navItemsFor(context: NavContext): NavItem[] {
   const dashboard: NavItem = { label: "Dashboard", href: "/dashboard", icon: IconHouse };
   const discover: NavItem = { label: "Discover", href: "/discover", icon: IconCompass };
+  const search: NavItem = { label: "Search", href: "/search", icon: IconSearch };
   const tickets: NavItem = { label: "Tickets", href: "/tickets", icon: IconTicket };
   if (context.kind === "musician") {
     return [
       dashboard,
       discover,
+      search,
       { label: "Gigs", href: "/gigs", icon: IconGigs },
       { label: "Bookings", href: `/dashboard/portfolio/${context.profileId}`, icon: IconBookings },
       { label: "Earnings", href: "/dashboard/earnings", icon: IconEarnings },
@@ -130,6 +143,7 @@ function navItemsFor(context: NavContext): NavItem[] {
     return [
       dashboard,
       discover,
+      search,
       { label: "Gigs", href: `/dashboard/curator/${context.profileId}/gigs`, icon: IconGigs },
       { label: "Bookings", href: `/dashboard/curator/${context.profileId}`, icon: IconBookings },
       { label: "Events", href: "/dashboard/events", icon: IconEvents },
@@ -140,7 +154,7 @@ function navItemsFor(context: NavContext): NavItem[] {
   // notification inbox lives, so dropping it here would leave a profile-less
   // fan (the one context that never reaches /dashboard by any other nav
   // route) with no way to their own notifications.
-  return [discover, dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
+  return [discover, search, dashboard, { label: "Gigs", href: "/gigs", icon: IconGigs }, tickets];
 }
 
 // Which single nav item, if any, is "active" for the current route. A
