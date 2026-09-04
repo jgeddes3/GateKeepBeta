@@ -100,7 +100,9 @@ export interface NotificationDoc {
   // SP6 Task 5: "ticket" is a ticket-order purchase confirmation; its refId
   // is the eventId (see refId's own comment below).
   // SP7: "show_announced", "new_music", "show_rescheduled", "show_post" are added for fan discovery notifications
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post";
+  // SP8: "saved_search_match" carries the matched source id in refId and
+  // says which collection it names in refKind.
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -112,6 +114,9 @@ export interface NotificationDoc {
   // kind doc written before this field existed.
   // SP7: eventId for show_announced / show_rescheduled / show_post; the artist's profileId for new_music.
   refId?: string;
+  // SP8: which collection refId names for "saved_search_match" (event, gig,
+  // or profile), see notificationHref.ts for the routing.
+  refKind?: "event" | "gig" | "profile";
 }
 
 // ---------- Sub-project 10 hardening ----------

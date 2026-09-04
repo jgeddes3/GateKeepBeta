@@ -169,3 +169,10 @@ export const PENDING_ORDERS_CAP_MESSAGE = "You have too many ticket orders in pr
 export const THREAD_FULL_MESSAGE = "Thread is full: accept, decline or withdraw.";
 export const SCANNER_OFFLINE_MESSAGE = "Couldn't reach GateKeep. Try again.";
 export const SALES_FINAL_LINE = "All sales are final unless the event is cancelled or the organizer refunds you. Service fee included in the total.";
+
+// ---------- Sub-project 8 search ----------
+export const SEARCH_LIMIT_MESSAGE = "You have reached today's search limit. Try again tomorrow.";
+export const SAVED_SEARCH_LIMIT_MESSAGE = "You can keep up to 10 saved searches. Delete one to save another.";
+export const SEARCH_EMPTY_MESSAGE = "Nothing matches yet. Try fewer filters or a shorter search.";
+export const SEARCH_LOCATION_OFF_MESSAGE = "Turn on location to search near you.";
+export const SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE = "Type something or pick a filter before saving a search.";

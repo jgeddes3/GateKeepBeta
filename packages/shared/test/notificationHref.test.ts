@@ -28,4 +28,18 @@ describe("notificationHref", () => {
     expect(notificationHref("new_music", "p1", "web")).toBeNull();
     expect(notificationHref("new_music", null, "mobile")).toBeNull();
   });
+  it("routes saved_search_match to the event page when refKind is event", () => {
+    expect(notificationHref("saved_search_match", "e1", "web", "event")).toBe("/e/e1");
+    expect(notificationHref("saved_search_match", "e1", "mobile", "event")).toBe("/event/e1");
+  });
+  it("routes saved_search_match to gigs when refKind is gig", () => {
+    expect(notificationHref("saved_search_match", "g1", "web", "gig")).toBe("/gigs/g1");
+    expect(notificationHref("saved_search_match", "g1", "mobile", "gig")).toBe("/(musician)/gigs?gigId=g1");
+  });
+  it("returns null for saved_search_match with refKind profile, or with no refId (clients resolve the handle themselves)", () => {
+    expect(notificationHref("saved_search_match", "p1", "web", "profile")).toBeNull();
+    expect(notificationHref("saved_search_match", "p1", "mobile", "profile")).toBeNull();
+    expect(notificationHref("saved_search_match", null, "web", "event")).toBeNull();
+    expect(notificationHref("saved_search_match", undefined, "mobile", "gig")).toBeNull();
+  });
 });
