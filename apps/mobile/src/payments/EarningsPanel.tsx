@@ -5,12 +5,16 @@ import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "f
 import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
+import { useAuth } from "../auth/AuthProvider";
+import { useProfileRole } from "./useProfileRole";
+import { SharesCard } from "./SharesCard";
+import { PayoutHistoryList } from "./PayoutHistoryList";
 import {
   PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
   instantFeePreviewCents,
-  type PaymentDoc, type StripeStatusResult,
+  type PaymentDoc, type ProfileType, type StripeStatusResult,
 } from "@gatekeep/shared";
-import { Text, Button, Input, Callout } from "../ui";
+import { Text, Button, Input, Callout, Skeleton } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -33,9 +37,14 @@ import { tokens } from "../theme/tokens";
 //  3. HTML elements become RN primitives (View/Text/TextInput/Pressable);
 //     RN has no `title` attribute, so the Instant button's two tooltip
 //     messages render as a small Text hint under the button row instead.
-//  4. NO client-side admin gating (spec §4): the buttons render for any
-//     member of the profile; a non-admin's press surfaces the server's
-//     permission refusal verbatim, exactly web's posture.
+//  4. SP5c Task 11: client-side admin gating now exists, mirroring web's
+//     useProfileRole gate exactly (this replaces the sub-5b "no client-side
+//     gating" posture above): onboarding, the cash-out amount field, and the
+//     cash-out buttons render only for role === "admin"; a plain member
+//     still sees the balance, payout shares, and history, just a muted
+//     "Only profile admins can cash out." line in place of the controls;
+//     while the role is loading, the loading treatment shows instead of
+//     either.
 
 interface RequestPayoutResult { payoutId: string; feeCents: number; netCents: number; replayed: boolean; }
 
@@ -135,34 +144,7 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
   );
 }
 
-// History caps at 20, same as BookingInbox's own history list (SP4 Task 10),
-// a generous soft cap so an unusually busy profile's Earnings page stays
-// bounded without pagination UI yet.
-const HISTORY_LIMIT = 20;
-
-function HistoryList({ rows }: { rows: PaymentRow[] }) {
-  const history = rows
-    .filter((r) => r.transfer.status === "transferred" || r.deposit.status === "forfeited")
-    .sort((a, b) => (b.transfer.transferredAt ?? b.updatedAt) - (a.transfer.transferredAt ?? a.updatedAt))
-    .slice(0, HISTORY_LIMIT);
-  if (history.length === 0) return <Text muted>No payout history yet.</Text>;
-  return (
-    <View style={{ gap: tokens.space.sm }}>
-      {history.map((r) => (
-        <Text key={`${r.bookingId}:${r.id}`}>
-          {formatGigDateTime(r.occurrenceStartsAt)}
-          {": "}
-          {r.deposit.status === "forfeited" && `Forfeited deposit: received 100% (${formatCents(r.deposit.sliceCents)})`}
-          {r.deposit.status === "forfeited" && r.transfer.status === "transferred" && "; "}
-          {r.transfer.status === "transferred" && r.transfer.amountCents != null
-            && `Paid ${formatCents(r.transfer.amountCents)}`}
-        </Text>
-      ))}
-    </View>
-  );
-}
-
-export function EarningsPanel({ profileId }: { profileId: string }) {
+export function EarningsPanel({ profileId, type }: { profileId: string; type: ProfileType }) {
   const t = useTokens();
   const [status, setStatus] = useState<StripeStatusResult | "loading" | "error">("loading");
   const [reloadKey, setReloadKey] = useState(0);
@@ -182,6 +164,13 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
   // setupPayouts/the AppState listener below.
   const onboardingInFlight = useRef(false);
   const rows = usePaymentRows(profileId);
+  // SP5c Task 11 role gate: onboarding, the cash-out amount field, and the
+  // cash-out buttons are admin-only actions on a shared profile's money. A
+  // plain member still sees the balance and history, just not the controls.
+  const { user } = useAuth();
+  const role = useProfileRole(profileId, user?.uid);
+  const isAdmin = role === "admin";
+  const roleLoading = role === "loading";
   // Hoisted once per render (not recomputed inline at each use site) so the
   // fee preview label and the Instant-button gating logic below can never
   // disagree about what "the typed amount" currently parses to.
@@ -324,17 +313,23 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
             </Callout>
           )}
           {!(status.hasAccount && status.payoutsEnabled) ? (
-            <View style={{ gap: tokens.space.sm }}>
-              <Text>Set up payouts to get paid for your bookings.</Text>
-              <Button title={onboardBusy ? "Opening Stripe…" : "Set up payouts"}
-                onPress={() => void setupPayouts()} disabled={onboardBusy} style={{ alignSelf: "flex-start" }} />
-              {onboardError && (
-                <Callout tone="warning"><Text color={t.warning}>{onboardError}</Text></Callout>
-              )}
-              <Text variant="meta" muted>
-                Your first payout may be held for about 7 days while Stripe verifies your account.
-              </Text>
-            </View>
+            roleLoading ? (
+              <Skeleton height={36} width={160} />
+            ) : isAdmin ? (
+              <View style={{ gap: tokens.space.sm }}>
+                <Text>Set up payouts to get paid for your bookings.</Text>
+                <Button title={onboardBusy ? "Opening Stripe…" : "Set up payouts"}
+                  onPress={() => void setupPayouts()} disabled={onboardBusy} style={{ alignSelf: "flex-start" }} />
+                {onboardError && (
+                  <Callout tone="warning"><Text color={t.warning}>{onboardError}</Text></Callout>
+                )}
+                <Text variant="meta" muted>
+                  Your first payout may be held for about 7 days while Stripe verifies your account.
+                </Text>
+              </View>
+            ) : (
+              <Text muted>Only profile admins can cash out.</Text>
+            )
           ) : (
             <View style={{ gap: tokens.space.md }}>
               <View style={{ gap: tokens.space.xs }}>
@@ -349,39 +344,48 @@ export function EarningsPanel({ profileId }: { profileId: string }) {
                   </Text>
                 )}
               </View>
-              <View style={{ gap: tokens.space.xs }}>
-                <Text>Amount to cash out</Text>
-                <Input
-                  keyboardType="decimal-pad"
-                  value={amount}
-                  onChangeText={(v) => { setAmount(v); setPayoutError(null); }}
-                  editable={!(payoutBusy || status.availableBalanceCents == null)}
-                  accessibilityLabel="Amount to cash out (dollars)"
-                  style={{ width: 110 }}
-                />
-              </View>
-              <View style={{ flexDirection: "row", gap: tokens.space.sm, flexWrap: "wrap" }}>
-                <Button title="Standard (free, 1–3 business days)" variant="secondary"
-                  onPress={() => void submitPayout("standard")} disabled={payoutBusy} />
-                <Button title={`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
-                  variant="secondary" onPress={() => void submitPayout("instant")} disabled={instantDisabled} />
-              </View>
-              {instantHint && <Text variant="meta" muted>{instantHint}</Text>}
-              {payoutError && (
-                <Callout tone="warning"><Text color={t.warning}>{payoutError}</Text></Callout>
-              )}
-              {payoutMessage && (
-                <Callout tone="success"><Text color={t.success}>{payoutMessage}</Text></Callout>
+              {roleLoading ? (
+                <Skeleton height={36} width={160} />
+              ) : isAdmin ? (
+                <>
+                  <View style={{ gap: tokens.space.xs }}>
+                    <Text>Amount to cash out</Text>
+                    <Input
+                      keyboardType="decimal-pad"
+                      value={amount}
+                      onChangeText={(v) => { setAmount(v); setPayoutError(null); }}
+                      editable={!(payoutBusy || status.availableBalanceCents == null)}
+                      accessibilityLabel="Amount to cash out (dollars)"
+                      style={{ width: 110 }}
+                    />
+                  </View>
+                  <View style={{ flexDirection: "row", gap: tokens.space.sm, flexWrap: "wrap" }}>
+                    <Button title="Standard (free, 1–3 business days)" variant="secondary"
+                      onPress={() => void submitPayout("standard")} disabled={payoutBusy} />
+                    <Button title={`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
+                      variant="secondary" onPress={() => void submitPayout("instant")} disabled={instantDisabled} />
+                  </View>
+                  {instantHint && <Text variant="meta" muted>{instantHint}</Text>}
+                  {payoutError && (
+                    <Callout tone="warning"><Text color={t.warning}>{payoutError}</Text></Callout>
+                  )}
+                  {payoutMessage && (
+                    <Callout tone="success"><Text color={t.success}>{payoutMessage}</Text></Callout>
+                  )}
+                </>
+              ) : (
+                <Text muted>Only profile admins can cash out.</Text>
               )}
             </View>
           )}
+          {type === "musician" && <SharesCard profileId={profileId} isAdmin={isAdmin} />}
           <View style={{ gap: tokens.space.sm }}>
             <Text variant="title">Pending settlements</Text>
             <PendingSettlementsList rows={rows} />
           </View>
           <View style={{ gap: tokens.space.sm }}>
             <Text variant="title">History</Text>
-            <HistoryList rows={rows} />
+            <PayoutHistoryList scope={{ kind: "profile", profileId }} />
           </View>
         </>
       )}

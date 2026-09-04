@@ -51,7 +51,7 @@ export default function MusicianDashboard() {
       <PageBackground />
       <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
         <Text variant="heading">Dashboard</Text>
-        <EarningsPanel key={profileId} profileId={profileId} />
+        <EarningsPanel key={profileId} profileId={profileId} type="musician" />
       </ScrollView>
     </View>
   );
