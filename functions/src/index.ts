@@ -39,3 +39,4 @@ export {
   onProfileWrittenSearch, onTrackWrittenSearch, onEventWrittenSearch, onGigWrittenSearch, onBookingWrittenSearch,
 } from "./searchIndex.js";
 export { search } from "./search.js";
+export { saveSearch, deleteSavedSearch, onSearchIndexCreated } from "./savedSearches.js";
