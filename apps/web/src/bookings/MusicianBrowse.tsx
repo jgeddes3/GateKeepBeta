@@ -6,6 +6,7 @@ import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc }
 import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
 import { MusicianCard, type MusicianCardProfile } from "../components/MusicianCard";
 import { OfferComposer } from "./OfferComposer";
+import { formatReliabilityLine } from "./BookingForms";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { IconUser, IconWarning } from "../ui/icons";
@@ -67,18 +68,17 @@ function MusicianGridItem({ curatorProfileId, musician }: { curatorProfileId: st
   }, [musician.id]);
 
   // Availability + reliability: rendered only from data this card already
-  // fetched above (the same curatorBooking doc the old card used for its
-  // rates summary), never a price. Rates are private by SP4 rule and the
-  // locked card spec is explicit: NEVER a price on this card.
+  // fetched above, never a price (rates are private by SP4 rule and the
+  // locked card spec is explicit: NEVER a price on this card). Both reads are
+  // optional-chained: recomputeReliability can create this projection with
+  // reliability alone (no rates, no preferences) for a musician who never
+  // opened the booking-info editor, and rebuildBookingProjections used to
+  // delete the doc outright (sp4 audit finding 1).
   const availabilityLabel = booking && booking !== "loading" && booking.preferences?.availabilityPattern
     ? formatChipLabel(booking.preferences.availabilityPattern)
     : null;
   const reliabilityLine = booking && booking !== "loading"
-    // Counts BOOKINGS, not dates: an 8-date completed whole-run booking is
-    // +1 here, not +8 (ReliabilitySummary.completedCount is booking-scoped,
-    // see functions/src/bookingLifecycle.ts's recomputeReliability).
-    ? `${booking.reliability.completedCount} show${booking.reliability.completedCount === 1 ? "" : "s"} played` +
-      ` · ${booking.reliability.noShowCount} no-show${booking.reliability.noShowCount === 1 ? "" : "s"}`
+    ? formatReliabilityLine(booking.reliability)
     : null;
 
   // ProfileDoc.subtype is the MusicianSubtype|CuratorSubtype union; this

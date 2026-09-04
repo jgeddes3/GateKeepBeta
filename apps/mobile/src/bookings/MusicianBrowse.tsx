@@ -4,9 +4,9 @@ import { useRouter } from "expo-router";
 import { collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebase } from "../lib/firebase";
-import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type GigDoc } from "@gatekeep/shared";
+import { GENRES, type ProfileDoc, type MusicianSubtype, type CuratorBookingDoc, type BudgetStructure, type BookingRates, type GigDoc } from "@gatekeep/shared";
 import { formatCents, formatGigDateTime, BUDGET_STRUCTURE_LABEL } from "../gigs/GigForms";
-import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, type OfferState } from "./BookingForms";
+import { DEPOSIT_HONESTY_LINE, OfferFields, buildOfferPayload, emptyOffer, errorCode, formatReliabilityLine, type OfferState } from "./BookingForms";
 import { GatePrompt } from "../payments/GatePrompt";
 import {
   Text, Button, Card, Chip, PageBackground, PhotoScrim, PhotoPlaceholder,
@@ -30,8 +30,11 @@ type MusicianRow = ProfileDoc & { id: string };
 const ACT_SIZE_OPTIONS: MusicianSubtype[] = ["solo", "band"];
 const ACT_SIZE_LABEL: Record<MusicianSubtype, string> = { solo: "Solo", band: "Band" };
 const RATE_STRUCTURES: BudgetStructure[] = ["perHour", "perSong", "perSet"];
+// A projection with no rates block at all (summary-only doc, sp4 audit
+// finding 1) renders exactly like a musician who set none: "No public rates."
+export const NULL_RATES: BookingRates = { perHour: null, perSong: null, perSet: null };
 
-function RatesSummary({ rates }: { rates: CuratorBookingDoc["rates"] }) {
+function RatesSummary({ rates }: { rates: BookingRates }) {
   const parts = RATE_STRUCTURES
     .map((k) => (rates[k] ? `${formatCents(rates[k]!.amountCents)} ${BUDGET_STRUCTURE_LABEL[k]}` : null))
     .filter((p): p is string => p !== null);
@@ -180,13 +183,11 @@ function MusicianCard({ curatorProfileId, musician }: { curatorProfileId: string
           <Skeleton height={14} width="55%" />
         ) : booking ? (
           <>
-            <RatesSummary rates={booking.rates} />
-            {/* Counts BOOKINGS, not dates: an 8-date completed whole-run
-                booking is +1 here, not +8 (booking-scoped reliability
-                summary). */}
-            <Text variant="meta" muted>
-              {booking.reliability.noShowCount} no-shows / {booking.reliability.completedCount} bookings
-            </Text>
+            <RatesSummary rates={booking.rates ?? NULL_RATES} />
+            {booking.preferences?.availabilityPattern && (
+              <Text variant="meta" muted>{booking.preferences.availabilityPattern}</Text>
+            )}
+            <Text variant="meta" muted>{formatReliabilityLine(booking.reliability)}</Text>
           </>
         ) : (
           <Text variant="meta" muted>No booking info shared yet.</Text>

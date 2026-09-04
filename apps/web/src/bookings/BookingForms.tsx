@@ -2,7 +2,7 @@
 import { useId } from "react";
 import {
   validateOfferInput, LAUNCH_TIMEZONE, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
-  type BudgetStructure,
+  type BudgetStructure, type ReliabilitySummary,
 } from "@gatekeep/shared";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -39,6 +39,20 @@ export { gigLocationLabel } from "../../app/u/[handle]/gigDisplay";
 // actual constant.
 export const DEPOSIT_HONESTY_LINE =
   `If accepted, a ${DEPOSIT_PERCENT}% deposit is charged to the curator's card at accept.`;
+
+// The curator-facing reliability sentence, one definition for every surface
+// that renders it (Find musicians cards today; Task 32 adds the inbox rows and
+// the thread header). Counts BOOKINGS, not dates: an 8-date completed
+// whole-run booking is +1 (ReliabilitySummary.completedCount is
+// booking-scoped, see functions/src/bookingLifecycle.ts's
+// recomputeReliability). Tolerates a projection with no reliability block:
+// pre-section-B3 recomputeReliability wrote summary-only docs, and
+// rebuildBookingProjections used to delete and recreate without one.
+export function formatReliabilityLine(r: ReliabilitySummary | undefined): string {
+  const completed = r?.completedCount ?? 0;
+  const noShows = r?.noShowCount ?? 0;
+  return `${completed} show${completed === 1 ? "" : "s"} played · ${noShows} no-show${noShows === 1 ? "" : "s"}`;
+}
 
 export interface OfferState { amount: string; quantity: string; note: string; }
 export const emptyOffer = (): OfferState => ({ amount: "", quantity: "", note: "" });
