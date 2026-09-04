@@ -49,6 +49,12 @@ describe("distributeEarnings", () => {
     expect(r1.legs.map((l) => [l.payee.kind, l.amountCents, l.outcome])).toEqual([
       ["member", 501, "transferred"], ["member", 300, "held"], ["profile", 200, "transferred"],
     ]);
+    // Fix round 1 (Critical): `transferId` is the PROFILE leg's own transfer,
+    // never a member's, even though a member leg comes first in `legs` above,
+    // a clawback reverses this exact id and must never reach into a member's
+    // account. `profileCents` is what the profile's own account actually got.
+    expect(r1.transferId).toBe(r1.legs.find((l) => l.payee.kind === "profile")!.transferId);
+    expect(r1.profileCents).toBe(200);
     const bassAcct = (await memberStripe(bass.uid))!.accountId!;
     expect(await fakeBalance(bassAcct)).toBe(501);
     expect(await fakeBalance(sp.accountId as string)).toBe(200);

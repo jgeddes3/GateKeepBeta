@@ -811,6 +811,7 @@ export async function finalizeSettlementSuccess(args: {
     updates["transfer.transferredAt"] = now;
     updates["transfer.legs"] = dist!.legs.length;
     updates["transfer.heldCents"] = dist!.heldCents;
+    updates["transfer.profileCents"] = dist!.profileCents;
   }
   try {
     // M2 (branch audit): held to `terminalBaseline`, args.baseline for a
@@ -1340,7 +1341,20 @@ export async function clawbackSettledOccurrence(
   // EXACTLY how far the unwind got, "reversal ✓, settlement refund ✓, deposit
   // refund ✗" is the difference between an operator knowing what is still owed
   // and having to reconstruct it from the Stripe dashboard.
-  const reversedCents = p.transfer.amountCents ?? 0;
+  // Fix round 1 (Critical): the PROFILE's share of the transfer only, never
+  // the split total. `transfer.amountCents` is the FULL earnings for a split
+  // settlement (a member's share included), but `transfer.id` (spec section
+  // 8) points at the profile's OWN transfer, which only ever moved
+  // `profileCents`, a member's transferred share stays with that member, the
+  // existing paths here recover the curator's money from the profile's
+  // account, not from a musician who never chose to be part of this booking.
+  // `?? p.transfer.amountCents` covers a pre-SP5c doc with no `profileCents`
+  // field, whose one transfer WAS the whole amount.
+  const reversedCents = p.transfer.profileCents ?? p.transfer.amountCents ?? 0;
+  // Zero only when the profile has no share of its own (every leg member-held
+  // or member-transferred) or every leg landed in heldShares: there is
+  // nothing in the profile's account for a clawback to reverse.
+  const reversesTransfer = reversedCents > 0;
   // Exactly what the settlement charge carried, see finalizeSettlementSuccess's
   // terminal write, which persists `computedCents`/`feeShareCents` from the same
   // math the card was charged from, and Task 11's late fee, which rode that
@@ -1358,7 +1372,7 @@ export async function clawbackSettledOccurrence(
   let terminalWritten = false;
   const stepReport = (): string => {
     const mark = (needed: boolean, done: boolean): string => (needed ? (done ? "✓" : "✗") : "not needed");
-    return `reversal (${reversedCents}c) ${mark(true, reversalId != null)},`
+    return `reversal (${reversedCents}c) ${mark(reversesTransfer, reversalId != null)},`
       + ` settlement refund (${refundTotal}c) ${mark(refundsSettlement, settlementRefundId != null)},`
       + ` deposit refund (${depositRefundCents}c) ${mark(refundsDeposit, depositRefundId != null)},`
       + ` doc write ${mark(true, terminalWritten)}`;
@@ -1377,14 +1391,23 @@ export async function clawbackSettledOccurrence(
     // moved, precisely the case where the trail matters most. The ledger
     // records what Stripe did, step by step, independently of where the sequence
     // stopped or what state the doc ended up in.
-    reversalId = (await stripe.reverseTransfer({
-      transferId: p.transfer.id, idempotencyKey: `${bookingId}:${gigId}:clawback`,
-    })).id;
-    await writeLedger({
-      kind: "transfer_reversal", amountCents: reversedCents, bookingId, gigId,
-      profileId: p.musicianProfileId, stripeId: reversalId,
-      detail: "no-show clawback, earnings transfer reversed",
-    }).catch((e) => console.error(`clawbackSettledOccurrence: transfer_reversal ledger row failed for ${bookingId}/${gigId}`, e));
+    //
+    // SKIPPED ENTIRELY when there is no profile-side money to reverse (fix
+    // round 1): no reversal call, no ledger row, `reversalId` stays null and
+    // `stepReport` reads "not needed", the refunds below still run exactly as
+    // they do for a reversed transfer.
+    if (reversesTransfer) {
+      reversalId = (await stripe.reverseTransfer({
+        transferId: p.transfer.id!, amountCents: reversedCents, idempotencyKey: `${bookingId}:${gigId}:clawback`,
+      })).id;
+      await writeLedger({
+        kind: "transfer_reversal", amountCents: reversedCents, bookingId, gigId,
+        profileId: p.musicianProfileId, stripeId: reversalId,
+        detail: (p.transfer.legs ?? 1) > 1
+          ? "no-show clawback, profile share of the earnings transfer reversed (member shares stay with the members)"
+          : "no-show clawback, earnings transfer reversed",
+      }).catch((e) => console.error(`clawbackSettledOccurrence: transfer_reversal ledger row failed for ${bookingId}/${gigId}`, e));
+    }
 
     if (refundsSettlement) {
       settlementRefundId = (await stripe.refund({

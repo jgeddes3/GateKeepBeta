@@ -83,7 +83,12 @@ export interface DistributeInput {
   now: number;
 }
 export interface DistributeLeg { payee: PayoutPayee; amountCents: number; outcome: "transferred" | "held"; transferId: string | null; sourced: boolean }
-export interface DistributeResult { legs: DistributeLeg[]; transferId: string | null; sourcedAny: boolean; heldCents: number }
+// SP5c fix round 1: `transferId` prefers the PROFILE leg's transfer id (a
+// clawback reverses the profile's own account, never a member's), falling
+// back to the first transferred leg only when there is no profile leg to
+// point at. `profileCents` is what actually reached the profile's account,
+// the amount a clawback may reverse.
+export interface DistributeResult { legs: DistributeLeg[]; transferId: string | null; sourcedAny: boolean; heldCents: number; profileCents: number }
 
 function refFields(ref: HeldShareRef) {
   return "bookingId" in ref
@@ -125,7 +130,7 @@ export async function distributeEarnings(input: DistributeInput): Promise<Distri
       accountId: input.profileAccountId, amountCents: input.amountCents, idempotencyKey: input.idempotencyBase, meta: input.meta,
       ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
     });
-    return { legs: [{ payee: { kind: "profile" }, amountCents: input.amountCents, outcome: "transferred", transferId: t.id, sourced }], transferId: t.id, sourcedAny: sourced, heldCents: 0 };
+    return { legs: [{ payee: { kind: "profile" }, amountCents: input.amountCents, outcome: "transferred", transferId: t.id, sourced }], transferId: t.id, sourcedAny: sourced, heldCents: 0, profileCents: input.amountCents };
   }
   const profileName = ((await db.doc(`profiles/${input.profileId}`).get()).data() as ProfileDoc | undefined)?.name ?? "your band";
   let remaining = input.source?.remainingCents ?? 0;
@@ -179,7 +184,19 @@ export async function distributeEarnings(input: DistributeInput): Promise<Distri
     }
     legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "transferred", transferId: t.id, sourced });
   }
-  return { legs, transferId: legs.find((l) => l.transferId)?.transferId ?? null, sourcedAny: legs.some((l) => l.sourced), heldCents };
+  const profileCents = legs.filter((l) => l.payee.kind === "profile").reduce((s, l) => s + l.amountCents, 0);
+  return {
+    legs,
+    // Fix round 1 (Critical): the PROFILE leg's transfer id, never a
+    // member's, a no-show clawback reverses this exact transfer and must
+    // never reach into a member's own account. Falls back to the first
+    // transferred leg only when there is no profile leg (or its own
+    // transfer failed to land here, unreachable in practice: a profile-kind
+    // leg always resolves an accountId and transfers).
+    transferId: legs.find((l) => l.payee.kind === "profile" && l.transferId)?.transferId
+      ?? legs.find((l) => l.transferId)?.transferId ?? null,
+    sourcedAny: legs.some((l) => l.sourced), heldCents, profileCents,
+  };
 }
 
 // Transfers every held (or previously failed) share of a user once their

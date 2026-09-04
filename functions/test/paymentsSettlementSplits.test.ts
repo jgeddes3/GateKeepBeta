@@ -11,7 +11,7 @@ import {
   type PaymentDoc, type ProfileDraftInput,
 } from "@gatekeep/shared";
 import { runPaymentsSweep } from "../src/paymentsSweep.js";
-import { chargeSettlement } from "../src/paymentsSettlement.js";
+import { chargeSettlement, clawbackSettledOccurrence } from "../src/paymentsSettlement.js";
 
 // Task 6 (booking settlement through distributeEarnings). These fixtures are
 // COPIES of paymentsSettlement.test.ts's own file-local helpers (controller
@@ -115,6 +115,17 @@ async function ledgerRows(bookingId: string): Promise<LedgerEntry[]> {
   return snap.docs.map((d) => d.data() as LedgerEntry);
 }
 
+// FakeStripe's running per-account balance (matches paymentsSettlement.test.ts's own helper).
+async function accountBalanceCents(accountId: string): Promise<number> {
+  return ((await fakeObject(accountId))?.balanceCents as number | undefined) ?? 0;
+}
+
+async function musicianAccountId(profileId: string): Promise<string> {
+  const sp = (await adb.doc(`profiles/${profileId}/private/stripe`).get()).data() as { accountId?: string } | undefined;
+  if (!sp?.accountId) throw new Error(`musicianAccountId: profile ${profileId} has no accountId after makeMoneyReady.`);
+  return sp.accountId;
+}
+
 // A real, fully confirmed single-gig booking whose date has already ENDED.
 async function makeEndedBooking(
   prefix: string,
@@ -176,5 +187,45 @@ describe("booking settlement with shares", () => {
     expect(await fakeObject(bassRow.stripeId!).then((t) => t?.sourceChargeId)).toBe(paid.settlement.intentId ? (await fakeObject(paid.settlement.intentId))?.chargeId : undefined);
     const total = legs.reduce((s, r) => s + r.amountCents, 0) + (rows.find((r) => r.kind === "share_held")?.amountCents ?? 0);
     expect(total).toBe(paid.transfer.amountCents);
+  });
+
+  // Fix round 1 (Critical): a no-show clawback on a split settlement must
+  // reverse ONLY the profile's own share, never a member's transferred share
+  // (spec section 8: a member's transferred share stays theirs, the existing
+  // paths recover the curator's money from the profile's own account).
+  it("clawing back a split settlement reverses only the profile's own share, leaving member shares untouched", async () => {
+    const b = await makeEndedBooking("spl2");
+    const bass = await addMember(b.musician.profileId, "spl2b");
+    const drums = await addMember(b.musician.profileId, "spl2d");
+    await callFn("createMemberOnboardingLink", {}, bass.user);
+    expect(await enableMemberAccount(bass.uid)).toBe(200);
+    await callFn("setPayoutShares", { profileId: b.musician.profileId, shares: [
+      { payee: { kind: "member", uid: bass.uid }, percent: 45 },
+      { payee: { kind: "member", uid: drums.uid }, percent: 45 },
+      { payee: { kind: "profile" }, percent: 10 },
+    ] }, b.musician.owner.user);
+    await scheduleSettlement(b.bookingId, b.gigId);
+    expect(await chargeSettlement({ bookingId: b.bookingId, gigId: b.gigId, now: Date.now() })).toEqual({ outcome: "charged", transferred: true });
+
+    const rows = await ledgerRows(b.bookingId);
+    const profileLeg = rows.find((r) => r.kind === "share_transfer" && r.uid == null)!;
+    const bassLeg = rows.find((r) => r.kind === "share_transfer" && r.uid === bass.uid)!;
+    const profileAccountId = await musicianAccountId(b.musician.profileId);
+    const bassAccountId = (await memberStripe(bass.uid))!.accountId!;
+    const profileBalanceBefore = await accountBalanceCents(profileAccountId);
+    const bassBalanceBefore = await accountBalanceCents(bassAccountId);
+    expect(bassBalanceBefore).toBe(bassLeg.amountCents);
+
+    await clawbackSettledOccurrence(b.bookingId, b.gigId, Date.now());
+
+    const clawed = (await getPayment(b.bookingId, b.gigId))!;
+    expect(clawed.settlement.status).toBe("waived");
+    expect(clawed.transfer.status).toBe("reversed");
+    expect(clawed.deposit.status).toBe("refunded");
+    // Only the profile's own account moved.
+    expect(await accountBalanceCents(profileAccountId)).toBe(profileBalanceBefore - profileLeg.amountCents);
+    expect(await accountBalanceCents(bassAccountId)).toBe(bassBalanceBefore);
+    const reversalRow = (await ledgerRows(b.bookingId)).find((r) => r.kind === "transfer_reversal")!;
+    expect(reversalRow.amountCents).toBe(profileLeg.amountCents);
   });
 });

@@ -710,6 +710,10 @@ export interface TransferState {         // musician earnings for this occurrenc
   // SP5c: how many transfer legs this settlement split into (per payee), and
   // how many cents landed in heldShares instead of transferring directly.
   legs?: number | null; heldCents?: number | null;
+  // SP5c fix round 1: cents that reached the profile's OWN account in this
+  // settlement (equals amountCents on the no-shares path; 0 with no profile
+  // share, or when every leg was held), what a no-show clawback may reverse.
+  profileCents?: number | null;
 }
 // bookings/{bookingId}/payments/{gigId}, one doc per occurrence, the money
 // truth for that date. Server-written only; readable by both booking sides.

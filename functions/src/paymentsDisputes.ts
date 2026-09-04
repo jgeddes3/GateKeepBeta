@@ -310,8 +310,16 @@ async function reverseForLostDispute(
   if (target.purpose === "settlement" || target.purpose === "paydue") {
     const hit = docs.find(({ p }) => p.settlement.intentId === target.intentId && p.transfer.status === "transferred" && p.transfer.id);
     if (!hit) return nothingReversed("no transfer: the settlement has no live earnings transfer to reverse");
+    // Fix round 1 (Critical): cap the reversal at the PROFILE's own share,
+    // never the split total. `transfer.id` (payoutShares.ts, distributeEarnings)
+    // is the profile's own transfer, a member's transferred share is not this
+    // profile's account and this path must never reach into it.
+    const profileCap = hit.p.transfer.profileCents ?? hit.p.transfer.amountCents ?? 0;
+    if (profileCap <= 0) {
+      return nothingReversed("no transfer: the profile's share of this settlement was 0, member shares are not recovered");
+    }
     const transferCents = hit.p.transfer.amountCents ?? null;
-    const reversedCents = Math.min(disputeAmountCents, transferCents ?? disputeAmountCents);
+    const reversedCents = Math.min(disputeAmountCents, profileCap);
     const r = await stripe.reverseTransfer({
       transferId: hit.p.transfer.id!, idempotencyKey: `dispute_reverse:${disputeId}`, amountCents: reversedCents,
     });
