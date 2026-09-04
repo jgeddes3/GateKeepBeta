@@ -135,6 +135,15 @@ describe("validatePortfolioUpdate", () => {
   });
 });
 
+describe("validatePortfolioUpdate city", () => {
+  it("accepts a city, accepts null, rejects empty and overlong", () => {
+    expect(validatePortfolioUpdate({ profileId: "p1", city: "Austin" }).ok).toBe(true);
+    expect(validatePortfolioUpdate({ profileId: "p1", city: null }).ok).toBe(true);
+    expect(validatePortfolioUpdate({ profileId: "p1", city: "   " }).ok).toBe(false);
+    expect(validatePortfolioUpdate({ profileId: "p1", city: "x".repeat(121) }).ok).toBe(false);
+  });
+});
+
 describe("validateBookingUpdate", () => {
   // SP4: BookingUpdateInput now carries a required `visibility`, this
   // literal is the backfill default (all rates + preferences "curators",

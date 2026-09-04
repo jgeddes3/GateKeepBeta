@@ -3,6 +3,7 @@ import {
   GENRES, GIG_TYPES, AUDIO_CONTENT_TYPES, MAX_AUDIO_UPLOAD_BYTES,
   ACT_SIZES, AVAILABILITY_PATTERNS, SERIES_CADENCES,
   MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
+  MAX_CITY_LENGTH,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
   type LookingFor, type GigDoc, type GigBudget, type GigSeriesDoc, type BudgetStructure,
@@ -119,7 +120,8 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
     return fail("Invalid portfolio update.");
   }
   if (!isValidDocId(input.profileId)) return fail("Invalid profile id.");
-  if (input.bio === undefined && input.genres === undefined && input.externalLinks === undefined) {
+  if (input.bio === undefined && input.genres === undefined && input.externalLinks === undefined
+      && input.city === undefined) {
     return fail("Nothing to update.");
   }
   if (input.bio !== undefined) {
@@ -146,6 +148,11 @@ export function validatePortfolioUpdate(input: PortfolioUpdateInput): Result {
     }
     const linkKeys = input.externalLinks.map((l) => `${l.kind}:${l.url.trim()}`);
     if (new Set(linkKeys).size !== linkKeys.length) return fail("Duplicate links.");
+  }
+  if (input.city !== undefined && input.city !== null) {
+    if (typeof input.city !== "string" || input.city.trim().length < 1 || input.city.trim().length > MAX_CITY_LENGTH) {
+      return fail(`City must be 1-${MAX_CITY_LENGTH} characters.`);
+    }
   }
   return { ok: true };
 }

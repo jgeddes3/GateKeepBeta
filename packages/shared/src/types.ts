@@ -157,12 +157,21 @@ export interface TrackDoc {
 export type ExternalLinkKind = "spotify" | "youtube" | "instagram" | "website";
 export interface ExternalLink { kind: ExternalLinkKind; url: string; }
 
+export interface PortfolioLocation {
+  city: string;                   // as the geocoder returned it
+  geo: { lat: number; lng: number } | null;
+  geocodedFrom: string;           // the city string the musician typed, for the skip-if-unchanged check
+}
+
 export interface PortfolioData {
   bio: string;
   genres: string[];              // 1-3 from GENRES once set; [] on a fresh draft
   externalLinks: ExternalLink[];
   avatarPhotoPath: string | null; // public/photos/... paths, written by the photo pipeline
   coverPhotoPath: string | null;
+  // SP8: optional home city, geocoded through the same budgeted geocoder as
+  // planner profiles. Absent on pre-SP8 docs; null once explicitly cleared.
+  location?: PortfolioLocation | null;
 }
 
 export interface RateAmount { amountCents: number; note: string | null; }
@@ -199,6 +208,7 @@ export interface PortfolioUpdateInput {
   bio?: string;
   genres?: string[];
   externalLinks?: ExternalLink[];
+  city?: string | null;          // SP8: null clears the home city
 }
 export interface BookingUpdateInput {
   profileId: string; rates: BookingRates; preferences: BookingPreferences; visibility: BookingVisibility;

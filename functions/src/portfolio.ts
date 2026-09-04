@@ -3,9 +3,12 @@ import { getFirestore } from "firebase-admin/firestore";
 import {
   validatePortfolioUpdate, validateBookingUpdate,
   type PortfolioUpdateInput, type BookingUpdateInput, type BookingDoc, type RateAmount, type PortfolioData,
+  type PortfolioLocation,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile } from "./guards.js";
 import { rebuildBookingProjections } from "./bookingVisibility.js";
+import { getGeocoder, geocoderApiKey, consumeGeocodeBudget } from "./geocode.js";
+import { GEOCODE_FAILURE_MESSAGE } from "./gigs.js";
 
 // Strips any extra/untrusted keys off a rate object and normalizes an
 // absent (undefined) rate the same as an explicit null. Without this, a
@@ -15,7 +18,8 @@ import { rebuildBookingProjections } from "./bookingVisibility.js";
 const rate = (r: RateAmount | null | undefined): RateAmount | null =>
   r == null ? null : { amountCents: r.amountCents, note: r.note ?? null };
 
-export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-central1" }, async (req) => {
+export const updatePortfolio = onCall<PortfolioUpdateInput>(
+  { region: "us-central1", secrets: [geocoderApiKey] }, async (req) => {
   const uid = requireAuthUid(req);
   requireVerifiedEmail(req);
   const input = req.data;
@@ -36,6 +40,26 @@ export const updatePortfolio = onCall<PortfolioUpdateInput>({ region: "us-centra
   // could carry extra keys) and the trimmed URL the validator actually checked.
   if (input.externalLinks !== undefined) {
     updates["portfolio.externalLinks"] = input.externalLinks.map((l) => ({ kind: l.kind, url: l.url.trim() }));
+  }
+
+  // SP8: home city. Same skip-if-unchanged and budget rules as the planner
+  // path of updateCuratorProfile: an untouched city never costs a geocode.
+  if (input.city !== undefined) {
+    if (input.city === null) {
+      updates["portfolio.location"] = null;
+    } else {
+      const query = input.city.trim();
+      const current = (snap.data()?.portfolio as { location?: PortfolioLocation | null } | undefined)?.location ?? null;
+      if (current && current.geocodedFrom === query) {
+        updates["portfolio.location"] = current;
+      } else {
+        await consumeGeocodeBudget(uid);
+        const result = await getGeocoder().geocode(query);
+        if (!result) throw new HttpsError("invalid-argument", GEOCODE_FAILURE_MESSAGE);
+        const location: PortfolioLocation = { city: result.city, geo: { lat: result.lat, lng: result.lng }, geocodedFrom: query };
+        updates["portfolio.location"] = location;
+      }
+    }
   }
 
   // Legacy data: profiles created before the portfolio seed (Task 5) may lack
