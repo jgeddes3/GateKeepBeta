@@ -61,6 +61,8 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   // select 2, save, deselect all, save must hit the guard below even
   // though `initial` still says zero.
   const [savedGenres, setSavedGenres] = useState<string[]>(initial?.genres ?? []);
+  const [city, setCity] = useState(initial?.location?.city ?? "");
+  const [savedCity, setSavedCity] = useState(initial?.location?.city ?? "");
   const [busy, setBusy] = useState(false);
   const toggleGenre = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
@@ -83,11 +85,14 @@ export function BioGenresForm({ profileId, initial, onSaved }:
     // both treat an omitted field as "leave it alone", but an explicit []
     // fails the 1-3-genres check.
     const payload = genres.length > 0 ? { profileId, bio, genres } : { profileId, bio };
+    const trimmedCity = city.trim();
+    if (trimmedCity !== savedCity) Object.assign(payload, { city: trimmedCity === "" ? null : trimmedCity });
     const v = validatePortfolioUpdate(payload);
     if (!v.ok) { window.alert(v.reason); return; }
     setBusy(true);
     if (await callOrAlert("updatePortfolio", payload)) {
       if (genres.length > 0) setSavedGenres(genres);
+      setSavedCity(trimmedCity);
       onSaved?.();
     }
     setBusy(false);
@@ -105,6 +110,14 @@ export function BioGenresForm({ profileId, initial, onSaved }:
           placeholder="Tell curators and fans who you are…"
           onChange={(e) => setBio(e.target.value)}
         />
+        <label className="grid gap-1.5">
+          <span className="font-sora text-sm font-medium text-gk-text">Home city</span>
+          <Input
+            placeholder="Where you're based"
+            value={city}
+            onChange={(e) => setCity(e.target.value)}
+          />
+        </label>
         <div className="grid gap-2">
           <span className="font-sora text-sm font-medium text-gk-text">Genres (up to 3)</span>
           <div className="flex flex-wrap gap-2">
@@ -116,7 +129,7 @@ export function BioGenresForm({ profileId, initial, onSaved }:
           </div>
         </div>
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
-          {busy ? "Saving…" : "Save bio & genres"}
+          {busy ? "Saving…" : "Save bio, city & genres"}
         </Button>
       </CardContent>
     </Card>
