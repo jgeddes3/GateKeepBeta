@@ -70,6 +70,13 @@ service cloud.firestore {
           && request.resource.data.createdAt is int;
         allow delete: if isOwner(uid);
       }
+
+      // SP5c: the person's own Express account flags and payout memo. Owner
+      // read; server-write only.
+      match /private/stripe {
+        allow read: if isOwner(uid);
+        allow write: if false; // Cloud Functions only
+      }
     }
 
     match /profiles/{profileId} {
@@ -346,6 +353,16 @@ service cloud.firestore {
     // uid field is the truth for list queries; the id is a convenience.
     match /follows/{followId} {
       allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow write: if false; // Cloud Functions only
+    }
+
+    // SP5c: a member's share of a settlement that is waiting for their
+    // account to be enabled. The member, the profile's members, and admin
+    // read it; the distribute and release paths write it.
+    match /heldShares/{heldId} {
+      allow read: if isAdmin()
+        || (signedIn() && request.auth.uid == resource.data.uid)
+        || isMember(resource.data.profileId);
       allow write: if false; // Cloud Functions only
     }
 

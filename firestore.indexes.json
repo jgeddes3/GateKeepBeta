@@ -308,7 +308,15 @@
     "fields": [
       { "fieldPath": "uid", "order": "ASCENDING" },
       { "fieldPath": "createdAt", "order": "DESCENDING" }
-    ] }
+    ] },
+  { "collectionGroup": "ledger", "queryScope": "COLLECTION",
+    "fields": [ { "fieldPath": "profileId", "order": "ASCENDING" }, { "fieldPath": "at", "order": "DESCENDING" } ] },
+  { "collectionGroup": "ledger", "queryScope": "COLLECTION",
+    "fields": [ { "fieldPath": "uid", "order": "ASCENDING" }, { "fieldPath": "at", "order": "DESCENDING" } ] },
+  { "collectionGroup": "heldShares", "queryScope": "COLLECTION",
+    "fields": [ { "fieldPath": "uid", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] },
+  { "collectionGroup": "heldShares", "queryScope": "COLLECTION",
+    "fields": [ { "fieldPath": "profileId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
     "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },
