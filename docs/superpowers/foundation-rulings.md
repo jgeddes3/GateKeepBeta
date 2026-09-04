@@ -32,12 +32,19 @@ Decisions taken so the build wouldn't stall. Each is reversible; the "cost if wr
 ## Deferred to sub-project 2 (recorded, non-blocking)
 
 - Admin user-lookup **name search** (email-exact is the v1 lookup key).
+  **RESOLVED (SP3):** `searchUsersByName` in `functions/src/adminTools.ts`, backed by `displayNameLower` and the one-shot `backfillDisplayNameLower`.
 - Join-wizard in-flight guard / orphaned-draft cleanup (`deleteProfile` is the cleanup path).
+  **RESOLVED (SP2; SP10 spec 5.6):** the draft cap is checked inside `createProfileDraft`'s transaction (`functions/src/profiles.ts`) and `deleteProfile` is the cleanup path.
 - `deleteProfile` leaves orphaned `pending` invites; `deleteProfile` has no profile-status restriction (confirm product intent, likely fine).
+  **RESOLVED (SP2 ruling 4; SP10 spec 5.6):** `deleteProfile` is draft/rejected-only server-side (`functions/src/profiles.ts`, status gate after `requireProfileAdmin`; confirmed product intent), and since sub-project 10 it batch-revokes the profile's `pending` invites in the same cascade.
 - Mobile account-screen dedup (3 byte-identical screens); shared `requireAuth` helper consolidation.
+  **RESOLVED (SP2, SP3):** one shared `apps/mobile/src/shell/AccountScreen.tsx` behind three thin wrappers; `requireVerifiedEmail` has a single definition in `functions/src/guards.ts`.
 - `@handle` vanity URL rewrite, currently `/u/[handle]`.
+  **RESOLVED (SP2):** `apps/web/next.config.ts` rewrites `/@:handle` and `/@:handle/shows` to `app/u/[handle]` and 301s the old `/u/` form.
 - Rejected-profile revise+resubmit UI (server-complete, no client surface yet).
+  **RESOLVED (SP2; SP10 spec 5.6):** the editors render "Resubmit for review" for a `rejected` profile (`apps/web/app/dashboard/portfolio/[profileId]/page.tsx` and the curator and mobile twins); sub-project 10 moved the resubmit cooldown to the server-only `users/{uid}.lastProfileRejectedAt` so delete-and-recreate cannot bypass it.
 - Mobile lint has 2 pre-existing errors, add "mobile lint green" to sub-project 2's definition of done.
+  **RESOLVED (SP2 Task 15):** `apps/mobile/eslint.config.js` is tracked and mobile lint 0 errors is a merge gate.
 
 ---
 

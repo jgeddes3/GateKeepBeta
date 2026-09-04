@@ -51,11 +51,14 @@ Foundation record: `docs/superpowers/foundation-rulings.md`
   confirmation, mobile account-screen dedup, `requireAuth`/`requireVerifiedEmail` consolidation
   (three local copies exist, see `functions/src/guards.ts`'s comment). Plus the EAS production
   build + native App Check launch-prep track (blocked on external accounts).
+  **RESOLVED (SP3), except the launch track:** every deferred item is annotated resolved in `foundation-rulings.md` (SP3, SP2, and SP10 spec 5.6 for the orphaned invites); the EAS production build and native App Check remain owner-owed (HANDOFF table rows 3, 4, 8).
 - **Widen `profiles/{id}/private/booking` read access** to members of approved curator profiles
   (spec §4/§5, the rules comment in `firestore.rules` marks the spot). Until then only profile
   members + admins can read rates.
+  **SUPERSEDED (SP4 Task 2):** SP3 widened the read, then SP4 removed the blanket disjunct and replaced it with the server-built `profiles/{id}/private/curatorBooking` projection (`firestore.rules`, `functions/src/bookingVisibility.ts`); see the M-12/M-13 annotations in `sp3-rulings.md`.
 - **Curator profiles get the wizard/portfolio treatment**, reuse the SP2 component/guard
   patterns; the mobile DO-NOT-COPY checklists in plan Tasks 13/14 apply to any new screens.
+  **RESOLVED (SP3):** `functions/src/curator.ts`, `apps/web/src/curator/CuratorForms.tsx`, `apps/mobile/src/curator/`.
 - **If profile suspension (as distinct from reject) is ever added**: it must sweep the `public/`
   prefixes the way `deleteProfile` does, or approved objects survive world-readable by path
   (rules-audit note).

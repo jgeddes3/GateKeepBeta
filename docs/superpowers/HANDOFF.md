@@ -1,6 +1,6 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-09-02, after the 7
+Read this first in any new session or on a new machine. Last updated 2026-09-03, after the 10
 merge. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
@@ -46,16 +46,37 @@ Done and merged (each has a rulings doc that is the authority for its area):
    off device, same posture as sub-6's door scanner before it. The Discover-page marketing capture
    for the landing page's fan section is also still owed (it currently reuses artist-page.jpg).
 
-10A. Hardening branch A (merged 2026-09-02 at `ee433d4`, plan
-   `plans/2026-09-02-hardening-sweep.md`): every em dash removed repo-wide, Cloud Functions on
-   Node 22 (`.nvmrc`), the `tickets.orderId` and `members.uid` index overrides repaired, `.claude/`
-   local files ignored, and GitHub Actions CI (`.github/workflows/ci.yml`) running every gate plus
-   an em-dash check on every push. Sub-project 7 merged main after this and re-ran every gate
-   under Node 22 before landing.
+10. Hardening, branches A and B (`sp10b-rulings.md`): no new features. Branch A (merged
+   2026-09-02 at `ee433d4`, plan `plans/2026-09-02-hardening-sweep.md`): every em dash removed
+   repo-wide, Cloud Functions on Node 22 (`.nvmrc`), the `tickets.orderId` and `members.uid` index
+   overrides repaired, `.claude/` local files ignored, and GitHub Actions CI
+   (`.github/workflows/ci.yml`) running every gate plus an em-dash check on every push. Sub-project
+   7 merged main after branch A and re-ran every gate under Node 22 before landing. Branch B (spec
+   `specs/2026-09-02-hardening-design.md`, plan `plans/2026-09-02-hardening.md`) closed the audit's
+   money, lifecycle, and copy defects: transfer sourcing, two Stripe webhook scopes, disputes, the
+   settlement webhook race, events cancelled and refunded when a curator is unpublished, admin
+   `takedownEvent`, deletion refusals with named blockers, auth `onDelete` cascade, push-token
+   hygiene, fail-closed geocoder, poster upload, notification deep links, scanner offline panel,
+   buyer order cancel with a five-minute expiry job, series end handling, and env-driven Firebase
+   config. Owner smoke owed: the second Stripe endpoint and a simulated dispute, the new EAS dev
+   build, then the 9A, 9B, 6, and 7 lists plus the sub-10 additions (table below, rows 48 to 59).
 
-NEXT: **10B Hardening branch B** (spec `specs/2026-09-02-hardening-design.md`, plan
-`plans/2026-09-02-hardening.md`, branches from main), then 8 Search. Deferred: 5c band payout
-splits.
+## Roadmap
+
+- **8 Search**: text search, ranking, the map view, venue filter chips, saved searches and alerts,
+  sitemap, handle redirects, reserved handles, a rate-limit helper, and the internals of both
+  placeholder directories (`apps/web/app/gigs/`, the curator musicians directory, and their
+  mobile twins). Spec and plan are on main, merged in by Task 35. Owner decision 2026-09-03: run
+  it subagent-driven in a fresh worktree from main as soon as 10B lands, re-running its plan's
+  pre-flight scan against the merged main first.
+- **5c Band payout splits**: admin-initiated member payout splits, per-order ticket settlement
+  transfers (`source_transaction`), payout history, member roles on payout buttons.
+- **Messaging**: general musician to curator chat beyond the terms-only booking thread.
+  Unscheduled; the mobile Messages tabs stay coming-soon until it gets a number.
+- **Follow-on if wanted**: the accessibility and state-coverage findings (antislop #10 to #29)
+  and the hardening ledger rows L62 to L80.
+- Unscheduled by design: advertising, subscriptions, 2FA beyond Google-only admins, SMS, video
+  hosting, guest checkout, seat maps, promo codes, resale.
 
 **Audit context:** `docs/superpowers/audit-2026-09-01.md` is the whole-project audit run after
 the 6 merge (19 blockers and near-blockers, per-area verdicts, the SP7 brief, and the
@@ -69,12 +90,48 @@ the built surface missed. Detail reports live in `docs/superpowers/audit/` and
 - `DESIGN.md` (repo root): tokens, fonts (Syne + Sora), radius tiers, accent dosage, glass cap.
 - The antislop skills (`~/.claude/skills/antislop`, `-ui`, `-copywriting`): binding on UI and
   copy work. Install from `miqdadbadjuber/anti-slop` via `npx skills add` if missing.
-- **No em dashes anywhere**: code, comments, copy, docs, commit messages.
+- **No em dashes anywhere**: code, comments, copy, docs, commit messages. Enforced repo-wide by
+  CI since sub-project 10 (2026-09): the workflow's last step fails on any U+2014 under
+  `apps/**`, `functions/**`, `packages/**`, `tests-rules/**`, `scripts/**`, `docs/**`,
+  `README.md`, `DESIGN.md`, and every rules file (DESIGN.md names the character instead of
+  printing it).
+- Two sweeps exist, so never write a bare "step N": always `dailySweep step N` (nine steps) or
+  `paymentsSweep step N` (eleven steps). README lists both.
+- Specs are binding over plans. Plans are historical execution records whose snippets may
+  predate review fixes; code and the rulings doc win over both.
+- Emulator suites run as one blocking foreground call (`pnpm emu:test` takes about ten minutes;
+  use a 600000 ms timeout). A backgrounded run that then waits on itself stalls forever.
+- `README.md` holds the env-var table, the launch checklists, and the smoke walkthroughs.
 - Owner's AI-slop blocklist beyond the skills: no lucide icons, no Inter/Geist/Space Grotesk,
   no bento grids, no fake testimonials or invented numbers (the full list is in sp9a's spec).
 - Each sub-project runs: brainstorm, spec, plan, subagent-driven execution with review gates,
   final whole-branch review, merge to main, rulings doc. Direct commits to main between
   sub-projects are fine for small fixes.
+
+## Standing tripwires (read before touching the named area)
+
+1. `resumeSeries` does not exist and pause is one-way. A resume must add `pausedBy` (`"curator"`
+   or `"admin"`) and an approval gate so a curator cannot resume a series an admin paused; a
+   naive resume is a Critical regression (`sp3-rulings.md` ruling 19).
+2. Android `openBrowserAsync` resolves when the browser opens, not when it closes. Any
+   in-app-browser flow must re-sync on app foreground and browser dismissal, never on the
+   promise (`sp5b-rulings.md` ruling 4).
+3. Stripe caches an idempotency key's response for 24 hours. A same-key retry replays the cached
+   result, so a retry that must charge again needs an attempt-scoped key, and a
+   grace-versus-cancel race can delay a buyer remainder up to a day (`sp5-rulings.md`,
+   `sp6-rulings.md`).
+4. Web RSC boundary: a server file never imports a VALUE from a `"use client"` module (types are
+   fine). Verify every changed web route with a live page load, not only `next build`
+   (`sp9a-rulings.md`).
+5. `source_transaction` cap: Stripe (and FakeStripe) refuse a transfer sourced from a charge once
+   the sourced transfers against that charge exceed its amount. `finalizeSettlementSuccess`
+   sources only when `earnings <= chargeAmountCents` and records `sourced: false` otherwise; a
+   new transfer path must make the same decision (`sp10b-rulings.md` ruling 5).
+6. Two Stripe webhook scopes: "Your account" events verify with `STRIPE_WEBHOOK_SECRET`,
+   "Connected accounts" events (`account.updated`, `payout.*`) with
+   `STRIPE_CONNECT_WEBHOOK_SECRET`. An event whose scope does not match the secret that verified
+   it is refused, so a new handler must be registered on the endpoint of the scope it belongs to
+   (`sp10b-rulings.md` ruling 6).
 
 ## Dev environment quickstart
 
@@ -99,24 +156,75 @@ the built surface missed. Detail reports live in `docs/superpowers/audit/` and
   single blocking call), `pnpm emu:rules` (114), web lint + build, mobile lint.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
-  locally; EAS cloud is unaffected).
+  locally; EAS cloud is unaffected). Node 22 is the functions runtime since sub-project 10
+  (`.nvmrc`).
 
-## Owner-owed items (not code)
+## Owner-owed (not code): the consolidated launch table
 
-- Signed-in visual smoke of the redesigned web app (checklist in `sp9a-rulings.md`): the hard
-  pre-launch gate.
-- Visual smoke of the redesigned mobile app on the next EAS build (checklist in README, "Sub-project
-  9B smoke checklist"; both themes, phone width): the hard mobile pre-launch gate, since this machine
-  cannot run the dev client.
-- Eyeball two derived colors (light focus rust #BF5038, on-destructive white) on /design.
-- Real concert photos into `apps/web/public/hero/` (2560x1440 JPG) replacing placeholders.
-- Stripe go-live checklist (`sp5-rulings.md`), sp5b device-testing steps (merchant id, EAS env
-  key, dev build), Firebase console items and legal-page review (README launch checklist).
-- New EAS dev build for `expo-location` (joined the native deps in sub-project 7, for the deck's
-  distance sort and "near me" labels): the mobile discover deck cannot be exercised on device
-  without it.
-- The Discover-page marketing capture for the landing page's fan section (`FanStorySection` in
-  `apps/web/src/marketing/LandingSections.tsx`): it currently reuses `artist-page.jpg` rather than
-  a real screenshot of the deck or the `/discover` list.
-- Device smoke of the discover deck (checklist in README, "Sub-project 7 smoke checklist"): entirely
-  unverified off a real device, same posture as sub-6's door scanner before it.
+Consolidated from the docs audit (`docs/superpowers/audit/docs-consistency.md` section B, rows 1
+to 47, verified against code on 2026-09-01) plus sub-project 10's additions (rows 48 to 59).
+Blocking: Launch = before real traffic; Live = before the live-mode Stripe flip; Device = before
+on-device testing; Runbook = a procedure, not a config; Optional = revisit on evidence. README
+section names refer to the README as rewritten in sub-project 10.
+
+| # | Item | Blocking | Where documented |
+|---|---|---|---|
+| 1 | Create the PROD Firebase project under the business Google account; keep `gatekeep-dev-jg` as DEV | Launch | `foundation-rulings.md` |
+| 2 | Enable Email/Password, Google, Apple sign-in providers (dev and prod) | Launch | README "Manual follow-ups" |
+| 3 | App Check: register web (reCAPTCHA v3 site key) and mobile (Play Integrity / App Attest); monitor mode until native mobile App Check ships; do not enforce Storage before it | Launch | README "Manual follow-ups" |
+| 4 | App Check enforcement is two changes: the console flip plus `enforceAppCheck: true` per onCall in the same change (absent today), with the SSR exception documented | Launch | README "Manual follow-ups"; audit cross-cutting #6 |
+| 5 | Never App-Check-enforce over `stripeWebhook` | Launch | README "Sub-project 5 launch checklist" |
+| 6 | Set the real `GOOGLE_WEB_CLIENT_ID` (`apps/mobile/src/auth/config.ts` is a placeholder) | Device | README "Manual follow-ups" |
+| 7 | Sentry projects, then `NEXT_PUBLIC_SENTRY_DSN` and `EXPO_PUBLIC_SENTRY_DSN` | Launch | README "Environment variables" |
+| 8 | EAS: `eas login`, Firebase Android and iOS apps, `google-services.json` / `GoogleService-Info.plist` plus the keystore SHA-1, `googleServicesFile` in `app.json`; Apple Developer Program for store publication | Device | README "Manual follow-ups" |
+| 9 | Verify `firebase deploy --only functions` resolves `workspace:*` for `@gatekeep/shared` | Launch | README "Manual follow-ups" |
+| 10 | Confirm Email Enumeration Protection is on (dev and prod) | Launch | README "Manual follow-ups" |
+| 11 | `staging/` 24h GCS lifecycle rule on the production bucket, kept as a versioned `lifecycle.json` (LAUNCH BLOCKER; the Storage emulator cannot test it) | Launch | README "Manual follow-ups"; `sp2-rulings.md` |
+| 12 | `PUBLIC_PROFILE_HOST` real domain (the mobile "View public page" link stays hidden until then) | Launch | README "Manual follow-ups" |
+| 13 | `NEXT_PUBLIC_SITE_URL` (canonical and OG base) | Launch | README "Environment variables" |
+| 14 | `STORAGE_BUCKET` on the production functions deploy, plus the production `NEXT_PUBLIC_FIREBASE_*` and `EXPO_PUBLIC_FIREBASE_*` sets | Launch | README "Environment variables" |
+| 15 | `GEOCODER_PROVIDER=google` and `firebase functions:secrets:set GEOCODER_API_KEY` (the geocoder fails closed without them since sub-project 10) | Launch | README "Sub-project 3 launch checklist" |
+| 16 | Revisit the 50/day geocode budget constant if usage needs it | Optional | README "Sub-project 3 launch checklist" |
+| 17 | After first deploy: the Cloud Scheduler jobs for `dailySweep`, `paymentsSweep`, and `ticketOrderExpiry` exist with `retryCount: 3` and sane next-run times | Launch | README "Gigs & series", "Payments" |
+| 18 | Monitor `adminAlerts` (the sweeps' escalation queue) from day one | Runbook | README "Payments" |
+| 19 | Confirm every composite index and field override in `firestore.indexes.json` shows Enabled after the first deploy (the emulator enforces none of them) | Launch | README launch checklists (3, 4, 5, 6) |
+| 20 | Set `LAUNCH_TIMEZONE` to the launch metro (`packages/shared/src/types.ts` is `America/New_York`) | Launch | README "Sub-project 3 launch checklist" |
+| 21 | UTC recurrence caveat: disclosure in the series forms, no fix pending | Informational | README "Sub-project 3 launch checklist" |
+| 22 | Run `backfillDisplayNameLower` once after deploy | Launch | README "Sub-project 3 launch checklist" |
+| 23 | Deploy the tightened rules and run `backfillBookingVisibility` in the SAME release (CRITICAL ordering) | Launch | README "Sub-project 4 launch checklist"; `sp4-rulings.md` ruling 3 |
+| 24 | Device pass: Hermes ICU date formatting, nested events Stack headers, native Google and Apple sign-in on a dev-client build | Device | README "Sub-project 3 launch checklist" |
+| 25 | Register both Stripe webhook endpoints ("Your account" and "Connected accounts") and set `STRIPE_WEBHOOK_SECRET` and `STRIPE_CONNECT_WEBHOOK_SECRET`; a fresh pair for live mode | Launch | README "Sub-project 5 launch checklist" |
+| 26 | Firestore TTL policy on `stripeEvents.expireAt` | Launch | README "Sub-project 5 launch checklist" |
+| 27 | `firebase functions:secrets:set STRIPE_SECRET_KEY`; `APP_ORIGIN` on functions; `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` then REBUILD web | Launch | README "Stripe key setup" |
+| 28 | Re-verify `RealStripe.debitConnectedAccount` (legacy `charges.create({source})`) against current Connect docs | Live | README "Sub-project 5 launch checklist" |
+| 29 | Re-verify the 4% instant-payout retail fee against Stripe's current cost | Live | README "Sub-project 5 launch checklist" |
+| 30 | Activate Stripe Connect under the business entity and swap live keys; never live under the personal entity | Live | README "Sub-project 5 launch checklist" |
+| 31 | Manual real-test-mode smoke walkthrough steps 1 to 8 (web), with both endpoints attached | Launch | README "Manual smoke walkthrough" |
+| 32 | Apple merchant id `merchant.app.gatekeep.mobile` and the Apple Pay certificate; Google Pay enabled in Stripe | Device | README "Sub-project 5b launch checklist" |
+| 33 | `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` as an EAS env var (and `apps/mobile/.env` locally) | Device | README "Sub-project 5b launch checklist" |
+| 34 | New EAS dev-client build, both platforms (native deps changed in 5b, 9B, 6, and 10) | Device | README "Sub-project 5b launch checklist" |
+| 35 | Mobile smoke walkthrough steps 9 to 15 (sheets, 3DS, past-due, wallets, onboarding, payouts, true-up) | Device | README "Manual smoke walkthrough" |
+| 36 | 9A signed-in web visual smoke, both themes, full coverage list | Launch (hard gate) | `sp9a-rulings.md` |
+| 37 | Eyeball `--gk-focus` light `#BF5038` and `--gk-on-destructive` white on `/design` | Launch | `sp9a-rulings.md` |
+| 38 | Real concert photos into `apps/web/public/hero/` and `apps/web/src/marketing/heroImages.ts` | Launch | README "Sub-project 9A launch checklist" |
+| 39 | Counsel review of the `/terms` and `/privacy` placeholder text | Launch | README "Sub-project 9A launch checklist" |
+| 40 | Footer `CONTACT_EMAIL` (`hello@gatekeep.app`): own the mailbox or change it | Launch | README "Sub-project 9A launch checklist" |
+| 41 | 9B mobile visual smoke on the next EAS build, both themes, coverage list | Device (hard gate) | README "Sub-project 9B smoke checklist" |
+| 42 | Confirm the token PaymentSheet `appearance` on the owner's build | Device | `sp9b-rulings.md` |
+| 43 | SP6 web smoke (create, promote, tiers, publish, public page, free RSVP, PAID with real test keys, wallet QR, attendees, grace refund, cancel), both themes | Launch | README "Sub-project 6 smoke checklist" |
+| 44 | SP6 mobile smoke including the DOOR SCANNER on a real camera, a two-account transfer, tap check-in | Device (top priority) | README "Sub-project 6 smoke checklist" |
+| 45 | Poster upload end to end on a device (shipped in sub-project 10; unverified on a real camera roll) | Device | README "Sub-project 6 launch checklist" |
+| 46 | Content takedown two-step (unpublish, then `deleteProfile` for a scrub); the admin confirm dialog names both steps | Runbook | README "Manual follow-ups" |
+| 47 | Seed the first admins (Google accounts) with `scripts/seed-admin.ts` against the prod project id | Launch | README "Scripts" |
+| 48 | Register the second Stripe webhook endpoint ("Connected accounts") and set `STRIPE_CONNECT_WEBHOOK_SECRET`; re-run the README test-mode walkthrough with both endpoints | Launch | README "Sub-project 5 launch checklist" |
+| 49 | Simulate a dispute with card 4000 0000 0000 0259 on a deposit and on a ticket order; confirm the alert, the delinquency flag, and the reversal on a lost outcome | Launch | README "Sub-project 5 launch checklist" |
+| 50 | Stripe Radar default rules on; read the Connect dispute-liability setting | Live | README "Sub-project 5 launch checklist" |
+| 51 | Decide the platform float for ticket settlement (or move to per-order sourced transfers in 5c) | Launch | README "Sub-project 5 launch checklist" |
+| 52 | Enable 1099 delivery for Express accounts | Live | README "Sub-project 5 launch checklist" |
+| 53 | Cloud Monitoring alert policies: function error rate, and a log-based metric on `adminAlerts` document creation | Launch | audit cross-cutting #15 |
+| 54 | Firestore PITR on, a daily scheduled export bucket, and a GCP budget alert (the `ledger` has no off-Firestore copy otherwise) | Launch | audit cross-cutting #30 |
+| 55 | Web security headers and a CSP in `apps/web/next.config.ts` | Launch | audit cross-cutting #20 |
+| 56 | Mobile store-review permissions: drop the microphone permission (`expo-audio` plugin options) and add `iosUrlScheme` to the Google sign-in plugin in `apps/mobile/app.json` | Device | audit cross-cutting #19 |
+| 57 | New EAS dev build (notification handler and poster picker changed native config): the 9A, 9B, 6, and 7 smoke lists, plus the admin Events block, the poster picker end to end, the verify-email banner and retry, the scanner offline panel, the buyer cancel, the notification deep links and push taps, the booking clarity screens (run notice, counterparty lines, grace notice), the portfolio visibility toggles, and the Find-musicians grids with a summary-only projection: all skipped as live checks during execution | Device | spec 10 section 11 |
+| 58 | Deploy and confirm the new composite index `payments (musicianProfileId, settlement.status)` and the repaired `tickets.orderId` and `members.uid` overrides show Enabled | Launch | spec 10 section 11 |
+| 59 | Confirm the deployed functions run Node 22 (`firebase.json` runtime `nodejs22`) | Launch | `plans/2026-09-02-hardening-sweep.md` |

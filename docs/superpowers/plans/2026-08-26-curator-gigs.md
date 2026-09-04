@@ -1,3 +1,6 @@
+> **Historical execution record.** This plan was executed and reviewed task by task; its snippets may predate the review fixes that shipped.
+> Where the plan and the code disagree, the code and this sub-project's rulings doc win (`docs/superpowers/HANDOFF.md` lists them).
+
 # Curator Profiles & Gig Postings Implementation Plan (Sub-project 3)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

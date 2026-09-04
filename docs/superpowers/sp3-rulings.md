@@ -380,20 +380,27 @@ sub-4 brainstorming.
 - Sweep step 5 (curatorAccess retries): add a per-doc try/catch inside the drain loop, a
   deterministically-failing uid at a fixed queue position would otherwise starve every uid after it
   indefinitely (the step-level catch only bounds it per-run today).
+  **RESOLVED (SP4 Task 13 item 1):** per-doc try/catch inside the drain loop, `functions/src/scheduled.ts` dailySweep step 5.
 - `gigs.ts` updateGig neighborhood→public branch: `.data() as GigPrivateLocation` lacks
   `| undefined`, a fully missing private/location subdoc would raw-TypeError instead of the
   intended internal HttpsError (unreachable today; every writer creates the subdoc).
+  **RESOLVED (SP4 Task 13):** `.data() as GigPrivateLocation | undefined` with the intended internal HttpsError, `functions/src/gigs.ts` updateGig.
 - `removeMember`: add `isValidDocId` guards on profileId/uid (P2's hardening pattern) and
   `requireVerifiedEmail` (only sibling mutator without it).
+  **RESOLVED (SP4 Task 13 item 3):** `isValidDocId` on both ids plus `requireVerifiedEmail`, `functions/src/members.ts` removeMember.
 - S4 test gap: add a case removing a member from an already-REJECTED curator profile holding a
   stale marker, current tests would not fail if the old status=="approved" recompute gate were
   restored.
+  **RESOLVED (SP4 Task 13):** `functions/test/members.test.ts` covers removal from an already-rejected curator profile holding a stale marker.
 - `deleteProfile`: move the handles/{handle} delete AFTER the (now potentially long) gig/series
   cascade, a mid-cascade failure currently frees the handle while the profile doc still carries
   it (idempotent retry recovers; low impact, draft/rejected only).
+  **RESOLVED (SP4 Task 13 item 5):** the `handles/{handle}` delete runs after the gig and series cascade behind a precondition, `functions/src/profiles.ts` deleteProfile.
 - Invite-accept fast path (`members.ts`): decides the curatorAccess set from a profile snapshot
   read before the membership transaction, a ~100ms race with reject-from-approved can set a
   stale-TRUE marker (self-healing via S4's unconditional recompute on later removal; harden by
   re-reading status post-transaction or calling syncCuratorAccess instead).
+  **RESOLVED (SP4 Task 13 item 6):** `respondToInvite` re-reads profile status after the membership transaction, `functions/src/members.ts`.
 - `syncCuratorAccess`: unbounded sequential N+1 over a uid's memberships, cap/paginate if
   membership counts grow.
+  **PARTIALLY RESOLVED (SP4):** paginated at 100 memberships per page (`functions/src/curator.ts` syncCuratorAccess), still sequential within a page; the page cap is the recorded mitigation.
