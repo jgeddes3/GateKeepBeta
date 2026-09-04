@@ -12,7 +12,7 @@ import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
 import { notifyProfileAdmins, notifyUser } from "./notifications.js";
 import { getStripe, stripeSecretKey } from "./stripeClient.js";
 import {
-  writeLedger, recordAdminAlert, setMemberSelfDealInstantHold,
+  writeLedger, recordAdminAlert, setMemberSelfDealInstantHold, heldShareRefFields,
   IDEMPOTENCY_WINDOW_MS, isDefiniteStripeRefusalCode, stripeErrorCode,
 } from "./paymentsCore.js";
 import { getMemberStripeDoc, setReleaseHeldSharesHook } from "./memberPayouts.js";
@@ -129,16 +129,10 @@ export function describeMovedLegs(legs: DistributeLeg[]): string {
 // the amount a clawback may reverse.
 export interface DistributeResult { legs: DistributeLeg[]; transferId: string | null; sourcedAny: boolean; heldCents: number; profileCents: number }
 
-function refFields(ref: HeldShareRef) {
-  return "bookingId" in ref
-    ? { bookingId: ref.bookingId, gigId: ref.gigId, eventId: null, orderId: null }
-    : { bookingId: null, gigId: null, eventId: ref.eventId, orderId: ref.orderId };
-}
-
-function sameHeldShareRef(a: HeldShareRef, b: HeldShareRef): boolean {
-  if ("bookingId" in a) return "bookingId" in b && a.bookingId === b.bookingId && a.gigId === b.gigId;
-  return "eventId" in b && a.eventId === b.eventId && a.orderId === b.orderId;
-}
+// The four nullable ledger columns a HeldShareRef flattens to. Defined in
+// paymentsCore.ts beside `voidHeldShares`, which needs the same flattening for
+// its `share_voided` rows, and imported here rather than kept in two places.
+const refFields = heldShareRefFields;
 
 // ---------- Fix wave I2: the FROZEN distribution plan ----------
 //
@@ -445,53 +439,6 @@ export async function releaseHeldShares(uid: string, now: number): Promise<numbe
       .catch((e) => console.error(`releaseHeldShares: notification failed for ${uid}`, e));
   }
   return releasedCents;
-}
-
-// ---------- Fix wave I4: cancelling held shares when the settlement is unwound ----------
-//
-// A held share is a PROMISE against money the platform collected. When that
-// money goes back (a no-show clawback refunds the curator, a lost dispute
-// takes it off the platform, a restore re-run re-prices the date from
-// scratch), the promise has to go with it: otherwise the member's account
-// finishes onboarding weeks later and `releaseHeldShares` transfers, out of
-// the platform's own balance, a share of a night nobody was charged for.
-//
-// Only `held` and `failed` rows are touched, and only those whose `ref`
-// matches. A `released` row is money that has already reached the member and
-// stays theirs (spec section 8: the existing unwind paths recover from the
-// profile's account, never from a member who already has their share).
-// `voided` rows are excluded from both the release query and every held total.
-//
-// Returns the cents voided so a caller can log or report it. Never throws for
-// a per-doc problem; every call site is best-effort and already committed.
-export async function voidHeldShares(
-  profileId: string, ref: HeldShareRef, reason: string, now: number,
-): Promise<number> {
-  const db = getFirestore();
-  const snap = await db.collection("heldShares")
-    .where("profileId", "==", profileId).where("status", "in", ["held", "failed"]).get();
-  let voidedCents = 0;
-  for (const d of snap.docs) {
-    const held = d.data() as HeldShareDoc;
-    // The composite index is (profileId, status); the ref match is in code
-    // because a HeldShareRef is a union of two shapes and Firestore cannot
-    // equality-match either half without a third index per shape.
-    if (!sameHeldShareRef(held.ref, ref)) continue;
-    try {
-      await d.ref.update({ status: "voided", voidedAt: now, error: FieldValue.delete() });
-    } catch (e) {
-      console.error(`voidHeldShares: could not void ${d.id}`, e);
-      continue;
-    }
-    voidedCents += held.amountCents;
-    // stripeId is the heldShares doc id, the same synthetic-id convention
-    // share_held uses, so a re-run of the same unwind dedupes on the row.
-    await writeLedger({
-      kind: "share_voided", amountCents: held.amountCents, profileId, uid: held.uid, stripeId: d.id,
-      ...refFields(held.ref), detail: reason, at: now,
-    }).catch((e) => console.error(`voidHeldShares: share_voided ledger row failed for ${d.id}`, e));
-  }
-  return voidedCents;
 }
 
 // Task 4's two call sites (getMemberPayoutStatus's status-poll path, the

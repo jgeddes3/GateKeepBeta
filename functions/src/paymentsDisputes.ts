@@ -30,10 +30,14 @@ import type { WebhookHandler } from "./paymentsWebhook.js";
 import {
   clearDelinquencyIfSettled, declareCuratorDelinquent, disputeAlertId, disputeReversalAlertId,
   externalRefundAlertId, recomputePaymentSummary, recordAdminAlert, writeLedger,
+  // SP5c fix wave (I4): a lost dispute cancels any share still HELD for the
+  // money it took back, so nothing releases later out of the platform balance.
+  // From paymentsCore, NOT payoutShares: paymentsWebhook.ts imports this file,
+  // and a payoutShares edge here would close the cycle
+  // payoutShares -> memberPayouts -> paymentsPayouts -> paymentsWebhook and
+  // break every module-scope webhook registration (see voidHeldShares' own note).
+  voidHeldShares,
 } from "./paymentsCore.js";
-// SP5c fix wave (I4): a lost dispute cancels any share still HELD for the
-// money it took back, so nothing releases later out of the platform balance.
-import { voidHeldShares } from "./payoutShares.js";
 
 export type DisputePurpose = DisputeRecord["purpose"];
 

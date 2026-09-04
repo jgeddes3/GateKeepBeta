@@ -6,6 +6,7 @@ import {
   type TicketDoc, type EventDoc, type TicketTransferDoc, type TicketOrderDoc, type InviteDoc,
 } from "@gatekeep/shared";
 import { writeAudit } from "./review.js";
+import { reassignShareOnRemoval } from "./payoutShares.js";
 
 // Consumes membership invariants (Task 8: never-zero-admins per profile) and
 // the users/{uid} tree created by onUserCreated (Task 5).
@@ -133,15 +134,6 @@ export async function cascadeDeleteUser(
   // money and release (or void) on their own paths.
   await runPhase(uid, "memberships", async () => {
     const now = Date.now();
-    // LAZY on purpose, and this is load-bearing: this module is pulled in by
-    // authTriggers.ts, which index.ts loads FIRST. A static import of
-    // payoutShares.ts here drags the whole payments module graph in ahead of
-    // paymentsWebhook.ts and its `webhookHandlers` registry, and every module
-    // that registers a handler onto that registry at module scope then dies
-    // with "Cannot access 'webhookHandlers' before initialization". Deferring
-    // the import to call time (account deletion is rare, and nothing here is
-    // hot) keeps index.ts's load order exactly as it was.
-    const { reassignShareOnRemoval } = await import("./payoutShares.js");
     for (const m of memberships.docs) {
       const profileId = m.ref.parent.parent!.id;
       await reassignShareOnRemoval(db, profileId, uid, now)

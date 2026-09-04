@@ -64,10 +64,9 @@ import {
   isUnconfirmedPayDueDeposit, recomputePaymentSummary, recordAdminAlert, resolveDepositPending,
   writeLedger, clawbackAlertId, depositPendingAlertId, depositRacedAlertId, settlementPayoutAlertId,
   settlementPendingAlertId, settlementRacedAlertId, IDEMPOTENCY_WINDOW_MS, setSelfDealInstantHold,
+  voidHeldShares,
 } from "./paymentsCore.js";
-import {
-  distributeEarnings, voidHeldShares, DistributePartialError, describeMovedLegs,
-} from "./payoutShares.js";
+import { distributeEarnings, DistributePartialError, describeMovedLegs } from "./payoutShares.js";
 
 // How long `payPastDue` parks a `past_due` occurrence's `nextRetryAt` while the
 // curator confirms its on-session intent in the browser. Elements confirms in
