@@ -4,7 +4,7 @@ import {
 } from "./helpers";
 import { addMember, enableMemberAccount, memberStripe } from "./payoutFixtures";
 import * as adminApp from "firebase-admin/app";
-import { getFirestore as adminFirestore } from "firebase-admin/firestore";
+import { getFirestore as adminFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   SETTLEMENT_DELAY_MS,
   type GigDoc, type LedgerEntry,
@@ -120,6 +120,17 @@ async function accountBalanceCents(accountId: string): Promise<number> {
   return ((await fakeObject(accountId))?.balanceCents as number | undefined) ?? 0;
 }
 
+// FakeStripe's refusal knob (stripeFake/config.failTransferAccountIds), the
+// same mechanism eventsSettlement.test.ts uses: transfers to this account are
+// refused with a `balance_insufficient`-shaped error, and the error is
+// deliberately not cached under its idempotency key, so the retry after the
+// knob clears re-executes rather than replaying the refusal.
+async function failTransfersTo(accountId: string, on: boolean): Promise<void> {
+  await adb.doc("stripeFake/config").set(
+    { failTransferAccountIds: on ? FieldValue.arrayUnion(accountId) : FieldValue.arrayRemove(accountId) },
+    { merge: true });
+}
+
 async function musicianAccountId(profileId: string): Promise<string> {
   const sp = (await adb.doc(`profiles/${profileId}/private/stripe`).get()).data() as { accountId?: string } | undefined;
   if (!sp?.accountId) throw new Error(`musicianAccountId: profile ${profileId} has no accountId after makeMoneyReady.`);
@@ -184,7 +195,14 @@ describe("booking settlement with shares", () => {
     expect(rows.find((r) => r.kind === "share_held")?.uid).toBe(drums.uid);
     expect(rows.find((r) => r.kind === "earnings_transfer")?.sourced).toBe(true);
     const bassRow = legs.find((r) => r.uid === bass.uid)!;
-    expect(await fakeObject(bassRow.stripeId!).then((t) => t?.sourceChargeId)).toBe(paid.settlement.intentId ? (await fakeObject(paid.settlement.intentId))?.chargeId : undefined);
+    // FIX WAVE M3(d): assert the intent id is really there before comparing
+    // through it. The old `paid.settlement.intentId ? ... : undefined` ternary
+    // made a MISSING intent compare `undefined` to `undefined` and pass, which
+    // is exactly the regression (a settlement with no recorded intent) this
+    // line is supposed to catch.
+    expect(typeof paid.settlement.intentId).toBe("string");
+    expect(await fakeObject(bassRow.stripeId!).then((t) => t?.sourceChargeId))
+      .toBe((await fakeObject(paid.settlement.intentId!))?.chargeId);
     const total = legs.reduce((s, r) => s + r.amountCents, 0) + (rows.find((r) => r.kind === "share_held")?.amountCents ?? 0);
     expect(total).toBe(paid.transfer.amountCents);
   });
@@ -227,5 +245,66 @@ describe("booking settlement with shares", () => {
     expect(await accountBalanceCents(bassAccountId)).toBe(bassBalanceBefore);
     const reversalRow = (await ledgerRows(b.bookingId)).find((r) => r.kind === "transfer_reversal")!;
     expect(reversalRow.amountCents).toBe(profileLeg.amountCents);
+
+    // FIX WAVE I4: the drummer's share was HELD against money the curator has
+    // just been refunded. Left `held` it would transfer out of the platform's
+    // own balance the moment they onboarded, for a date nobody paid for.
+    const drumsHeld = await adb.collection("heldShares").where("uid", "==", drums.uid).get();
+    expect(drumsHeld.size).toBe(1);
+    expect(drumsHeld.docs[0].data().status).toBe("voided");
+    expect(typeof drumsHeld.docs[0].data().voidedAt).toBe("number");
+    const voidedRow = (await ledgerRows(b.bookingId)).find((r) => r.kind === "share_voided");
+    expect(voidedRow?.uid).toBe(drums.uid);
+    expect(voidedRow?.amountCents).toBe(drumsHeld.docs[0].data().amountCents);
+  });
+
+  // FIX WAVE M3(a): CRASH RESUME across a split settlement. The member leg
+  // transfers, the profile leg is refused, and the attempt is re-run once the
+  // refusal clears. The frozen plan (fix wave I2) plus the per-leg idempotency
+  // keys are what make the re-run finish the settlement instead of paying the
+  // member a second time.
+  it("resumes a settlement whose profile leg was refused after a member leg had already transferred", async () => {
+    const b = await makeEndedBooking("spl3");
+    const bass = await addMember(b.musician.profileId, "spl3b");
+    await callFn("createMemberOnboardingLink", {}, bass.user);
+    expect(await enableMemberAccount(bass.uid)).toBe(200);
+    // The member leg is FIRST in the shares list, so it transfers before the
+    // profile leg splitCents places last, which is what makes the refusal a
+    // partial distribution rather than a clean first-leg failure.
+    await callFn("setPayoutShares", { profileId: b.musician.profileId, shares: [
+      { payee: { kind: "member", uid: bass.uid }, percent: 60 },
+      { payee: { kind: "profile" }, percent: 40 },
+    ] }, b.musician.owner.user);
+    await scheduleSettlement(b.bookingId, b.gigId);
+
+    const profileAccountId = await musicianAccountId(b.musician.profileId);
+    const bassAccountId = (await memberStripe(bass.uid))!.accountId!;
+    await failTransfersTo(profileAccountId, true);
+    await expect(chargeSettlement({ bookingId: b.bookingId, gigId: b.gigId, now: Date.now() })).rejects.toThrow();
+    // The member has been paid; the profile has not, and the settlement is not
+    // terminal, so nothing downstream can treat this date as done.
+    const bassAfterFailure = await accountBalanceCents(bassAccountId);
+    expect(bassAfterFailure).toBeGreaterThan(0);
+    expect(await accountBalanceCents(profileAccountId)).toBe(0);
+    expect((await getPayment(b.bookingId, b.gigId))?.settlement.status).not.toBe("paid");
+
+    await failTransfersTo(profileAccountId, false);
+    expect(await chargeSettlement({ bookingId: b.bookingId, gigId: b.gigId, now: Date.now() }))
+      .toEqual({ outcome: "charged", transferred: true });
+
+    const paid = (await getPayment(b.bookingId, b.gigId))!;
+    expect(paid.settlement.status).toBe("paid");
+    expect(paid.transfer.legs).toBe(2);
+    const rows = await ledgerRows(b.bookingId);
+    const bassLeg = rows.find((r) => r.kind === "share_transfer" && r.uid === bass.uid)!;
+    const profileLeg = rows.find((r) => r.kind === "share_transfer" && r.uid == null)!;
+    // ONCE each: the member's balance is unchanged by the resume, and the
+    // profile received exactly its own leg.
+    expect(await accountBalanceCents(bassAccountId)).toBe(bassAfterFailure);
+    expect(bassAfterFailure).toBe(bassLeg.amountCents);
+    expect(await accountBalanceCents(profileAccountId)).toBe(profileLeg.amountCents);
+    expect(bassLeg.amountCents + profileLeg.amountCents).toBe(paid.transfer.amountCents);
+    // One share_transfer row per leg, not one per attempt.
+    expect(rows.filter((r) => r.kind === "share_transfer")).toHaveLength(2);
   });
 });

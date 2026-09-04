@@ -43,7 +43,7 @@ describe("distributeEarnings", () => {
     const base = `test:di1:${Date.now()}`;
     const input = {
       profileId: band.profileId, amountCents: 1001, source: null, purpose: "earnings" as const,
-      ref: { bookingId: "b1", gigId: "g1" }, idempotencyBase: base, meta: { purpose: "earnings" }, profileAccountId: sp.accountId as string, now: Date.now(),
+      ref: { bookingId: "b1", gigId: "g1" }, idempotencyBase: base, meta: { purpose: "earnings" }, profileAccountId: sp.accountId as string, selfDeal: false, now: Date.now(),
     };
     const r1 = await distributeEarnings(input);
     expect(r1.legs.map((l) => [l.payee.kind, l.amountCents, l.outcome])).toEqual([
@@ -92,11 +92,100 @@ describe("distributeEarnings", () => {
     expect(releasedNote.size).toBe(1);
   });
 
+  // FIX WAVE I2: the legs a base distributes are frozen on its FIRST call. The
+  // bug this pins: distributeEarnings used to re-read the shares on every
+  // call, so clearing them between a partial distribution and its retry sent
+  // the WHOLE amount to the profile under the bare base key (a key nothing had
+  // consumed) on top of the member legs already paid.
+  it("freezes the plan per base, so a share change between a call and its retry cannot pay twice", async () => {
+    const band = await makeApprovedMusicianProfile("di3");
+    const bass = await addMember(band.profileId, "di3b");
+    const drums = await addMember(band.profileId, "di3d");
+    await callFn("createMemberOnboardingLink", {}, bass.user);
+    expect(await enableMemberAccount(bass.uid)).toBe(200);
+    await callFn("setPayoutShares", { profileId: band.profileId, shares: [
+      { payee: { kind: "member", uid: bass.uid }, percent: 50 },
+      { payee: { kind: "member", uid: drums.uid }, percent: 30 },
+      { payee: { kind: "profile" }, percent: 20 },
+    ] }, band.owner.user);
+    await readyProfileAccount(band.profileId, band.owner.user);
+    const sp = (await adb.doc(`profiles/${band.profileId}/private/stripe`).get()).data()!;
+    const profileAccountId = sp.accountId as string;
+    const base = `test:di3:${Date.now()}`;
+    const input = {
+      profileId: band.profileId, amountCents: 1000, source: null, purpose: "earnings" as const,
+      ref: { bookingId: "b3", gigId: "g3" }, idempotencyBase: base, meta: { purpose: "earnings" },
+      profileAccountId, selfDeal: false, now: Date.now(),
+    };
+    const first = await distributeEarnings(input);
+    const bassAcct = (await memberStripe(bass.uid))!.accountId!;
+    expect(await fakeBalance(bassAcct)).toBe(500);
+    expect(await fakeBalance(profileAccountId)).toBe(200);
+
+    // The shares are cleared entirely between the two calls. Under the old
+    // behaviour the retry's no-shares branch would transfer the FULL 1000c to
+    // the profile under the bare `base` key.
+    await callFn("setPayoutShares", { profileId: band.profileId, shares: null }, band.owner.user);
+    const second = await distributeEarnings(input);
+    expect(second.legs).toEqual(first.legs);
+    expect(await fakeBalance(profileAccountId)).toBe(200);
+    expect(await fakeBalance(bassAcct)).toBe(500);
+    expect((await adb.doc(`heldShares/${base}:${drums.uid}`).get()).data()?.amountCents).toBe(300);
+    // The plan doc itself is the frozen record, server-only.
+    const plan = (await adb.doc(`distributions/${base}`).get()).data()!;
+    expect(plan.shared).toBe(true);
+    expect((plan.legs as Array<{ amountCents: number }>).map((l) => l.amountCents)).toEqual([500, 300, 200]);
+  });
+
+  // FIX WAVE M3(c): the STATUS-CALL release path, the belt-and-braces route
+  // beside the onMemberStripeWritten trigger. The fake account is flipped
+  // WITHOUT the account.updated webhook, so getMemberPayoutStatus's own sync is
+  // what discovers the change. The trigger fires off that sync's doc write and
+  // may still win the per-doc claim, which is fine: either path releases, and
+  // what matters is the terminal state and that the money moved exactly once.
+  it("releases a held share through getMemberPayoutStatus's own sync, exactly once", async () => {
+    const band = await makeApprovedMusicianProfile("di4");
+    const drums = await addMember(band.profileId, "di4d");
+    await callFn("createMemberOnboardingLink", {}, drums.user);
+    await callFn("setPayoutShares", { profileId: band.profileId, shares: [
+      { payee: { kind: "member", uid: drums.uid }, percent: 40 },
+      { payee: { kind: "profile" }, percent: 60 },
+    ] }, band.owner.user);
+    await readyProfileAccount(band.profileId, band.owner.user);
+    const sp = (await adb.doc(`profiles/${band.profileId}/private/stripe`).get()).data()!;
+    const base = `test:di4:${Date.now()}`;
+    await distributeEarnings({
+      profileId: band.profileId, amountCents: 1000, source: null, purpose: "earnings",
+      ref: { bookingId: "b4", gigId: "g4" }, idempotencyBase: base, meta: {},
+      profileAccountId: sp.accountId as string, selfDeal: false, now: Date.now(),
+    });
+    expect((await adb.doc(`heldShares/${base}:${drums.uid}`).get()).data()?.status).toBe("held");
+
+    // No webhook: only the fake Stripe account object changes, so nothing has
+    // written the member's cached doc and no trigger has fired yet.
+    const drumsAcct = (await memberStripe(drums.uid))!.accountId!;
+    await adb.doc(`stripeFake/state/objects/${drumsAcct}`).set(
+      { transfersEnabled: true, payoutsEnabled: true, instantEligible: true }, { merge: true });
+    await callFn("getMemberPayoutStatus", {}, drums.user);
+
+    const until = Date.now() + 15_000;
+    let held = (await adb.doc(`heldShares/${base}:${drums.uid}`).get()).data() as HeldShareDoc;
+    while (held.status !== "released" && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 300));
+      held = (await adb.doc(`heldShares/${base}:${drums.uid}`).get()).data() as HeldShareDoc;
+    }
+    expect(held.status).toBe("released");
+    // Exactly one transfer of the held amount, whichever path won the claim.
+    expect(await fakeBalance(drumsAcct)).toBe(400);
+    const after = await callFn<object, { heldCents: number }>("getMemberPayoutStatus", {}, drums.user);
+    expect(after.heldCents).toBe(0);
+  });
+
   it("with no shares makes a single transfer under the base key", async () => {
     const solo = await makeApprovedMusicianProfile("di2");
     await readyProfileAccount(solo.profileId, solo.owner.user);
     const sp = (await adb.doc(`profiles/${solo.profileId}/private/stripe`).get()).data()!;
-    const r = await distributeEarnings({ profileId: solo.profileId, amountCents: 700, source: null, purpose: "earnings", ref: { bookingId: "b", gigId: "g" }, idempotencyBase: `test:di2:${Date.now()}`, meta: {}, profileAccountId: sp.accountId as string, now: Date.now() });
+    const r = await distributeEarnings({ profileId: solo.profileId, amountCents: 700, source: null, purpose: "earnings", ref: { bookingId: "b", gigId: "g" }, idempotencyBase: `test:di2:${Date.now()}`, meta: {}, profileAccountId: sp.accountId as string, selfDeal: false, now: Date.now() });
     expect(r.legs).toHaveLength(1);
     expect(r.transferId).toMatch(/^tr/);
     expect(await fakeBalance(sp.accountId as string)).toBe(700);

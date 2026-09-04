@@ -57,7 +57,18 @@ const STRIPE_REACHING: ReadonlyArray<{ name: string; file: string; why: string }
   { name: "deleteProfile", file: "profiles.ts", why: "SP10 Task 12: the money gate's assertNoMoneyOutstanding calls getStripe().getBalances on a connected account" },
   { name: "cancelTicketOrder", file: "ticketing.ts", why: "SP10 Task 21: releasePendingOrder -> getStripe().cancelIntent / retrieveIntentStatus" },
   { name: "ticketOrderExpiry", file: "paymentsSweep.ts", why: "SP10 Task 21: onSchedule every 5 minutes, runTicketOrderExpiry -> getStripe().cancelIntent" },
+  { name: "createMemberOnboardingLink", file: "memberPayouts.ts", why: "SP5c Task 4: creates the member's own Express account + onboarding link (getStripe().createExpressAccount / createOnboardingLink)" },
+  { name: "getMemberPayoutStatus", file: "memberPayouts.ts", why: "SP5c Task 4: syncMemberAccountFlags -> getStripe().getAccountState, readPayoutBalances -> getStripe().getBalances, and the held-share release's transferToAccount" },
+  { name: "requestMemberPayout", file: "memberPayouts.ts", why: "SP5c Task 4: getStripe().getBalances / createPayout / debitConnectedAccount for a member's own cash-out" },
 ];
+
+// NOT enumerated here, deliberately: `onMemberStripeWritten` (payoutShares.ts)
+// is an `onDocumentWritten` FIRESTORE TRIGGER, and HANDLER_RE below walks only
+// onCall/onRequest/onSchedule exports. It reaches getStripe() through
+// releaseHeldShares and DOES declare `secrets: [stripeSecretKey]` (SP5c final
+// fix wave, C1); widening the regex to trigger exports would need every other
+// trigger in the codebase audited for the same question, which is the census
+// this file's header already rejects as too brittle.
 
 const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
 const HANDLER_RE = /export const (\w+)\s*=\s*(onCall|onRequest|onSchedule)\b/g;
