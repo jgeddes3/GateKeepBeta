@@ -5,16 +5,20 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { rememberOnboardingProfileId } from "./onboardingRedirect";
+import { useAuth } from "../auth/AuthProvider";
+import { useProfileRole } from "./useProfileRole";
+import { SharesCard } from "./SharesCard";
+import { PayoutHistoryList } from "./PayoutHistoryList";
 import {
   PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
   instantFeePreviewCents,
-  type PaymentDoc, type StripeStatusResult,
+  type PaymentDoc, type ProfileType, type StripeStatusResult,
 } from "@gatekeep/shared";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { Skeleton } from "../ui/skeleton";
-import { IconEarnings, IconWarning } from "../ui/icons";
+import { IconWarning } from "../ui/icons";
 
 // SP5 Task 14: the musician's payouts surface. House idiom throughout (see
 // src/bookings/CancelDialog.tsx): "use client", callFn(...) (lib/callable.ts,
@@ -134,52 +138,7 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
   );
 }
 
-// History caps at 20, same as BookingInbox's own history list (SP4 Task 10):
-// a generous soft cap so an unusually busy profile's Earnings page stays
-// bounded without pagination UI yet.
-const HISTORY_LIMIT = 20;
-
-function HistoryList({ rows }: { rows: PaymentRow[] }) {
-  const history = rows
-    .filter((r) => r.transfer.status === "transferred" || r.deposit.status === "forfeited")
-    .sort((a, b) => (b.transfer.transferredAt ?? b.updatedAt) - (a.transfer.transferredAt ?? a.updatedAt))
-    .slice(0, HISTORY_LIMIT);
-  if (history.length === 0) {
-    return (
-      <p className="flex items-start gap-2 font-sora text-sm text-gk-muted">
-        <IconEarnings size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-        No payout history yet. Play a gig and your first payout lands here.
-      </p>
-    );
-  }
-  return (
-    <ul className="grid gap-2">
-      {history.map((r) => (
-        <li
-          key={`${r.bookingId}:${r.id}`}
-          className="flex flex-wrap items-center justify-between gap-2 rounded-gk border border-gk-border bg-gk-surface px-3.5 py-2.5"
-        >
-          <span className="font-sora text-sm text-gk-text">{formatGigDateTime(r.occurrenceStartsAt)}</span>
-          {/* Review round 1: whitespace-normal (Badge's own base class is
-              nowrap). The worst case here is a forfeited deposit AND a
-              transfer both landing on the same row, which joins two full
-              money sentences (a "Forfeited deposit..." clause plus a
-              "Paid $Y" clause) into one string that can easily outrun a
-              360px viewport as one unbroken line, so this lets it wrap
-              instead of forcing horizontal overflow. */}
-          <Badge variant="success" className="whitespace-normal text-right">
-            {r.deposit.status === "forfeited" && `Forfeited deposit: received 100% (${formatCents(r.deposit.sliceCents)})`}
-            {r.deposit.status === "forfeited" && r.transfer.status === "transferred" && "; "}
-            {r.transfer.status === "transferred" && r.transfer.amountCents != null
-              && `Paid ${formatCents(r.transfer.amountCents)}`}
-          </Badge>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-export function EarningsPanel({ profileId, name }: { profileId: string; name: string }) {
+export function EarningsPanel({ profileId, name, type }: { profileId: string; name: string; type: ProfileType }) {
   // The earnings page mounts one EarningsPanel per musician profile the
   // signed-in account has (MusicianProfilesList), so a literal
   // "earnings-cashout-amount" id would collide across two-plus panels on
@@ -200,6 +159,11 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
   // cash-out and mints its own id.
   const requestRef = useRef<{ id: string; method: "standard" | "instant"; amountCents: number } | null>(null);
   const rows = usePaymentRows(profileId);
+  // SP5c Task 9 role gate: onboarding, the cash-out amount field, and the
+  // cash-out buttons are admin-only actions on a shared profile's money. A
+  // plain member still sees the balance and history, just not the controls.
+  const { user } = useAuth();
+  const isAdmin = useProfileRole(profileId, user?.uid) === "admin";
   // Hoisted once per render (not recomputed inline at each use site) so the
   // fee preview label and the Instant-button gating logic below can never
   // disagree about what "the typed amount" currently parses to.
@@ -309,21 +273,25 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
             </p>
           )}
           {!(status.hasAccount && status.payoutsEnabled) ? (
-            <div className="grid gap-2.5">
-              <p className="font-sora text-sm text-gk-text">Set up payouts to get paid for your bookings.</p>
-              <Button onClick={setupPayouts} disabled={onboardBusy} className="w-fit">
-                {onboardBusy ? "Redirecting…" : "Set up payouts"}
-              </Button>
-              {onboardError && (
-                <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
-                  <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-                  {onboardError}
+            isAdmin ? (
+              <div className="grid gap-2.5">
+                <p className="font-sora text-sm text-gk-text">Set up payouts to get paid for your bookings.</p>
+                <Button onClick={setupPayouts} disabled={onboardBusy} className="w-fit">
+                  {onboardBusy ? "Redirecting…" : "Set up payouts"}
+                </Button>
+                {onboardError && (
+                  <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                    <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                    {onboardError}
+                  </p>
+                )}
+                <p className="font-sora text-xs text-gk-muted">
+                  Your first payout may be held for about 7 days while Stripe verifies your account.
                 </p>
-              )}
-              <p className="font-sora text-xs text-gk-muted">
-                Your first payout may be held for about 7 days while Stripe verifies your account.
-              </p>
-            </div>
+              </div>
+            ) : (
+              <p className="font-sora text-sm text-gk-muted">Only profile admins can cash out.</p>
+            )
           ) : (
             <div className="grid gap-3">
               <div>
@@ -342,48 +310,55 @@ export function EarningsPanel({ profileId, name }: { profileId: string; name: st
                   </p>
                 )}
               </div>
-              <div className="grid max-w-40 gap-1.5">
-                <label htmlFor={amountFieldId} className="font-sora text-sm font-medium text-gk-text">
-                  Amount to cash out
-                </label>
-                <div className="flex items-center gap-1.5">
-                  <span aria-hidden="true" className="font-sora text-sm text-gk-muted">$</span>
-                  <Input id={amountFieldId} type="number" min="1" step="0.01" value={amount}
-                    onChange={(e) => { setAmount(e.target.value); setPayoutError(null); }}
-                    disabled={payoutBusy || status.availableBalanceCents == null}
-                    aria-label="Amount to cash out (dollars)" />
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={() => submitPayout("standard")} disabled={payoutBusy} variant="secondary">
-                  Standard (free, 1–3 business days)
-                </Button>
-                <Button onClick={() => submitPayout("instant")}
-                  disabled={payoutBusy || !status.instantEligible || belowInstantMin
-                    || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}
-                  title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE
-                    : belowInstantMin ? PAYOUT_INSTANT_MIN_MESSAGE : undefined}>
-                  {`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
-                </Button>
-              </div>
-              {payoutError && (
-                <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
-                  <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-                  {payoutError}
-                </p>
-              )}
-              {payoutMessage && (
-                <p className="font-sora text-sm text-gk-success">{payoutMessage}</p>
+              {isAdmin ? (
+                <>
+                  <div className="grid max-w-40 gap-1.5">
+                    <label htmlFor={amountFieldId} className="font-sora text-sm font-medium text-gk-text">
+                      Amount to cash out
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <span aria-hidden="true" className="font-sora text-sm text-gk-muted">$</span>
+                      <Input id={amountFieldId} type="number" min="1" step="0.01" value={amount}
+                        onChange={(e) => { setAmount(e.target.value); setPayoutError(null); }}
+                        disabled={payoutBusy || status.availableBalanceCents == null}
+                        aria-label="Amount to cash out (dollars)" />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => submitPayout("standard")} disabled={payoutBusy} variant="secondary">
+                      Standard (free, 1–3 business days)
+                    </Button>
+                    <Button onClick={() => submitPayout("instant")}
+                      disabled={payoutBusy || !status.instantEligible || belowInstantMin
+                        || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}
+                      title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE
+                        : belowInstantMin ? PAYOUT_INSTANT_MIN_MESSAGE : undefined}>
+                      {`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
+                    </Button>
+                  </div>
+                  {payoutError && (
+                    <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                      <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                      {payoutError}
+                    </p>
+                  )}
+                  {payoutMessage && (
+                    <p className="font-sora text-sm text-gk-success">{payoutMessage}</p>
+                  )}
+                </>
+              ) : (
+                <p className="font-sora text-sm text-gk-muted">Only profile admins can cash out.</p>
               )}
             </div>
           )}
+          {type === "musician" && <SharesCard profileId={profileId} isAdmin={isAdmin} />}
           <div className="grid gap-2">
             <h3 className="font-syne text-sm font-semibold text-gk-text">Pending settlements</h3>
             <PendingSettlementsList rows={rows} />
           </div>
           <div className="grid gap-2">
             <h3 className="font-syne text-sm font-semibold text-gk-text">History</h3>
-            <HistoryList rows={rows} />
+            <PayoutHistoryList scope={{ kind: "profile", profileId }} />
           </div>
         </>
       )}

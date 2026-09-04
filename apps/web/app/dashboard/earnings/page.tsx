@@ -9,29 +9,29 @@ import type { ProfileDoc } from "@gatekeep/shared";
 import { Skeleton } from "../../../src/ui/skeleton";
 import { IconEarnings } from "../../../src/ui/icons";
 
-type MusicianProfileSummary = { profileId: string; name: string };
+type ProfileSummary = { profileId: string; name: string; type: ProfileDoc["type"] };
 
 // Same "my profiles" subscription idiom as app/dashboard/page.tsx's
 // ProfilesList (collectionGroup('members').where('uid','==',uid), then a
-// per-doc profile get()), filtered to type === "musician": payouts are the
-// musician half of a profile (Stripe Connect Express), so a curator-only
-// profile has nothing to show on this page. Mounted with key={user.uid} by
-// the page below for the same remount-on-identity-change reason ProfilesList
-// documents.
-function MusicianProfilesList({ uid }: { uid: string }) {
-  const [profiles, setProfiles] = useState<MusicianProfileSummary[] | "loading">("loading");
+// per-doc profile get()). SP5c Task 9: curator profiles now get an Earnings
+// panel too (ticket settlements, shares of their own ticket revenue), so
+// this lists both musician and curator profiles, not musician-only.
+// Mounted with key={user.uid} by the page below for the same
+// remount-on-identity-change reason ProfilesList documents.
+function EarningsProfilesList({ uid }: { uid: string }) {
+  const [profiles, setProfiles] = useState<ProfileSummary[] | "loading">("loading");
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
     const unsubscribe = onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", uid)), async (snap) => {
-      const out: MusicianProfileSummary[] = [];
+      const out: ProfileSummary[] = [];
       for (const m of snap.docs) {
         if (cancelled) return;
         const p = await getDoc(doc(db, "profiles", m.ref.parent.parent!.id));
         if (cancelled) return;
         if (p.exists()) {
           const d = p.data() as ProfileDoc;
-          if (d.type === "musician") out.push({ profileId: p.id, name: d.name });
+          if (d.type === "musician" || d.type === "curator") out.push({ profileId: p.id, name: d.name, type: d.type });
         }
       }
       if (!cancelled) setProfiles(out);
@@ -41,7 +41,7 @@ function MusicianProfilesList({ uid }: { uid: string }) {
 
   if (profiles === "loading") {
     return (
-      <div className="grid gap-2" role="status" aria-label="Loading your musician profiles">
+      <div className="grid gap-2" role="status" aria-label="Loading your profiles">
         <Skeleton className="h-4 w-32" />
         <Skeleton className="h-9 w-40" />
       </div>
@@ -51,13 +51,13 @@ function MusicianProfilesList({ uid }: { uid: string }) {
     return (
       <p className="flex items-start gap-2 font-sora text-sm text-gk-muted">
         <IconEarnings size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-        No musician profiles yet.{" "}
+        No profiles yet.{" "}
         <a href="/join" className="text-gk-text underline underline-offset-4 hover:text-gk-focus">Create one</a>
         {" "}to start getting booked and paid.
       </p>
     );
   }
-  return <>{profiles.map((p) => <EarningsPanel key={p.profileId} profileId={p.profileId} name={p.name} />)}</>;
+  return <>{profiles.map((p) => <EarningsPanel key={p.profileId} profileId={p.profileId} name={p.name} type={p.type} />)}</>;
 }
 
 function EarningsPageSkeleton() {
@@ -79,7 +79,7 @@ export default function EarningsPage() {
       <a href="/dashboard" className="font-sora text-sm text-gk-muted hover:text-gk-text">&larr; Back to dashboard</a>
       <h1 className="mt-4 font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Earnings &amp; payouts</h1>
       <div className="mt-8">
-        <MusicianProfilesList key={`earnings-${user.uid}`} uid={user.uid} />
+        <EarningsProfilesList key={`earnings-${user.uid}`} uid={user.uid} />
       </div>
     </main>
   );
