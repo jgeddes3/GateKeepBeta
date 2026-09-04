@@ -18,8 +18,9 @@ export default function CuratorTabs() {
       <Tabs.Screen name="events" options={{ title: "My Events", headerShown: false,
         tabBarIcon: ({ color }) => <IconCalendarCheck color={color} size={22} /> }} />
       {/* SP4 Task 12: was the "Find Talent" placeholder (talent.tsx, now
-          deleted), replaced by musicians.tsx, the MusicianBrowse "Find
-          musicians" screen, per the plan's explicit file naming. */}
+          deleted), replaced by musicians.tsx, the "Find musicians" screen
+          (SP8 Task 15: now the curator search face), per the plan's
+          explicit file naming. */}
       <Tabs.Screen name="musicians" options={{ title: "Find Musicians",
         tabBarIcon: ({ color }) => <IconMusicNotes color={color} size={22} /> }} />
       {/* SP4 Task 12: BookingInbox for this curator profile's own threads. */}

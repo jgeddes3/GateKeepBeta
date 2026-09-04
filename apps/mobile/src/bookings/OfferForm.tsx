@@ -6,8 +6,8 @@ import { Button, Card } from "../ui";
 import { tokens } from "../theme/tokens";
 
 // RN port of ../../../web/src/bookings/OfferForm.tsx, the booking thread
-// screen's counter-offer form (SP4 Task 12). Same fields as GigBrowse's
-// Apply panel / MusicianBrowse's offer composer (OfferFields,
+// screen's counter-offer form (SP4 Task 12). Same fields as GigDetailSheet's
+// Apply panel / OfferComposer's offer composer (OfferFields,
 // buildOfferPayload, the client-side mirror of validateOfferInput
 // counterBooking runs server-side), wrapped as a dumb value/submit
 // component: BookingThread owns the actual counterBooking call, its busy

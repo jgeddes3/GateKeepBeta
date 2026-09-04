@@ -7,8 +7,8 @@ import { Text, Input, TextArea, Callout } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 
 // RN port of ../../../web/src/bookings/BookingForms.tsx (SP4 Task 12):
-// booking-domain field-groups + pure formatters shared by GigBrowse's Apply
-// flow, MusicianBrowse's inline offer composer, and BookingThread's counter
+// booking-domain field-groups + pure formatters shared by GigDetailSheet's
+// Apply flow, OfferComposer's offer composer, and BookingThread's counter
 // form (OfferForm.tsx). Mirrors ../gigs/GigForms.tsx's split: dumb
 // value/onChange RN components + pure functions, no save button of their
 // own. Booking-status DISPLAY helpers (bookingHistoryLabel/depositLine) and
@@ -149,13 +149,13 @@ function tzOffsetMs(timeZone: string, utcMs: number): number | null {
   }
 }
 
-// GigBrowse's date-filter boundary computation: every gig time on this app
-// displays in LAUNCH_TIMEZONE (formatGigDateTime), so a "From"/"To" day
-// typed in the filter must be bucketed by LAUNCH_TIMEZONE midnight, not UTC
-// midnight. Byte-identical technique to web's launchTzDayStartMs (round-trip
+// A date-filter boundary computation: every gig time on this app displays
+// in LAUNCH_TIMEZONE (formatGigDateTime), so a "From"/"To" day typed in a
+// filter must be bucketed by LAUNCH_TIMEZONE midnight, not UTC midnight.
+// Byte-identical technique to web's launchTzDayStartMs (round-trip
 // validated, DST-aware via tzOffsetMs above); returns null for an
 // empty/malformed input OR an Intl failure, both treated identically by
-// GigBrowse (no date constraint applied), never a thrown error.
+// every caller (no date constraint applied), never a thrown error.
 export function launchTzDayStartMs(dateInput: string): number | null {
   if (!dateInput) return null;
   const [year, month, day] = dateInput.split("-").map(Number);
@@ -207,7 +207,7 @@ export function gigLocationLabel(location: GigPublicLocation): string {
 }
 
 // Shared error-message box style, every busy composer/dialog in this
-// directory (GigBrowse's Apply panel, MusicianBrowse's offer composer,
+// directory (GigDetailSheet's Apply panel, OfferComposer,
 // OfferForm, CancelDialog, BookingThread) surfaces the server's verbatim
 // error the same way, matching the amber warning-box color already
 // established by ../gigs/GigForms.tsx and ../curator/CuratorForms.tsx.

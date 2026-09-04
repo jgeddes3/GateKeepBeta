@@ -10,7 +10,8 @@ export default function MusicianTabs() {
       <Tabs.Screen name="dashboard" options={{ title: "Dashboard",
         tabBarIcon: ({ color }) => <IconHouse color={color} size={22} /> }} />
       {/* SP4 Task 12: was a "Coming in a later phase" placeholder, now the
-          GigBrowse "Find gigs" screen (public open-gigs browse + Apply). */}
+          "Find gigs" screen (public open-gigs browse + Apply; SP8 Task 15:
+          now the musician search face). */}
       <Tabs.Screen name="gigs" options={{ title: "Find Gigs",
         tabBarIcon: ({ color }) => <IconCalendarCheck color={color} size={22} /> }} />
       <Tabs.Screen name="portfolio" options={{ title: "Portfolio",

@@ -15,18 +15,22 @@ import { tokens } from "../theme/tokens";
 // web's link-styled DateBlockRow, since the mobile primitive kit has no
 // link component of its own.
 
-const ACT_SIZE_LABEL: Record<string, string> = { solo: "Solo", duo: "Duo", band: "Band" };
+// Exported for CuratorArtistRow.tsx (SP8 Task 15): the curator face's row
+// needs the same act-size label, meta-line join, distance formatting, and
+// avatar thumbnail this file already has, rather than a second copy of any
+// of them.
+export const ACT_SIZE_LABEL: Record<string, string> = { solo: "Solo", duo: "Duo", band: "Band" };
 
-function joinDetail(parts: (string | null | undefined)[]): string | undefined {
+export function joinDetail(parts: (string | null | undefined)[]): string | undefined {
   const filtered = parts.filter((p): p is string => !!p);
   return filtered.length > 0 ? filtered.join(" · ") : undefined;
 }
 
-function distancePart(r: SearchResult): string | null {
+export function distancePart(r: SearchResult): string | null {
   return r.distanceMeters != null ? distanceLabel(r.distanceMeters) : null;
 }
 
-function Thumbnail({ imagePath, size, radius, icon }: {
+export function Thumbnail({ imagePath, size, radius, icon }: {
   imagePath: string | null; size: number; radius: number; icon: ReactNode;
 }) {
   const t = useTokens();

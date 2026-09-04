@@ -262,8 +262,8 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
           <PhotoScrim />
           <View style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: tokens.space.xl, alignItems: "center" }}>
             {/* tokens.dark.text (not a raw hex): PhotoScrim is always the dark
-                night gradient in both themes, mirrors GigCard/MusicianBrowse's
-                own on-scrim text color convention. */}
+                night gradient in both themes, mirrors the search result
+                cards' own on-scrim text color convention. */}
             <Text color={tokens.dark.text} style={{ textAlign: "center" }}>
               {busy ? "Checking in…" : "Point the camera at a ticket QR code"}
             </Text>

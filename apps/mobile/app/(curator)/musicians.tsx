@@ -4,13 +4,13 @@ import { doc, onSnapshot } from "firebase/firestore";
 import { getFirebase } from "../../src/lib/firebase";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
-import { MusicianBrowse } from "../../src/bookings/MusicianBrowse";
+import { CuratorFace } from "../../src/search/CuratorFace";
 import type { ProfileDoc } from "@gatekeep/shared";
 import { Text, PageBackground, Skeleton, SkeletonCard } from "../../src/ui";
 import { tokens } from "../../src/theme/tokens";
 
-// Curator "Find musicians" tab (SP4 Task 12), replaces the earlier
-// "Find Talent" placeholder (talent.tsx, deleted). Gated the same way
+// Curator "Find musicians" tab (SP8 Task 15): the curator search face,
+// replacing the earlier browse placeholder. Gated the same way
 // (curator)/events/index.tsx gates its own content: an approved curator
 // profile is required both to browse usefully (offerGig needs one) and to
 // match web's dashboard/curator/[profileId]/musicians/page.tsx gate.
@@ -71,5 +71,5 @@ export default function Musicians() {
     );
   }
 
-  return <MusicianBrowse key={profileId} curatorProfileId={profileId} />;
+  return <CuratorFace key={profileId} curatorProfileId={profileId} />;
 }
