@@ -1911,6 +1911,7 @@ const ALERT_KIND_LABEL: Record<AdminAlertKind, string> = {
   ticket_order_stuck: "Ticket order stuck with a pending charge",
   event_cascade_stuck: "Event cascade stuck",
   account_deleted_unclean: "Account deleted with obligations",
+  held_share_release_failed: "Held share release failed",
 };
 
 // Only the three saga kinds share a bookingId-keyed row an admin can act on

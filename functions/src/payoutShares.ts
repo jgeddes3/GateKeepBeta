@@ -1,8 +1,17 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, type Firestore } from "firebase-admin/firestore";
-import { isValidDocId, validatePayoutShares, SHARES_ADMIN_MESSAGE, type PayoutShare, type StripeProfileDoc } from "@gatekeep/shared";
+import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
+import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import {
+  isValidDocId, validatePayoutShares, SHARES_ADMIN_MESSAGE,
+  splitCents, payeeKey, shareHeldMessage, formatShareCents,
+  type PayoutShare, type StripeProfileDoc,
+  type HeldShareDoc, type HeldShareRef, type PayoutPayee, type MemberStripeDoc, type ProfileDoc,
+} from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
-import { notifyProfileAdmins } from "./notifications.js";
+import { notifyProfileAdmins, notifyUser } from "./notifications.js";
+import { getStripe } from "./stripeClient.js";
+import { writeLedger, recordAdminAlert } from "./paymentsCore.js";
+import { getMemberStripeDoc, setReleaseHeldSharesHook } from "./memberPayouts.js";
 
 export async function loadShares(db: Firestore, profileId: string): Promise<PayoutShare[] | null> {
   const snap = await db.doc(`profiles/${profileId}/private/stripe`).get();
@@ -59,3 +68,157 @@ export async function reassignShareOnRemoval(db: Firestore, profileId: string, u
     console.error(`reassignShareOnRemoval: notification failed for ${profileId}`, e);
   }
 }
+
+// ---------- Task 5: the split-at-settlement engine, held shares, and release ----------
+
+export interface DistributeInput {
+  profileId: string; amountCents: number;
+  source: { chargeId: string; remainingCents: number } | null;
+  purpose: "earnings" | "ticket_settlement";
+  ref: HeldShareRef;
+  idempotencyBase: string;
+  meta: Record<string, string>;
+  profileAccountId: string;
+  now: number;
+}
+export interface DistributeLeg { payee: PayoutPayee; amountCents: number; outcome: "transferred" | "held"; transferId: string | null; sourced: boolean }
+export interface DistributeResult { legs: DistributeLeg[]; transferId: string | null; sourcedAny: boolean; heldCents: number }
+
+function refFields(ref: HeldShareRef) {
+  return "bookingId" in ref
+    ? { bookingId: ref.bookingId, gigId: ref.gigId, eventId: null, orderId: null }
+    : { bookingId: null, gigId: null, eventId: ref.eventId, orderId: ref.orderId };
+}
+
+// The one place SP5c money crosses from "profile got paid" to "who inside
+// that profile actually gets it". Called by Task 6 (booking settlement) and
+// Task 7 (ticket settlement) once the platform-side charge is settled, this
+// only moves the RECIPIENT-side money: no shares configured, the whole
+// amount goes to the profile's own account (today's pre-SP5c behavior,
+// unchanged); shares configured, splitCents divides amountCents (remainder
+// to the largest share, never lost), each member leg transfers to that
+// member's OWN connected account when it is transfer-ready, or is written to
+// heldShares (and the member notified) when it is not.
+//
+// IDEMPOTENT PER (idempotencyBase, leg): every Stripe call below carries a
+// key derived from idempotencyBase, so calling this twice with the same base
+// (a settlement retry, a webhook redelivery) replays the same transfers
+// rather than moving money twice, and the heldShares doc id
+// (`{idempotencyBase}:{uid}`) makes the held branch equally idempotent, a
+// second call's .create() hits ALREADY_EXISTS (gRPC 6) and is swallowed.
+export async function distributeEarnings(input: DistributeInput): Promise<DistributeResult> {
+  const db = getFirestore();
+  const stripe = getStripe();
+  const shares = await loadShares(db, input.profileId);
+  const fits = (cents: number, remaining: number) => input.source !== null && cents <= remaining;
+  if (!shares) {
+    const sourced = fits(input.amountCents, input.source?.remainingCents ?? 0);
+    const t = await stripe.transferToAccount({
+      accountId: input.profileAccountId, amountCents: input.amountCents, idempotencyKey: input.idempotencyBase, meta: input.meta,
+      ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
+    });
+    return { legs: [{ payee: { kind: "profile" }, amountCents: input.amountCents, outcome: "transferred", transferId: t.id, sourced }], transferId: t.id, sourcedAny: sourced, heldCents: 0 };
+  }
+  const profileName = ((await db.doc(`profiles/${input.profileId}`).get()).data() as ProfileDoc | undefined)?.name ?? "your band";
+  let remaining = input.source?.remainingCents ?? 0;
+  const legs: DistributeLeg[] = [];
+  let heldCents = 0;
+  for (const part of splitCents(input.amountCents, shares)) {
+    if (part.amountCents <= 0) continue;
+    const key = `${input.idempotencyBase}:share:${payeeKey(part.payee)}`;
+    let accountId: string | null = null;
+    if (part.payee.kind === "profile") accountId = input.profileAccountId;
+    else {
+      const ms: MemberStripeDoc | null = await getMemberStripeDoc(part.payee.uid);
+      accountId = ms?.accountId && ms.transfersEnabled ? ms.accountId : null;
+    }
+    if (!accountId) {
+      const uid = (part.payee as { uid: string }).uid;
+      const heldRef = db.doc(`heldShares/${input.idempotencyBase}:${uid}`);
+      const held: HeldShareDoc = { profileId: input.profileId, uid, amountCents: part.amountCents, purpose: input.purpose, ref: input.ref, status: "held", createdAt: input.now, releasedAt: null, transferId: null };
+      try { await heldRef.create(held); }
+      catch (e) { if ((e as { code?: number }).code !== 6) throw e; }
+      // stripeId is the heldShares doc's own id (there is no Stripe object for
+      // a held share), deterministic per (idempotencyBase, uid) exactly like
+      // writeLedger's `late_fee` convention (paymentsCore.ts's doc comment):
+      // a share_held row must dedupe the same way the heldShares doc itself
+      // does, or a replayed distributeEarnings call (this same base, called
+      // again before the member's account is enabled) would double the row.
+      await writeLedger({ kind: "share_held", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: heldRef.id, ...refFields(input.ref), detail: `share held for ${uid} until their payouts are set up`, at: input.now })
+        .catch((e) => console.error(`distributeEarnings: share_held ledger row failed for ${key}`, e));
+      await notifyUser(uid, { kind: "share_held", refKind: "payouts", title: "Money is waiting for you", body: shareHeldMessage(part.amountCents, profileName) }, `share_held:${key}`)
+        .catch((e) => console.error(`distributeEarnings: share_held notification failed for ${key}`, e));
+      legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "held", transferId: null, sourced: false });
+      heldCents += part.amountCents;
+      continue;
+    }
+    const sourced = fits(part.amountCents, remaining);
+    const t = await stripe.transferToAccount({
+      accountId, amountCents: part.amountCents, idempotencyKey: key, meta: { ...input.meta, payee: payeeKey(part.payee) },
+      ...(sourced ? { sourceChargeId: input.source!.chargeId } : {}),
+    });
+    if (sourced) remaining -= part.amountCents;
+    const uid = part.payee.kind === "member" ? part.payee.uid : null;
+    await writeLedger({ kind: "share_transfer", amountCents: part.amountCents, profileId: input.profileId, uid, stripeId: t.id, sourced, ...refFields(input.ref), detail: `${payeeKey(part.payee)} share of ${input.purpose}${sourced ? ", sourced from the charge" : ", drawn on the platform balance"}`, at: input.now })
+      .catch((e) => console.error(`distributeEarnings: share_transfer ledger row failed for ${key}`, e));
+    if (uid) {
+      await notifyUser(uid, { kind: "share_paid", refKind: "payouts", title: "You were paid", body: `${formatShareCents(part.amountCents)} from ${profileName}.` }, `share_paid:${key}`)
+        .catch((e) => console.error(`distributeEarnings: share_paid notification failed for ${key}`, e));
+    }
+    legs.push({ payee: part.payee, amountCents: part.amountCents, outcome: "transferred", transferId: t.id, sourced });
+  }
+  return { legs, transferId: legs.find((l) => l.transferId)?.transferId ?? null, sourcedAny: legs.some((l) => l.sourced), heldCents };
+}
+
+// Transfers every held (or previously failed) share of a user once their
+// account can receive transfers. Unsourced by then: the charge is long gone.
+export async function releaseHeldShares(uid: string, now: number): Promise<number> {
+  const db = getFirestore();
+  const ms = await getMemberStripeDoc(uid);
+  if (!ms?.accountId || !ms.transfersEnabled) return 0;
+  const snap = await db.collection("heldShares").where("uid", "==", uid).where("status", "in", ["held", "failed"]).get();
+  let releasedCents = 0;
+  for (const d of snap.docs) {
+    const held = d.data() as HeldShareDoc;
+    try {
+      const t = await getStripe().transferToAccount({ accountId: ms.accountId, amountCents: held.amountCents, idempotencyKey: `held:${d.id}`, meta: { purpose: "held_share", heldId: d.id, profileId: held.profileId, uid } });
+      await d.ref.update({ status: "released", releasedAt: now, transferId: t.id, error: FieldValue.delete() });
+      await writeLedger({ kind: "share_released", amountCents: held.amountCents, profileId: held.profileId, uid, stripeId: t.id, sourced: false, ...refFields(held.ref), detail: "held share released after payout setup", at: now })
+        .catch((e) => console.error(`releaseHeldShares: ledger row failed for ${d.id}`, e));
+      releasedCents += held.amountCents;
+    } catch (e) {
+      await d.ref.update({ status: "failed", error: e instanceof Error ? e.message : String(e) }).catch(() => undefined);
+      const shouldLog = await recordAdminAlert({ alertId: `held_share:${d.id}`, kind: "held_share_release_failed", detail: `held share ${d.id} (${held.amountCents}c for ${uid}) could not be transferred: ${e instanceof Error ? e.message : String(e)}; retried on the member's next status sync`, bookingId: null, gigId: null, now });
+      if (shouldLog) console.error(`releaseHeldShares: ${d.id} failed`, e);
+    }
+  }
+  if (releasedCents > 0) {
+    await notifyUser(uid, { kind: "share_released", refKind: "payouts", title: "Held money released", body: `${formatShareCents(releasedCents)} that was waiting for you is now in your balance.` }, `share_released:${uid}:${now}`)
+      .catch((e) => console.error(`releaseHeldShares: notification failed for ${uid}`, e));
+  }
+  return releasedCents;
+}
+
+// Task 4's two call sites (getMemberPayoutStatus's status-poll path, the
+// account.updated member branch in payments.ts) already call
+// releaseHeldSharesHook; this registration is what turns that hook from a
+// no-op into the real thing, both there AND for this trigger below.
+setReleaseHeldSharesHook(releaseHeldShares);
+
+// The webhook-independent path to the same release: fires directly off the
+// member's own identity doc flipping transfersEnabled false -> true,
+// regardless of which caller wrote it (the account.updated webhook, or
+// getMemberPayoutStatus's own sync). Idempotent alongside both of those
+// direct calls: the `held:${docId}` Stripe idempotency key and the doc's
+// `status` CAS (only "held"/"failed" rows are selected) mean a release that
+// already ran, by whichever path got there first, is a no-op here.
+export const onMemberStripeWritten = onDocumentWritten("users/{uid}/private/stripe", async (event) => {
+  const uid = event.params.uid;
+  try {
+    const before = event.data?.before.data() as MemberStripeDoc | undefined;
+    const after = event.data?.after.data() as MemberStripeDoc | undefined;
+    if (after?.transfersEnabled === true && before?.transfersEnabled !== true) await releaseHeldShares(uid, Date.now());
+  } catch (e) {
+    console.error("releaseHeldShares: trigger failed", uid, e);
+  }
+});
