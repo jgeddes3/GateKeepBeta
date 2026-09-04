@@ -1,82 +1,149 @@
 # GateKeep
 
 GateKeep connects musicians, event curators (venues, planners, hosts), and fans in a single
-metro area, team-approved musician/curator profiles, gig booking, and (later) ticketing, built
-on a shared Firebase backend behind default-deny Firestore rules and Cloud Functions-only
-privileged writes.
+metro area: team-approved musician and curator profiles, gig booking with escrowed payments, fan
+discovery, and fan ticketing, built on a shared Firebase backend behind default-deny Firestore
+rules with every privileged write in Cloud Functions.
 
-This repo now spans three sub-projects. **Sub-project 1: Foundation**, accounts, auth, profile
-lifecycle (draft → review → approve), the mobile + web app shells, an admin approval dashboard,
-and notification plumbing. **Sub-project 2: Musician Portfolio**, bio/photos/genres/links,
-10×30s reviewed audio snippets with server-side trim/transcode, curator-gated booking rates &
-preferences, and server-rendered public portfolio pages at `/@handle`, on both mobile and web.
-**Sub-project 3: Curator Profiles & Gig Postings**, the curator side of the same profile system
-(venues/planners/hosts get the wizard/photos/public-page treatment too), one-off and recurring gig
-postings with budget/location privacy semantics, a shared daily scheduled job that materializes
-recurring series and pays down sub-project 2's cleanup debt, and admin gig moderation + name
-search. **Sub-project 4: Booking Flow**, curators and musicians book each other through either
-door (apply to an open gig / offer a gig directly), negotiate over a capped counter-offer thread,
-and accepting freezes terms + records a 35% deposit as data (no money moves yet); cancellation
-windows, no-show reliability records, musician-controlled booking visibility, and whole-run series
-booking all land on top of sub-project 3's gig/series model. See "Gigs & series" and "Booking flow"
-below for the concepts, and `docs/superpowers/specs/` / `docs/superpowers/plans/` for each
-sub-project's design spec and implementation plan (exact filenames under Design docs below).
+The repo spans eleven sub-projects, merged in this order: 1, 2, 3, 4, 5, 5b, 9A, 9B, 6, 7, 10.
+Each merged sub-project has a rulings doc under `docs/superpowers/` that is the authority for its
+area (the table under "Design docs" at the end lists them all), and `docs/superpowers/HANDOFF.md`
+is the fresh-session entry point.
+
+**Sub-project 1: Foundation.** Accounts (email, Google, Apple), group profiles with members and
+admins, the draft, review, approve lifecycle, the admin approval dashboard, notification plumbing
+(in-app inbox plus Expo push), and the mobile and web app shells.
+
+**Sub-project 2: Musician portfolio.** Bio, photos, genres, links, up to ten 30-second reviewed
+audio snippets with server-side trim and transcode, curator-gated booking rates and preferences,
+and server-rendered public pages at `/@handle` on web with a native twin on mobile.
+
+**Sub-project 3: Curator profiles and gig postings.** Venues, planners, and hosts get the same
+wizard, photos, and public-page treatment; one-off and recurring gig postings with budget and
+location privacy; the `dailySweep` scheduled job that materializes series and pays down earlier
+cleanup debt; admin gig moderation and name search. See "Gigs & series" below.
+
+**Sub-project 4: Booking flow.** Either side opens a booking (apply to an open gig, or offer a
+gig directly), negotiates over a capped counter-offer thread, and accepting freezes the terms and
+records a 35% deposit; cancellation windows, no-show reliability records, musician-controlled rate
+visibility, and whole-run series booking. See "Booking flow" below.
+
+**Sub-project 5: Payments.** Stripe Connect Express on the separate charges and transfers model:
+the deposit is charged at accept, the remainder settles T+3 after each date ends, the musician's
+share transfers to their connected account, a declined settlement duns and then flags the curator
+delinquent, and profile admins cash out (standard or instant). **5b** carries the full action set
+to mobile through the native PaymentSheet. See "Payments" below.
+
+**Sub-project 9A: Web UI/UX.** The "Ember, Deeper Night" design language (repo-root `DESIGN.md`,
+binding on all UI work), both themes, every web surface restyled. **9B** carries it to mobile: a
+token theme layer, owned `apps/mobile/src/ui` primitives, every screen restyled with branded
+loading, empty, and error states.
+
+**Sub-project 6: Events and ticketing.** Curator-published events (standalone or promoted from a
+filled gig), multi-tier paid and free tickets with a fan-paid service fee on the sub-project 5
+rails, T+1 settlement to the curator, QR door check-in, grace refunds, cancel with full
+auto-refund, and email-targeted in-app transfers (mobile only). See "Events and ticketing" below.
+
+**Sub-project 7: Fan discovery.** Follows on musicians, curators, and genres; notifications for a
+show announced, a lineup addition, a reschedule, and new approved music from someone followed;
+short show posts from lineup musicians; a ranked discover deck and filterable list on mobile and a
+filterable `/discover` grid on web. See the sub-project 7 checklists below.
+
+**Sub-project 10: Hardening.** No new features. The whole-project audit's money, lifecycle, and
+copy defects closed: transfer sourcing rules, two Stripe webhook scopes, dispute handling, the
+settlement webhook race, events cancelled and refunded when their curator is unpublished, an admin
+`takedownEvent`, deletion refusals with named blockers, an auth `onDelete` cascade, push-token
+hygiene, a fail-closed geocoder, poster upload end to end, notification deep links, the door
+scanner's offline panel, buyer order cancel with a five-minute expiry job, Node 22, CI, and the
+repo-wide em-dash sweep that CI now enforces. Rulings: `docs/superpowers/sp10b-rulings.md`.
 
 ## Monorepo map
 
 ```
 GateKeepBeta/
-├── package.json                  # workspace root, scripts
+├── package.json                  # workspace root: typecheck, emu, emu:test, emu:rules scripts
 ├── pnpm-workspace.yaml
 ├── tsconfig.base.json            # shared strict TS config
-├── firebase.json                 # emulators (incl. storage :9199), functions, firestore config
-├── .firebaserc                   # default Firebase project id
+├── .nvmrc                        # Node 22 (sub-project 10)
+├── .github/workflows/ci.yml      # every gate on every push and PR, then the em-dash grep (sub-project 10)
+├── .github/dependabot.yml        # weekly npm updates for root, functions, apps/web, apps/mobile
+├── firebase.json                 # emulators (auth, firestore, functions, storage :9199), functions runtime nodejs22
+├── .firebaserc                   # default Firebase project id (gatekeep-dev-jg)
 ├── firestore.rules               # default-deny + narrow allows
-├── firestore.indexes.json
-├── storage.rules                 # Storage security rules (staging/review/public paths)
-├── packages/shared/              # @gatekeep/shared: types + validation, single source of truth
-│   └── src/{types,validation,storagePaths,index}.ts
-├── functions/                    # Cloud Functions (v2 callables + triggers)
-│   ├── src/index.ts              # exports all functions
-│   ├── src/authTriggers.ts       # onUserCreated → users doc
-│   ├── src/guards.ts             # requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile, requireCuratorProfile
-│   ├── src/profiles.ts           # createProfileDraft, submitProfileForReview, deleteProfile
-│   ├── src/review.ts             # reviewProfile, grantAdmin, audit logging, curator-unpublish takedown cascade
+├── firestore.indexes.json        # composite indexes + field overrides
+├── storage.rules                 # staging/review/public paths
+├── CLAUDE.md                     # session pointer to docs/superpowers/HANDOFF.md
+├── DESIGN.md                     # binding brand contract for all UI work (sub-project 9A)
+├── docs/superpowers/             # HANDOFF.md, specs/, plans/, one rulings doc per sub-project, audit/, mocks/
+├── scripts/                      # seed-admin.ts, seed-test-accounts.ts, seed-test-event.ts, seed-test-discovery.ts (see Scripts)
+├── packages/shared/              # @gatekeep/shared: the single source of truth for every cross-boundary shape
+│   └── src/{types,validation,storagePaths,money,messages,paymentDisplay,feePreviews,discover,notificationHref,index}.ts
+├── functions/                    # Cloud Functions: v2 callables, triggers, schedulers, one HTTPS webhook
+│   ├── src/index.ts              # exports every function
+│   ├── src/guards.ts             # requireAuthUid, requireVerifiedEmail, requireProfileMember, requireMusicianProfile, requireCuratorProfile, requireApprovedCuratorProfile, requireApprovedMusicianProfile
+│   ├── src/authTriggers.ts       # onUserCreated (users doc), onUserDocWritten, onUserDeleted (cascade, sub-project 10)
+│   ├── src/profiles.ts           # createProfileDraft, submitProfileForReview, deleteProfile (money and events gates, sub-project 10)
+│   ├── src/review.ts             # reviewProfile (unpublish cascade, events included since sub-project 10), grantAdmin, audit log
 │   ├── src/members.ts            # inviteMember, respondToInvite, revokeInvite, removeMember, transferAdmin
-│   ├── src/account.ts            # deleteAccount
-│   ├── src/notifications.ts      # push token helpers, notifyUser, approval trigger
-│   ├── src/portfolio.ts          # updatePortfolio, updateBookingInfo
-│   ├── src/tracks.ts             # createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack
-│   ├── src/media.ts              # processUpload trigger: ffmpeg transcode + sharp photo resize (musician + curator gallery)
-│   ├── src/curator.ts            # updateCuratorProfile, removeCuratorPhoto (sub-project 3)
-│   ├── src/geocode.ts            # geocode(address) adapter interface + Stub/Google providers (sub-project 3)
-│   ├── src/gigs.ts               # createGig, updateGig, publishGig, cancelGig, takedownGig (sub-project 3)
+│   ├── src/account.ts            # deleteAccount, cascadeDeleteUser (sub-project 10)
+│   ├── src/notifications.ts      # notifyUser (inbox + Expo push, token pruning), approval trigger
+│   ├── src/portfolio.ts          # updatePortfolio, updateBookingInfo (sub-project 2)
+│   ├── src/tracks.ts             # createTrack, updateTrack, deleteTrack, reorderTracks, reviewTrack (sub-project 2)
+│   ├── src/media.ts              # processUpload: ffmpeg transcode, sharp resize, posterUploads docs (sub-projects 2, 3, 6, 10)
+│   ├── src/curator.ts            # updateCuratorProfile, removeCuratorPhoto, syncCuratorAccess (sub-project 3)
+│   ├── src/geocode.ts            # Stub and Google geocoders; fails closed outside the emulator (sub-projects 3, 10)
+│   ├── src/gigs.ts               # createGig, publishGig, updateGig, cancelGig, takedownGig (sub-project 3)
 │   ├── src/gigSeries.ts          # createSeries, updateSeries, pauseSeries, endSeries (sub-project 3)
-│   ├── src/scheduled.ts          # runDailySweep + dailySweep onSchedule wrapper (sub-project 3, see Gigs & series below)
+│   ├── src/scheduled.ts          # runDailySweep + dailySweep, nine steps (sub-projects 3, 4, 6, 10)
 │   ├── src/adminTools.ts         # searchUsersByName, backfillDisplayNameLower, flagAccount (sub-project 3)
-│   ├── src/storage.ts            # Storage bucket helper + STORAGE_BUCKET
-│   └── test/*.test.ts            # emulator integration tests
-├── apps/mobile/                  # Expo (expo-router): app/, src/lib/firebase.ts, src/auth/, src/shell/
-│   ├── eslint.config.js          # flat config (Expo's `eslint-config-expo` default)
-│   ├── src/shell/AccountScreen.tsx # shared account screen; app/(fan|musician|curator)/account.tsx are thin wrappers
-│   ├── src/portfolio/            # RN portfolio editor: forms, TrimUploader, TrackManager
-│   ├── src/curator/              # RN curator wizard/editor forms (sub-project 3)
-│   ├── src/gigs/                 # RN gig composer + series management (sub-project 3)
-│   ├── app/(curator)/            # curator tab group: dashboard, events (gig composer/list/series), account
-│   └── app/artist/[handle].tsx   # native public portfolio view
-├── apps/web/                     # Next.js (App Router): app/, src/lib/firebase.ts, app/admin/ (claim-gated)
-│   ├── app/join/                 # musician + curator onboarding wizard
-│   ├── app/dashboard/portfolio/  # portfolio editor page
-│   ├── app/dashboard/curator/    # curator editor + gig composer/list + series management (sub-project 3)
-│   ├── app/u/[handle]/           # server-rendered (SSR) public portfolio/curator page + open gigs
-│   ├── src/curator/CuratorForms.tsx # curator editor form sections (sub-project 3)
-│   └── src/gigs/GigForms.tsx     # gig composer + series form sections (sub-project 3)
-└── tests-rules/                  # Firestore + Storage security rules emulator tests
+│   ├── src/storage.ts            # bucket helper + STORAGE_BUCKET
+│   ├── src/bookings.ts           # applyToGig, offerGig, counterBooking, declineBooking, withdrawBooking, acceptBooking (sub-project 4)
+│   ├── src/bookingLifecycle.ts   # cancelBooking, cancelOccurrence, reportNoShow, removeReliabilityMark (sub-project 4)
+│   ├── src/bookingVisibility.ts  # rebuildBookingProjections, backfillBookingVisibility (sub-project 4)
+│   ├── src/stripeClient.ts       # RealStripe and FakeStripe, both secrets, both webhook signing secrets (sub-projects 5, 10)
+│   ├── src/payments.ts           # createSetupIntent, refreshPaymentMethod, createOnboardingLink, getStripeStatus, releaseStuckSaga, confirmOccurrenceActuals, payPastDue (sub-project 5)
+│   ├── src/paymentsCore.ts       # deposit saga, ledger, admin alerts (sub-project 5)
+│   ├── src/paymentsSettlement.ts # settlement math, true-ups, finalizeSettlementSuccess (sub-project 5)
+│   ├── src/paymentsSweep.ts      # runPaymentsSweep + paymentsSweep, eleven steps; ticketOrderExpiry (sub-projects 5, 6, 10)
+│   ├── src/paymentsPayouts.ts    # requestPayout (profile admins only), payout webhooks (sub-project 5)
+│   ├── src/paymentsWebhook.ts    # stripeWebhook: claim machine, handler registry (sub-projects 5, 6, 10)
+│   ├── src/paymentsDisputes.ts   # charge.dispute.created/closed and charge.refunded handlers (sub-project 10)
+│   ├── src/eventsCore.ts         # pure event and order helpers (sub-project 6)
+│   ├── src/events.ts             # createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent (sub-project 6)
+│   ├── src/eventsAdmin.ts        # takedownEvent, kept apart from events.ts to avoid a review.ts import cycle (sub-project 10)
+│   ├── src/ticketing.ts          # createTicketOrder, finalizeTicketOrder, cancelTicketOrder, refundTicket, checkInTicket, undoCheckIn, offerTransfer, respondToTransfer (sub-projects 6, 10)
+│   ├── src/follows.ts            # followTarget, unfollowTarget, markGenrePickerSeen (sub-project 7)
+│   ├── src/announce.ts           # fan-out note builders hooked into events.ts and tracks.ts (sub-project 7)
+│   ├── src/discover.ts           # getDiscoverDeck (sub-project 7)
+│   ├── src/discoverRank.ts       # pure ranking: genre overlap, follow boost, soonness, distance, seeded shuffle (sub-project 7)
+│   ├── src/showPosts.ts          # createShowPost, removeShowPost (sub-project 7)
+│   └── test/*.test.ts            # emulator integration tests (vitest)
+├── apps/mobile/                  # Expo SDK 57 + expo-router
+│   ├── app/(auth)/               # sign-in, sign-up; app/join.tsx is the wizard
+│   ├── app/(fan)/                # index (upcoming events), search, tickets (QR wallet), account
+│   ├── app/(musician)/           # dashboard, portfolio, gigs, bookings, messages, account
+│   ├── app/(curator)/            # dashboard, events (gigs, series, event/[eventId], scan/[eventId]), bookings, musicians, messages, account
+│   ├── app/artist/[handle].tsx   # native public artist page
+│   ├── app/venue/[handle].tsx    # native public curator page (sub-project 7)
+│   ├── app/booking/[bookingId].tsx, app/event/[eventId].tsx
+│   └── src/{auth,shell,ui,theme,portfolio,curator,gigs,bookings,payments,events,tickets,discover,notifications,lib,types}/
+├── apps/web/                     # Next.js 16 App Router
+│   ├── app/u/[handle]/           # SSR public page, served as /@handle (rewrite in next.config.ts), plus shows/
+│   ├── app/e/[eventId]/          # public event page + buy flow
+│   ├── app/discover/             # signed-in Shows | Artists grid with filters (sub-project 7)
+│   ├── app/join/, app/sign-in/   # onboarding wizard, auth
+│   ├── app/dashboard/            # page.tsx (account, delete), portfolio/, curator/, bookings/, earnings/, events/
+│   ├── app/tickets/, app/gigs/   # fan wallet, gig directory (placeholder-grade until sub-project 8)
+│   ├── app/admin/                # claim-gated admin: review queue, gigs, events takedowns, alerts, show posts
+│   ├── app/design/, app/terms/, app/privacy/
+│   └── src/{auth,shell,ui,components,marketing,portfolio,curator,gigs,bookings,payments,events,discover,lib}/
+└── tests-rules/                  # Firestore + Storage rules tests: rules, payments, events, discovery, storage, hardening
 ```
 
-`packages/shared` owns every cross-boundary type and validation rule, functions and both apps
-import from it, nothing redefines a shape locally. `functions` owns every privileged mutation.
-Apps own UI and only ever read Firestore directly or call callables.
+`packages/shared` owns every cross-boundary type, validation rule, money formula, and user-facing
+message constant; functions and both apps import from it and nothing redefines a shape locally.
+`functions` owns every privileged mutation. Apps own UI and only ever read Firestore directly or
+call callables.
 
 ## Prerequisites
 
@@ -116,8 +183,8 @@ npx expo start                        # from apps/mobile: Expo dev server (use a
                                        # cannot do native Google/Apple sign-in)
 
 pnpm --filter @gatekeep/web lint      # ESLint (apps/web)
-pnpm --filter @gatekeep/mobile lint   # ESLint (apps/mobile), green as of sub-project 2 (see Task 15
-                                       # of the SP2 plan); first run scaffolds apps/mobile/eslint.config.js
+pnpm --filter @gatekeep/shared test   # vitest for packages/shared (money math, validation, message constants)
+pnpm --filter @gatekeep/mobile lint   # ESLint (apps/mobile), flat config at apps/mobile/eslint.config.js (tracked)
 ```
 
 **Seed the emulator:** optional fixture scripts for UI/device testing, run against a live `pnpm emu`
@@ -160,6 +227,38 @@ export FUNCTIONS_DISCOVERY_TIMEOUT=60      # bash, seconds; raises the 30s defau
 $env:FUNCTIONS_DISCOVERY_TIMEOUT = "60"    # PowerShell
 ```
 
+## Scripts
+
+Four operator scripts live in `scripts/`, run with `pnpm tsx` from the repo root. `seed-admin.ts`
+and `seed-test-accounts.ts` resolve which project they write to through the shared
+`scripts/projectId.ts` (in order: a `--project` argument, then `GCLOUD_PROJECT`, then the
+`project_id` inside the `GOOGLE_APPLICATION_CREDENTIALS` file, then `gatekeep-dev-jg` only when an
+emulator host is set) and print the resolved project id before writing anything; anything else
+refuses. `seed-test-event.ts` and `seed-test-discovery.ts` are emulator-only.
+
+```bash
+# The three test accounts (password GateKeep-Test1 for all): test-fan@gatekeep.dev (no profile),
+# test-musician@gatekeep.dev (admin of the approved @testmusician), test-curator@gatekeep.dev
+# (admin of the approved @testvenue). Idempotent. The emulator wipes them on every restart.
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 pnpm tsx scripts/seed-test-accounts.ts
+
+# One published event (a free tier and a paid tier) owned by @testvenue; prints its /e/[eventId]
+# URL (WEB_PORT overrides the port). Emulator only; run the accounts seed first. Every run
+# creates another event.
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 pnpm tsx scripts/seed-test-event.ts
+
+# Sub-project 7 fixtures on top of the accounts seed: an approved demo track for @testmusician, a
+# second published event with a real booking-lineup act, and test-fan following genre:rock. Run
+# the accounts seed first. Every run creates a fresh gig/booking/event set.
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  FIREBASE_STORAGE_EMULATOR_HOST=localhost:9199 pnpm tsx scripts/seed-test-discovery.ts
+
+# Grant the admin claim to a Google sign-in account (refuses every other provider; see
+# docs/superpowers/foundation-rulings.md).
+FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 pnpm tsx scripts/seed-admin.ts someone@example.com
+GOOGLE_APPLICATION_CREDENTIALS=./service-account.json pnpm tsx scripts/seed-admin.ts someone@example.com
+```
+
 ## Gigs & series (sub-project 3)
 
 **Concepts.** A `gigs` doc is one dated posting (title, budget, wants, location, one of
@@ -185,26 +284,42 @@ occurrence-vs-series choice), plus name search (`searchUsersByName`) and account
 (`flagAccount`) layered onto the existing profile review queue.
 
 **The daily scheduled job** (`functions/src/scheduled.ts`'s `dailySweep`, wrapping the plain
-`runDailySweep(now)` function tests call directly) runs once a day and does five things in one
-pass: (1) materializes new occurrences for every `active` gigSeries up to the 8-week horizon, (2)
-closes `open` gigs whose `startsAt` has passed, (3) fails abandoned `processing` tracks older than
-24h (pays down sub-project 2's reaper debt), (4) revokes `pending` invites past their 14-day
-expiry, and (5) retries any `curatorAccessRetries/{uid}` entry left by a `syncCuratorAccess` call
-that failed at its original touchpoint. **This only runs in production after `firebase deploy`
-enables the underlying Cloud Scheduler job**, the emulator has no scheduler component, so
-`runDailySweep` is exercised directly by tests locally, never on a timer. See the launch checklist
-below for the UTC-recurrence and timezone caveats that affect exactly when a series' occurrences
-land.
+`runDailySweep(now)` that tests call directly) runs once a day at 09:00 in `LAUNCH_TIMEZONE` with
+`retryCount: 3` and does nine things in one pass. Naming convention, binding in every doc from
+sub-project 10 on: two sweeps exist, so a bare "step N" is ambiguous. Always write
+"dailySweep step N" or "paymentsSweep step N".
 
-Each of the five steps runs in its own try/catch with its own chunked batch writer, a poisoned
-doc in one step (a malformed series, say) is logged and counted in `SweepReport.errors`, but never
-prevents the other four steps from running, and each step's own writes are only lost if THAT
-step's own commit never happens (a healthy step's commit is unaffected). Steps 1 and 3-5 also page
-through their collections (100 series/page, 500 docs/page for the rest) rather than issuing one
-unbounded `.get()`, and step 1 additionally skips (and counts) a series whose profile is already
-at the `MAX_OPEN_GIGS_PER_PROFILE` cap, or whose status changed between the initial scan and that
-series' write. `dailySweep`'s `onSchedule` options set `timeoutSeconds: 540` and
-`memory: "512MiB"` (up from the 2nd-gen defaults) to give this real headroom at scale.
+1. dailySweep step 1: materializes new occurrences for every `active` gigSeries up to the 8-week
+   horizon, births them `filled` on a whole-run booking, and flips a series whose `endDate` has
+   passed to `ended` in the same batch as its watermark (sub-project 10).
+2. dailySweep step 2: closes `open` gigs whose `startsAt` has passed.
+3. dailySweep step 3: fails abandoned `processing` tracks older than 24h and deletes
+   `posterUploads` docs older than 24h (sub-project 10).
+4. dailySweep step 4: revokes `pending` invites past their 14-day expiry.
+5. dailySweep step 5: retries `curatorAccessRetries/{uid}` entries left by a failed
+   `syncCuratorAccess`.
+6. dailySweep step 6: expires `open` bookings whose target gig is gone or no longer open, skipping
+   a booking flagged `depositChargePending` (sub-project 10).
+7. dailySweep step 7: resolves `confirmed` bookings whose committed dates are all done to
+   `completed`.
+8. dailySweep step 8: reminds ticket holders of `published` events starting within 24h, titled
+   "Tonight" or "Tomorrow" from the launch-zone calendar day.
+9. dailySweep step 9: drains `eventCascadeRetries/{eventId}`, the retry queue for events the
+   unpublish cascade could not cancel and refund on the first pass (sub-project 10).
+
+**This only runs in production after `firebase deploy` provisions the Cloud Scheduler job**: the
+emulator has no scheduler component, so `runDailySweep` is exercised directly by tests locally,
+never on a timer. See the launch checklist below for the UTC-recurrence caveat that affects
+exactly when a series' occurrences land.
+
+Each step runs in its own try/catch with its own chunked batch writer: a poisoned doc in one step
+(a malformed series, say) is logged and counted in `SweepReport.errors` and never prevents the
+other steps from running, and a step's own writes are lost only if that step's own commit never
+happens. Steps 1 and 3 to 5 page through their collections (100 series per page, 500 docs per
+page for the rest) rather than issuing one unbounded `.get()`, and step 1 additionally skips (and
+counts) a series whose profile is already at the `MAX_OPEN_GIGS_PER_PROFILE` cap, or whose status
+changed between the initial scan and that series' write. `dailySweep`'s `onSchedule` options set
+`timeoutSeconds: 540` and `memory: "512MiB"` to give this real headroom at scale.
 
 ## Booking flow (sub-project 4)
 
@@ -297,9 +412,10 @@ identified during Task 8/13's review rounds):
   precondition.
 - **Sweep step 6 (booking expiry)** reads each `open` booking's gig with a separate `get()`;
   batching those reads via `db.getAll()` per page would cut round-trips at scale.
-- **`inviteMember`/`respondToInvite` guard gaps** (inherited from sub-project 3's Task 13 deferred
-  list, still open): `inviteMember` lacks an `isValidDocId(profileId)` guard; `respondToInvite`
-  validates `inviteId` by existence only, not shape.
+- **`inviteMember`/`respondToInvite` guard gaps**: RESOLVED in sub-project 5 (Task 3). Both carry
+  `isValidDocId` guards and `requireVerifiedEmail` (`functions/src/members.ts`), and sub-project 10
+  added the trimmed, lowercased email plus the duplicate-pending-invite and existing-member
+  refusals (uniform response) to `inviteMember`.
 - **`functions/test/` helper duplication**: `bookings.test.ts`, `bookingLifecycle.test.ts`, and
   `scheduled.test.ts` each carry their own near-identical copies of `makeApprovedCuratorProfile`/
   `makeApprovedMusicianProfile`/`createOpenGig`/`gigContent`/`offerPayload`/`pollNotifications`/
@@ -323,7 +439,7 @@ later constant change never re-prices a live booking):
 |---|---|---|
 | Curator service fee | **+11%** on top of every charge | curator (deposit and settlement each carry their proportional share) |
 | Musician commission | **−2%** of everything transferred as earnings | musician |
-| Instant cash-out | **−4%** of the payout (min $1) | musician; standard payouts are free (1–3 business days) |
+| Instant cash-out | **-4%** of the payout (min $1), on cash-outs of **$10.00 or more** (`INSTANT_PAYOUT_MIN_CENTS`) | musician; standard payouts are free (1 to 3 business days) and have no minimum |
 | Late fee | one-time **10%** of the outstanding settlement | curator, when the settlement goes delinquent, split **7 points to the musician, 3 to the platform** |
 
 Integer cents everywhere: fees charged to the curator round **up** (`Math.ceil`), shares paid out
@@ -359,9 +475,13 @@ shape it handles (no late fee ever applies to a deposit). Both clients surface t
 occurrence.
 
 **Payouts.** Musicians onboard through a Stripe-hosted Express flow (`createOnboardingLink`) and
-cash out from the web Earnings page, standard (free, 1–3 business days) or instant (4%, min $1,
-debit-card-backed accounts only). **Any member of a profile can trigger its payouts**, that is a
-deliberate product decision, recorded in the launch checklist below, not an oversight.
+cash out from the Earnings page on either platform: standard (free, 1 to 3 business days) or
+instant (4%, min $1, debit-card-backed accounts only, and only for $10.00 or more; below that the
+callable refuses with `PAYOUT_INSTANT_MIN_MESSAGE`). **Payout authority is profile admins only**:
+`createOnboardingLink` and `requestPayout` call `requireProfileAdmin` (sub-project 5 security
+ruling H2, `docs/superpowers/sp5-rulings.md` ruling 7), because onboarding sets the bank
+destination and a payout drains the balance. Members see balance and status through
+`getStripeStatus`; on mobile they see the buttons and receive the server's refusal.
 
 **Gates.** A curator needs a saved card before sending an offer or accepting an application; a
 musician must be payout-ready before applying to a gig or having a booking accepted. Both are
@@ -402,14 +522,117 @@ It is also the recovery path for a charge Stripe leaves `processing`: a same-key
 (Stripe replays the cached response), so the caller persists the intent id and lets
 `payment_intent.succeeded` finalize.
 
-**`paymentsSweep`** runs hourly and owns everything time-based: opening settlement windows, charging
-birth deposits, running the dunning schedule, finishing `*_pending` money moves a crash interrupted,
-and escalating states it deliberately refuses to act on into `adminAlerts` for a human
-(`releaseStuckSaga` is the admin callable that resolves one).
+**`paymentsSweep`** runs hourly (`retryCount: 3`) and owns everything time-based. Its eleven
+steps, in run order (`functions/src/paymentsSweep.ts`, the `steps` array at the bottom of the
+file; the name in parentheses is the step's key in the sweep report):
 
-**Not in sub-project 5**: dispute/chargeback flows beyond Stripe's dashboard defaults, tax
-forms/1099s, statements/exports, multi-currency, live-mode activation, and platform payout
-accounting/reporting.
+1. paymentsSweep step 1 (`reconcile`): finishes or unstages accept sagas left flagged
+   `depositChargePending`.
+2. paymentsSweep step 2 (`pendingDeposits`): completes `refund_pending` and `forfeit_pending`
+   deposits whose post-commit executor never ran.
+3. paymentsSweep step 3 (`birthDeposits`): charges the deposit for occurrences the materializer
+   birthed onto an already-booked run.
+4. paymentsSweep step 4 (`dueOccurrences`): schedules the settlement for each occurrence that has
+   ended, or waives it when the linkage broke (taken down, reopened, re-owned, gig gone).
+5. paymentsSweep step 5 (`chargeSettlements`): charges due `pending` settlements off-session and
+   transfers the musician's share (sourced from the charge only when it fits; see
+   `sp10b-rulings.md`).
+6. paymentsSweep step 6 (`retrySettlements`): runs the +1d, +2d, +2d dunning schedule on
+   `past_due` settlements, then adds the late fee and declares the curator delinquent.
+7. paymentsSweep step 7 (`expiredRefunds`): refunds future-dated deposits off bookings that
+   resolved to `expired` (moderation cascades).
+8. paymentsSweep step 8 (`ticketOrderExpiry`): expires stale pending ticket orders and releases
+   inventory; completes an order whose intent already succeeded, and raises a
+   `ticket_order_stuck` alert after two hours (sub-project 10). The same function runs alone every
+   five minutes as the `ticketOrderExpiry` scheduler; the hourly run is the backstop.
+9. paymentsSweep step 9 (`cancelledEventRefunds`): retries refunds a cancelled event could not
+   complete.
+10. paymentsSweep step 10 (`ticketSettlement`): transfers face value to the curator T+1 after
+    `endsAt`, claiming the event with `settlementClaimedAt` before the transfer and stamping
+    `settlementStartedAt` only after it succeeds (sub-project 10).
+11. paymentsSweep step 11 (`ticketTransferExpiry`): expires ticket transfer offers past their 24h
+    TTL.
+
+Every step is isolated (a step-level and a per-doc try/catch), and states the sweep refuses to act
+on are escalated into `adminAlerts` for a human (`releaseStuckSaga` is the admin callable that
+resolves one).
+
+**Not in sub-project 5** (and still open): tax forms beyond the Connect 1099 delivery setting,
+statements and exports, multi-currency, and platform payout accounting. Dispute handling landed in
+sub-project 10 (`charge.dispute.created`, `charge.dispute.closed`, `charge.refunded` in
+`functions/src/paymentsWebhook.ts`): an open dispute writes a ledger row and an `adminAlert`,
+flags a curator delinquent for a booking charge or stamps `disputeStatus: "open"` on a ticket
+order, and `disputes/{disputeId}` (admin-read) holds the resolution state; a lost dispute reverses
+the matching transfer; a won one clears the gate; evidence submission stays manual in the Stripe
+dashboard. Live-mode activation is an owner launch item.
+
+## Events and ticketing (sub-project 6)
+
+**Concepts.** An `events/{eventId}` doc is a curator-published show, standalone or promoted from a
+`filled` gig (at most one event per `gigId`; a second promotion is refused with
+`GIG_ALREADY_PROMOTED_MESSAGE`), with `status` in `draft`, `published`, `completed`, `cancelled`,
+a lineup of booking acts or external names, a public-precision location, and an optional poster.
+A booking act is verified server-side (`verifyLineupBookingActs`): the booking must exist, belong
+to the calling curator, match the musician, and be `confirmed`, so a curator cannot fabricate an
+association on a musician's public page. Tiers live at `events/{eventId}/tiers/{tierId}`
+(`priceCents`, `capacity`, server-maintained `soldCount`, an optional sale window); inventory truth
+is a transactional `soldCount <= capacity` check, and after publish a capacity can only go up.
+Orders (`orders/{orderId}`), tickets (`users/{uid}/tickets/{ticketId}`), the attendee projection
+(`events/{eventId}/attendees/{ticketId}`), transfers, and `users/{uid}/ticketIndex/{eventId}` (the
+valid-ticket proof the address gate and the buyer cap read) are all server-written. Clients never
+write any of them; every event mutation is a callable (`createEvent`, `updateEvent`,
+`setEventTiers`, `publishEvent`, `cancelEvent`, and the admin `takedownEvent`). Published and
+completed events are publicly readable; an event past its start cannot be edited; the exact
+address reveals only to a valid ticket holder.
+
+**Money.** The fan pays a service fee on top of face value, per ticket
+`min(round(price * 7%) + 99c, 399c)`, zero on free tickets, snapshotted per order as `feePolicy`
+so a later tuning never rewrites history. Checkout (`createTicketOrder`) holds inventory in a
+10-minute pending order, capped at eight tickets per buyer per event (held tickets plus other
+pending orders) and three pending orders per buyer across events; the buyer can
+`cancelTicketOrder`, and `ticketOrderExpiry` reclaims the rest every five minutes. The
+PaymentIntent carries `metadata.purpose: "tickets"` and the buyer's `receipt_email`, and either
+`finalizeTicketOrder` or the `payment_intent.succeeded` webhook completes the order exactly once
+and mints the tickets. Both checkouts show, above Pay: "All sales are final unless the event is
+cancelled or the organizer refunds you. Service fee included in the total." The curator receives
+100% of face value of paid, non-refunded tickets, transferred T+1 after `endsAt` (paymentsSweep
+step 10, idempotency key `ticket_settlement:{eventId}`, ledger id `ticket_settlement:{transferId}`),
+and only while the curator profile is `approved`. Curator grace refunds (`refundTicket`, per
+ticket, fee included) close at `endsAt`, which freezes the settlement basis a full day before any
+transfer. Cancelling an event (curator `cancelEvent`, admin `takedownEvent`, or the unpublish
+cascade when an approved curator is rejected) refunds every paid order in full, fee included, and
+notifies holders; `cancelEventCore` refuses once settlement has started or been freshly claimed. A
+lost dispute on a ticket charge reverses that order's face value out of the event's settlement
+transfer, or reduces the pending basis when the event has not settled.
+
+**Door.** A ticket's QR is possession of a server-minted `qrSecret` (payload
+`{ticketId, eventId, qrSecret}`) compared `===` against the live ticket doc; a transfer mints a
+fresh secret, so old QRs die at the scanner. `checkInTicket` requires membership of the event's
+profile, opens 12 hours before `startsAt` (`CHECK_IN_TOO_EARLY_MESSAGE`), and has a name-list
+fallback (`override: true`); `undoCheckIn` reverts one. The mobile scanner branches on the
+callable's error code: `failed-precondition`, `not-found`, and `permission-denied` are ticket
+verdicts; anything else renders a neutral "Couldn't reach GateKeep. Try again." panel that stays
+until tapped.
+
+**Transfers.** Email-targeted only (handles denote group profiles, not people) and mobile only.
+`offerTransfer` always answers "If that account exists, the ticket offer is on its way." (no
+account enumeration), offers expire after 24h, and the recipient's buyer cap is re-checked on
+accept.
+
+**Surfaces.** Web: the public SSR page `/e/[eventId]` with the Elements buy flow and the poster as
+its OG image, Upcoming Events on `/@handle`, curator management under `/dashboard/events` (tiers,
+poster, publish, cancel, attendee list with grace refunds and undo check-in), and the fan wallet at
+`/tickets`. Mobile: the fan event screen with the PaymentSheet, the Tickets tab (QR wallet,
+address reveal, transfers, incoming offers), curator management with the poster picker, and the
+expo-camera door scanner. Ticket notifications deep-link to the wallet on both platforms
+(`notificationHref` in `packages/shared`).
+
+**Data and boundaries.** `tests-rules/events.rules.test.ts` proves the matrix: every client write
+to these collections is denied; `orders` read to the buyer and the curator's members; `tickets`
+to their owner; `attendees` to the event's curator members; `transfers` to either party.
+`tests-rules/hardening.rules.test.ts` proves the sub-project 10 additions:
+`posterUploads/{uid}/uploads/{nonce}` to its owner, `disputes` to admins, `eventCascadeRetries` to
+nobody (server-only, not even admin reads).
 
 ## Environment variables
 
@@ -425,9 +648,18 @@ string / no-op) by default and only matters for a production deploy.
 | `GEOCODER_PROVIDER` | functions | set to `google` to geocode gig/curator addresses via the real Google Geocoding API (`functions/src/geocode.ts`'s `getGeocoder()`) | unset/any other value → `StubGeocoder`, a deterministic dev/test-only hash-based geocoder with a US-centric bounding box, **launch item**, see checklist below |
 | `GEOCODER_API_KEY` | functions | Google Geocoding API key; required (throws at call time) when `GEOCODER_PROVIDER=google` | n/a while `GEOCODER_PROVIDER` is unset |
 | `STRIPE_SECRET_KEY` | functions | Stripe secret key (`sk_test_…` / `sk_live_…`), a `defineSecret()` param, its presence is what selects the REAL Stripe client | unset → `FakeStripe`, but **only inside the emulator**; a deployed function without it throws rather than moving fake money (`functions/src/stripeClient.ts`'s `getStripe()` fails closed) |
-| `STRIPE_WEBHOOK_SECRET` | functions | Stripe webhook signing secret (`whsec_…`), a `defineSecret()` param, `stripeWebhook` verifies every request against it | unset → signature verification runs against an empty secret and every real Stripe delivery is rejected; harmless in the emulator (FakeStripe's webhook calls are same-process and already trusted) |
+| `STRIPE_WEBHOOK_SECRET` | functions | signing secret of the first Stripe endpoint ("Your account" scope), a `defineSecret()` param declared on `stripeWebhook`; every request is verified against it first, then against the Connect secret | outside the emulator a missing secret is a **500** from `stripeWebhook` ("webhook misconfigured", `StripeWebhookSecretMissingError` in `functions/src/stripeClient.ts`), never a signature check against an empty string; Stripe retries a 500, so a genuine delivery is not lost once the secret lands. Inside the emulator FakeStripe's webhook calls are same-process and need no secret |
 | `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | Stripe publishable key (`pk_test_…` / `pk_live_…`) for Stripe.js, **public, not a secret**; the secret key must NEVER appear in `apps/web` | Stripe.js never loads, so the save-card modal and `payPastDue`'s confirmation step can't run |
 | `APP_ORIGIN` | functions | absolute origin (`https://…`) used to build Stripe Connect onboarding return/refresh URLs | `http://localhost:3000` **in the emulator only**; in production `createOnboardingLink` throws rather than build a redirect to an unknown origin |
+| `STRIPE_CONNECT_WEBHOOK_SECRET` | functions | signing secret of the second Stripe endpoint ("Connected accounts" scope: `account.updated`, `payout.paid`, `payout.failed`), a `defineSecret()` param declared on `stripeWebhook`; `constructWebhookEvent` returns which secret verified, and an event whose scope does not match that secret is refused | outside the emulator a missing secret is the same fail-closed 500 as `STRIPE_WEBHOOK_SECRET`; inside the emulator nothing needs it |
+| `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` | mobile | Stripe publishable key for the native PaymentSheet (`apps/mobile/src/payments/stripe.ts`); set as an EAS environment variable, and in `apps/mobile/.env` for local dev-client runs | keyless mode: the native sheets are skipped and the emulator loop runs with zero Stripe keys |
+| `FIREBASE_EMULATORS` | web | set to `1` so a production build (`next build && next start`) still targets the local emulators (`apps/web/src/lib/firebase-server.ts`) | a production build talks to real Firebase; `next dev` always targets the emulators |
+| `STORAGE_BUCKET` | functions | the bucket every server-side Storage read and cleanup targets (`functions/src/storage.ts`); **must be set on the production deploy** or the functions read the dev bucket | `gatekeep-dev-jg.firebasestorage.app` |
+| `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, `NEXT_PUBLIC_FIREBASE_PROJECT_ID`, `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`, `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`, `NEXT_PUBLIC_FIREBASE_APP_ID` | web | the Firebase web config (`apps/web/src/lib/firebase.ts`); the set is documented in `apps/web/.env.example` | the `gatekeep-dev-jg` dev values compiled into the module |
+| `EXPO_PUBLIC_FIREBASE_API_KEY`, `EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN`, `EXPO_PUBLIC_FIREBASE_PROJECT_ID`, `EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET`, `EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`, `EXPO_PUBLIC_FIREBASE_APP_ID` | mobile | the Firebase mobile config (`apps/mobile/src/lib/firebase.ts`); the set is documented in `apps/mobile/.env.example` | the `gatekeep-dev-jg` dev values compiled into the module |
+| `WEB_PORT` | scripts | the web dev-server port `scripts/seed-test-event.ts` prints its `/e/[eventId]` URL against | `3000` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | scripts | service-account JSON path that lets `scripts/seed-admin.ts` and `scripts/seed-test-accounts.ts` run against a real project instead of the emulator | the scripts refuse to run when neither this nor the emulator hosts are set |
+| `GCLOUD_PROJECT` | scripts | the project id `scripts/seed-admin.ts` and `scripts/seed-test-accounts.ts` (via `scripts/projectId.ts`) write to, checked after a `--project` argument and before the credentials file; printed before any write | a `--project` argument, else the credentials file's `project_id`, else `gatekeep-dev-jg` when an emulator host is set, else the script refuses |
 
 Web App Check only initializes when `NODE_ENV === "production"` **and** the site key is set
 (`apps/web/src/lib/firebase.ts`). Mobile Sentry is additionally gated on `!__DEV__`
@@ -527,14 +759,14 @@ before a real launch:
   project, two DSNs), then set `NEXT_PUBLIC_SENTRY_DSN` (web) and `EXPO_PUBLIC_SENTRY_DSN`
   (mobile) in each app's deploy/build environment. Both apps typecheck, lint, and build cleanly
   with these unset, crash reporting is simply inert until then.
-- **EAS `projectId`**: `apps/mobile/src/notifications/push.ts` reads
-  `Constants.expoConfig?.extra?.eas?.projectId` for push token registration. Run `eas init` (or
-  set `expo.extra.eas.projectId` in `apps/mobile/app.json` manually) once an EAS project exists;
-  this also unblocks the EAS production build in the launch-prep track above.
-- **EAS build setup (in progress, 2026-08-27)**: `apps/mobile/eas.json` (development/preview/
+- **EAS `projectId`**: DONE. `apps/mobile/app.json` carries `expo.extra.eas.projectId`
+  (`0731d32c-00c5-4fdb-9d1c-78d6be4bf1c6`), which `apps/mobile/src/notifications/push.ts` reads
+  for push-token registration.
+- **EAS build setup (still owed; the "Owner-owed items" list in
+  `docs/superpowers/HANDOFF.md` is the tracker)**: `apps/mobile/eas.json` (development/preview/
   production profiles; preview builds an installable Android APK) and the app identifiers
   (`app.gatekeep.mobile` for both `android.package` and `ios.bundleIdentifier`) are committed. Still
-  manual: `eas login` + `eas init` against the org account; Firebase console → add an **Android
+  manual: `eas login` on each build machine; Firebase console → add an **Android
   app** (package `app.gatekeep.mobile`) → download `google-services.json` into `apps/mobile/` and add
   the EAS keystore's SHA-1 (`eas credentials`) to it (Google Sign-In fails on-device without it);
   add an **iOS app** (bundle `app.gatekeep.mobile`) → `GoogleService-Info.plist` likewise; then set
@@ -698,6 +930,27 @@ before a real launch:
   claim document is stamped with a 30-day `expireAt`, but **the field alone expires nothing**, the
   code stamps it, the policy deletes it. Without the policy `stripeEvents` grows forever; the
   replay protection still works, it just never garbage-collects.
+- **Radar and dispute liability (before live mode).** Turn on Stripe Radar's default rules on the
+  platform account (every charge is a platform charge, so Radar runs there), and read the Connect
+  dispute-liability setting: on the separate charges and transfers model the platform is liable
+  for disputes, which is what the `charge.dispute.*` handlers assume (alert, delinquency flag on a
+  booking charge, reversal of the matching transfer on a lost outcome, `disputes/{disputeId}` for
+  the admin). Evidence submission stays manual in the Stripe dashboard.
+- **Simulate a dispute in test mode.** Charge Stripe's dispute test card **4000 0000 0000 0259**
+  once as a booking deposit and once as a ticket order. Expect: a `dispute_opened` ledger row and
+  `adminAlert`, the curator flagged delinquent (deposit) or the order stamped
+  `disputeStatus: "open"` (ticket), and, after closing the dispute as lost from the dashboard, a
+  `dispute_lost` row plus the reversal, or a `dispute_reversal_failed` alert when no transfer
+  exists yet.
+- **Platform float for ticket settlement (decision owed).** Ticket settlement is one transfer per
+  event (paymentsSweep step 10) that is not sourced from a specific charge, so it draws on the
+  platform's available balance; on Stripe's standard payout timing the platform needs enough
+  float to cover an event's face value on T+1, or the transfer fails with `balance_insufficient`
+  and retries hourly (cancel stays possible because `settlementStartedAt` is stamped only after
+  success). Decide before launch: hold a float, delay platform payouts, or move to per-order
+  sourced transfers (sub-project 5c).
+- **1099 delivery.** Enable tax form delivery for Express accounts in the Connect settings for the
+  tax year; nothing in code depends on it.
 - **Re-verify `debitConnectedAccount` against current Stripe Connect documentation BEFORE live
   mode.** Pulling funds from a connected account's balance back to the platform (how the 4% instant
   fee is collected) is implemented as `charges.create({ source: accountId })`, Stripe's legacy,
@@ -723,12 +976,13 @@ before a real launch:
   deposits, the dunning schedule and every crash-recovery path live in it, so a silently unprovisioned
   job means nothing ever settles. Check `adminAlerts` periodically too, that is where the sweep
   escalates money states it refuses to act on.
-- **Product decision recorded: ANY member of a profile can trigger its payouts** (`requestPayout`
-  calls `requireProfileMember`, not a profile-admin check, same posture as `getStripeStatus` and
-  the rest of the payments callables). For a multi-member band profile this means any member can
-  cash the whole balance out to the profile's connected account. Deliberate for v1 (the money can
-  only ever land in that profile's own Stripe account, never a member's), but revisit if
-  multi-member profiles turn out to need an admin-only payout role.
+- **Product decision recorded: payouts are profile ADMINS only** (`requestPayout` and
+  `createOnboardingLink` call `requireProfileAdmin`, sub-project 5 security ruling H2,
+  `docs/superpowers/sp5-rulings.md` ruling 7). Onboarding sets the bank destination and a payout
+  drains the balance, so both are gated like `removeMember` and `transferAdmin`. Members keep
+  read-only balance and status through `getStripeStatus`; the mobile Earnings card shows the
+  buttons to any member and surfaces the server's refusal. Sub-project 5c (admin-initiated member
+  payout splits) is the recorded follow-up.
 - **New composite indexes deploy with `firebase deploy`**: sub-project 5 adds 7 (one `bookings`
   composite plus six `payments` **collection-group** composites the sweep's due/retry/delinquency
   scans depend on). Same caveat as the sub-project 3/4 indexes: the emulator does not enforce
@@ -895,7 +1149,8 @@ sheets entirely.
 - **No new Stripe secrets or webhook registration needed.** Ticket checkout rides the existing
   `stripeWebhook` endpoint and `stripeEvents` claim machine with a new `metadata.purpose: "tickets"`
   value; the webhook subscription list and the `stripeEvents.expireAt` TTL policy set up for
-  sub-project 5 (see above, unchanged) already cover it.
+  sub-project 5 (see above, unchanged) already cover it. Sub-project 10 later added
+  `STRIPE_CONNECT_WEBHOOK_SECRET` for the Connect scope; see the sub-project 5 checklist.
 - **New composite indexes deploy with `firebase deploy`**: sub-project 6 adds 11 composite indexes
   to `firestore.indexes.json` (3 `orders`, 5 `events`, 3 `transfers`) plus a `tickets.orderId`
   collection-group field override. Same caveat as every prior sub-project's indexes: the emulator
@@ -903,12 +1158,10 @@ sheets entirely.
   about them, confirm they build on the real project (Firebase console → Firestore → Indexes)
   after the first deploy before the events/orders/transfers queries that depend on them will work
   in production.
-- **Poster upload is not wired end to end.** `functions/src/media.ts`'s `processPhoto` already
-  accepts `kind: "poster"` and transcodes it, but persists the processed path nowhere the client can
-  read back (a poster has no profile-doc field the way avatar/cover/gallery photos do), so every
-  event on both web and mobile renders text-only (`PhotoPlaceholder`) regardless of what a curator
-  uploads. Fixing it is a small functions change (a watchable doc field, or a synchronous callable
-  that returns the processed path), a follow-up, not shipped in sub-project 6.
+- **Poster upload: DONE in sub-project 10.** `processPhoto` writes `posterUploads/{uid}/uploads/{nonce}`
+  for kind `poster`; the web `EventEditor` and the mobile event management screen watch that doc
+  and save `posterPath` through `updateEvent`; `/e/[eventId]` renders it and uses it as the OG
+  image. Abandoned poster docs older than 24h are reaped by dailySweep step 3.
 - **Transfers are mobile-only in v1.** The web fan tickets page shows a "manage transfers in the
   GateKeep app" hint and never calls `offerTransfer`/`respondToTransfer`; only the mobile app can
   send or accept a transfer. Transfer targeting is email-only (handles denote group profiles, not
@@ -1054,28 +1307,25 @@ Smaller items from the sub-project 2 quality-review rounds, recorded in full in
 
 ## Design docs
 
-**Sub-project 1: Foundation**, `docs/superpowers/specs/2026-08-24-foundation-design.md` for the
-full design spec and `docs/superpowers/plans/2026-08-24-foundation.md` for the task-by-task
-implementation plan.
+Each sub-project has a spec (binding over its plan), a plan (a historical execution record; its
+snippets may predate review fixes), and a rulings doc that is the authority for its area.
+`docs/superpowers/HANDOFF.md` is the fresh-session entry point, `DESIGN.md` at the repo root is the
+brand contract binding on all UI work, and `docs/superpowers/foundation-rulings.md` holds the
+sub-project 1 rulings.
 
-**Sub-project 2: Musician Portfolio**, `docs/superpowers/specs/2026-08-25-musician-portfolio-design.md`
-for the full design spec and `docs/superpowers/plans/2026-08-25-musician-portfolio.md` for the
-task-by-task implementation plan.
+| Sub-project | Spec | Plan | Rulings | Merged |
+|---|---|---|---|---|
+| 1 Foundation | `docs/superpowers/specs/2026-08-24-foundation-design.md` | `docs/superpowers/plans/2026-08-24-foundation.md` | `docs/superpowers/foundation-rulings.md` | 2026-08-25 |
+| 2 Musician portfolio | `docs/superpowers/specs/2026-08-25-musician-portfolio-design.md` | `docs/superpowers/plans/2026-08-25-musician-portfolio.md` | `docs/superpowers/sp2-rulings.md` | 2026-08-26 |
+| 3 Curator profiles and gigs | `docs/superpowers/specs/2026-08-26-curator-gigs-design.md` | `docs/superpowers/plans/2026-08-26-curator-gigs.md` | `docs/superpowers/sp3-rulings.md` | 2026-08-26 |
+| 4 Booking flow | `docs/superpowers/specs/2026-08-26-booking-flow-design.md` | `docs/superpowers/plans/2026-08-26-booking-flow.md` | `docs/superpowers/sp4-rulings.md` | 2026-08-27 |
+| 5 Payments | `docs/superpowers/specs/2026-08-27-payments-design.md` | `docs/superpowers/plans/2026-08-27-payments.md` | `docs/superpowers/sp5-rulings.md` | 2026-08-28 |
+| 5b Mobile payments | `docs/superpowers/specs/2026-08-28-mobile-payments-design.md` | `docs/superpowers/plans/2026-08-28-mobile-payments.md` | `docs/superpowers/sp5b-rulings.md` | 2026-08-28 |
+| 9A Web UI/UX | `docs/superpowers/specs/2026-08-28-web-uiux-design.md` | `docs/superpowers/plans/2026-08-28-web-uiux.md` | `docs/superpowers/sp9a-rulings.md` (mocks in `docs/superpowers/mocks/sp9a/`) | 2026-08-29 |
+| 9B Mobile UI/UX | `docs/superpowers/specs/2026-08-29-mobile-uiux-design.md` | `docs/superpowers/plans/2026-08-29-mobile-uiux.md` | `docs/superpowers/sp9b-rulings.md` | 2026-08-29 |
+| 6 Events and ticketing | `docs/superpowers/specs/2026-08-30-events-ticketing-design.md` | `docs/superpowers/plans/2026-08-30-events-ticketing.md` | `docs/superpowers/sp6-rulings.md` | 2026-08-31 |
+| 7 Fan discovery | `docs/superpowers/specs/2026-09-02-fan-discovery-design.md` | `docs/superpowers/plans/2026-09-02-fan-discovery.md` | `docs/superpowers/sp7-rulings.md` | 2026-09-02 |
+| 10 Hardening | `docs/superpowers/specs/2026-09-02-hardening-design.md` | `docs/superpowers/plans/2026-09-02-hardening-sweep.md` (branch A) and `docs/superpowers/plans/2026-09-02-hardening.md` (branch B) | `docs/superpowers/sp10b-rulings.md` (branch B Task 34; covers both branches) | 2026-09-09 |
 
-**Sub-project 3: Curator Profiles & Gig Postings**, `docs/superpowers/specs/2026-08-26-curator-gigs-design.md`
-for the full design spec and `docs/superpowers/plans/2026-08-26-curator-gigs.md` for the
-task-by-task implementation plan. Durable rulings/handoff record: `docs/superpowers/sp3-rulings.md`
-(mirrors `sp2-rulings.md`'s structure).
-
-**Sub-project 4: Booking Flow**, `docs/superpowers/specs/2026-08-26-booking-flow-design.md` for
-the full design spec and `docs/superpowers/plans/2026-08-26-booking-flow.md` for the task-by-task
-implementation plan. Builds on and resolves obligations recorded in `docs/superpowers/sp3-rulings.md`
-(rulings 23/24 and the M-12/M-13 + booking-widening obligation bullets, annotated
-"RESOLVED (SP4)" in place). Durable rulings/handoff record: `docs/superpowers/sp4-rulings.md`.
-
-**Sub-project 5: Payments**, `docs/superpowers/specs/2026-08-27-payments-design.md` for the full
-design spec and `docs/superpowers/plans/2026-08-27-payments.md` for the task-by-task implementation
-plan (its "as-built contract changes" blocks record where the shipped Stripe layer deliberately
-diverges from the original task snippets). Discharges the deposit-machine, settlement-math and
-`selfDeal`-settlement obligations recorded in `docs/superpowers/sp4-rulings.md`, annotated
-"RESOLVED (SP5)" in place.
+The whole-project audit that sourced sub-project 10: `docs/superpowers/audit-2026-09-01.md`, with
+the detail reports in `docs/superpowers/audit/`.
