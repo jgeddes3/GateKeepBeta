@@ -10,16 +10,14 @@ import { OfferComposer } from "../bookings/OfferComposer";
 import { Button } from "../ui/button";
 import { ACT_SIZE_LABEL } from "./ResultRows";
 
-// The curator search result row: same private/curatorBooking per-card read
-// MusicianBrowse.tsx's MusicianGridItem already does (controller ruling 2,
-// n+1 accepted at v1 the same way that card accepts it), tolerating a
-// summary-only projection with reliability but no preferences (rebuild can
-// seed the doc from a reliability event alone, before the musician has ever
-// saved booking info). Availability and reliability only, never a rate:
-// rates are private by SP4 rule and the locked musician-card spec is
-// explicit that a price never renders on this surface, and this row keeps
-// that same rule. "Offer a gig" reuses the same OfferComposer instance
-// MusicianBrowse opens per card.
+// The curator search result row: a private/curatorBooking per-row read
+// (controller ruling 2), n+1 accepted at v1, tolerating a summary-only
+// projection with reliability but no preferences (rebuild can seed the doc
+// from a reliability event alone, before the musician has ever saved
+// booking info). Availability and reliability only, never a rate: rates are
+// private by SP4 rule and the locked musician-card spec is explicit that a
+// price never renders on this surface, and this row keeps that same rule.
+// "Offer a gig" opens the same OfferComposer instance per row.
 export function CuratorArtistRow({ curatorProfileId, r }: { curatorProfileId: string; r: SearchResult }) {
   const [booking, setBooking] = useState<CuratorBookingDoc | null | "loading">("loading");
   const [offering, setOffering] = useState(false);

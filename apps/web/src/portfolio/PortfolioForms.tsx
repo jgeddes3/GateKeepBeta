@@ -22,8 +22,8 @@ import { IconCheck, IconLink, IconPlus, IconTrash, IconUpload } from "../ui/icon
 // imports a plain value from a "use client" file. Imported (for this file's
 // own use below) AND re-exported (a plain `export {x} from "mod"` re-export
 // does NOT create a local binding, so both are needed) so every existing
-// "use client" importer of this name (GigCard.tsx, MusicianCard.tsx,
-// MusicianBrowse.tsx) keeps working unchanged.
+// "use client" importer of this name (GigCard.tsx, the search result rows,
+// CuratorArtistRow.tsx) keeps working unchanged.
 import { formatChipLabel } from "../../app/u/[handle]/chipLabel";
 export { formatChipLabel };
 

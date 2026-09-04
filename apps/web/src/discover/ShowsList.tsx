@@ -62,8 +62,7 @@ export function ShowsList() {
   // No synchronous "loading"/error reset at the top of the effect
   // (eslint-config-next's React Compiler rules flag a setState called
   // directly in an effect body): every state transition happens inside
-  // getDocs' own success/failure callback instead, the same tradeoff
-  // GigBrowse.tsx's own identical comment documents. A filter change keeps
+  // getDocs' own success/failure callback instead. A filter change keeps
   // showing the PREVIOUS result set until the new query resolves, rather
   // than flashing back to a loading skeleton.
   useEffect(() => {

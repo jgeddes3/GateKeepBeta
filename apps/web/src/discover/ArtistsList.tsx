@@ -93,9 +93,9 @@ export function ArtistsList() {
   const [genre, setGenre] = useState<string | null>(null);
 
   // No synchronous "loading"/error reset at the top of the effect (see
-  // ShowsList.tsx's identical comment, and GigBrowse.tsx's original): every
-  // state transition happens inside getDocs' own callbacks instead, so a
-  // genre change keeps showing the previous list until the new one resolves.
+  // ShowsList.tsx's identical comment): every state transition happens
+  // inside getDocs' own callbacks instead, so a genre change keeps showing
+  // the previous list until the new one resolves.
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();

@@ -13,15 +13,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 
 type GigRow = GigDoc & { id: string };
 
-// Used from Find musicians (apps/web/src/bookings/MusicianBrowse.tsx): a
+// Used from Find musicians (apps/web/src/search/CuratorArtistRow.tsx): a
 // curator picks one of THEIR OWN open gigs and sends offerGig to a specific
 // musician profile. Terms form mirrors the gig detail page's Apply panel
 // (buildOfferPayload/OfferFields are shared between the two doors).
 export function OfferComposer({ curatorProfileId, musicianProfileId, musicianName, onClose }: {
   curatorProfileId: string; musicianProfileId: string; musicianName: string; onClose: () => void;
 }) {
-  // MusicianBrowse can open several OfferComposer instances on the same
-  // page (one per musician card), so a literal "offer-composer-gig" id would
+  // CuratorArtistRow can open several OfferComposer instances on the same
+  // page (one per artist row), so a literal "offer-composer-gig" id would
   // collide across them; useId() gives each mounted instance its own.
   const gigSelectId = useId();
   const [openGigs, setOpenGigs] = useState<GigRow[] | "loading">("loading");

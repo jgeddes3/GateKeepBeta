@@ -37,13 +37,13 @@ function mapUrl(location: CuratorDetails["location"]): string {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
 }
 
-// Display-only duplicate of src/bookings/GigBrowse.tsx's own (unexported,
-// "use client") gigBadgeLabel: same rationale as this file's other local
-// duplicates below (BUDGET_STRUCTURE_LABEL used to live here for the same
-// reason): a Server Component can't import a value out of a "use client"
-// module. The badge only ever claims what's provable from the public gig
-// doc alone (real status, whether it belongs to a series), the same
-// constraint GigBrowse.tsx's own comment documents.
+// A Server Component can't import a value out of a "use client" module
+// (same rationale as this file's other local duplicates below;
+// BUDGET_STRUCTURE_LABEL used to live here for the same reason), so this
+// stays its own local, unexported copy. The badge only ever claims what's
+// provable from the public gig doc alone: real status, and whether it
+// belongs to a series. A cadence ("Weekly") would need the member-only
+// gigSeries doc and stays off this public grid.
 function gigBadgeLabel(gig: PublicGig): string {
   return gig.seriesId != null ? "Recurring series" : "Open for applications";
 }
@@ -289,8 +289,7 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
           <p className="mt-8 font-sora text-sm text-gk-muted">This curator hasn&apos;t added content yet.</p>
         )}
 
-        {/* 6. OPEN GIGS: shared GigCard grid, matching the public "Find
-            gigs" browse grid's own layout (src/bookings/GigBrowse.tsx).
+        {/* 6. OPEN GIGS: shared GigCard grid.
             Unlike the pre-restyle page (and unlike this route's Shows
             section below), this section always renders, empty state
             included: the "See open gigs" CTA above anchors here, and a

@@ -15,14 +15,14 @@ import { cn } from "../lib/utils";
 // presentational component: every page that renders one hands it exactly
 // the fields it already has (no new Firestore reads or Storage lookups
 // happen here or at any call site added by this task) and picks its own
-// `badgeLabel` from data it can already prove is true: see GigBrowse.tsx's
-// comment on why the public "Find gigs" grid can never claim a series'
+// `badgeLabel` from data it can already prove is true: see CuratorProfile.tsx's
+// own gigBadgeLabel for why the public gig grid can never claim a series'
 // exact cadence ("Weekly") the way a member-scoped context eventually could.
 
 export type GigCardGig = Pick<GigDoc, "title" | "startsAt" | "budget" | "wants" | "location"> & { id: string };
 
 // Reuses formatCents + BUDGET_STRUCTURE_LABEL exactly as every other gig
-// surface does (GigBrowse, the gig detail page, the curator gigs list):
+// surface does (the gig detail page, the curator gigs list):
 // the only new behavior is collapsing an exact min==max budget (the common
 // case: a curator posts one flat number, not a real range) down to a single
 // figure, closer to the locked mock's "$600 / set" example than the
@@ -35,13 +35,14 @@ export function formatGigCardPrice(budget: GigBudget): string {
     : `${formatCents(budget.minCents)}–${formatCents(budget.maxCents)} ${label}`;
 }
 
-// Shared by GigCard and MusicianCard: a placeholder built from surface/
-// border tokens only (never the page-level bg-0/1/2 gradient: DESIGN.md's
-// harsh-gradient rule reserves that one for the page itself), topped with
-// the same --gk-scrim every real photo gets, so a card with no photo yet
-// still reads as "this card's photo slot" rather than a blank hole. The
-// centered icon names what's missing (a gig vs. an artist), not a generic
-// "no image" glyph (antislop R-04).
+// Shared by GigCard and every other card/hero that needs a no-photo-yet
+// slot (event and ticket surfaces, the artist hero): a placeholder built
+// from surface/border tokens only (never the page-level bg-0/1/2 gradient:
+// DESIGN.md's harsh-gradient rule reserves that one for the page itself),
+// topped with the same --gk-scrim every real photo gets, so a card with no
+// photo yet still reads as "this card's photo slot" rather than a blank
+// hole. The centered icon names what's missing (a gig vs. an artist), not a
+// generic "no image" glyph (antislop R-04).
 function PhotoPlaceholder({ icon }: { icon: ReactNode }) {
   return (
     <div

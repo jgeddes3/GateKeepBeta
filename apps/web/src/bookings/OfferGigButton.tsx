@@ -7,9 +7,9 @@ import { Button } from "../ui/button";
 
 // Sub-project 9A task 9: the artist page hero's "Offer a gig" CTA (spec
 // section 6.4). This is new WIRING, not a new callable/query/data shape:
-// it surfaces the SAME curator-only offer flow MusicianBrowse.tsx's
-// MusicianGridItem already ships (OfferComposer, unchanged) on a page that
-// never had it before. "Preserving the existing curator-gated behavior
+// it surfaces the SAME curator-only offer flow CuratorArtistRow.tsx already
+// ships (OfferComposer, unchanged) on a page that never had it before.
+// "Preserving the existing curator-gated behavior
 // exactly" means this reuses that gate as-is rather than inventing a new
 // one:
 // - Gate: useMyProfiles(uid), the SAME "my profiles" read every other

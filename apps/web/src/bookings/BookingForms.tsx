@@ -113,7 +113,7 @@ export function buildOfferPayload(
 // does on its own).
 //
 // Review round 1: this component mounts more than once on the same page in
-// at least two places (MusicianBrowse can open several OfferComposer
+// at least two places (CuratorArtistRow can open several OfferComposer
 // instances; the gig detail page can render this from ApplyPanel alongside
 // other booking surfaces), so a literal id string would collide across
 // instances (two elements with the same id, and a label pointing at
@@ -178,11 +178,12 @@ function tzOffsetMs(timeZone: string, utcMs: number): number {
   return asUtc - utcMs;
 }
 
-// GigBrowse's date-filter boundary computation: every gig time on this app
-// is displayed in LAUNCH_TIMEZONE (formatGigDateTime), so a "From"/"To" day
-// picked in the filter UI must be bucketed by LAUNCH_TIMEZONE midnight, not
-// UTC midnight: an evening gig near the boundary would otherwise mis-bucket
-// by the zone's offset (4-5h for LAUNCH_TIMEZONE = America/New_York).
+// A LAUNCH_TIMEZONE-aware day-boundary computation: every gig time on this
+// app is displayed in LAUNCH_TIMEZONE (formatGigDateTime), so a calendar day
+// picked in a date field (a "From"/"To" filter, a series end date) must be
+// bucketed by LAUNCH_TIMEZONE midnight, not UTC midnight: an evening gig
+// near the boundary would otherwise mis-bucket by the zone's offset (4-5h
+// for LAUNCH_TIMEZONE = America/New_York).
 // Standard two-step technique: treat the input Y-M-D as a UTC guess, read
 // LAUNCH_TIMEZONE's offset AT that guess (so DST is derived per-date, never
 // a hardcoded constant), then shift the guess by that offset to land on the

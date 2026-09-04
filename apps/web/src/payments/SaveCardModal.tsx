@@ -45,9 +45,9 @@ export function SaveCardModal({ profileId, onSaved, onClose }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Reads computed CSS custom properties off the document (real DOM work),
-  // same render-body-work-avoidance idiom GigBrowse.tsx/MusicianBrowse.tsx's
-  // own useMemo'd `filtered` lists already use in this app, computed once
-  // per mount rather than on every render.
+  // same render-body-work-avoidance idiom this app's own useMemo'd
+  // `filtered` lists already use elsewhere, computed once per mount rather
+  // than on every render.
   const appearance = useMemo(() => gkStripeAppearance(), []);
 
   const start = async () => {

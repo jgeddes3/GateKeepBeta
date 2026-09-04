@@ -60,7 +60,7 @@ function requestKey(
 // calls setState outside a promise callback: eslint-config-next's
 // react-hooks/set-state-in-effect rule flags exactly the alternative
 // (a setState call reachable synchronously from an effect), the same
-// constraint GigBrowse.tsx/ShowsList.tsx's own comments document.
+// constraint ShowsList.tsx's own comment documents.
 export function useSearch(face: SearchFace, opts: {
   location: { lat: number; lng: number } | null;
   includePins: boolean;
@@ -108,9 +108,9 @@ export function useSearch(face: SearchFace, opts: {
   }
 
   // No setState here outside the .then/.catch callbacks: see this hook's
-  // own header comment. Returns a cancel() function (the other half of the
-  // GigBrowse.tsx/ShowsList.tsx "let cancelled = false; ...; return () =>
-  // { cancelled = true }" convention): the seqRef check alone only guards
+  // own header comment. Returns a cancel() function (the same "let
+  // cancelled = false; ...; return () => { cancelled = true }" convention
+  // ShowsList.tsx's own effect uses): the seqRef check alone only guards
   // against a NEWER request superseding this one while the hook is still
   // mounted, it says nothing about the hook itself having unmounted (or a
   // Tabs panel remounting into a fresh hook instance) while this promise

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { doc, onSnapshot } from "firebase/firestore";
 import { getFirebase } from "../../../../../src/lib/firebase";
 import { useAuth } from "../../../../../src/auth/AuthProvider";
-import { MusicianBrowse } from "../../../../../src/bookings/MusicianBrowse";
+import { CuratorFace } from "../../../../../src/search/CuratorFace";
 import type { ProfileDoc } from "@gatekeep/shared";
 import { Button } from "../../../../../src/ui/button";
 import { Skeleton } from "../../../../../src/ui/skeleton";
@@ -69,7 +69,7 @@ export default function FindMusicians(props: { params: Promise<{ profileId: stri
       </Link>
       <h1 className="mt-4 font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Find musicians</h1>
       <div className="mt-8">
-        <MusicianBrowse key={profileId} curatorProfileId={profileId} />
+        <CuratorFace key={profileId} curatorProfileId={profileId} />
       </div>
     </main>
   );

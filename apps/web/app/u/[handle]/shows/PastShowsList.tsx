@@ -17,16 +17,16 @@ import type { CuratorBookingDoc, PaymentDoc, ReliabilitySummary } from "@gatekee
 // establishes: always attempt the read, treat a denial as "this depth just
 // doesn't apply to this viewer" rather than an error). No depth here adds a
 // new query SHAPE: both reads below are byte-identical in structure to ones
-// MusicianBrowse.tsx (curatorBooking) and EarningsPanel.tsx (bookings +
+// CuratorArtistRow.tsx (curatorBooking) and EarningsPanel.tsx (bookings +
 // payments) already perform, just pointed at ONE profile's already-known
-// gigIds instead of a browse grid or a payouts summary.
+// gigIds instead of a search result row or a payouts summary.
 
 type Reliability = ReliabilitySummary | null | "loading";
 
 // Curator depth: the exact profiles/{id}/private/curatorBooking read
-// MusicianBrowse.tsx's MusicianGridItem already performs per card (that
-// read's own comment: "the caller has curatorAccess via their own approved
-// curator profile membership, regardless of curatorProfileId"). A signed-
+// CuratorArtistRow.tsx already performs per row (that read's own comment:
+// "the caller has curatorAccess via their own approved curator profile
+// membership, regardless of curatorProfileId"). A signed-
 // out visitor, a fan, a musician, or an unapproved curator all get
 // permission-denied here, which resolves to `null` (nothing shown), the
 // same as a doc that never existed.
