@@ -18,10 +18,11 @@ import { DeckCardView } from "./DeckCards";
 import { ShowsList } from "./ShowsList";
 import { ArtistsList } from "./ArtistsList";
 import { GenrePickerSheet, useGenrePickerGate } from "./GenrePickerSheet";
+import { LocationPromptSheet } from "./LocationPromptSheet";
 import { useDeckAudio } from "./useDeckAudio";
 import { useDeckLocation, type DeckLocation } from "./useDeckLocation";
 import {
-  Text, Card, Chip, Button, Sheet, ErrorBanner, SkeletonCard, PageBackground, PhotoPlaceholder,
+  Text, Card, Chip, Button, ErrorBanner, SkeletonCard, PageBackground, PhotoPlaceholder,
   IconCompass, IconListBullets, IconMusicNotes, IconSpeakerHigh, IconSpeakerSlash, IconTicket,
 } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -449,18 +450,7 @@ export function DeckScreen() {
         </View>
       )}
 
-      <Sheet visible={location.promptVisible} onClose={() => void location.dismiss()}>
-        <View style={{ gap: tokens.space.md }}>
-          <View style={{ gap: 4 }}>
-            <Text variant="title">Show what&apos;s close</Text>
-            <Text muted>Allow location and the deck ranks nearby rooms and shows first. Nothing is stored.</Text>
-          </View>
-          <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
-            <Button title="Not now" variant="ghost" onPress={() => void location.dismiss()} style={{ flex: 1 }} />
-            <Button title="Allow" onPress={() => void location.allow()} style={{ flex: 1 }} />
-          </View>
-        </View>
-      </Sheet>
+      <LocationPromptSheet state={location} />
 
       <GenrePickerSheet visible={genrePickerVisible} onClose={() => void genreGate.markSeen()} />
     </View>
