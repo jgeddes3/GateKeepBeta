@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { View, Pressable, KeyboardAvoidingView, Platform } from "react-native";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import { useRouter } from "expo-router";
+import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
 import {
   SHOW_POST_MAX_CHARS, SHOW_POST_LIMIT_MESSAGE, SHOW_POST_RATE_MESSAGE, SHOW_POST_EVENT_CLOSED_MESSAGE,
   type ShowPostDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
+import { useAuth } from "../auth/AuthProvider";
 import { useProfileContext } from "../shell/ProfileContext";
-import { Text, Card, Button, TextArea, Sheet, ErrorBanner, IconTrash } from "../ui";
+import { Text, Card, Button, TextArea, Sheet, ErrorBanner, IconTrash, IconHeart } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -77,6 +79,80 @@ export function useShowPostComposerGate(musicianProfileId: string, endsAt: numbe
   return { isMember, eventEnded };
 }
 
+// SP12 (spec 3.2 and 5). A lineup post's heart reaction: one per viewer per
+// post, seeded from the post's own OWNER-only hearts/{uid} doc (a one-shot
+// getDoc, same "no live listener needed, the callable's own response is
+// what reconciles" posture GoingButton.tsx documents) and adjusted
+// optimistically on every tap. Every screen in this app already sits behind
+// a signed-in gate (app/_layout.tsx's Gate()), so `!user` here is a
+// defensive fallback rather than a real, reachable state, matching
+// EventComments.tsx's own signed-out branch.
+function HeartControl({ eventId, postId, initialCount }: { eventId: string; postId: string; initialCount: number }) {
+  const t = useTokens();
+  const { user } = useAuth();
+  const router = useRouter();
+  const [state, setState] = useState<"loading" | "error" | "ready">("loading");
+  const [hearted, setHearted] = useState(false);
+  const [count, setCount] = useState(initialCount);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Sync with `user` itself changing (sign-out/sign-in), same guard-clause
+    // shape as ProfileContext.tsx's own.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!user) { setHearted(false); setState("ready"); return; }
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, `events/${eventId}/posts/${postId}/hearts/${user.uid}`))
+      .then((s) => { if (!cancelled) { setHearted(s.exists()); setState("ready"); } })
+      .catch(() => { if (!cancelled) setState("error"); });
+    return () => { cancelled = true; };
+  }, [eventId, postId, user]);
+
+  const toggle = async () => {
+    if (!user) { router.push("/(auth)/sign-in"); return; }
+    if (busy || state !== "ready") return;
+    const prevHearted = hearted;
+    const prevCount = count;
+    const next = !hearted;
+    setHearted(next);
+    setCount((c) => Math.max(0, c + (next ? 1 : -1)));
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await callFn<{ eventId: string; postId: string; hearted: boolean }, { hearted: boolean; heartCount: number }>(
+        "setPostHeart", { eventId, postId, hearted: next });
+      setHearted(res.data.hearted);
+      setCount(res.data.heartCount);
+    } catch (e) {
+      setHearted(prevHearted);
+      setCount(prevCount);
+      setError(e instanceof Error ? e.message : "Could not update. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <View style={{ gap: 2 }}>
+      <Pressable
+        onPress={() => void toggle()}
+        disabled={busy || state === "loading"}
+        accessibilityRole="button"
+        accessibilityState={{ selected: hearted }}
+        accessibilityLabel={hearted ? `Remove your heart from this post, ${count}` : `Heart this post, ${count}`}
+        hitSlop={12}
+        style={{ flexDirection: "row", alignItems: "center", gap: 4, minHeight: 44, opacity: busy ? 0.6 : 1 }}
+      >
+        <IconHeart size={18} color={hearted ? t.accent : t.muted} />
+        <Text variant="meta">{count}</Text>
+      </Pressable>
+      {state === "error" && <Text variant="meta" color={t.destructive}>Couldn&apos;t load your heart status.</Text>}
+      {error && <Text variant="meta" color={t.destructive}>{error}</Text>}
+    </View>
+  );
+}
+
 function PostRowItem({ post, canRemove, onRemoved }: {
   post: PostRow; canRemove: boolean; onRemoved: (postId: string) => void;
 }) {
@@ -112,7 +188,10 @@ function PostRowItem({ post, canRemove, onRemoved }: {
           </Pressable>
         )}
       </View>
-      <Text variant="meta" muted>{new Date(post.createdAt).toLocaleString()}</Text>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <Text variant="meta" muted>{new Date(post.createdAt).toLocaleString()}</Text>
+        <HeartControl eventId={post.eventId} postId={post.id} initialCount={post.heartCount ?? 0} />
+      </View>
       {error && <ErrorBanner message={error} />}
     </Card>
   );

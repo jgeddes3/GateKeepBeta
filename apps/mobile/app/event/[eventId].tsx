@@ -21,6 +21,8 @@ import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "../..
 import { PostPurchaseGenrePrompt } from "../../src/discover/GenrePickerSheet";
 import { ShowPostsForAct } from "../../src/discover/ShowPosts";
 import { ShareButton } from "../../src/share/ShareButton";
+import { GoingButton } from "../../src/events/GoingButton";
+import { EventComments } from "../../src/events/EventComments";
 import {
   Text, Button, Badge, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconTicket, IconMapPin, IconMinus, IconPlus,
@@ -654,6 +656,17 @@ export default function EventScreen() {
             <Text style={{ lineHeight: 21 }}>{event.description}</Text>
           </View>
         ) : null}
+
+        {/* SP12 (spec 3.2): the fan reaction row and comment thread, between
+            About and Tickets, matching the web page's own border-t
+            treatment between sections. */}
+        <View style={{ gap: tokens.space.md, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
+          <GoingButton eventId={eventId} eventStatus={event.status} initialCount={event.goingCount ?? 0} />
+          <EventComments
+            eventId={eventId} eventStatus={event.status} curatorProfileId={event.curatorProfileId}
+            lineupMusicianProfileIds={event.lineupMusicianProfileIds ?? []}
+          />
+        </View>
 
         <View style={{ gap: tokens.space.sm, borderTopWidth: 1, borderTopColor: t.border, paddingTop: tokens.space.md }}>
           <Text variant="title">Tickets</Text>
