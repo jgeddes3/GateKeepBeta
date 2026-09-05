@@ -51,7 +51,7 @@ function DiscoverBody({ uid }: { uid: string }) {
             <TabsTrigger value="shows">Shows</TabsTrigger>
             <TabsTrigger value="artists">Artists</TabsTrigger>
           </TabsList>
-          <TabsContent value="shows"><ShowsList /></TabsContent>
+          <TabsContent value="shows"><ShowsList uid={uid} /></TabsContent>
           <TabsContent value="artists"><ArtistsList /></TabsContent>
         </Tabs>
       </div>
