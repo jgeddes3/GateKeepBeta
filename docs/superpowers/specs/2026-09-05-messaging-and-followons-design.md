@@ -32,8 +32,9 @@ launch.
   profile switcher chooses which of the user's profiles is speaking; a user with one profile sees
   no switcher); right, the thread. Each row: the other profile's name and type, the last message
   preview, the time, an unread count. The thread shows messages as bubbles (own side right in the
-  accent, other side left, the same shape `BookingThread` uses), the sender's profile name and
-  the member's display name under each bubble, a composer with a 1000-character counter and a
+  accent, other side left, the same shape `BookingThread` uses), the sender's profile name under
+  each bubble (plus the member's display name on the viewer's own sends; other accounts' user
+  docs are not readable), a composer with a 1000-character counter and a
   Send button, and a header menu with "Block" (admins of the acting profile), "Report", and a
   link to the other profile's public page. Blocked threads show "You blocked this profile.
   Unblock to message again." with an Unblock action for admins; a thread the other side blocked
@@ -77,7 +78,8 @@ launch.
 - `/admin` gains a "Reports" panel listing open reports (conversation and comment) with the
   reporter, the reason, the target, and the time; an admin can open the reported conversation
   (read-only, the whole thread) or comment, hide the comment, add an admin note on the offending
-  user through the existing `flagAccount` tool, or resolve the report. Resolved reports leave the
+  user through the existing `flagAccount` tool (comment reports carry the author's uid;
+  conversation reports point the operator at User lookup instead), or resolve the report. Resolved reports leave the
   list.
 
 ### 3.4 Follow-ons
@@ -128,7 +130,11 @@ launch.
   gains `heartCount` and `events/{eventId}/posts/{postId}/hearts/{uid}`; `EventDoc` gains
   `goingCount`, `commentCount`.
 - `NotificationDoc.kind` gains `message` and `comment_reply`; `notificationHref` branches for
-  both.
+  both. A `message` notification carries `refKind: "musician" | "curator"` (the recipient
+  profile's type) so the mobile href can pick the tab group, the way `saved_search_match`
+  already branches on `refKind`.
+- Server-only rate windows: `messageWindows/{profileId}` and `commentWindows/{uid}` hold the
+  recent timestamps for the rolling caps (client-unreadable, same posture as `geocodeBudgets`).
 - Rules: `conversations` and their `messages` readable by members of either participant profile
   or admins when `openReports > 0`; `reports` admin-read; `comments` readable by anyone signed in
   when not hidden (admins see hidden); `reactions` and `hearts` readable by anyone signed in;
