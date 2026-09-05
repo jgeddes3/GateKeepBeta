@@ -225,6 +225,11 @@ export const MESSAGE_LENGTH_MESSAGE = "Messages are 1 to 1000 characters.";
 export const MESSAGE_RATE_MESSAGE = "You are sending too fast. Try again in a few minutes.";
 export const MESSAGE_UNAPPROVED_MESSAGE = "Only approved profiles can message.";
 export const REPORT_SENT_MESSAGE = "Report sent. Thanks.";
+// One open report per reporter per target. A reporter cannot read the reports
+// collection, so a second attempt has no other way to learn the first one
+// landed: this is a statement of fact, not a failure, and both clients render
+// it in the calm tone REPORT_SENT_MESSAGE gets.
+export const REPORT_DUPLICATE_MESSAGE = "You already reported this.";
 export const REPORT_REASON_PROMPT = "Why are you reporting this?";
 export const REPORT_REASON_MESSAGE = "Give a reason of 1 to 300 characters.";
 export const messageNotificationTitle = (senderProfile: string, recipientProfile: string): string =>

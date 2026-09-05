@@ -1444,6 +1444,12 @@ export interface ReportDoc {
   // The profile the reporter was acting as, when there is one (a
   // conversation report always has one; a fan reporting a comment does not).
   reporterProfileId: string | null;
+  // The uid the report is AGAINST, for the kinds that have exactly one: a
+  // comment has an author, so the admin panel can add an admin note through
+  // flagAccount straight from the row (spec 3.3). A conversation has two
+  // sides and no single offender, so it is null there and the panel sends the
+  // operator to User lookup instead.
+  offenderUid: string | null;
   reason: string;                          // 1 to REPORT_REASON_MAX_CHARS after trim
   status: ReportStatus;
   resolvedBy: string | null;

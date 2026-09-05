@@ -40,6 +40,7 @@ export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js"
 export { createShowPost, removeShowPost } from "./showPosts.js";
 export { sendMessage, markConversationRead, setConversationBlock } from "./messaging.js";
 export { postComment, hideComment, deleteComment, setGoing, setPostHeart } from "./comments.js";
+export { reportConversation, reportComment, resolveReport } from "./reports.js";
 export { getDiscoverDeck } from "./discover.js";
 export {
   onProfileWrittenSearch, onTrackWrittenSearch, onEventWrittenSearch, onGigWrittenSearch, onBookingWrittenSearch,

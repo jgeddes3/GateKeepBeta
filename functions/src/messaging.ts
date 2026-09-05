@@ -58,7 +58,9 @@ interface SendMessageInput { fromProfileId: string; toProfileId: string; text: s
 // profile ids: anyone can construct one, so any difference between these
 // three answers would be an oracle telling a stranger which pairs of profiles
 // are talking to each other.
-const CONVERSATION_DENIED_MESSAGE = "Only profile members can do that.";
+// Exported for reports.ts, which has to refuse in exactly the same words for
+// exactly the same reason.
+export const CONVERSATION_DENIED_MESSAGE = "Only profile members can do that.";
 
 // A mirror write carries FieldValue.increment for `unread` (see below), which
 // the plain ConversationRefDoc field type cannot express; every other field
@@ -135,7 +137,10 @@ function parsePairId(conversationId: string): { musicianProfileId: string; curat
 // is not, and requireProfileMember/Admin proves the caller speaks for it.
 // Every failure is the same sentence, so a stranger probing a constructed
 // pairId learns nothing about who talks to whom.
-async function requireConversationParticipant(
+//
+// Exported for reports.ts: reportConversation authorizes the same way, and a
+// second copy of this reasoning is a second chance to get it wrong.
+export async function requireConversationParticipant(
   profileId: string, conversationId: string, uid: string, as: "member" | "admin",
 ): Promise<void> {
   const pair = parsePairId(conversationId);
