@@ -1415,11 +1415,15 @@ editor, doors and age fields, and artist tags on the lineup.
   fallback otherwise) and from all three mobile screens (event, artist, venue).
 - Open a shared `/e/` and `/u/` link cold and warm on device.
 - Tag an artist on a draft, publish, and accept from the other account; confirm the artist page,
-  search index, a show post, and the follower announce.
+  search index, a show post, and the follower announce. Then tag a second artist, decline it, and
+  untag a third: both render as plain names and neither reaches the artist page.
+- Edit a display name and confirm a new ticket carries it while an old ticket keeps its name.
 - Set a home city and confirm Discover ranks by it with location off, on both web and mobile;
   confirm "Ranked near {city}" links to the account card.
-- Set doors and an age on an event and confirm the line and the badge on both platforms, including
-  the "All ages only" filter.
+- Set doors and an age on an event and confirm the line and the badge on both platforms, the
+  "All ages only" filter, and `doorTime` in the web event page's JSON-LD (view source).
+- Save a search with "All ages only" and confirm a new all-ages show alerts while an 18+ show
+  does not.
 - Confirm the well-known files resolve on the production domain.
 
 ### Sub-project 2 polish follow-ups (non-blocking)
