@@ -135,7 +135,20 @@ function usePaymentRows(profileId: string, retryKey = 0): PaymentRow[] | "loadin
   return rows;
 }
 
-function PendingSettlementsList({ rows, error, onRetry }: { rows: PaymentRow[]; error: boolean; onRetry: () => void }) {
+function PendingSettlementsList({ rows, loading, error, onRetry }: {
+  rows: PaymentRow[]; loading: boolean; error: boolean; onRetry: () => void;
+}) {
+  // Fix round 2, finding 1: was missing a "loading" branch entirely, so a
+  // still-loading (or freshly-retried) read fell through to the
+  // pending.length === 0 check below and rendered "Nothing pending right
+  // now" on every first load and every Retry press.
+  if (loading) {
+    return (
+      <View style={{ gap: tokens.space.sm }}>
+        <SkeletonCard />
+      </View>
+    );
+  }
   if (error) {
     return (
       <View style={{ gap: tokens.space.sm }}>
@@ -411,7 +424,7 @@ export function EarningsPanel({ profileId, type }: { profileId: string; type: Pr
           {type === "musician" && <SharesCard profileId={profileId} isAdmin={isAdmin} />}
           <View style={{ gap: tokens.space.sm }}>
             <Text variant="title">Pending settlements</Text>
-            <PendingSettlementsList rows={rowsList} error={rows === "error"}
+            <PendingSettlementsList rows={rowsList} loading={rows === "loading"} error={rows === "error"}
               onRetry={() => setRowsRetry((n) => n + 1)} />
           </View>
           <View style={{ gap: tokens.space.sm }}>

@@ -247,14 +247,21 @@ export default function GigEditor() {
       </View>
     );
   }
-  if (profile === "error" || privateLoc === "error") {
+  // Fix round 2, finding 4: profile's own "error" is checked first (kept
+  // ahead of both of the checks below, as before), but `!profile` (a
+  // genuinely deleted profile) now comes BEFORE privateLoc's "error", not
+  // grouped with it. Grouping them left a deleted profile stuck on the
+  // retryable error banner forever whenever the private-location read also
+  // failed (privateLoc === "error" kept re-triggering this branch even
+  // though `!profile` is a real, permanent, non-retryable state).
+  if (profile === "error") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
           <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-            onPress={() => { setProfile("loading"); setPrivateLoc("loading"); setRetryKey((n) => n + 1); }} />
+            onPress={() => { setProfile("loading"); setRetryKey((n) => n + 1); }} />
         </View>
       </View>
     );
@@ -266,6 +273,18 @@ export default function GigEditor() {
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
           <Text variant="title">Profile not found</Text>
           <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
+        </View>
+      </View>
+    );
+  }
+  if (privateLoc === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setPrivateLoc("loading"); setRetryKey((n) => n + 1); }} />
         </View>
       </View>
     );

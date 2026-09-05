@@ -9,10 +9,33 @@ import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 import { notificationHref, UNREAD_MARKER_LABEL, type NotificationDoc, type ProfileDoc } from "@gatekeep/shared";
 
+// Fix round 2, finding 5: was re-typed verbatim in both the signed-out
+// branch and the genuinely-empty-inbox branch below (fix round 1's own
+// addition duplicated fix round 1's card). Module-scope so it cannot drift
+// between the two call sites; web's dashboard/page.tsx:286-300 "All caught
+// up" card, ported verbatim (audit #16), unchanged from before.
+function EmptyNotifications() {
+  const t = useTokens();
+  const router = useRouter();
+  return (
+    <View style={{ gap: tokens.space.md }}>
+      <Text variant="title">Notifications</Text>
+      <View style={{ alignItems: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+        <IconBell size={20} color={t.muted} />
+        <Text variant="label">All caught up</Text>
+        <Text muted style={{ textAlign: "center" }}>
+          Review updates and booking activity will land here the moment they happen. In the meantime, go see
+          what&apos;s playing.
+        </Text>
+        <Button variant="ghost" title="Browse gigs" onPress={() => router.push("/(musician)/gigs")} />
+      </View>
+    </View>
+  );
+}
+
 export function NotificationsList() {
   const { user } = useAuth();
   const router = useRouter();
-  const t = useTokens();
   // Four-way sentinel (audit #11): "loading" while the first snapshot
   // hasn't landed, "error" on a failed read (distinct from a genuinely
   // empty inbox, which gets its own "All caught up" empty state below).
@@ -72,20 +95,7 @@ export function NotificationsList() {
   // effect above, so `notes` stays "loading" forever without this branch,
   // a permanent skeleton instead of the ordinary empty list.
   if (!user) {
-    return (
-      <View style={{ gap: tokens.space.md }}>
-        <Text variant="title">Notifications</Text>
-        <View style={{ alignItems: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
-          <IconBell size={20} color={t.muted} />
-          <Text variant="label">All caught up</Text>
-          <Text muted style={{ textAlign: "center" }}>
-            Review updates and booking activity will land here the moment they happen. In the meantime, go see
-            what&apos;s playing.
-          </Text>
-          <Button variant="ghost" title="Browse gigs" onPress={() => router.push("/(musician)/gigs")} />
-        </View>
-      </View>
-    );
+    return <EmptyNotifications />;
   }
   if (notes === "loading") {
     return (
@@ -108,22 +118,7 @@ export function NotificationsList() {
     );
   }
   if (notes.length === 0) {
-    // Web dashboard's own empty card (apps/web/app/dashboard/page.tsx:286-300),
-    // ported verbatim (audit #16).
-    return (
-      <View style={{ gap: tokens.space.md }}>
-        <Text variant="title">Notifications</Text>
-        <View style={{ alignItems: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
-          <IconBell size={20} color={t.muted} />
-          <Text variant="label">All caught up</Text>
-          <Text muted style={{ textAlign: "center" }}>
-            Review updates and booking activity will land here the moment they happen. In the meantime, go see
-            what&apos;s playing.
-          </Text>
-          <Button variant="ghost" title="Browse gigs" onPress={() => router.push("/(musician)/gigs")} />
-        </View>
-      </View>
-    );
+    return <EmptyNotifications />;
   }
   return (
     <FlatList data={notes} keyExtractor={(n) => n.id}

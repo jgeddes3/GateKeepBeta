@@ -508,7 +508,27 @@ export default function GigsList() {
       <View style={{ flex: 1 }}>
         <PageBackground />
         <ScrollView contentContainerStyle={{ padding: tokens.space.lg }} keyboardShouldPersistTaps="handled">
-          <GigPromotePicker gigs={eligibleGigsForPromotion} onPick={(g) => void promoteGig(g)} onClose={() => setView({ kind: "list" })} />
+          {/* Fix round 2, finding 2: the entry point to this view is hidden
+              while `events` isn't a real list (finding 7 in fix round 1),
+              but a live update can still flip it to "error"/"loading"
+              WHILE the picker is already open; `usedGigIds` can't tell
+              which gigs are already promoted in that case, so render this
+              section's own error/loading state here instead of the picker,
+              rather than let promoteGig run against an incomplete list. */}
+          {events === "loading" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <SkeletonCard />
+            </View>
+          ) : events === "error" ? (
+            <View style={{ gap: tokens.space.md }}>
+              <ErrorBanner message="Couldn't load your events." />
+              <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+                onPress={() => { setEvents("loading"); setEventsRetry((n) => n + 1); }} />
+              <Button variant="secondary" title="Back" onPress={() => setView({ kind: "list" })} />
+            </View>
+          ) : (
+            <GigPromotePicker gigs={eligibleGigsForPromotion} onPick={(g) => void promoteGig(g)} onClose={() => setView({ kind: "list" })} />
+          )}
         </ScrollView>
       </View>
     );
@@ -654,7 +674,9 @@ export default function GigsList() {
         </View>
 
         <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
-          <Text variant="title">Series ({seriesList.length})</Text>
+          <Text variant="title">
+            Series{series !== "error" && series !== "loading" ? ` (${seriesList.length})` : ""}
+          </Text>
           {series === "loading" ? (
             <View style={{ gap: tokens.space.sm }}>
               <SkeletonCard />

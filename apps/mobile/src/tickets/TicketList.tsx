@@ -321,7 +321,12 @@ export function TicketList({ uid }: { uid: string }) {
   const [detailTicket, setDetailTicket] = useState<TicketRow | null>(null);
   const [transferTicket, setTransferTicket] = useState<TicketRow | null>(null);
 
-  if (rows === "loading" || now == null) return <TicketListSkeleton />;
+  // Fix round 2, finding 6: `incoming === "loading"` used to fall straight
+  // through to the empty check below (incomingList === []), so a fan with a
+  // pending transfer offer saw the "No tickets yet" empty state flash
+  // before the offer had even loaded. Now it shares the same top-level
+  // skeleton as the tickets read itself.
+  if (rows === "loading" || incoming === "loading" || now == null) return <TicketListSkeleton />;
   if (rows === "error") {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
