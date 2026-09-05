@@ -415,22 +415,21 @@ service cloud.firestore {
     // ---------- Sub-project 12: messaging, comments, reactions ----------
     // conversations/{pairId}, pairId = "{musicianProfileId}__{curatorProfileId}".
     // Members of EITHER participant profile GET the doc and its messages;
-    // an admin may GET one only while it carries an open report (the
-    // Reports panel opens exactly one conversation by id). LIST is
-    // admin-only, gated the same way, and even an admin's unfiltered scan
-    // still fails: openReports is not a field the query itself guarantees,
-    // and Cloud Firestore cannot prove a list rule for "any possible
-    // matching document" from data the query doesn't constrain (confirmed
-    // empirically: resource.data and the wildcard pairId are BOTH unbound
-    // during list-rule provability, not merely denied at get-time). Members
-    // never list this collection at all, for either participant profile;
-    // profiles/{profileId}/conversations below is what the inbox screen
-    // queries instead. Every write is a callable (messaging.ts, reports.ts).
+    // an admin may GET one only while it carries an open report. LIST is
+    // closed outright: the Reports panel opens exactly one conversation by
+    // id, so an admin list clause was never exercised by anything real,
+    // and a resource.data-gated list can't be proven anyway (resource.data
+    // and the wildcard pairId are both unbound during list-rule
+    // provability, confirmed empirically, not merely denied at get-time).
+    // Members never list this collection at all, for either participant
+    // profile; profiles/{profileId}/conversations below is what the inbox
+    // screen queries instead. Every write is a callable (messaging.ts,
+    // reports.ts).
     match /conversations/{pairId} {
       allow get: if isMember(resource.data.musicianProfileId)
         || isMember(resource.data.curatorProfileId)
         || (isAdmin() && resource.data.openReports > 0);
-      allow list: if isAdmin() && resource.data.openReports > 0;
+      allow list: if false;
       allow write: if false; // Cloud Functions only
 
       match /messages/{messageId} {
@@ -441,9 +440,14 @@ service cloud.firestore {
         // already inside (conversations/{pairId}/messages), not a
         // top-level scan, so it never hits the list-provability limit
         // above.
-        allow read: if isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.musicianProfileId)
-          || isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.curatorProfileId)
-          || (isAdmin() && get(/databases/$(database)/documents/conversations/$(pairId)).data.openReports > 0);
+        // Free checks first, same idiom as bookings/{bookingId}/payments
+        // above, so an anonymous or non-member caller is denied without
+        // ever paying for a get(); openReports > 0 still gates the admin
+        // path exactly as it does on the parent doc.
+        allow read: if (isAdmin() && get(/databases/$(database)/documents/conversations/$(pairId)).data.openReports > 0)
+          || (signedIn() && (
+            isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.musicianProfileId)
+            || isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.curatorProfileId)));
         allow write: if false;
       }
     }
@@ -474,20 +478,31 @@ service cloud.firestore {
     // comments vanish for everyone except admins"). Signed-in and not
     // public, because commenting itself needs an account: an anonymous
     // visitor sees the show, not the room's conversation. A non-admin list
-    // MUST pin hidden == false for the rule to hold over every result.
+    // MUST pin hidden == false for the rule to hold over every result. The
+    // parent event's status (published/cancelled) is enforced by the
+    // callables that write comments, not this rule; a thread stays
+    // readable on a cancelled event by design.
     match /events/{eventId}/comments/{commentId} {
       allow read: if isAdmin() || (signedIn() && resource.data.hidden == false);
       allow write: if false; // Cloud Functions only
     }
-    // The "Going" toggle and the lineup-post heart: signed-in read (the
-    // counts themselves live on the parent event and post docs, which are
-    // already public), callable-only write.
+    // The "Going" toggle and the lineup-post heart: only the person who
+    // reacted, or an admin, may read their own pointer doc; nobody may
+    // LIST who reacted, that would enumerate every uid that went "Going"
+    // or hearted a post. Counts live on the parent event and post docs,
+    // already public, so the aggregate stays visible without exposing the
+    // roster.
     match /events/{eventId}/reactions/{uid} {
-      allow read: if signedIn();
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if false;
       allow write: if false;
     }
     match /events/{eventId}/posts/{postId}/hearts/{uid} {
-      allow read: if signedIn();
+      // The parent event's status is enforced by the callables that write
+      // hearts, not this rule; a heart stays readable by its owner even if
+      // the event is later cancelled.
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if false;
       allow write: if false;
     }
     // Per-user rolling comment-rate window (comments.ts) and per-profile

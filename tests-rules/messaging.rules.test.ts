@@ -3,7 +3,9 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { collection, doc, getDoc, getDocs, orderBy, query, setDoc, updateDoc, where } from "firebase/firestore";
+import {
+  collection, collectionGroup, doc, getDoc, getDocs, orderBy, query, setDoc, updateDoc, where,
+} from "firebase/firestore";
 
 // Sub-project 12 rules matrix. Everything below is read-only for clients:
 // sendMessage, postComment, the report callables, and resolveReport own
@@ -79,11 +81,16 @@ describe("conversations and messages", () => {
     const admin = env.authenticatedContext("ad", { admin: true }).firestore();
     await assertFails(getDocs(query(
       collection(admin, "profiles/mus1/conversations"), orderBy("lastMessageAt", "desc"))));
+    // An anonymous caller cannot list the mirror either; membership needs a
+    // signed-in uid, not merely a wildcard-scoped path.
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(getDocs(query(
+      collection(anon, "profiles/mus1/conversations"), orderBy("lastMessageAt", "desc"))));
     // The mirror is server-written only, even for a genuine member.
     await assertFails(setDoc(doc(mine, `profiles/mus1/conversations/${PAIR}`), { unread: 0 }));
   });
 
-  it("refuses strangers, anonymous callers, and every client write", async () => {
+  it("nobody lists top-level conversations; strangers, anonymous callers, and every client write are refused", async () => {
     await seedPair();
     const stranger = env.authenticatedContext("zz").firestore();
     await assertFails(getDoc(doc(stranger, `conversations/${PAIR}`)));
@@ -94,6 +101,11 @@ describe("conversations and messages", () => {
     const anon = env.unauthenticatedContext().firestore();
     await assertFails(getDoc(doc(anon, `conversations/${PAIR}`)));
     const member = env.authenticatedContext("mo").firestore();
+    // List is closed outright (allow list: if false), even for a real
+    // member of the exact conversation the filter targets.
+    await assertFails(getDocs(query(
+      collection(member, "conversations"),
+      where("participants", "array-contains", "mus1"), orderBy("lastMessageAt", "desc"))));
     await assertFails(updateDoc(doc(member, `conversations/${PAIR}`), { unread: { cur1: 0 } }));
     await assertFails(setDoc(doc(member, `conversations/${PAIR}/messages/m2`),
       { senderProfileId: "mus1", senderUid: "mo", text: "sneak", at: 3 }));
@@ -108,8 +120,32 @@ describe("conversations and messages", () => {
     });
     await assertSucceeds(getDoc(doc(admin, `conversations/${PAIR}`)));
     await assertSucceeds(getDoc(doc(admin, `conversations/${PAIR}/messages/m1`)));
-    // Still no bulk sweep of every conversation, reported or not.
+    // List is closed outright, reported or not; an admin still cannot scan
+    // the collection, only get() one conversation at a time by id.
     await assertFails(getDocs(collection(admin, "conversations")));
+  });
+});
+
+describe("collection-group queries stay scoped to their parent, never a cross-cutting scan", () => {
+  it("a signed-in member cannot collectionGroup messages, comments, or conversations", async () => {
+    await seedPair();
+    await seed("events/ev1", {
+      curatorProfileId: "cur1", title: "Night", status: "published",
+      lineup: [], lineupMusicianProfileIds: [], startsAt: 10, endsAt: 20,
+    });
+    await seed("events/ev1/comments/c1", {
+      authorUid: "fan1", authorName: "Fan", authorRole: "fan", authorProfileId: null,
+      parentId: null, text: "great", hidden: false, hiddenBy: null, openReports: 0, at: 5,
+    });
+    const member = env.authenticatedContext("mo").firestore();
+    // "messages" exists only nested under one conversation, "comments" only
+    // nested under one event, and "conversations" exists both top-level
+    // (list closed outright) and under profiles/{id} (list needs a bound
+    // profileId): none of the three can be proven across the whole
+    // database, so a bare collectionGroup scan fails for all of them.
+    await assertFails(getDocs(collectionGroup(member, "messages")));
+    await assertFails(getDocs(collectionGroup(member, "comments")));
+    await assertFails(getDocs(collectionGroup(member, "conversations")));
   });
 });
 
@@ -162,6 +198,10 @@ describe("event comments, reactions, and post hearts", () => {
       collection(fan, "events/ev1/comments"), where("hidden", "==", false), orderBy("at", "desc"))));
     // An unpinned list would include the hidden doc, so it must fail.
     await assertFails(getDocs(query(collection(fan, "events/ev1/comments"), orderBy("at", "desc"))));
+    // Even fan2, who wrote comment c2, cannot read it once it's hidden:
+    // hidden means hidden from the author too, not just other fans.
+    const author = env.authenticatedContext("fan2").firestore();
+    await assertFails(getDoc(doc(author, "events/ev1/comments/c2")));
     const anon = env.unauthenticatedContext().firestore();
     await assertFails(getDoc(doc(anon, "events/ev1/comments/c1")));
     const admin = env.authenticatedContext("ad", { admin: true }).firestore();
@@ -169,11 +209,23 @@ describe("event comments, reactions, and post hearts", () => {
     await assertSucceeds(getDocs(query(collection(admin, "events/ev1/comments"), orderBy("at", "desc"))));
   });
 
-  it("shows reactions and hearts to any signed-in caller and refuses every client write", async () => {
+  it("lets only the reacting or hearting uid, or an admin, read that one doc; refuses every list and every client write", async () => {
     await seedEvent();
     const fan = env.authenticatedContext("fan1").firestore();
     await assertSucceeds(getDoc(doc(fan, "events/ev1/reactions/fan1")));
     await assertSucceeds(getDoc(doc(fan, "events/ev1/posts/p1/hearts/fan1")));
+    // Nobody signed in may list the roster of who reacted or hearted; the
+    // counts on the parent event/post docs are the only public aggregate.
+    await assertFails(getDocs(collection(fan, "events/ev1/reactions")));
+    await assertFails(getDocs(collection(fan, "events/ev1/posts/p1/hearts")));
+    // A stranger cannot read fan1's reaction or heart by uid either.
+    const stranger = env.authenticatedContext("zz").firestore();
+    await assertFails(getDoc(doc(stranger, "events/ev1/reactions/fan1")));
+    await assertFails(getDoc(doc(stranger, "events/ev1/posts/p1/hearts/fan1")));
+    // An admin, exercising the isAdmin() branch, may still get either.
+    const admin = env.authenticatedContext("ad", { admin: true }).firestore();
+    await assertSucceeds(getDoc(doc(admin, "events/ev1/reactions/fan1")));
+    await assertSucceeds(getDoc(doc(admin, "events/ev1/posts/p1/hearts/fan1")));
     await assertFails(setDoc(doc(fan, "events/ev1/reactions/fan1"), { going: false, at: 9 }));
     await assertFails(setDoc(doc(fan, "events/ev1/posts/p1/hearts/fan1"), { at: 9 }));
     await assertFails(setDoc(doc(fan, "events/ev1/comments/c3"),
