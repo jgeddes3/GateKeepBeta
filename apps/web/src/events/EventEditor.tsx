@@ -1,12 +1,16 @@
 "use client";
 import { useState } from "react";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
-import { GENRES, type EventAct, type EventDoc, type EventStatus, type TicketTierDoc } from "@gatekeep/shared";
+import {
+  AGE_RESTRICTIONS, AGE_RESTRICTION_LABEL, DOORS_MAX_BEFORE_START_MS, EVENT_DOORS_MESSAGE,
+  GENRES, type AgeRestriction, type EventAct, type EventDoc, type EventStatus, type TaggedActStatus, type TicketTierDoc,
+} from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { LocationFields, MAX_ADDRESS_LENGTH, type LocationValue } from "../gigs/GigForms";
 import { EVENT_STATUS_LABEL, EVENT_STATUS_BADGE } from "./eventDisplay";
 import { PosterField } from "./PosterField";
+import { ArtistPicker } from "./ArtistPicker";
 import { Chip, formatChipLabel } from "../portfolio/PortfolioForms";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -51,13 +55,13 @@ interface CreateEventPayload {
   curatorProfileId: string; source: EventSourceInput;
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
-  curatorGenres?: string[];
+  curatorGenres?: string[]; doorsAt: number | null; ageRestriction: AgeRestriction;
 }
 interface UpdateEventPayload {
   curatorProfileId: string; eventId: string;
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
-  curatorGenres?: string[];
+  curatorGenres?: string[]; doorsAt: number | null; ageRestriction: AgeRestriction;
 }
 interface SetEventTiersPayload {
   curatorProfileId: string; eventId: string;
@@ -88,7 +92,7 @@ const fromLocalInput = (value: string): number | null => {
   return Number.isFinite(ms) ? ms : null;
 };
 
-function ErrorBox({ message }: { message: string }) {
+export function ErrorBox({ message }: { message: string }) {
   return (
     <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
       <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
@@ -99,14 +103,64 @@ function ErrorBox({ message }: { message: string }) {
 
 // ---------- Lineup editor (shared by create + edit) ----------
 
-function LineupFields({ lineup, onChange }: { lineup: EventAct[]; onChange: (v: EventAct[]) => void }) {
+interface TagEventArtistPayload { curatorProfileId: string; eventId: string; musicianProfileId: string; }
+interface UntagEventArtistPayload { curatorProfileId: string; eventId: string; musicianProfileId: string; }
+
+// Server-owned status copy (spec section 6): the curator sees this beside
+// every tagged act, never invented or edited client-side.
+const TAG_STATUS_LABEL: Record<TaggedActStatus, string> = { pending: "Pending", accepted: "Accepted", declined: "Declined" };
+
+function LineupFields({ lineup, onChange, eventId, profileId }: {
+  lineup: EventAct[]; onChange: (v: EventAct[]) => void; eventId: string | null; profileId: string;
+}) {
   const [draft, setDraft] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const [untagBusyId, setUntagBusyId] = useState<string | null>(null);
+
   const addAct = () => {
     const name = draft.trim();
     if (!name) return;
     onChange([...lineup, { kind: "external", name }]);
     setDraft("");
   };
+
+  // tagEventArtist is the ONLY writer of a `tagged` act (eventArtistTags.ts's
+  // own header comment); this just mirrors its result locally (status
+  // "pending", the id and name the picker already resolved) so the row
+  // appears without a refetch. Save later resends this placeholder verbatim,
+  // and the server's own reconcileTaggedActs replaces it with its stored
+  // copy by musicianProfileId, so nothing here ever invents or edits status.
+  const handlePick = async (musicianProfileId: string, name: string) => {
+    if (!eventId) return;
+    setTagError(null);
+    try {
+      await callFn<TagEventArtistPayload, { actIndex: number }>("tagEventArtist",
+        { curatorProfileId: profileId, eventId, musicianProfileId });
+      onChange([...lineup, { kind: "tagged", musicianProfileId, name, status: "pending", taggedAt: Date.now(), respondedAt: null }]);
+    } catch (e) {
+      // The three ARTIST_TAG_* messages are the whole vocabulary here
+      // (duplicate, unapproved, cap); surfaced verbatim, same discipline as
+      // every other callable rejection in this file.
+      setTagError(e instanceof Error ? e.message : "Could not tag this artist.");
+    }
+  };
+
+  const untag = async (musicianProfileId: string, index: number) => {
+    if (!eventId) return;
+    setTagError(null);
+    setUntagBusyId(musicianProfileId);
+    try {
+      await callFn<UntagEventArtistPayload, { ok: true }>("untagEventArtist",
+        { curatorProfileId: profileId, eventId, musicianProfileId });
+      onChange(lineup.map((a, i) => (i === index ? { kind: "external", name: a.name } : a)));
+    } catch (e) {
+      setTagError(e instanceof Error ? e.message : "Could not untag this artist.");
+    } finally {
+      setUntagBusyId(null);
+    }
+  };
+
   return (
     <div className="grid gap-2">
       {lineup.length > 0 && (
@@ -116,19 +170,31 @@ function LineupFields({ lineup, onChange }: { lineup: EventAct[]; onChange: (v: 
               <span className="min-w-0 truncate font-sora text-sm text-gk-text">
                 {act.name}
                 {act.kind === "booking" && <span className="ml-1.5 font-sora text-xs text-gk-muted">(booked act)</span>}
+                {act.kind === "tagged" && <span className="ml-1.5 font-sora text-xs text-gk-muted">{TAG_STATUS_LABEL[act.status]}</span>}
               </span>
-              <button
-                type="button" aria-label={`Remove ${act.name}`}
-                onClick={() => onChange(lineup.filter((_, idx) => idx !== i))}
-                className="shrink-0 rounded-gk-sm p-1 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus"
-              >
-                <IconTrash size={14} aria-hidden="true" />
-              </button>
+              <span className="flex shrink-0 items-center gap-1">
+                {act.kind === "tagged" && (
+                  <Button
+                    type="button" variant="ghost" size="sm"
+                    onClick={() => void untag(act.musicianProfileId, i)}
+                    disabled={untagBusyId === act.musicianProfileId}
+                  >
+                    {untagBusyId === act.musicianProfileId ? "Untagging…" : "Untag"}
+                  </Button>
+                )}
+                <button
+                  type="button" aria-label={`Remove ${act.name}`}
+                  onClick={() => onChange(lineup.filter((_, idx) => idx !== i))}
+                  className="shrink-0 rounded-gk-sm p-1 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus"
+                >
+                  <IconTrash size={14} aria-hidden="true" />
+                </button>
+              </span>
             </li>
           ))}
         </ul>
       )}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Input
           value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Act name" maxLength={80}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAct(); } }}
@@ -137,8 +203,18 @@ function LineupFields({ lineup, onChange }: { lineup: EventAct[]; onChange: (v: 
           <IconPlus size={16} aria-hidden="true" />
           Add act
         </Button>
+        <Button type="button" variant="secondary" onClick={() => setPickerOpen(true)} disabled={!eventId}>
+          <IconPlus size={16} aria-hidden="true" />
+          Tag a GateKeep artist
+        </Button>
       </div>
+      {/* tagEventArtist requires a real eventId (it appends to a stored
+          document); the create form has none yet, so this stays name-only
+          until the first save. */}
+      {!eventId && <p className="font-sora text-xs text-gk-muted">Save the event first, then tag artists.</p>}
+      {tagError && <ErrorBox message={tagError} />}
       <p className="font-sora text-xs text-gk-muted">At least one act is required.</p>
+      <ArtistPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={(id, name) => { void handlePick(id, name); }} />
     </div>
   );
 }
@@ -386,6 +462,8 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
   const [description, setDescription] = useState("");
   const [startsAtInput, setStartsAtInput] = useState(seedStartsAt ? toLocalInput(seedStartsAt) : "");
   const [endsAtInput, setEndsAtInput] = useState(seedStartsAt ? toLocalInput(seedStartsAt + 2 * 3_600_000) : "");
+  const [doorsInput, setDoorsInput] = useState("");
+  const [age, setAge] = useState<AgeRestriction>("all_ages");
   const [lineup, setLineup] = useState<EventAct[]>(seedLineup ?? []);
   const [genres, setGenres] = useState<string[]>([]);
   const [location, setLocation] = useState<LocationValue>({ address: "", visibility: isVenue ? "public" : "neighborhood" });
@@ -402,6 +480,13 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
     if (endsAt == null || endsAt <= startsAt) { setError("End time must be after the start time."); return; }
     if (startsAt <= Date.now()) { setError("Start time must be in the future."); return; }
     if (lineup.length === 0) { setError("Add at least one act to the lineup."); return; }
+    // Client-side hint mirroring validateEventInput's own doors rule
+    // (functions/src/eventsCore.ts): a light UX pre-check only, the server
+    // remains the sole authority.
+    const doorsAt = doorsInput ? fromLocalInput(doorsInput) : null;
+    if (doorsInput && (doorsAt == null || doorsAt >= startsAt || startsAt - doorsAt > DOORS_MAX_BEFORE_START_MS)) {
+      setError(EVENT_DOORS_MESSAGE); return;
+    }
 
     let resolvedSource: EventSourceInput = source;
     if (source.kind === "standalone") {
@@ -416,6 +501,7 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
       const payload: CreateEventPayload = {
         curatorProfileId: profileId, source: resolvedSource, title: trimmedTitle, description: description.trim(),
         startsAt, endsAt, lineup, curatorGenres: genres.length > 0 ? genres : undefined,
+        doorsAt, ageRestriction: age,
       };
       const { data } = await callFn<CreateEventPayload, { eventId: string }>("createEvent", payload);
       onCreated(data.eventId);
@@ -454,13 +540,25 @@ function EventCreateForm({ profileId, isVenue, curatorAddress, source, seedTitle
               <label htmlFor="event-ends" className="font-sora text-sm font-medium text-gk-text">Ends</label>
               <Input id="event-ends" type="datetime-local" value={endsAtInput} onChange={(e) => setEndsAtInput(e.target.value)} />
             </div>
+            <div className="grid gap-1.5">
+              <label htmlFor="event-doors" className="font-sora text-sm font-medium text-gk-text">Doors (optional)</label>
+              <Input id="event-doors" type="datetime-local" value={doorsInput} onChange={(e) => setDoorsInput(e.target.value)} />
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            <span className="font-sora text-sm font-medium text-gk-text">Age</span>
+            <div className="flex flex-wrap gap-2">
+              {AGE_RESTRICTIONS.map((a) => (
+                <Chip key={a} active={age === a} onClick={() => setAge(a)}>{AGE_RESTRICTION_LABEL[a]}</Chip>
+              ))}
+            </div>
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader><CardTitle>Lineup</CardTitle></CardHeader>
-        <CardContent><LineupFields lineup={lineup} onChange={setLineup} /></CardContent>
+        <CardContent><LineupFields lineup={lineup} onChange={setLineup} eventId={null} profileId={profileId} /></CardContent>
       </Card>
 
       <Card>
@@ -496,6 +594,8 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
   const [description, setDescription] = useState(event.description);
   const [startsAtInput, setStartsAtInput] = useState(toLocalInput(event.startsAt));
   const [endsAtInput, setEndsAtInput] = useState(toLocalInput(event.endsAt));
+  const [doorsInput, setDoorsInput] = useState(event.doorsAt ? toLocalInput(event.doorsAt) : "");
+  const [age, setAge] = useState<AgeRestriction>(event.ageRestriction ?? "all_ages");
   const [maxTicketsPerBuyer, setMaxTicketsPerBuyer] = useState(String(event.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER));
   const [lineup, setLineup] = useState<EventAct[]>(event.lineup);
   const [genres, setGenres] = useState<string[]>(event.curatorGenres ?? []);
@@ -519,12 +619,19 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
     if (lineup.length === 0) { setError("Add at least one act to the lineup."); return; }
     const maxTix = Number(maxTicketsPerBuyer);
     if (!Number.isInteger(maxTix) || maxTix < 1 || maxTix > 20) { setError("Max tickets per buyer must be a whole number from 1 to 20."); return; }
+    // Client-side hint mirroring validateEventInput's own doors rule
+    // (functions/src/eventsCore.ts): a light UX pre-check only, the server
+    // remains the sole authority.
+    const doorsAt = doorsInput ? fromLocalInput(doorsInput) : null;
+    if (doorsInput && (doorsAt == null || doorsAt >= startsAt || startsAt - doorsAt > DOORS_MAX_BEFORE_START_MS)) {
+      setError(EVENT_DOORS_MESSAGE); return;
+    }
 
     setBusy(true);
     try {
       const payload: UpdateEventPayload = {
         curatorProfileId: profileId, eventId: event.id, title: trimmedTitle, description: description.trim(),
-        startsAt, endsAt, maxTicketsPerBuyer: maxTix, lineup,
+        startsAt, endsAt, maxTicketsPerBuyer: maxTix, lineup, doorsAt, ageRestriction: age,
         // Fix round 1 (Minor, review): the current selection is always
         // resent, never carried forward as "no change" (updateEvent's own
         // full-replace convention, same discipline this payload's posterPath
@@ -578,6 +685,18 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
               <label htmlFor="event-edit-max-tix" className="font-sora text-sm font-medium text-gk-text">Max tickets/buyer</label>
               <Input id="event-edit-max-tix" type="number" min={1} max={20} value={maxTicketsPerBuyer} onChange={(e) => setMaxTicketsPerBuyer(e.target.value)} />
             </div>
+            <div className="grid gap-1.5">
+              <label htmlFor="event-edit-doors" className="font-sora text-sm font-medium text-gk-text">Doors (optional)</label>
+              <Input id="event-edit-doors" type="datetime-local" value={doorsInput} onChange={(e) => setDoorsInput(e.target.value)} />
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            <span className="font-sora text-sm font-medium text-gk-text">Age</span>
+            <div className="flex flex-wrap gap-2">
+              {AGE_RESTRICTIONS.map((a) => (
+                <Chip key={a} active={age === a} onClick={() => setAge(a)}>{AGE_RESTRICTION_LABEL[a]}</Chip>
+              ))}
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -591,7 +710,7 @@ function EventEditContentForm({ profileId, event }: { profileId: string; event: 
 
       <Card>
         <CardHeader><CardTitle>Lineup</CardTitle></CardHeader>
-        <CardContent><LineupFields lineup={lineup} onChange={setLineup} /></CardContent>
+        <CardContent><LineupFields lineup={lineup} onChange={setLineup} eventId={event.id} profileId={profileId} /></CardContent>
       </Card>
 
       <Card>
