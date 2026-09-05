@@ -216,7 +216,7 @@ sub-project 11. Detail reports live in `docs/superpowers/audit/` and
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
 - Gates before any merge: `pnpm typecheck` (5/5), shared tests (218), web tests (14), `pnpm emu:test`
-  (955 across 61 files, single blocking call), `pnpm emu:rules` (150 across 10 files), web lint (0
+  (958 across 61 files, single blocking call), `pnpm emu:rules` (151 across 10 files), web lint (0
   errors) + build, mobile lint (0 new warnings) + `expo export` bundles.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
