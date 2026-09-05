@@ -145,7 +145,8 @@ launch.
   recent timestamps for the rolling caps (client-unreadable, same posture as `geocodeBudgets`).
 - Rules: `conversations` and their `messages` readable by members of either participant profile
   or admins when `openReports > 0`; `reports` admin-read; `comments` readable by anyone signed in
-  when not hidden (admins see hidden); `reactions` and `hearts` readable by anyone signed in;
+  when not hidden (admins see hidden); a `reactions` or `hearts` doc readable only by its owner
+  (never listable; the counts on the parent docs are the public face);
   every write callable-only; the per-profile conversation mirrors readable by that profile's
   members only. Indexes: `comments (hidden, at desc)` if the query needs it; `reports (status,
   createdAt desc)`; the mirrors order by a single field and need no composite.
