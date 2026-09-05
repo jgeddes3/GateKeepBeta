@@ -88,7 +88,7 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
     <WarnBox>
       <Text color={t.warning}>{message}</Text>
       {affected === "loading" ? null : affected.length > 0 ? (
-        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: tokens.space.xs }}>
           {affected.map((id, i) => (
             <Pressable key={id} hitSlop={12} accessibilityRole="link"
               accessibilityLabel={`Go to the overdue booking${affected.length > 1 ? ` (${i + 1})` : ""}`}

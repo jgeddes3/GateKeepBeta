@@ -40,11 +40,16 @@ function GigListItem({ gig, onPress, onSeriesPress }: {
   gig: GigRow; onPress: () => void; onSeriesPress: () => void;
 }) {
   const t = useTokens();
+  const gigTitle = gig.title || "Untitled gig";
   return (
-    <Pressable onPress={onPress}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${gigTitle}, ${GIG_STATUS_LABEL[gig.status]}`}
+    >
       <Card style={{ padding: tokens.space.md, gap: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{gig.title || "Untitled gig"}</Text>
+          <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{gigTitle}</Text>
           <StatusBadge label={GIG_STATUS_LABEL[gig.status]} status={GIG_STATUS_TONE[gig.status]} />
         </View>
         <Text variant="meta" muted>
@@ -52,7 +57,13 @@ function GigListItem({ gig, onPress, onSeriesPress }: {
           {" · "}{formatCents(gig.budget.minCents)}–{formatCents(gig.budget.maxCents)} {BUDGET_STRUCTURE_LABEL[gig.budget.structure]}
         </Text>
         {gig.seriesId && (
-          <Pressable onPress={onSeriesPress} hitSlop={8}>
+          <Pressable
+            onPress={onSeriesPress}
+            hitSlop={12}
+            style={{ minHeight: 44, justifyContent: "center" }}
+            accessibilityRole="link"
+            accessibilityLabel={`View series${gig.detachedFromTemplate ? " (detached)" : ""}`}
+          >
             <Text variant="meta" color={t.focus}>series{gig.detachedFromTemplate ? " (detached)" : ""}</Text>
           </Pressable>
         )}
@@ -68,11 +79,16 @@ function GigListItem({ gig, onPress, onSeriesPress }: {
 // note; every event here renders via plain text, same as GigListItem's own
 // thumb-less card). ----------
 function EventListItem({ event, onPress }: { event: EventRow; onPress: () => void }) {
+  const eventTitle = event.title || "Untitled event";
   return (
-    <Pressable onPress={onPress}>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${eventTitle}, ${EVENT_STATUS_LABEL[event.status]}`}
+    >
       <Card style={{ padding: tokens.space.md, gap: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{event.title || "Untitled event"}</Text>
+          <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{eventTitle}</Text>
           <StatusBadge label={EVENT_STATUS_LABEL[event.status]} status={EVENT_STATUS_TONE[event.status]} />
         </View>
         <Text variant="meta" muted>{formatEventFullDate(event.startsAt)} · {formatGigTime(event.startsAt)}</Text>
@@ -180,7 +196,12 @@ function GigPromotePicker({ gigs, onPick, onClose }: { gigs: GigRow[]; onPick: (
       ) : (
         <View style={{ gap: tokens.space.sm }}>
           {gigs.map((g) => (
-            <Pressable key={g.id} onPress={() => onPick(g)}>
+            <Pressable
+              key={g.id}
+              onPress={() => onPick(g)}
+              accessibilityRole="button"
+              accessibilityLabel={`Promote ${g.title || "Untitled gig"}`}
+            >
               <Card style={{ gap: 4 }}>
                 <Text variant="label" numberOfLines={1}>{g.title || "Untitled gig"}</Text>
                 <Text variant="meta" muted>{formatGigDateTime(g.startsAt)}</Text>
@@ -590,9 +611,9 @@ export default function GigsList() {
                 </Button>
               </View>
             ) : (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
                 <IconWarningCircle size={14} color={t.muted} />
-                <Text variant="meta" muted>Your curator profile must be approved before you can create events.</Text>
+                <Text variant="meta" muted style={{ flexShrink: 1 }}>Your curator profile must be approved before you can create events.</Text>
               </View>
             )}
           </View>
@@ -648,7 +669,12 @@ export default function GigsList() {
             <>
               {seriesList.length === 0 && <Text muted>No recurring series yet.</Text>}
               {seriesList.map((s) => (
-                <Pressable key={s.id} onPress={() => openSeries(s.id)}>
+                <Pressable
+                  key={s.id}
+                  onPress={() => openSeries(s.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${s.template.title || "Untitled series"}, ${SERIES_STATUS_LABEL[s.status]}`}
+                >
                   <Card style={{ padding: tokens.space.md, gap: 4 }}>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                       <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{s.template.title || "Untitled series"}</Text>

@@ -161,19 +161,24 @@ export function CounterpartyLine({ musicianProfileId, curatorProfileId, mySide }
   if (other === "loading") return <Skeleton height={12} width="55%" />;
   if (!other) return <Text variant="meta" muted>with a profile that is no longer available</Text>;
   const linkable = mySide === "curator" && other.handle;
+  const suffix = reliability ? ` · ${reliability}` : "";
+  if (!linkable) {
+    return <Text variant="meta" muted>with {other.name}{suffix}</Text>;
+  }
   return (
-    <Text variant="meta" muted>
-      with{" "}
-      <Text
-        variant="meta"
-        style={linkable ? { textDecorationLine: "underline" } : undefined}
-        onPress={linkable ? () => router.push({ pathname: "/artist/[handle]", params: { handle: other.handle! } }) : undefined}
-        accessibilityRole={linkable ? "link" : undefined}
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}>
+      <Text variant="meta" muted>with{" "}</Text>
+      <Pressable
+        hitSlop={12}
+        accessibilityRole="link"
+        accessibilityLabel={`View ${other.name}'s profile`}
+        onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: other.handle! } })}
+        style={{ minHeight: 44, justifyContent: "center" }}
       >
-        {other.name}
-      </Text>
-      {reliability ? ` · ${reliability}` : ""}
-    </Text>
+        <Text variant="meta" muted style={{ textDecorationLine: "underline" }}>{other.name}</Text>
+      </Pressable>
+      {suffix ? <Text variant="meta" muted>{suffix}</Text> : null}
+    </View>
   );
 }
 
@@ -182,7 +187,10 @@ function OpenThreadRow({ row, mySide, onPress }: { row: BookingRow; mySide: Book
   const title = useRowGigTitle(row.gigId);
   const yourTurn = row.awaitingSide === mySide;
   return (
-    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+    <Pressable onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${title}${yourTurn ? ", your turn" : ""}`}
+      style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
       padding: tokens.space.md, gap: tokens.space.xs }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
         <Text variant="label" style={{ flex: 1 }}>{title}</Text>
@@ -201,7 +209,10 @@ function ConfirmedRow({ row, mySide, onPress }: { row: BookingRow; mySide: Booki
   const title = useRowGigTitle(row.gigId);
   const next = useNextOccurrence(row.id);
   return (
-    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+    <Pressable onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={title}
+      style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
       padding: tokens.space.md, gap: tokens.space.xs }}>
       <Text variant="label">{title}</Text>
       <CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />
@@ -218,7 +229,10 @@ function HistoryRow({ row, mySide, onPress }: { row: BookingRow; mySide: Booking
   const t = useTokens();
   const title = useRowGigTitle(row.gigId);
   return (
-    <Pressable onPress={onPress} style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
+    <Pressable onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${title}, ${bookingHistoryLabel(row)}`}
+      style={{ borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.card,
       padding: tokens.space.md, gap: tokens.space.xs }}>
       <Text variant="label">{title}</Text>
       <CounterpartyLine musicianProfileId={row.musicianProfileId} curatorProfileId={row.curatorProfileId} mySide={mySide} />

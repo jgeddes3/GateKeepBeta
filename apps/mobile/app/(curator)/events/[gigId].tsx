@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ScrollView, View, Alert } from "react-native";
+import { ScrollView, View, Alert, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, getDoc } from "firebase/firestore";
 import { getFirebase } from "../../../src/lib/firebase";
@@ -103,12 +103,19 @@ function BookedActCard({ bookingId, musicianProfileId }: { bookingId: string; mu
       <Text variant="label">Booked act</Text>
       {act === "loading" ? <Skeleton height={16} width="50%" />
         : act ? (
-          <Text
-            style={act.handle ? { textDecorationLine: "underline" } : undefined}
-            onPress={act.handle ? () => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } }) : undefined}
-          >
-            {act.name}
-          </Text>
+          act.handle ? (
+            <Pressable
+              hitSlop={12}
+              accessibilityRole="link"
+              accessibilityLabel={act.name}
+              onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } })}
+              style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}
+            >
+              <Text style={{ textDecorationLine: "underline" }}>{act.name}</Text>
+            </Pressable>
+          ) : (
+            <Text>{act.name}</Text>
+          )
         ) : <Text muted>Profile no longer available.</Text>}
       <Button title="Open the booking →" variant="secondary"
         onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } })} />

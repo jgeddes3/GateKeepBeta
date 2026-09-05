@@ -135,6 +135,7 @@ export function NotificationsList() {
         // VoiceOver/TalkBack announce it too; a read row's title just goes
         // muted, matching the web twin.
         <Pressable onPress={() => onPress(item)}
+          accessibilityRole="button"
           accessibilityLabel={item.read ? item.title : `${UNREAD_MARKER_LABEL}, ${item.title}`}
           style={{ padding: tokens.space.md }}>
           {!item.read && (

@@ -14,6 +14,7 @@ import { Modal, Pressable } from "react-native";
 import type { ReactNode } from "react";
 import { tokens } from "../theme/tokens";
 import { useTokens } from "../theme/ThemeProvider";
+import { useReducedMotion } from "../theme/useReducedMotion";
 
 export function Sheet({
   visible,
@@ -25,8 +26,14 @@ export function Sheet({
   children: ReactNode;
 }) {
   const t = useTokens();
+  const reduced = useReducedMotion();
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType={reduced ? "none" : "slide"}
+      onRequestClose={onClose}
+    >
       <Pressable
         onPress={onClose}
         accessibilityRole="button"

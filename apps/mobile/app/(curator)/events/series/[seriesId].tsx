@@ -323,7 +323,12 @@ export default function SeriesDetail() {
                 <Text muted>No dates yet. The daily sweep materializes upcoming occurrences from this template automatically.</Text>
               )}
               {occurrences.map((occ) => (
-                <Pressable key={occ.id} onPress={() => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId: occ.id } })}>
+                <Pressable
+                  key={occ.id}
+                  onPress={() => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId: occ.id } })}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${formatGigDateTime(occ.startsAt)}, ${GIG_STATUS_LABEL[occ.status]}${occ.detachedFromTemplate ? ", detached" : ""}`}
+                >
                   <Card style={{ padding: tokens.space.md, gap: 4 }}>
                     <Text variant="label">{formatGigDateTime(occ.startsAt)}</Text>
                     <Text variant="meta" muted>

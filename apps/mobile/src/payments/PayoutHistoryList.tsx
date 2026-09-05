@@ -151,7 +151,9 @@ export function PayoutHistoryList({ scope }: { scope: PayoutHistoryScope }) {
     return (
       <View style={{ gap: tokens.space.sm }}>
         <Callout tone="warning"><Text color={t.warning}>Couldn&apos;t load payout history.</Text></Callout>
-        <Pressable onPress={() => void load(null, true)} style={{ alignSelf: "flex-start" }}>
+        <Pressable onPress={() => void load(null, true)}
+          accessibilityRole="button" accessibilityLabel="Retry"
+          hitSlop={12} style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}>
           <Text color={t.warning} style={{ textDecorationLine: "underline" }}>Retry</Text>
         </Pressable>
       </View>

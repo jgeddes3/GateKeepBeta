@@ -415,6 +415,7 @@ export default function Artist() {
             <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
               {links.map((l) => (
                 <Pressable key={`${l.kind}:${l.url}`} onPress={() => void Linking.openURL(l.url)}
+                  accessibilityRole="link" accessibilityLabel={`Open ${l.kind} link`}
                   style={{ minHeight: 44, justifyContent: "center", borderWidth: 1, borderColor: t.border, borderRadius: tokens.radius.pill,
                     paddingHorizontal: 14, paddingVertical: 8 }}>
                   <Text variant="label">{l.kind}</Text>

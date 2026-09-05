@@ -201,7 +201,9 @@ export function MemberPayoutsPanel() {
       {status === "error" && (
         <View style={{ gap: tokens.space.sm }}>
           <Callout tone="warning"><Text color={t.warning}>Couldn&apos;t load payout status.</Text></Callout>
-          <Pressable onPress={() => setReloadKey((k) => k + 1)} style={{ alignSelf: "flex-start" }}>
+          <Pressable onPress={() => setReloadKey((k) => k + 1)}
+            accessibilityRole="button" accessibilityLabel="Retry"
+            hitSlop={12} style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}>
             <Text color={t.warning} style={{ textDecorationLine: "underline" }}>Retry</Text>
           </Pressable>
         </View>
@@ -219,7 +221,9 @@ export function MemberPayoutsPanel() {
           ) : !status.payoutsEnabled ? (
             <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm, flexWrap: "wrap" }}>
               <Text>Verifying your account</Text>
-              <Pressable onPress={() => setReloadKey((k) => k + 1)}>
+              <Pressable onPress={() => setReloadKey((k) => k + 1)}
+                accessibilityRole="button" accessibilityLabel="Retry"
+                hitSlop={12} style={{ minHeight: 44, justifyContent: "center" }}>
                 <Text style={{ textDecorationLine: "underline" }}>Retry</Text>
               </Pressable>
             </View>

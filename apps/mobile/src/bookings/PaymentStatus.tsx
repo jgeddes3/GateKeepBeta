@@ -236,7 +236,7 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
             </View>
           ) : (
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
-              <Text>
+              <Text style={{ flex: 1, flexShrink: 1 }}>
                 {stripeStatus.hasCard
                   ? `Card on file: ${stripeStatus.cardBrand ?? "card"} •••• ${stripeStatus.cardLast4 ?? "----"}`
                   : "No card on file"}
