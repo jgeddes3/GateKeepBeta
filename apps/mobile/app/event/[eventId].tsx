@@ -664,7 +664,7 @@ export default function EventScreen() {
           <GoingButton eventId={eventId} eventStatus={event.status} initialCount={event.goingCount ?? 0} />
           <EventComments
             eventId={eventId} eventStatus={event.status} curatorProfileId={event.curatorProfileId}
-            lineupMusicianProfileIds={event.lineupMusicianProfileIds ?? []}
+            lineupMusicianProfileIds={event.lineupMusicianProfileIds ?? []} commentCount={event.commentCount ?? 0}
           />
         </View>
 

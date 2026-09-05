@@ -8,7 +8,7 @@ import {
 import {
   COMMENT_MAX_CHARS, COMMENT_PAGE_SIZE, COMMENT_REPLY_LABEL, COMMENT_HIDE_LABEL, COMMENT_DELETE_LABEL,
   COMMENT_COMPOSER_PLACEHOLDER, COMMENTS_CLOSED_MESSAGE, COMMENTS_EMPTY_MESSAGE, COMMENT_DELETED_LINE,
-  COMMENT_UNDER_REVIEW_MESSAGE, REPORT_LABEL, REPORT_REASON_PROMPT, REPORT_REASON_MAX_CHARS, REPORT_REASON_MESSAGE,
+  REPORT_LABEL, REPORT_REASON_PROMPT, REPORT_REASON_MAX_CHARS, REPORT_REASON_MESSAGE,
   REPORT_SENT_MESSAGE, REPORT_DUPLICATE_MESSAGE, SHOW_MORE_LABEL, commentHiddenLine,
   type CommentRole, type EventCommentDoc, type EventStatus,
 } from "@gatekeep/shared";
@@ -109,20 +109,23 @@ async function fetchCommentsPage(
 // to tell the two apart from here either.
 function ParentQuote({ eventId, parentId, rows }: { eventId: string; parentId: string; rows: CommentRow[] }) {
   const known = rows.find((r) => r.id === parentId) ?? null;
-  const [parent, setParent] = useState<EventCommentDoc | "loading" | "gone">(known ?? "loading");
+  // Only the fetch fallback lives in state (fix round 1, review finding):
+  // `known` is already derived from `rows` on every render, so mirroring it
+  // into state too was a redundant, synchronous setState in the effect body.
+  // `known ?? fetched` below is the actual parent; `fetched` starts and stays
+  // "loading" whenever a parent is already on hand.
+  const [fetched, setFetched] = useState<EventCommentDoc | "loading" | "gone">("loading");
 
   useEffect(() => {
-    // Sync with `known` itself changing (a later page load surfaces the
-    // parent that a fetch had to fill in for), same guard-clause shape as
-    // ProfileContext.tsx's own.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (known) { setParent(known); return; }
+    if (known) return;
     let cancelled = false;
     getDoc(doc(getFirebase().db, `events/${eventId}/comments/${parentId}`))
-      .then((s) => { if (!cancelled) setParent(s.exists() ? (s.data() as EventCommentDoc) : "gone"); })
-      .catch(() => { if (!cancelled) setParent("gone"); });
+      .then((s) => { if (!cancelled) setFetched(s.exists() ? (s.data() as EventCommentDoc) : "gone"); })
+      .catch(() => { if (!cancelled) setFetched("gone"); });
     return () => { cancelled = true; };
   }, [eventId, parentId, known]);
+
+  const parent = known ?? fetched;
 
   if (parent === "loading") return null;
   if (parent === "gone") {
@@ -233,7 +236,7 @@ function ReplySheet({ visible, onClose, eventId, parent, onPosted }: {
       setText("");
       onPosted();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not post this reply.");
+      setError(e instanceof Error ? e.message : "Could not post. Try again.");
     } finally {
       setBusy(false);
     }
@@ -256,7 +259,7 @@ function ReplySheet({ visible, onClose, eventId, parent, onPosted }: {
           />
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
             <Text variant="meta" muted>{text.length} / {COMMENT_MAX_CHARS}</Text>
-            <Button title={busy ? "Posting…" : "Post"} loading={busy} disabled={text.trim().length === 0}
+            <Button title={busy ? "Posting…" : COMMENT_REPLY_LABEL} loading={busy} disabled={text.trim().length === 0}
               onPress={() => void submit()} />
           </View>
           {error && <ErrorBanner message={error} />}
@@ -266,9 +269,9 @@ function ReplySheet({ visible, onClose, eventId, parent, onPosted }: {
   );
 }
 
-function CommentItem({ eventId, comment, rows, uid, authority, isAdmin, isOpen, onChanged, onReply }: {
+function CommentItem({ eventId, comment, rows, uid, authority, isOpen, onChanged, onReply }: {
   eventId: string; comment: CommentRow; rows: CommentRow[]; uid: string | undefined;
-  authority: CommentAuthority; isAdmin: boolean; isOpen: boolean;
+  authority: CommentAuthority; isOpen: boolean;
   onChanged: () => void; onReply: (comment: CommentRow) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -276,7 +279,9 @@ function CommentItem({ eventId, comment, rows, uid, authority, isAdmin, isOpen, 
   const [reportOpen, setReportOpen] = useState(false);
 
   const isAuthor = uid != null && comment.authorUid === uid;
-  const canModerate = authority !== "fan" || isAdmin;
+  // Ruling: matches web's canHide exactly, authority alone. An admin
+  // moderates through the admin Reports panel, not this row's own buttons.
+  const canModerate = authority !== "fan";
 
   const hide = async () => {
     setBusy(true); setError(null);
@@ -295,9 +300,7 @@ function CommentItem({ eventId, comment, rows, uid, authority, isAdmin, isOpen, 
       await callFn("deleteComment", { eventId, commentId: comment.id });
       onChanged();
     } catch (e) {
-      setError(e instanceof Error
-        ? (e.message === COMMENT_UNDER_REVIEW_MESSAGE ? COMMENT_UNDER_REVIEW_MESSAGE : e.message)
-        : "Could not delete this comment.");
+      setError(e instanceof Error ? e.message : "Could not delete this comment.");
       setBusy(false);
     }
   };
@@ -314,7 +317,7 @@ function CommentItem({ eventId, comment, rows, uid, authority, isAdmin, isOpen, 
       {comment.parentId && <ParentQuote eventId={eventId} parentId={comment.parentId} rows={rows} />}
       <Text>{comment.text}</Text>
       <View style={{ flexDirection: "row", gap: tokens.space.sm, flexWrap: "wrap" }}>
-        {isOpen && comment.parentId === null && (
+        {isOpen && comment.parentId === null && !comment.hidden && (
           <Button variant="ghost" title={COMMENT_REPLY_LABEL} accessibilityLabel={COMMENT_REPLY_LABEL}
             onPress={() => onReply(comment)} style={{ paddingHorizontal: 0 }} />
         )}
@@ -335,8 +338,9 @@ function CommentItem({ eventId, comment, rows, uid, authority, isAdmin, isOpen, 
   );
 }
 
-export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMusicianProfileIds }: {
-  eventId: string; eventStatus: EventStatus; curatorProfileId: string; lineupMusicianProfileIds: string[];
+export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMusicianProfileIds, commentCount }: {
+  eventId: string; eventStatus: EventStatus; curatorProfileId: string;
+  lineupMusicianProfileIds: string[]; commentCount: number;
 }) {
   const router = useRouter();
   const { user } = useAuth();
@@ -400,7 +404,7 @@ export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMu
       setText("");
       void load(null, true);
     } catch (e) {
-      setPostError(e instanceof Error ? e.message : "Could not post this comment.");
+      setPostError(e instanceof Error ? e.message : "Could not post. Try again.");
     } finally {
       setPosting(false);
     }
@@ -408,26 +412,33 @@ export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMu
 
   return (
     <View style={{ gap: tokens.space.md }}>
-      <Text variant="title">Comments</Text>
+      <Text variant="title">Comments{commentCount > 0 ? ` (${commentCount})` : ""}</Text>
 
       {!isOpen ? (
         <Text muted>{COMMENTS_CLOSED_MESSAGE}</Text>
       ) : !user ? (
         <Button title="Sign in to comment" onPress={() => router.push("/(auth)/sign-in")} style={{ alignSelf: "flex-start" }} />
       ) : (
-        <View style={{ gap: tokens.space.sm }}>
-          <TextArea
-            value={text} onChangeText={(v) => setText(v.slice(0, COMMENT_MAX_CHARS))}
-            maxLength={COMMENT_MAX_CHARS} placeholder={COMMENT_COMPOSER_PLACEHOLDER}
-            accessibilityLabel={COMMENT_COMPOSER_PLACEHOLDER} editable={!posting}
-          />
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-            <Text variant="meta" muted>{text.length} / {COMMENT_MAX_CHARS}</Text>
-            <Button title={posting ? "Posting…" : "Post"} loading={posting} disabled={text.trim().length === 0}
-              onPress={() => void post()} />
+        // Own KeyboardAvoidingView (fix round 1, review finding): the two
+        // Sheet forms already had one, but this composer sits inline in the
+        // event screen's own ScrollView, un-guarded, so the input, counter,
+        // and Post button could end up under the keyboard on iOS. Same
+        // behavior/offset pattern as ConversationThread.tsx's own.
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={0}>
+          <View style={{ gap: tokens.space.sm }}>
+            <TextArea
+              value={text} onChangeText={(v) => setText(v.slice(0, COMMENT_MAX_CHARS))}
+              maxLength={COMMENT_MAX_CHARS} placeholder={COMMENT_COMPOSER_PLACEHOLDER}
+              accessibilityLabel={COMMENT_COMPOSER_PLACEHOLDER} editable={!posting}
+            />
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+              <Text variant="meta" muted>{text.length} / {COMMENT_MAX_CHARS}</Text>
+              <Button title={posting ? "Posting…" : "Post"} loading={posting} disabled={text.trim().length === 0}
+                onPress={() => void post()} />
+            </View>
+            {postError && <ErrorBanner message={postError} />}
           </View>
-          {postError && <ErrorBanner message={postError} />}
-        </View>
+        </KeyboardAvoidingView>
       )}
 
       {status === "loading" ? (
@@ -454,7 +465,7 @@ export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMu
             <View style={{ paddingVertical: tokens.space.xs }}>
               <CommentItem
                 eventId={eventId} comment={item} rows={rows} uid={user?.uid} authority={authority}
-                isAdmin={isAdmin} isOpen={isOpen} onChanged={() => void load(null, true)} onReply={setReplyTarget}
+                isOpen={isOpen} onChanged={() => void load(null, true)} onReply={setReplyTarget}
               />
             </View>
           )}

@@ -71,11 +71,16 @@ export function GoingButton({ eventId, eventStatus, initialCount }: {
     } catch (e) {
       setGoing(prevGoing);
       setCount(prevCount);
-      setError(e instanceof Error ? e.message : "Could not update. Try again.");
+      setError(e instanceof Error ? e.message : "Could not update this. Try again.");
     } finally {
       setBusy(false);
     }
   };
+
+  // Ruling: matches web's GoingButton exactly. A draft or cancelled event
+  // has nothing to react to, so this renders nothing rather than a
+  // disabled-but-visible button.
+  if (!isOpen) return null;
 
   return (
     <View style={{ gap: tokens.space.xs }}>
@@ -84,7 +89,6 @@ export function GoingButton({ eventId, eventStatus, initialCount }: {
           title={GOING_LABEL}
           variant={going ? "default" : "secondary"}
           loading={busy || state === "loading"}
-          disabled={!isOpen}
           onPress={() => void toggle()}
           accessibilityState={{ selected: going }}
           accessibilityLabel={`${GOING_LABEL}, ${count} going`}
