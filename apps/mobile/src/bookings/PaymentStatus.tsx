@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, Pressable } from "react-native";
+import { View } from "react-native";
 import { collection, doc, onSnapshot } from "firebase/firestore";
 import { useRouter } from "expo-router";
 import { getFirebase } from "../lib/firebase";
@@ -13,7 +13,7 @@ import {
   PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
   type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
-import { Text, Card, StatusBadge, Skeleton, type StatusTone } from "../ui";
+import { Text, Button, Card, StatusBadge, Skeleton, type StatusTone } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -230,9 +230,9 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
           ) : stripeStatus === "error" ? (
             <View style={{ gap: tokens.space.xs }}>
               <Text color={t.warning}>Couldn&apos;t load your card status.</Text>
-              <Pressable onPress={() => setStripeReloadKey((k) => k + 1)}>
-                <Text color={t.warning} style={{ textDecorationLine: "underline" }}>Retry</Text>
-              </Pressable>
+              <Button variant="ghost" onPress={() => setStripeReloadKey((k) => k + 1)} style={{ alignSelf: "flex-start" }}>
+                <Text variant="label" color={t.warning}>Retry</Text>
+              </Button>
             </View>
           ) : (
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
@@ -241,11 +241,8 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
                   ? `Card on file: ${stripeStatus.cardBrand ?? "card"} •••• ${stripeStatus.cardLast4 ?? "----"}`
                   : "No card on file"}
               </Text>
-              <Pressable onPress={() => setShowSaveCard(true)}>
-                <Text style={{ textDecorationLine: "underline" }}>
-                  {stripeStatus.hasCard ? "Update card" : "Add a card"}
-                </Text>
-              </Pressable>
+              <Button variant="ghost" title={stripeStatus.hasCard ? "Update card" : "Add a card"}
+                onPress={() => setShowSaveCard(true)} />
             </View>
           )}
         </Card>
@@ -275,9 +272,8 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
                     onDone={() => setOpenTrueUpFor(null)} onCancel={() => setOpenTrueUpFor(null)}
                   />
                 ) : (
-                  <Pressable onPress={() => setOpenTrueUpFor(row.id)} style={{ alignSelf: "flex-start" }}>
-                    <Text variant="meta" style={{ textDecorationLine: "underline" }}>Report actuals</Text>
-                  </Pressable>
+                  <Button variant="ghost" title="Report actuals" onPress={() => setOpenTrueUpFor(row.id)}
+                    style={{ alignSelf: "flex-start" }} />
                 )
               )}
             </View>
@@ -302,9 +298,8 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
             surface natively. The musician line now links to the dashboard's
             EarningsPanel (Task 7) instead of pointing to the web app. */}
         {!isCuratorSide && (
-          <Pressable onPress={() => router.push("/(musician)/dashboard")}>
-            <Text variant="meta" style={{ textDecorationLine: "underline" }}>Manage payouts →</Text>
-          </Pressable>
+          <Button variant="ghost" title="Manage payouts →" onPress={() => router.push("/(musician)/dashboard")}
+            style={{ alignSelf: "flex-start" }} />
         )}
       </View>
     </View>

@@ -272,9 +272,9 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
       {url
         ? <Image source={{ uri: url }} style={{ width: 110, height: 110, borderRadius: 8 }} />
         : <Skeleton width={110} height={110} radius={8} />}
-      <Pressable onPress={remove} disabled={busy}>
-        <Text color={t.destructive}>{busy ? "Removing…" : "Remove"}</Text>
-      </Pressable>
+      <Button variant="ghost" onPress={remove} disabled={busy}>
+        <Text variant="label" color={t.destructive}>{busy ? "Removing…" : "Remove"}</Text>
+      </Button>
     </View>
   );
 }

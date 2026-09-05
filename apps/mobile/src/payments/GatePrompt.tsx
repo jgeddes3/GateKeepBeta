@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { View, Pressable } from "react-native";
 import { useRouter } from "expo-router";
 import { SaveCardSheet } from "./SaveCardSheet";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
@@ -87,21 +88,24 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
     <WarnBox>
       <Text color={t.warning}>{message}</Text>
       {affected === "loading" ? null : affected.length > 0 ? (
-        <Text>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}>
           {affected.map((id, i) => (
-            <Text key={id}>
-              <Text style={{ textDecorationLine: "underline" }}
-                onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}>
-                Go to the overdue booking{affected.length > 1 ? ` (${i + 1})` : ""}
+            <Pressable key={id} hitSlop={12} accessibilityRole="link"
+              accessibilityLabel={`Go to the overdue booking${affected.length > 1 ? ` (${i + 1})` : ""}`}
+              onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}
+              style={{ minHeight: 44, justifyContent: "center" }}>
+              <Text style={{ textDecorationLine: "underline" }}>
+                Go to the overdue booking{affected.length > 1 ? ` (${i + 1})` : ""}{i < affected.length - 1 ? "," : ""}
               </Text>
-              {i < affected.length - 1 ? ", " : ""}
-            </Text>
+            </Pressable>
           ))}
-        </Text>
+        </View>
       ) : (
-        <Text style={{ textDecorationLine: "underline" }} onPress={() => router.push("/(curator)/bookings")}>
-          Go to your bookings
-        </Text>
+        <Pressable hitSlop={12} accessibilityRole="link" accessibilityLabel="Go to your bookings"
+          onPress={() => router.push("/(curator)/bookings")}
+          style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}>
+          <Text style={{ textDecorationLine: "underline" }}>Go to your bookings</Text>
+        </Pressable>
       )}
     </WarnBox>
   );
@@ -168,9 +172,11 @@ export function GatePrompt({ message, curatorProfileId, viewerIsMusician, onRetr
     return viewerIsMusician ? (
       <WarnBox>
         <Text color={t.warning}>{message}</Text>
-        <Text style={{ textDecorationLine: "underline" }} onPress={() => router.push("/(musician)/dashboard")}>
-          Finish payout setup →
-        </Text>
+        <Pressable hitSlop={12} accessibilityRole="link" accessibilityLabel="Finish payout setup"
+          onPress={() => router.push("/(musician)/dashboard")}
+          style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}>
+          <Text style={{ textDecorationLine: "underline" }}>Finish payout setup →</Text>
+        </Pressable>
       </WarnBox>
     ) : (
       <Callout tone="warning">

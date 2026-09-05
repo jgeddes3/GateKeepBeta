@@ -7,7 +7,7 @@ import { useAuth } from "../../../src/auth/AuthProvider";
 import { useProfileContext } from "../../../src/shell/ProfileContext";
 import { ConversationList } from "../../../src/messaging/ConversationList";
 import type { ProfileDoc } from "@gatekeep/shared";
-import { Text, Card, PageBackground, Skeleton, SkeletonCard } from "../../../src/ui";
+import { Text, Button, Card, ErrorBanner, PageBackground, Skeleton, SkeletonCard } from "../../../src/ui";
 import { tokens } from "../../../src/theme/tokens";
 
 // SP12 Task 10: was the "Direct messages, coming soon." placeholder,
@@ -24,7 +24,11 @@ export default function CuratorMessages() {
   const profileId = typeof activeContext === "object" && activeContext.type === "curator"
     ? activeContext.profileId : null;
 
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
+  // Four-way sentinel (audit #11), see (curator)/dashboard.tsx's identical
+  // comment: a failed read is distinct from a not-yet-loaded or a
+  // genuinely-missing profile.
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileRetry, setProfileRetry] = useState(0);
   // Same render-time-reset + late-callback guard as the sibling
   // bookings/dashboard/events screens: this tab stays mounted across a
   // profile-context switch, so without both a stale previous profile's
@@ -44,17 +48,18 @@ export default function CuratorMessages() {
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => { if (activeIdRef.current !== forId) return; setProfile(s.exists() ? (s.data() as ProfileDoc) : null); },
-      () => { if (activeIdRef.current !== forId) return; setProfile(null); });
-  }, [profileId]);
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("CuratorMessages: profile onSnapshot failed", e);
+        setProfile("error");
+      });
+  }, [profileId, profileRetry]);
 
-  const notEligible = !user || !profileId || (profile !== "loading" && (!profile || profile.status !== "approved"));
-  const stillLoading = !notEligible && profile === "loading";
-
-  if (notEligible || stillLoading) {
+  if (!user || !profileId || profile === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
-        {notEligible ? (
+        {!user || !profileId ? (
           <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl }}>
             <Card style={{ gap: tokens.space.sm }}>
               <Text muted style={{ textAlign: "center" }}>Switch to a curator profile to see its messages.</Text>
@@ -67,6 +72,30 @@ export default function CuratorMessages() {
             <SkeletonCard />
           </View>
         )}
+      </View>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile || profile.status !== "approved") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl }}>
+          <Card style={{ gap: tokens.space.sm }}>
+            <Text muted style={{ textAlign: "center" }}>Switch to a curator profile to see its messages.</Text>
+          </Card>
+        </View>
       </View>
     );
   }

@@ -6,7 +6,7 @@ import { useAuth } from "../../src/auth/AuthProvider";
 import { useProfileContext } from "../../src/shell/ProfileContext";
 import { BookingInbox } from "../../src/bookings/BookingInbox";
 import type { ProfileDoc } from "@gatekeep/shared";
-import { Text, PageBackground, Skeleton, SkeletonCard } from "../../src/ui";
+import { Text, Button, ErrorBanner, PageBackground, Skeleton, SkeletonCard } from "../../src/ui";
 import { tokens } from "../../src/theme/tokens";
 
 // Musician "Bookings" tab (SP4 Task 12), gated on the active profile
@@ -19,7 +19,11 @@ export default function Bookings() {
   const { activeContext } = useProfileContext();
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
+  // Four-way sentinel (audit #11), see (curator)/dashboard.tsx's identical
+  // comment: a failed read is distinct from a not-yet-loaded or a
+  // genuinely-missing profile.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [profileRetry, setProfileRetry] = useState(0);
 
   // Same render-time-reset + late-callback guard as the sibling
   // dashboard/portfolio/events screens: this tab stays mounted across a
@@ -32,7 +36,7 @@ export default function Bookings() {
     setLastProfileId(profileId);
     // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
-    setProfile(null);
+    setProfile("loading");
   }
 
   useEffect(() => {
@@ -41,10 +45,14 @@ export default function Bookings() {
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => { if (activeIdRef.current !== forId) return; setProfile(s.exists() ? (s.data() as ProfileDoc) : null); },
-      () => { if (activeIdRef.current !== forId) return; setProfile(null); });
-  }, [profileId]);
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("Bookings: profile onSnapshot failed", e);
+        setProfile("error");
+      });
+  }, [profileId, profileRetry]);
 
-  if (!user || !profileId || !profile) {
+  if (!user || !profileId || profile === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -61,6 +69,29 @@ export default function Bookings() {
             <SkeletonCard />
           </View>
         )}
+      </View>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
+        </View>
       </View>
     );
   }

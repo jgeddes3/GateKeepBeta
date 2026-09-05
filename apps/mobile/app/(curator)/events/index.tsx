@@ -53,7 +53,7 @@ function GigListItem({ gig, onPress, onSeriesPress }: {
         </Text>
         {gig.seriesId && (
           <Pressable onPress={onSeriesPress} hitSlop={8}>
-            <Text variant="meta" color={t.accent}>series{gig.detachedFromTemplate ? " (detached)" : ""} →</Text>
+            <Text variant="meta" color={t.focus}>series{gig.detachedFromTemplate ? " (detached)" : ""}</Text>
           </Pressable>
         )}
       </Card>
@@ -557,8 +557,11 @@ export default function GigsList() {
         )}
 
         <View style={{ gap: tokens.space.sm, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
-            <Text variant="title">Ticketed events</Text>
+          <View style={{
+            flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between",
+            gap: tokens.space.sm, rowGap: tokens.space.sm,
+          }}>
+            <Text variant="title" style={{ flexShrink: 1 }}>Ticketed events</Text>
             {profile.status === "approved" ? (
               <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
                 <Button variant="secondary" onPress={() => setView({ kind: "picker" })}>

@@ -6,7 +6,7 @@ import type { SavedSearchDoc, SearchFace } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
 import { deleteSavedSearch } from "./searchApi";
-import { Text, Button, Card, PageBackground, Skeleton, IconMagnifyingGlass } from "../ui";
+import { Text, Button, Card, ErrorBanner, PageBackground, Skeleton, IconMagnifyingGlass } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -48,7 +48,11 @@ export function SavedSearchesScreen() {
   const uid = user?.uid;
   const router = useRouter();
   const t = useTokens();
-  const [rows, setRows] = useState<SavedSearchRow[] | null>(null);
+  // "error" sentinel (same lens as this app's other listener screens, e.g.
+  // (curator)/bookings.tsx): a failed read is not the same as a genuinely
+  // empty result.
+  const [rows, setRows] = useState<SavedSearchRow[] | "error" | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -60,9 +64,14 @@ export function SavedSearchesScreen() {
       (snap) => {
         if (cancelled) return;
         setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as SavedSearchDoc) })));
+      },
+      (e) => {
+        if (cancelled) return;
+        console.error("SavedSearchesScreen: savedSearches onSnapshot failed", e);
+        setRows("error");
       });
     return () => { cancelled = true; unsubscribe(); };
-  }, [uid]);
+  }, [uid, retryKey]);
 
   const remove = async (id: string) => {
     setDeletingId(id);
@@ -89,7 +98,14 @@ export function SavedSearchesScreen() {
             <Skeleton height={64} />
           </View>
         )}
-        {rows !== null && rows.length === 0 && (
+        {rows === "error" && (
+          <View style={{ gap: tokens.space.sm }}>
+            <ErrorBanner message="Couldn't load your saved searches. Retry." />
+            <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+              onPress={() => { setRows(null); setRetryKey((n) => n + 1); }} />
+          </View>
+        )}
+        {rows !== null && rows !== "error" && rows.length === 0 && (
           <View style={{ alignItems: "center", gap: tokens.space.sm, paddingVertical: tokens.space.xl }}>
             <IconMagnifyingGlass size={48} color={t.muted} />
             <Text variant="heading" style={{ textAlign: "center" }}>No saved searches yet</Text>
@@ -98,7 +114,7 @@ export function SavedSearchesScreen() {
             </Text>
           </View>
         )}
-        {rows !== null && rows.map((row) => (
+        {rows !== null && rows !== "error" && rows.map((row) => (
           // A row's Pressable and its Delete Button are SIBLINGS, not
           // nested (fix round 1, important #1): a Pressable that wraps a
           // nested Button and carries its own accessibilityRole/Label

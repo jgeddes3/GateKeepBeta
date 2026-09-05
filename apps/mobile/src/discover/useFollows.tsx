@@ -65,6 +65,15 @@ export function useFollows(uid: string | null): FollowState {
       setTargets(nextTargets);
       setGenres(nextGenres);
       setLoading(false);
+    }, (e) => {
+      // No "error" sentinel on FollowState (its public shape is read by
+      // FollowButton/useGenrePickerGate app-wide, and a failed follows read
+      // is not worth a full-screen retry surface on a small widget). This
+      // at least stops a failed listener from leaving `loading` stuck true
+      // forever with nothing in the logs to explain why.
+      if (cancelled) return;
+      console.error("useFollows: follows onSnapshot failed", e);
+      setLoading(false);
     });
     return () => { cancelled = true; unsubscribe(); };
   }, [uid]);

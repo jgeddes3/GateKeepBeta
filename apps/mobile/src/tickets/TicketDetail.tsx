@@ -1,4 +1,4 @@
-import { Linking, ScrollView, View, useWindowDimensions } from "react-native";
+import { Linking, Pressable, ScrollView, View, useWindowDimensions } from "react-native";
 import { useRouter } from "expo-router";
 import QRCode from "react-native-qrcode-svg";
 import type { EventDoc } from "@gatekeep/shared";
@@ -88,18 +88,18 @@ export function TicketDetail({ uid, ticket, event, now, onClose, onTransferPress
         </View>
 
         {address !== "hidden" && (
-          <View style={{ flexDirection: "row", gap: tokens.space.xs, alignItems: "flex-start" }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: tokens.space.xs, alignItems: "center" }}>
             <IconMapPin size={16} color={t.muted} />
-            <Text style={{ flex: 1 }}>
-              {address.address}{" "}
-              <Text
-                color={t.muted}
-                style={{ textDecorationLine: "underline" }}
-                onPress={() => void Linking.openURL(mapUrl(address))}
-              >
-                Map
-              </Text>
-            </Text>
+            <Text style={{ flexShrink: 1 }}>{address.address}</Text>
+            <Pressable
+              hitSlop={12}
+              accessibilityRole="link"
+              accessibilityLabel="Open in Map"
+              onPress={() => void Linking.openURL(mapUrl(address))}
+              style={{ minHeight: 44, justifyContent: "center" }}
+            >
+              <Text color={t.muted} style={{ textDecorationLine: "underline" }}>Map</Text>
+            </Pressable>
           </View>
         )}
 

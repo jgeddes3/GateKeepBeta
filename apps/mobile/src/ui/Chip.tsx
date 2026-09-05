@@ -25,6 +25,8 @@ export function Chip({
       accessibilityRole="button"
       accessibilityState={{ selected: active, disabled: !!disabled }}
       style={{
+        minHeight: 44,
+        justifyContent: "center",
         paddingVertical: 6,
         paddingHorizontal: 12,
         borderRadius: tokens.radius.pill,

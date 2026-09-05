@@ -110,31 +110,29 @@ export function TrackManager({ profileId }: { profileId: string }) {
               <Input value={renameText} onChangeText={setRenameText} maxLength={80} autoFocus
                 returnKeyType="done" onSubmitEditing={() => saveRename(t.id)}
                 style={{ flex: 1 }} />
-              <Pressable disabled={busy} onPress={() => saveRename(t.id)}>
-                <Text variant="label">Save</Text>
-              </Pressable>
-              <Pressable onPress={() => setRenamingId(null)}>
-                <Text muted>Cancel</Text>
-              </Pressable>
+              <Button variant="ghost" title="Save" disabled={busy} onPress={() => saveRename(t.id)} />
+              <Button variant="ghost" onPress={() => setRenamingId(null)}>
+                <Text variant="label" muted>Cancel</Text>
+              </Button>
             </View>
           ) : (
             <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
-              <Pressable disabled={busy || i === 0} onPress={() => move(i, -1)} accessibilityRole="button" accessibilityLabel="Move up">
+              <Pressable disabled={busy || i === 0} onPress={() => move(i, -1)} accessibilityRole="button" accessibilityLabel="Move up"
+                hitSlop={12} style={{ minHeight: 44, justifyContent: "center" }}>
                 <Text style={{ opacity: busy || i === 0 ? 0.4 : 1 }}>↑</Text>
               </Pressable>
-              <Pressable disabled={busy || i === tracks.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down">
+              <Pressable disabled={busy || i === tracks.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down"
+                hitSlop={12} style={{ minHeight: 44, justifyContent: "center" }}>
                 <Text style={{ opacity: busy || i === tracks.length - 1 ? 0.4 : 1 }}>↓</Text>
               </Pressable>
-              <Pressable disabled={busy} onPress={() => startRename(t)}>
-                <Text style={{ opacity: busy ? 0.4 : 1 }}>Rename</Text>
-              </Pressable>
-              <Pressable disabled={busy} onPress={() => Alert.alert("Delete track?", t.title, [
+              <Button variant="ghost" title="Rename" disabled={busy} onPress={() => startRename(t)} />
+              <Button variant="ghost" disabled={busy} onPress={() => Alert.alert("Delete track?", t.title, [
                   { text: "Cancel", style: "cancel" },
                   { text: "Delete", style: "destructive",
                     onPress: () => void call("deleteTrack", { profileId, trackId: t.id }) },
                 ])}>
-                <Text color={tok.destructive} style={{ opacity: busy ? 0.4 : 1 }}>Delete</Text>
-              </Pressable>
+                <Text variant="label" color={tok.destructive}>Delete</Text>
+              </Button>
             </View>
           )}
         </Card>

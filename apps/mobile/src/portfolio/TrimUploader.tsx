@@ -299,14 +299,16 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone?
             </>
           )}
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Pressable onPress={preview} style={{ borderWidth: 1, borderColor: tok.border, padding: 10, borderRadius: 8 }}>
+            <Pressable onPress={preview}
+              style={{ minHeight: 44, justifyContent: "center", borderWidth: 1, borderColor: tok.border, padding: 10, borderRadius: 8 }}>
               <Text>▶ Preview</Text>
             </Pressable>
-            <Pressable onPress={() => player.pause()} style={{ borderWidth: 1, borderColor: tok.border, padding: 10, borderRadius: 8 }}>
+            <Pressable onPress={() => player.pause()}
+              style={{ minHeight: 44, justifyContent: "center", borderWidth: 1, borderColor: tok.border, padding: 10, borderRadius: 8 }}>
               <Text>Stop</Text>
             </Pressable>
             <Pressable onPress={() => void upload()} disabled={busy !== null}
-              style={{ backgroundColor: tok.accent, padding: 10, borderRadius: 8 }}>
+              style={{ minHeight: 44, justifyContent: "center", backgroundColor: tok.accent, padding: 10, borderRadius: 8 }}>
               <Text color={tok.onAccent}>{busy ?? "Upload snippet"}</Text>
             </Pressable>
           </View>

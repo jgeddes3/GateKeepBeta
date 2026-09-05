@@ -44,6 +44,14 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         }
       }
       if (!cancelled) setMyProfiles(results);
+    }, (e) => {
+      // No "error" sentinel here (unlike the per-screen listeners): this
+      // context's public shape (myProfiles: ProfileSummary[]) is consumed
+      // app-wide (ContextSwitcher, every profile-gated screen) and stays
+      // exactly as-is. A failed read now at least surfaces in the logs
+      // instead of silently leaving myProfiles on its last-known value with
+      // nothing to explain why it stopped updating.
+      if (!cancelled) console.error("ProfileProvider: members onSnapshot failed", e);
     });
     return () => { cancelled = true; unsubscribe(); };
   }, [user?.uid]);

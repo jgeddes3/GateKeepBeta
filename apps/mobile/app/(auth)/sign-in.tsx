@@ -136,7 +136,7 @@ export default function SignIn() {
                 Alert.alert("Reset password", "Reset link sent, check your email."); }
           catch { setError("Couldn't send the reset email."); }
         }} />
-        <Link href="/(auth)/sign-up"><Text color={t.accent}>New here? Create an account</Text></Link>
+        <Link href="/(auth)/sign-up"><Text color={t.focus}>New here? Create an account</Text></Link>
       </View>
     </View>
   );

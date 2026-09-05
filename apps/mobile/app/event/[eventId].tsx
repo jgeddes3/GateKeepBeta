@@ -24,7 +24,7 @@ import { ShareButton } from "../../src/share/ShareButton";
 import { GoingButton } from "../../src/events/GoingButton";
 import { EventComments } from "../../src/events/EventComments";
 import {
-  Text, Button, Badge, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
+  Text, Button, Badge, StatusBadge, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconTicket, IconMapPin, IconMinus, IconPlus,
 } from "../../src/ui";
 import { useTokens } from "../../src/theme/ThemeProvider";
@@ -209,7 +209,6 @@ function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, d
       accessibilityRole="radio"
       accessibilityState={{ selected, disabled: !canPick }}
       accessibilityLabel={tier.name}
-      style={{ opacity: canPick ? 1 : 0.55 }}
     >
       <Card style={{ gap: tokens.space.sm, borderColor: selected ? t.accent : t.border, borderWidth: selected ? 2 : 1 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
@@ -219,12 +218,15 @@ function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, d
               {formatTierPrice(tier.priceCents)}{feeLine ? ` · ${feeLine}` : ""}
             </Text>
             {availability !== "on_sale" && (
-              <Text variant="meta" muted style={{ marginTop: 4 }}>{TIER_AVAILABILITY_LABEL[availability]}</Text>
+              <View style={{ marginTop: 4 }}>
+                <StatusBadge label={TIER_AVAILABILITY_LABEL[availability]} status="neutral" />
+              </View>
             )}
           </View>
           <View style={{
             width: 22, height: 22, borderRadius: 11, borderWidth: 2,
             borderColor: selected ? t.accent : t.border, alignItems: "center", justifyContent: "center",
+            opacity: canPick ? 1 : 0.55,
           }}>
             {selected && <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: t.accent }} />}
           </View>
@@ -245,7 +247,7 @@ function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, d
               accessibilityRole="button"
               accessibilityLabel={`Fewer ${tier.name} tickets`}
               style={{
-                width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: t.border,
+                width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: t.border,
                 alignItems: "center", justifyContent: "center", opacity: quantity <= 1 ? 0.4 : 1,
               }}
             >
@@ -258,7 +260,7 @@ function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, d
               accessibilityRole="button"
               accessibilityLabel={`More ${tier.name} tickets`}
               style={{
-                width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: t.border,
+                width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: t.border,
                 alignItems: "center", justifyContent: "center", opacity: quantity >= max ? 0.4 : 1,
               }}
             >
@@ -636,12 +638,15 @@ export default function EventScreen() {
             {lineup.map((act, i) => (
               <View key={`${act.name}-${i}`} style={{ gap: tokens.space.xs }}>
                 {act.handle ? (
-                  <Text
-                    style={{ textDecorationLine: "underline" }}
+                  <Pressable
+                    hitSlop={12}
+                    accessibilityRole="link"
+                    accessibilityLabel={act.name}
                     onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } })}
+                    style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}
                   >
-                    {act.name}
-                  </Text>
+                    <Text style={{ textDecorationLine: "underline" }}>{act.name}</Text>
+                  </Pressable>
                 ) : (
                   <Text>{act.name}</Text>
                 )}

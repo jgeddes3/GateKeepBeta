@@ -121,9 +121,9 @@ export function LinksForm({ profileId, initial }:
       {links.map((l, i) => (
         <View key={`${l.kind}-${l.url}-${i}`} style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
           <Text style={{ flex: 1 }} numberOfLines={1}>{l.kind}: {l.url}</Text>
-          <Pressable disabled={busy} onPress={() => void save(links.filter((_, j) => j !== i))}>
-            <Text color={t.destructive}>Remove</Text>
-          </Pressable>
+          <Button variant="ghost" disabled={busy} onPress={() => void save(links.filter((_, j) => j !== i))}>
+            <Text variant="label" color={t.destructive}>Remove</Text>
+          </Button>
         </View>
       ))}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View } from "react-native";
+import { View, Pressable } from "react-native";
 import { useRouter } from "expo-router";
 import { callFn } from "../lib/callable";
 import { fetchDelinquentBookingIds } from "./delinquentBookings";
@@ -47,19 +47,19 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
       {affected === "loading" ? (
         <Text color={t.destructive}>Checking which booking is affected…</Text>
       ) : affected.length > 0 ? (
-        <Text color={t.destructive}>
-          Settle it from{" "}
+        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}>
+          <Text color={t.destructive}>Settle it from </Text>
           {affected.map((id, i) => (
-            <Text key={id} color={t.destructive}>
-              <Text color={t.destructive} style={{ textDecorationLine: "underline" }}
-                onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}>
-                this booking{affected.length > 1 ? ` (${i + 1})` : ""}
+            <Pressable key={id} hitSlop={12} accessibilityRole="link"
+              accessibilityLabel={`this booking${affected.length > 1 ? ` (${i + 1})` : ""}`}
+              onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}
+              style={{ minHeight: 44, justifyContent: "center" }}>
+              <Text color={t.destructive} style={{ textDecorationLine: "underline" }}>
+                this booking{affected.length > 1 ? ` (${i + 1})` : ""}{i < affected.length - 1 ? "," : "."}
               </Text>
-              {i < affected.length - 1 ? ", " : ""}
-            </Text>
+            </Pressable>
           ))}
-          .
-        </Text>
+        </View>
       ) : (
         <Text color={t.destructive}>Check your bookings tab to find and settle the overdue date.</Text>
       )}

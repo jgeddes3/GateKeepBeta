@@ -19,7 +19,7 @@ export function ContextSwitcher() {
   return (
     <>
       <Pressable onPress={() => setOpen(true)}
-        style={{ padding: 8, flexDirection: "row", alignItems: "center", gap: 4 }}>
+        style={{ minHeight: 44, padding: 8, flexDirection: "row", alignItems: "center", gap: 4 }}>
         <Text variant="label" color={t.text}>{label}</Text>
         <IconCaretDown size={14} color={t.text} />
       </Pressable>

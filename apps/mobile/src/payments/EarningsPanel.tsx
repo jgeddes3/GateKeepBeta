@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { View, Pressable, AppState } from "react-native";
+import { View, AppState } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { collection, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
@@ -307,9 +307,9 @@ export function EarningsPanel({ profileId, type }: { profileId: string; type: Pr
       {status === "error" && (
         <View style={{ gap: tokens.space.sm }}>
           <Callout tone="warning"><Text color={t.warning}>Couldn&apos;t load payout status.</Text></Callout>
-          <Pressable onPress={() => setReloadKey((k) => k + 1)} style={{ alignSelf: "flex-start" }}>
-            <Text color={t.warning} style={{ textDecorationLine: "underline" }}>Retry</Text>
-          </Pressable>
+          <Button variant="ghost" onPress={() => setReloadKey((k) => k + 1)} style={{ alignSelf: "flex-start" }}>
+            <Text variant="label" color={t.warning}>Retry</Text>
+          </Button>
         </View>
       )}
       {typeof status === "object" && (
