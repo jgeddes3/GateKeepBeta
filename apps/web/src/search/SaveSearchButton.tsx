@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   hasSavedSearchCriteria, SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE,
   type SearchFace, type SearchFilters,
@@ -16,6 +16,7 @@ export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: st
   const [error, setError] = useState<string | null>(null);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current); }, []);
+  const hintId = useId();
 
   const disabled = !hasSavedSearchCriteria(q, filters);
 
@@ -37,9 +38,14 @@ export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: st
     // this button's own row, which is the search header's own no-wrap flex
     // row on every face (Task 8's headerSlot contract): at 360px that
     // sentence wrapped onto several lines and squeezed the search input out
-    // of the row. Stacked onto its own line below the button now, and
-    // hidden below the sm breakpoint entirely, so the header row's own
-    // width never depends on this sentence fitting.
+    // of the row. Stacked onto its own full-width line below the button
+    // instead, so it can never affect the header row's own width.
+    // Fix round 3 (finding #2): round 2's `hidden sm:inline` then hid the
+    // hint from the DOM entirely below the sm breakpoint, so a phone user
+    // had no way to learn why the button was disabled. Shown at every
+    // width now (a `<p>`, so it's a genuine block-level line, not an inline
+    // span that could still wrap awkwardly), and wired to the button via
+    // `aria-describedby` so a screen reader announces it too.
     <div className="grid gap-1">
       <div className="flex items-center gap-2">
         <Button
@@ -47,6 +53,7 @@ export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: st
           variant="secondary"
           size="sm"
           disabled={disabled || state === "saving"}
+          aria-describedby={disabled ? hintId : undefined}
           onClick={() => void onClick()}
         >
           {state === "saved" ? "Saved" : "Save search"}
@@ -54,7 +61,7 @@ export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: st
         {error && <span role="alert" className="font-sora text-xs text-gk-warning">{error}</span>}
       </div>
       {disabled && (
-        <span className="hidden font-sora text-xs text-gk-muted sm:inline">{SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE}</span>
+        <p id={hintId} className="font-sora text-xs text-gk-muted">{SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE}</p>
       )}
     </div>
   );

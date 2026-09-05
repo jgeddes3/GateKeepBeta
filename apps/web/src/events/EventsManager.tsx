@@ -102,11 +102,15 @@ function EventListRow({ event, onManage }: { event: EventRow; onManage: () => vo
   // over it with `absolute inset-0` (carrying the row's full look: border,
   // hover, and the focus ring) and the row's accessible name (title, status,
   // date) via `aria-label`, since its own text content is now decorative.
-  // Everything visible sits in a `pointer-events-none` layer so clicks fall
-  // through to that stretched button, except TierBars, which opts back into
-  // `pointer-events-auto` (and `relative z-10`, to paint above the button)
-  // so a failed tier read's own Retry button stays genuinely clickable and
-  // still isn't nested inside another interactive element.
+  // Fix round 3 (finding #1): that decorative content still sat in the
+  // accessibility tree, so a screen reader announced the title/badge/date
+  // twice, once from the button's aria-label and once as plain content.
+  // `pointer-events-none` and `aria-hidden="true"` now go directly on each
+  // decorative element (the poster, the title/badge row, the date line)
+  // rather than on one shared wrapper: TierBars sits in the same flex
+  // column but is never inside an aria-hidden ancestor, so its own Retry
+  // button stays reachable and clickable, still without being nested
+  // inside the row's own stretched button.
   return (
     <div className="relative flex w-full items-start gap-3.5 rounded-gk border border-gk-border bg-gk-surface p-3.5 transition-colors hover:border-gk-accent/50">
       <button
@@ -114,25 +118,26 @@ function EventListRow({ event, onManage }: { event: EventRow; onManage: () => vo
         aria-label={`${title}, ${EVENT_STATUS_LABEL[event.status]}, ${formatEventFullDate(event.startsAt)} at ${formatGigTime(event.startsAt)}`}
         className="absolute inset-0 rounded-gk outline-none focus-visible:ring-2 focus-visible:ring-gk-focus"
       />
-      <div className="pointer-events-none flex w-full items-start gap-3.5">
-        <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-gk-sm border border-gk-border bg-gk-surface">
-          {posterUrl ? (
-            <img src={posterUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
-          ) : (
-            <PhotoPlaceholder icon={<IconTicket size={18} aria-hidden="true" />} />
-          )}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none relative h-14 w-14 shrink-0 overflow-hidden rounded-gk-sm border border-gk-border bg-gk-surface"
+      >
+        {posterUrl ? (
+          <img src={posterUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
+        ) : (
+          <PhotoPlaceholder icon={<IconTicket size={18} aria-hidden="true" />} />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div aria-hidden="true" className="pointer-events-none flex flex-wrap items-center gap-2">
+          <p className="truncate font-syne text-sm font-semibold text-gk-text">{title}</p>
+          <Badge variant={EVENT_STATUS_BADGE[event.status]}>{EVENT_STATUS_LABEL[event.status]}</Badge>
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate font-syne text-sm font-semibold text-gk-text">{title}</p>
-            <Badge variant={EVENT_STATUS_BADGE[event.status]}>{EVENT_STATUS_LABEL[event.status]}</Badge>
-          </div>
-          <p className="mt-0.5 font-sora text-sm text-gk-muted">
-            {formatEventFullDate(event.startsAt)} · {formatGigTime(event.startsAt)}
-          </p>
-          <div className="pointer-events-auto relative z-10">
-            <TierBars eventId={event.id} />
-          </div>
+        <p aria-hidden="true" className="pointer-events-none mt-0.5 font-sora text-sm text-gk-muted">
+          {formatEventFullDate(event.startsAt)} · {formatGigTime(event.startsAt)}
+        </p>
+        <div className="relative z-10">
+          <TierBars eventId={event.id} />
         </div>
       </div>
     </div>
