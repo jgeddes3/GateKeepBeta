@@ -316,36 +316,49 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
   const genres = await computeEventGenres(db, input.lineup, curatorGenres);
 
   const eventRef = db.doc(`events/${input.eventId}`);
-  const eventSnap = await eventRef.get();
-  if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
-  const event = eventSnap.data() as EventDoc;
-  // curatorProfileId/gigId are never accepted as update fields at all (see
-  // this input type above); this cross-check just refuses a caller who is
-  // a member of ProfileA from editing an event that actually belongs to
-  // ProfileB by claiming ProfileA in the request.
-  if (event.curatorProfileId !== input.curatorProfileId) {
-    throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
-  }
-  if (event.status !== "draft" && event.status !== "published") {
-    throw new HttpsError("failed-precondition", `Cannot edit an event in status "${event.status}".`);
-  }
+  // SP11 fix round 1 (Important 1): read the event, reconcile the lineup
+  // against THAT read, and write the update all inside one transaction.
+  // A plain get-then-update let a concurrent tagEventArtist or
+  // respondToArtistTag land in the gap and be silently reverted by the
+  // stale lineup this callable read earlier; worse, that concurrent call's
+  // own dedupe key (e.g. `announce:{eventId}` on an accept) is already
+  // spent, so the lost write could never be re-sent. The post-commit
+  // fan-out below stays outside the transaction, unchanged: it is
+  // best-effort and must never block or roll back the write.
+  const { event, lineup } = await db.runTransaction(async (tx) => {
+    const eventSnap = await tx.get(eventRef);
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found.");
+    const event = eventSnap.data() as EventDoc;
+    // curatorProfileId/gigId are never accepted as update fields at all (see
+    // this input type above); this cross-check just refuses a caller who is
+    // a member of ProfileA from editing an event that actually belongs to
+    // ProfileB by claiming ProfileA in the request.
+    if (event.curatorProfileId !== input.curatorProfileId) {
+      throw new HttpsError("permission-denied", "That event does not belong to this curator profile.");
+    }
+    if (event.status !== "draft" && event.status !== "published") {
+      throw new HttpsError("failed-precondition", `Cannot edit an event in status "${event.status}".`);
+    }
 
-  // SP11: the client resends the whole lineup, tagged acts included. Their
-  // status is server state, so every tagged entry is replaced by the stored
-  // copy and an entry the server has never seen is refused.
-  const lineup = reconcileTaggedActs(event.lineup ?? [], input.lineup);
+    // SP11: the client resends the whole lineup, tagged acts included. Their
+    // status is server state, so every tagged entry is replaced by the
+    // stored copy and an entry the server has never seen is refused.
+    const lineup = reconcileTaggedActs(event.lineup ?? [], input.lineup);
 
-  await eventRef.update({
-    title: input.title.trim(), description: input.description.trim(),
-    startsAt: input.startsAt, endsAt: input.endsAt,
-    maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
-    lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(lineup),
-    posterPath, updatedAt: Date.now(),
-    // Full-replace, like every other field on this callable: an omitted
-    // doorsAt clears the door time and an omitted ageRestriction returns the
-    // event to all ages, so the editors on both clients always resend both.
-    doorsAt: input.doorsAt ?? null, ageRestriction: input.ageRestriction ?? "all_ages",
-    genres, curatorGenres: curatorGenres ?? [],
+    tx.update(eventRef, {
+      title: input.title.trim(), description: input.description.trim(),
+      startsAt: input.startsAt, endsAt: input.endsAt,
+      maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
+      lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(lineup),
+      posterPath, updatedAt: Date.now(),
+      // Full-replace, like every other field on this callable: an omitted
+      // doorsAt clears the door time and an omitted ageRestriction returns
+      // the event to all ages, so the editors on both clients always resend
+      // both.
+      doorsAt: input.doorsAt ?? null, ageRestriction: input.ageRestriction ?? "all_ages",
+      genres, curatorGenres: curatorGenres ?? [],
+    });
+    return { event, lineup };
   });
 
   // SP7 Task 5: fan-out on a published event's edit. Only applies once the
@@ -543,13 +556,20 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
   // bill", under their own key.
   // Best-effort, post-commit notification. A failure here must never
   // surface as an error on an already-committed publish.
+  const published: EventDoc = { ...event, status: "published" };
   try {
-    const published: EventDoc = { ...event, status: "published" };
     await notifyFollowers(announceTargets(published), showAnnouncedNote(input.eventId, published), `announce:${input.eventId}`);
     await notifyLineupMembers(db, published.lineupMusicianProfileIds, onTheBillNote(input.eventId, published), `bill:${input.eventId}`);
-    await notifyPendingTags(db, input.eventId, published);
   } catch (e) {
     console.error(`publishEvent: fan-out failed for event ${input.eventId}`, e);
+  }
+  // Fix round 1 (Task 4 point in the review): its own try, separate from the
+  // follower fan-out above, so a failure notifying followers can never skip
+  // telling a still-pending tagged artist they were tagged.
+  try {
+    await notifyPendingTags(db, input.eventId, published);
+  } catch (e) {
+    console.error(`publishEvent: pending-tag notify failed for event ${input.eventId}`, e);
   }
 
   return { ok: true };

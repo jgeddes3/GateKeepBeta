@@ -17,7 +17,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import {
   isValidDocId, ARTIST_TAG_DUPLICATE_MESSAGE, ARTIST_TAG_UNAPPROVED_MESSAGE,
-  ARTIST_TAG_ANSWERED_MESSAGE, ARTIST_TAG_UNKNOWN_MESSAGE,
+  ARTIST_TAG_ANSWERED_MESSAGE, ARTIST_TAG_UNKNOWN_MESSAGE, ARTIST_TAG_EVENT_CLOSED_MESSAGE,
   type EventAct, type EventDoc, type ProfileDoc, type TaggedActStatus,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
@@ -30,8 +30,13 @@ const MAX_LINEUP_ACTS = 20;
 
 type TaggedAct = Extract<EventAct, { kind: "tagged" }>;
 
-export const artistTagDedupeKey = (eventId: string, musicianProfileId: string) =>
-  `artist_tag:${eventId}:${musicianProfileId}`;
+// Fix round 1 (Important 3): keyed on taggedAt too, so a re-tag (a fresh
+// taggedAt, whether this is the artist's first time on this bill or a
+// re-tag after an untag) always gets its own notification. Without the
+// timestamp, a re-tag would replay the FIRST tag's spent key and the artist
+// would never hear about the second one.
+export const artistTagDedupeKey = (eventId: string, musicianProfileId: string, taggedAt: number) =>
+  `artist_tag:${eventId}:${musicianProfileId}:${taggedAt}`;
 
 function taggedIn(lineup: EventAct[], musicianProfileId: string): TaggedAct | undefined {
   return lineup.find((a): a is TaggedAct => a.kind === "tagged" && a.musicianProfileId === musicianProfileId);
@@ -87,27 +92,30 @@ async function loadOwnedEvent(
 
 // Post-commit and best-effort, the repo's fan-out posture: the tag is
 // already written, so a notify failure must never surface as an error on it.
+// Keyed on the ACT's own taggedAt (not "now"): notifyPendingTags calls this
+// with an act read earlier in the same request, and the key must match the
+// one a publish-time tag would have minted for that exact tag.
 async function tellTaggedAdmins(
-  eventId: string, event: EventDoc, curatorName: string, musicianProfileId: string,
+  eventId: string, event: EventDoc, curatorName: string, act: TaggedAct,
 ): Promise<void> {
   try {
-    await notifyProfileAdmins(musicianProfileId,
-      artistTagNote(eventId, event, curatorName), artistTagDedupeKey(eventId, musicianProfileId));
+    await notifyProfileAdmins(act.musicianProfileId,
+      artistTagNote(eventId, event, curatorName), artistTagDedupeKey(eventId, act.musicianProfileId, act.taggedAt));
   } catch (e) {
-    console.error(`artist tag: notify failed for event ${eventId} artist ${musicianProfileId}`, e);
+    console.error(`artist tag: notify failed for event ${eventId} artist ${act.musicianProfileId}`, e);
   }
 }
 
 // publishEvent's hook: every act still "pending" at publish time hears about
-// it now, under the same per-artist key a publish-time tag already used, so
-// a tag made while the event was published and a later publish (of a
-// re-drafted event) can never double-send.
+// it now, under the same per-artist-per-tag key a publish-time tag already
+// used, so a tag made while the event was published and a later publish (of
+// a re-drafted event) can never double-send.
 export async function notifyPendingTags(db: Firestore, eventId: string, event: EventDoc): Promise<void> {
   const pending = (event.lineup ?? []).filter((a): a is TaggedAct => a.kind === "tagged" && a.status === "pending");
   if (pending.length === 0) return;
   const curatorName = ((await db.doc(`profiles/${event.curatorProfileId}`).get()).data() as ProfileDoc | undefined)?.name
     ?? "A GateKeep organizer";
-  for (const act of pending) await tellTaggedAdmins(eventId, event, curatorName, act.musicianProfileId);
+  for (const act of pending) await tellTaggedAdmins(eventId, event, curatorName, act);
 }
 
 export const tagEventArtist = onCall<{ curatorProfileId: string; eventId: string; musicianProfileId: string }>(
@@ -129,30 +137,46 @@ export const tagEventArtist = onCall<{ curatorProfileId: string; eventId: string
     }
 
     const now = Date.now();
-    const actIndex = await db.runTransaction(async (tx) => {
+    const { actIndex, act } = await db.runTransaction(async (tx) => {
       const fresh = (await tx.get(ref)).data() as EventDoc | undefined;
       if (!fresh) throw new HttpsError("not-found", "Event not found.");
       const lineup = fresh.lineup ?? [];
       if (alreadyOnLineup(lineup, musicianProfileId)) {
         throw new HttpsError("failed-precondition", ARTIST_TAG_DUPLICATE_MESSAGE);
       }
-      if (lineup.length >= MAX_LINEUP_ACTS) {
-        throw new HttpsError("failed-precondition", `Lineup must have 1-${MAX_LINEUP_ACTS} acts.`);
-      }
-      const act: TaggedAct = {
+      const tagged: TaggedAct = {
         kind: "tagged", musicianProfileId, name: artist.name,
         status: "pending", taggedAt: now, respondedAt: null,
       };
-      const next = [...lineup, act];
+      // Fix round 1 (Important 3): untagEventArtist turns a removed tag into
+      // a plain { kind: "external", name } act rather than deleting it (the
+      // show still has that act). Re-tagging the SAME artist name is that
+      // act coming back, not a new one, so it is converted in place: this
+      // both avoids a duplicate "The Act" row and keeps it out of the cap
+      // count, which only guards a genuinely NEW row.
+      const matchIndex = lineup.findIndex((a) =>
+        a.kind === "external" && a.name.trim().toLowerCase() === artist.name.trim().toLowerCase());
+      let next: EventAct[];
+      let index: number;
+      if (matchIndex >= 0) {
+        next = lineup.map((a, i) => (i === matchIndex ? tagged : a));
+        index = matchIndex;
+      } else {
+        if (lineup.length >= MAX_LINEUP_ACTS) {
+          throw new HttpsError("failed-precondition", `Lineup must have 1-${MAX_LINEUP_ACTS} acts.`);
+        }
+        next = [...lineup, tagged];
+        index = next.length - 1;
+      }
       tx.update(ref, { lineup: next, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(next), updatedAt: now });
-      return next.length - 1;
+      return { actIndex: index, act: tagged };
     });
 
     // A draft tag stays silent; publishEvent's notifyPendingTags tells them.
     if (event.status === "published") {
       const curatorName = ((await db.doc(`profiles/${curatorProfileId}`).get()).data() as ProfileDoc | undefined)?.name
         ?? "A GateKeep organizer";
-      await tellTaggedAdmins(eventId, event, curatorName, musicianProfileId);
+      await tellTaggedAdmins(eventId, event, curatorName, act);
     }
     return { actIndex };
   });
@@ -203,6 +227,13 @@ export const respondToArtistTag = onCall<{ eventId: string; musicianProfileId: s
       const snap = await tx.get(ref);
       if (!snap.exists) throw new HttpsError("not-found", "Event not found.");
       const fresh = snap.data() as EventDoc;
+      // Fix round 1 (Important 2): loadOwnedEvent already refuses a
+      // tagEventArtist/untagEventArtist call against a closed event; this is
+      // the same gate on the answer side, since a cancelled event's lineup
+      // must not keep changing underneath it.
+      if (fresh.status !== "draft" && fresh.status !== "published") {
+        throw new HttpsError("failed-precondition", ARTIST_TAG_EVENT_CLOSED_MESSAGE);
+      }
       const act = taggedIn(fresh.lineup ?? [], musicianProfileId);
       if (!act) throw new HttpsError("not-found", "That artist is not tagged on this lineup.");
       if (act.status !== "pending") throw new HttpsError("failed-precondition", ARTIST_TAG_ANSWERED_MESSAGE);

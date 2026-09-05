@@ -199,6 +199,10 @@ export const ARTIST_TAG_ANSWERED_MESSAGE = "This tag has already been answered."
 // Refusal for an updateEvent payload inventing a tagged act the server has
 // never seen: tags are created only by tagEventArtist.
 export const ARTIST_TAG_UNKNOWN_MESSAGE = "Tag artists from the lineup editor.";
+// Fix round 1: respondToArtistTag's own event-status gate (the event is no
+// longer draft or published, e.g. cancelled), same style as the "no longer
+// available" family used elsewhere for a stale action against a closed event.
+export const ARTIST_TAG_EVENT_CLOSED_MESSAGE = "This event is no longer accepting lineup changes.";
 export const ARTIST_TAG_BANNER_TITLE = "You were tagged on this lineup";
 export const SHARE_LINK_COPIED_MESSAGE = "Link copied";
 export const HOME_CITY_PROMPT_LINE = "Or set a home city under Account.";

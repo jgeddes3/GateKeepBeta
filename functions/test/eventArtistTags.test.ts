@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { callFn, signUpTestUser } from "./helpers";
 import {
   adb, makeApprovedCuratorProfile, makeApprovedMusicianProfile, makeDraftEvent,
-  addTiersAndPublish, eventContent, waitForIndex,
+  addTiersAndPublish, eventContent, waitForIndex, makePublishedBookingEvent,
 } from "./discoverFixtures";
 import { addMember } from "./payoutFixtures";
 import type { EventDoc, EventAct, NotificationDoc } from "@gatekeep/shared";
@@ -25,9 +25,11 @@ describe("tagEventArtist", () => {
     const { actIndex } = await callFn<Record<string, unknown>, { actIndex: number }>(
       "tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: artist.profileId }, owner.user);
     expect(actIndex).toBe(1);
-    expect(await taggedAct(eventId, artist.profileId)).toMatchObject({
+    const tagged = await taggedAct(eventId, artist.profileId);
+    expect(tagged).toMatchObject({
       kind: "tagged", musicianProfileId: artist.profileId, name: "The Act", status: "pending", respondedAt: null,
     });
+    const taggedAt = tagged!.taggedAt;
     // A draft tag is silent, and the pending act is not in the projection.
     expect(await notes(artist.owner.uid, "artist_tag")).toHaveLength(0);
     expect((await event(eventId)).lineupMusicianProfileIds).not.toContain(artist.profileId);
@@ -37,7 +39,10 @@ describe("tagEventArtist", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ title: "You were tagged on a lineup", refId: eventId });
     expect(sent[0].body).toContain("tagged you on");
-    expect((await adb.doc(`users/${artist.owner.uid}/notifications/artist_tag:${eventId}:${artist.profileId}`).get()).exists).toBe(true);
+    // The dedupe key is keyed on THIS tag's own taggedAt (fix round 1,
+    // Important 3): a re-tag after an untag mints a new taggedAt and so a
+    // fresh key, rather than replaying an already-spent one.
+    expect((await adb.doc(`users/${artist.owner.uid}/notifications/artist_tag:${eventId}:${artist.profileId}:${taggedAt}`).get()).exists).toBe(true);
 
     await callFn("respondToArtistTag", { eventId, musicianProfileId: artist.profileId, accept: true }, artist.owner.user);
     const accepted = await event(eventId);
@@ -111,6 +116,15 @@ describe("tagEventArtist", () => {
     expect(untagged.lineupMusicianProfileIds).not.toContain(second.profileId);
     expect(untagged.lineup.some((a) => a.kind === "external" && a.name === "The Act")).toBe(true);
 
+    // Re-tagging the SAME artist converts that external act back rather than
+    // appending a duplicate row (fix round 1, Important 3), and notifies
+    // again under a fresh (new taggedAt) dedupe key.
+    await callFn("tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: second.profileId }, owner.user);
+    const retagged = await event(eventId);
+    expect(retagged.lineup).toHaveLength(3);
+    expect(retagged.lineup.some((a) => a.kind === "external" && a.name === "The Act")).toBe(false);
+    expect(await notes(second.owner.uid, "artist_tag")).toHaveLength(2);
+
     // The 20-act cap is the same one validateEventInput enforces.
     await adb.doc(`events/${eventId}`).update({
       lineup: Array.from({ length: 20 }, (_, i) => ({ kind: "external", name: `Filler ${i}` })),
@@ -169,6 +183,66 @@ describe("tagEventArtist", () => {
     const after = await event(eventId);
     expect(after.lineupMusicianProfileIds).not.toContain(musician.profileId);
     expect(after.lineup.some((a) => a.kind === "tagged")).toBe(false);
+  });
+
+  it("refuses tagEventArtist and untagEventArtist for a curator profile that does not own the event", async () => {
+    const { eventId } = await makeDraftEvent("at6");
+    const other = await makeApprovedCuratorProfile("at6b", "venue");
+    const artist = await makeApprovedMusicianProfile("at6m");
+    await expect(callFn("tagEventArtist",
+      { curatorProfileId: other.profileId, eventId, musicianProfileId: artist.profileId }, other.owner.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    await expect(callFn("untagEventArtist",
+      { curatorProfileId: other.profileId, eventId, musicianProfileId: artist.profileId }, other.owner.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("refuses untagEventArtist for a non-admin member of the curator profile", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("at7");
+    const artist = await makeApprovedMusicianProfile("at7m");
+    await callFn("tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: artist.profileId }, owner.user);
+    const member = await addMember(profileId, "at7b", "member");
+    await expect(callFn("untagEventArtist",
+      { curatorProfileId: profileId, eventId, musicianProfileId: artist.profileId }, member.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+  });
+
+  it("refuses tagging an artist already on the bill as a booking act", async () => {
+    const { curator, musician, eventId } = await makePublishedBookingEvent("at8");
+    await expect(callFn("tagEventArtist",
+      { curatorProfileId: curator.profileId, eventId, musicianProfileId: musician.profileId }, curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/failed-precondition", message: "That artist is already on the lineup." });
+  });
+
+  it("dedupes the accept-time announce: a venue follower already told at publish hears nothing new, an artist-only follower hears once", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("at9");
+    const venueFan = await signUpTestUser(`at9vf-${Date.now()}@test.com`);
+    await callFn("followTarget", { targetId: profileId, targetType: "curator" }, venueFan.user);
+    await addTiersAndPublish(profileId, eventId, owner.user, FREE_TIER);
+    expect(await notes(venueFan.uid, "show_announced")).toHaveLength(1);
+
+    const artist = await makeApprovedMusicianProfile("at9m");
+    const artistFan = await signUpTestUser(`at9af-${Date.now()}@test.com`);
+    await callFn("followTarget", { targetId: artist.profileId, targetType: "musician" }, artistFan.user);
+
+    await callFn("tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: artist.profileId }, owner.user);
+    await callFn("respondToArtistTag", { eventId, musicianProfileId: artist.profileId, accept: true }, artist.owner.user);
+
+    expect(await notes(venueFan.uid, "show_announced")).toHaveLength(1);
+    expect(await notes(artistFan.uid, "show_announced")).toHaveLength(1);
+  });
+
+  it("refuses respondToArtistTag once the event is cancelled", async () => {
+    const { owner, profileId, eventId } = await makeDraftEvent("at10");
+    await addTiersAndPublish(profileId, eventId, owner.user, FREE_TIER);
+    const artist = await makeApprovedMusicianProfile("at10m");
+    await callFn("tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: artist.profileId }, owner.user);
+    await callFn("cancelEvent", { curatorProfileId: profileId, eventId }, owner.user);
+    await expect(callFn("respondToArtistTag",
+      { eventId, musicianProfileId: artist.profileId, accept: true }, artist.owner.user))
+      .rejects.toMatchObject({
+        code: "functions/failed-precondition", message: "This event is no longer accepting lineup changes.",
+      });
   });
 });
 
