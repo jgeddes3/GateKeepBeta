@@ -25,6 +25,9 @@ import {
   type ProfileDoc, type ProfileStatus, type AuditLogDoc, type UserDoc, type TrackDoc, type GigDoc, type GigStatus,
   type CuratorSubtype, type AdminNoteDoc, type ReliabilityMark, type ReliabilityDoc, type BookingRequestDoc,
   type AdminAlertDoc, type AdminAlertKind, type EventDoc, type EventStatus, type TicketOrderDoc, type ShowPostDoc,
+  type ReportDoc, type ConversationDoc, type MessageDoc, type EventCommentDoc,
+  REPORTS_PANEL_TITLE, REPORT_RESOLVE_LABEL, REPORT_OPEN_CONVERSATION_LABEL, REPORT_HIDE_COMMENT_LABEL,
+  REPORTS_EMPTY_MESSAGE,
 } from "@gatekeep/shared";
 
 // Task 12: full-polish restyle of the admin dashboard, per antislop-ui's App
@@ -1565,6 +1568,293 @@ function ShowPostsPanel() {
   );
 }
 
+// Task 9 (SP12): read-only review of the reported conversation, gated open by
+// the same disjunct that opens the read in the first place: an admin can
+// `get` a conversation and its messages only while `openReports > 0`
+// (firestore.rules). This block is mounted only from a report row that is
+// itself open, so the read normally succeeds; a failure (the conversation
+// vanished, or it was resolved out from under this panel in another tab)
+// renders the calm line below rather than a raw permission error. Every
+// bubble is left-aligned and neutral: there is no "own side" for a
+// moderator, unlike ConversationThread's own mine/theirs styling.
+function ReportedConversation({ conversationId }: { conversationId: string }) {
+  const [state, setState] = useState<
+    "loading" | "error" | { conv: ConversationDoc; messages: Row<MessageDoc>[] }
+  >("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { db } = getFirebase();
+        const convSnap = await getDoc(doc(db, "conversations", conversationId));
+        if (!convSnap.exists()) { if (!cancelled) setState("error"); return; }
+        const messagesSnap = await getDocs(
+          query(collection(db, `conversations/${conversationId}/messages`), orderBy("at", "asc")));
+        if (!cancelled) {
+          setState({
+            conv: convSnap.data() as ConversationDoc,
+            messages: messagesSnap.docs.map((d) => ({ id: d.id, ...(d.data() as MessageDoc) })),
+          });
+        }
+      } catch (e) {
+        console.error("ReportedConversation: read failed", conversationId, e);
+        if (!cancelled) setState("error");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [conversationId]);
+
+  if (state === "loading") return <CardRowsSkeleton count={1} label="Loading conversation" />;
+  if (state === "error") {
+    return <p className="font-sora text-sm text-gk-muted">This conversation is no longer open for review.</p>;
+  }
+  return (
+    <div className="grid gap-2 rounded-gk border border-gk-border bg-gk-bg p-3">
+      {state.messages.length === 0 && <p className="font-sora text-sm text-gk-muted">No messages.</p>}
+      {state.messages.map((m) => (
+        <div key={m.id} className="grid gap-1 rounded-gk border border-gk-border bg-gk-surface p-3">
+          <p className="whitespace-pre-wrap font-sora text-sm text-gk-text">{m.text}</p>
+          <p className="font-sora text-xs text-gk-muted">{m.senderProfileId} · {new Date(m.at).toLocaleString()}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// One open report. targetPath is the conversation id for a conversation
+// report and `events/{eventId}/comments/{commentId}` for a comment report
+// (packages/shared/src/types.ts's own comment on ReportDoc); `comment` is
+// the batched getDoc ReportsPanel's loader does for comment rows only
+// (undefined for a conversation row, null when the comment is gone).
+type ReportRow = Row<ReportDoc> & { comment?: EventCommentDoc | null };
+
+// Owns one report row's actions: open the conversation (read-only, toggled
+// inline), hide the comment, add an admin note on the offending account, and
+// resolve. A per-row component (not shared state on ReportsPanel) so each
+// row's busy/error/open state is independent, the same posture QueueRow and
+// LiveTrackRow already use above.
+function ReportRowCard({ report, onResolved }: { report: ReportRow; onResolved: () => void }) {
+  const commentGone = report.kind === "comment" && report.comment === null;
+  const [showConversation, setShowConversation] = useState(false);
+
+  const [hidden, setHidden] = useState(report.kind === "comment" && report.comment?.hidden === true);
+  const [hideBusy, setHideBusy] = useState(false);
+  const [hideError, setHideError] = useState<string | null>(null);
+
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+
+  const [showNote, setShowNote] = useState(false);
+  const [noteText, setNoteText] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [noteDone, setNoteDone] = useState(false);
+
+  const hideComment = async () => {
+    // targetPath is server-minted as events/{eventId}/comments/{commentId}
+    // (reportComment, functions/src/reports.ts); a comment report always
+    // has that shape, so this split is safe without a further guard.
+    const [, eventId, , commentId] = report.targetPath.split("/");
+    setHideBusy(true); setHideError(null);
+    try {
+      await callFn("hideComment", { eventId, commentId });
+      setHidden(true);
+    } catch (e) {
+      setHideError(e instanceof Error ? e.message : "Could not hide that comment, try again.");
+    } finally {
+      setHideBusy(false);
+    }
+  };
+
+  const resolve = async () => {
+    setResolveBusy(true); setResolveError(null);
+    try {
+      await callFn("resolveReport", { reportId: report.id });
+      onResolved();
+    } catch (e) {
+      setResolveError(e instanceof Error ? e.message : "Could not resolve that report, try again.");
+      setResolveBusy(false);
+    }
+  };
+
+  const submitNote = async () => {
+    if (!report.offenderUid) return;
+    const trimmed = noteText.trim();
+    if (trimmed.length < 1 || trimmed.length > 500) {
+      setNoteError("Note must be 1-500 characters.");
+      return;
+    }
+    setNoteBusy(true); setNoteError(null);
+    try {
+      await callFn("flagAccount", { uid: report.offenderUid, text: trimmed });
+      setNoteDone(true);
+      setShowNote(false);
+      setNoteText("");
+    } catch (e) {
+      setNoteError(e instanceof Error ? e.message : "Could not add that note, try again.");
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent className="grid gap-3 p-4">
+        <div className="min-w-0 grid gap-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary">{report.kind === "conversation" ? "Conversation" : "Comment"}</Badge>
+            <span className="font-sora text-xs text-gk-muted">
+              Reported by {report.reporterUid} · {new Date(report.createdAt).toLocaleString()}
+            </span>
+          </div>
+          <p className="whitespace-pre-wrap font-sora text-sm text-gk-text">{report.reason}</p>
+          <p className="truncate font-sora text-xs text-gk-muted">{report.targetPath}</p>
+          {report.kind === "comment" && (
+            commentGone ? (
+              <p className="font-sora text-sm text-gk-muted">This comment has been deleted.</p>
+            ) : report.comment ? (
+              <div className="grid gap-1 rounded-gk border border-gk-border bg-gk-bg p-3">
+                <p className="font-syne text-xs font-semibold text-gk-text">{report.comment.authorName}</p>
+                <p className="whitespace-pre-wrap font-sora text-sm text-gk-text">{report.comment.text}</p>
+              </div>
+            ) : null
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {report.kind === "conversation" && (
+            <Button size="sm" variant="secondary" onClick={() => setShowConversation((s) => !s)}>
+              {REPORT_OPEN_CONVERSATION_LABEL}
+            </Button>
+          )}
+          {report.kind === "comment" && !commentGone && !hidden && (
+            <Button size="sm" variant="secondary" disabled={hideBusy} onClick={() => void hideComment()}>
+              {hideBusy ? "Hiding…" : REPORT_HIDE_COMMENT_LABEL}
+            </Button>
+          )}
+          {report.kind === "comment" && hidden && <Badge variant="outline">Hidden</Badge>}
+          {report.kind === "comment" && report.offenderUid && !noteDone && (
+            <Button size="sm" variant="secondary" onClick={() => setShowNote((s) => !s)}>Add a note</Button>
+          )}
+          {noteDone && <span className="font-sora text-xs text-gk-muted">Note added.</span>}
+          <Button size="sm" disabled={resolveBusy} onClick={() => void resolve()}>
+            {resolveBusy ? "Resolving…" : REPORT_RESOLVE_LABEL}
+          </Button>
+        </div>
+
+        {/* The report carries an offenderUid only for a comment (one author);
+            a conversation has two sides and no single offender, so this line
+            points the operator at User lookup instead (brief's narrowing of
+            spec 3.3, which asks for a note on both). */}
+        {report.kind === "conversation" && (
+          <p className="font-sora text-sm text-gk-muted">
+            Open the conversation to find the account, then use User lookup to add a note.
+          </p>
+        )}
+
+        {hideError && (
+          <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {hideError}
+          </p>
+        )}
+        {resolveError && (
+          <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            {resolveError}
+          </p>
+        )}
+
+        {showNote && (
+          <ReasonCard
+            title="Add an admin note"
+            reason={noteText} onReasonChange={setNoteText}
+            busy={noteBusy} error={noteError}
+            onSubmit={() => void submitNote()} onCancel={() => { setShowNote(false); setNoteError(null); }}
+            submitLabel="Add note" busyLabel="Adding…"
+          />
+        )}
+
+        {showConversation && report.kind === "conversation" && (
+          <ReportedConversation conversationId={report.targetPath} />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Task 9 (SP12): admin moderation surface for abuse reports (spec 3.3). Same
+// shape as ShowPostsPanel just above: an inline async IIFE effect with a
+// `cancelled` guard and a single setRows/setError at the end, backed by a
+// one-shot getDocs rather than a live listener (an admin working the queue
+// re-opens the panel to see new arrivals, same posture as the profile/track
+// queues elsewhere on this page). The query is admin-read only
+// (firestore.rules) and served by the (status, createdAt desc) composite
+// index (Task 2). Resolved reports are never fetched, and a resolve here
+// removes the row locally rather than re-querying (spec 3.3: "Resolved
+// reports leave the list").
+function ReportsPanel() {
+  const [rows, setRows] = useState<ReportRow[] | "loading">("loading");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { db } = getFirebase();
+        const snap = await getDocs(query(
+          collection(db, "reports"), where("status", "==", "open"), orderBy("createdAt", "desc"), limit(50)));
+        const base: ReportRow[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as ReportDoc) }));
+        // One getDoc per comment row (small, bounded by the 50-row limit
+        // above), same n+1-avoidance-not-needed shape as UserProfiles' own
+        // per-membership reads: this is a one-shot admin panel load, not a
+        // hot path.
+        const withComments = await Promise.all(base.map(async (r) => {
+          if (r.kind !== "comment") return r;
+          try {
+            const c = await getDoc(doc(db, r.targetPath));
+            return { ...r, comment: c.exists() ? (c.data() as EventCommentDoc) : null };
+          } catch {
+            return { ...r, comment: null };
+          }
+        }));
+        if (!cancelled) setRows(withComments);
+      } catch (e) {
+        if (!cancelled) {
+          setRows([]);
+          setError(e instanceof Error ? e.message : "Could not load reports.");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const removeRow = (id: string) => setRows((prev) => (prev === "loading" ? prev : prev.filter((r) => r.id !== id)));
+
+  return (
+    <section className="grid gap-3">
+      <h2 className="font-syne text-lg font-semibold text-gk-text">{REPORTS_PANEL_TITLE}</h2>
+      <p className="font-sora text-sm text-gk-muted">Open abuse reports across conversations and comments, newest first.</p>
+      {error && (
+        <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+          <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          {error}
+        </p>
+      )}
+      {rows === "loading" && <CardRowsSkeleton label="Loading reports" />}
+      {rows !== "loading" && rows.length === 0 && !error && (
+        <p className="font-sora text-sm text-gk-muted">{REPORTS_EMPTY_MESSAGE}</p>
+      )}
+      {rows !== "loading" && rows.length > 0 && (
+        <div className="grid gap-3">
+          {rows.map((r) => <ReportRowCard key={r.id} report={r} onResolved={() => removeRow(r.id)} />)}
+        </div>
+      )}
+    </section>
+  );
+}
+
 type SearchIndexCounts = { artists: number; venues: number; shows: number; gigs: number; deleted: number };
 
 // Task 11 (SP8): admin-only rebuild of the whole searchIndex collection from
@@ -1828,6 +2118,7 @@ const AUDIT_ACTION_LABEL: Record<AuditLogDoc["action"], string> = {
   event_taken_down: "Event taken down",
   account_deleted: "Account deleted",
   profile_deleted_stripe_ids: "Profile deleted, Stripe ids cleared",
+  report_resolved: "Report resolved",
 };
 
 function AuditLog() {
@@ -2022,6 +2313,7 @@ export default function AdminPage() {
         <p className="mt-2 font-sora text-sm text-gk-muted">Review queue, moderation, and account tools.</p>
         <div className="mt-8 grid gap-10">
           <AdminAlerts />
+          <ReportsPanel />
           <Queue />
           <TracksQueue />
           <GigsAdmin />
