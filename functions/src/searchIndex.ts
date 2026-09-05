@@ -24,7 +24,10 @@ const lower = (s: string | null | undefined): string | null => (s ? s.toLowerCas
 const base = (kind: SearchKind, sourceId: string, now: number): SearchIndexDoc => ({
   kind, sourceId, handle: null, title: "", subtitle: "", words: [], tokens: [], genres: [],
   city: null, cityLower: null, neighborhood: null, geo: null, startsAt: null, endsAt: null,
-  priceFromCents: null, hasFreeTier: false, budgetMinCents: null, budgetMaxCents: null, actSize: null,
+  priceFromCents: null, hasFreeTier: false,
+  // SP11 Task 1 default; Task 6 projects the event's value
+  ageRestriction: "all_ages",
+  budgetMinCents: null, budgetMaxCents: null, actSize: null,
   hasAudio: false, busyDays: [], relatedProfileIds: [], followerCount: 0, imagePath: null, updatedAt: now,
 });
 
