@@ -5,13 +5,15 @@ import { doc, onSnapshot, collection, getDocs, orderBy, query } from "firebase/f
 import { getFirebase } from "../../../../src/lib/firebase";
 import { callFn } from "../../../../src/lib/callable";
 import { useAuth } from "../../../../src/auth/AuthProvider";
-import type { EventDoc, TicketTierDoc } from "@gatekeep/shared";
+import type { AgeRestriction, EventAct, EventDoc, TicketTierDoc } from "@gatekeep/shared";
 import { gigLocationLabel } from "../../../../src/bookings/BookingForms";
 import {
   formatEventFullDate, formatEventTimeRange, EVENT_STATUS_LABEL, EVENT_STATUS_TONE,
 } from "../../../../src/events/eventDisplay";
 import { TierEditor, TierSalesStats, tierRowFrom, type TierRowState } from "../../../../src/events/TierEditor";
 import { PosterField } from "../../../../src/events/PosterField";
+import { EventDetailsFields, type EventDetailsSave } from "../../../../src/events/EventDetailsFields";
+import { LineupEditor } from "../../../../src/events/LineupEditor";
 import {
   Text, Button, Card, StatusBadge, TextArea, PageBackground, Skeleton, SkeletonCard, ErrorBanner,
 } from "../../../../src/ui";
@@ -21,12 +23,18 @@ import { useTokens } from "../../../../src/theme/ThemeProvider";
 // Sub-project 6 task 12: the ticketed-event management screen. Brief anatomy
 // (verbatim): status, tiers editor per callable constraints, publish/cancel
 // with destructive confirm, per-tier sold/capacity, sales total. Content
-// editing (title/description/dates/lineup, mirrors web's EventEditContentForm)
-// is deliberately NOT part of this screen: the brief's own anatomy for this
+// editing (title/description/dates, mirrors web's EventEditContentForm) is
+// deliberately NOT part of this screen: the brief's own anatomy for this
 // task names exactly the five things above, unlike web's Task 10 twin, which
-// bundles content editing alongside tiers/publish/cancel. Content stays
-// web-edit-only for now, the same kind of recorded scoping decision Task
-// 10's own report made for its poster-upload and lineup-picker gaps.
+// bundles content editing alongside tiers/publish/cancel. Title, description,
+// and dates stay web-edit-only, the same kind of recorded scoping decision
+// Task 10's own report made for its poster-upload and lineup-picker gaps.
+//
+// Sub-project 11 task 14 (spec sections 3.4/3.5) adds exactly the two
+// surfaces the plan names for THIS screen on top of that: doors/age
+// (EventDetailsFields) and the artist-tag lineup editor (LineupEditor),
+// both full-replace `updateEvent` writers through the shared saveEvent
+// below, same as savePoster already is.
 
 // ---------- Cancel confirm (controller ruling 9, binding): an inline
 // destructive panel, NOT a Sheet, mirroring src/bookings/CancelDialog.tsx
@@ -86,6 +94,8 @@ export default function EventManagementScreen() {
   const [publishError, setPublishError] = useState<string | null>(null);
   const [posterBusy, setPosterBusy] = useState(false);
   const [posterError, setPosterError] = useState<string | null>(null);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Render-time reset, same idiom as [gigId].tsx's privLocGigId: this screen
   // does not remount when navigating from one event's management screen
@@ -145,10 +155,11 @@ export default function EventManagementScreen() {
     }
   };
 
-  // The mobile screen has no content editor, so the poster saves on its own
-  // through updateEvent's full-replace payload: every current field of the
-  // live event doc plus the new posterPath. Content stays web-edit-only
-  // (this file's own header), this is the one field mobile writes.
+  // The mobile screen has no title/description/dates editor, so the poster
+  // saves on its own through updateEvent's full-replace payload: every
+  // current field of the live event doc plus the new posterPath. Content
+  // stays web-edit-only (this file's own header), this is the one field
+  // mobile writes on its own here.
   const savePoster = async (path: string | null) => {
     setPosterBusy(true);
     setPosterError(null);
@@ -157,11 +168,37 @@ export default function EventManagementScreen() {
         curatorProfileId: event.curatorProfileId, eventId,
         title: event.title, description: event.description, startsAt: event.startsAt, endsAt: event.endsAt,
         maxTicketsPerBuyer: event.maxTicketsPerBuyer, lineup: event.lineup, posterPath: path,
+        doorsAt: event.doorsAt ?? null, ageRestriction: event.ageRestriction ?? "all_ages",
       });
     } catch (e) {
       setPosterError(e instanceof Error ? e.message : "Could not save the poster.");
     } finally {
       setPosterBusy(false);
+    }
+  };
+
+  // Task 14's second writer of this doc, sharing one code path with
+  // EventDetailsFields' Save button and LineupEditor's own tag-free
+  // mutations (add/remove act): full-replace, like savePoster above, always
+  // resending whichever of doorsAt/ageRestriction/lineup this particular
+  // call is NOT changing from the live event doc, so neither caller
+  // clobbers the other's last write.
+  const saveEvent = async (patch: { doorsAt?: number | null; ageRestriction?: AgeRestriction; lineup?: EventAct[] }) => {
+    setSaveBusy(true);
+    setSaveError(null);
+    try {
+      await callFn("updateEvent", {
+        curatorProfileId: event.curatorProfileId, eventId,
+        title: event.title, description: event.description, startsAt: event.startsAt, endsAt: event.endsAt,
+        maxTicketsPerBuyer: event.maxTicketsPerBuyer, posterPath: event.posterPath,
+        lineup: patch.lineup ?? event.lineup,
+        doorsAt: patch.doorsAt !== undefined ? patch.doorsAt : (event.doorsAt ?? null),
+        ageRestriction: patch.ageRestriction ?? (event.ageRestriction ?? "all_ages"),
+      });
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Could not save changes.");
+    } finally {
+      setSaveBusy(false);
     }
   };
 
@@ -181,13 +218,15 @@ export default function EventManagementScreen() {
           <Text muted>{gigLocationLabel(event.location)}</Text>
         </Card>
 
-        {event.lineup.length > 0 && (
-          <Card style={{ gap: 4 }}>
-            <Text variant="label">Lineup</Text>
-            {event.lineup.map((act, i) => (
-              <Text key={`${act.kind}-${i}-${act.name}`}>{act.name}</Text>
-            ))}
-          </Card>
+        {editable && (
+          <EventDetailsFields
+            event={event} busy={saveBusy} error={saveError}
+            onSave={(v: EventDetailsSave) => void saveEvent(v)}
+          />
+        )}
+
+        {editable && (
+          <LineupEditor event={event} eventId={eventId} onChange={(lineup) => void saveEvent({ lineup })} />
         )}
 
         {editable && (
