@@ -23,7 +23,9 @@ export function notificationHref(
 ): string | null {
   if (kind === "booking") return refId ? (platform === "web" ? `/dashboard/bookings/${refId}` : `/booking/${refId}`) : null;
   if (kind === "ticket") return platform === "web" ? "/tickets" : "/(fan)/tickets";
-  if (kind === "show_announced" || kind === "show_rescheduled" || kind === "show_post") {
+  // SP11: artist_tag carries the eventId in refId and opens the event page,
+  // where the tagged artist's admins see the accept and decline banner.
+  if (kind === "show_announced" || kind === "show_rescheduled" || kind === "show_post" || kind === "artist_tag") {
     return refId ? (platform === "web" ? `/e/${refId}` : `/event/${refId}`) : null;
   }
   if (kind === "new_music") return null;

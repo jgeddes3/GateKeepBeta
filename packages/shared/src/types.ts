@@ -6,11 +6,32 @@ export type CuratorSubtype = "venue" | "planner" | "individual_host";
 export type ProfileStatus = "draft" | "pending_review" | "approved" | "rejected";
 export type MemberRole = "admin" | "member";
 
+// SP11: an event's door policy. Absent on every pre-SP11 event doc, which
+// reads as "all_ages" everywhere (EventDoc.ageRestriction below).
+export const AGE_RESTRICTIONS = ["all_ages", "18_plus", "21_plus"] as const;
+export type AgeRestriction = (typeof AGE_RESTRICTIONS)[number];
+export const AGE_RESTRICTION_LABEL: Record<AgeRestriction, string> = {
+  all_ages: "All ages", "18_plus": "18+", "21_plus": "21+",
+};
+// SP11: doors may not open more than this far before the start time.
+export const DOORS_MAX_BEFORE_START_MS = 12 * 60 * 60 * 1000;
+export interface UpdateAccountInput { displayName?: string; homeCity?: string | null }
+// `geocoded` is true when a homeGeo was written, false when the geocoder
+// missed (the city text is stored, homeGeo is null), and null when this call
+// did not touch homeCity at all.
+export interface UpdateAccountResult { ok: true; geocoded: boolean | null }
+
 export interface UserDoc {
   displayName: string;
   email: string;
   photoUrl: string | null;
   homeCity: string | null;
+  // SP11: the coarsened (two decimal) centre of homeCity, geocoded and
+  // written ONLY by updateAccount. Never client-writable (firestore.rules
+  // drops it, along with displayName and homeCity, from the owner update
+  // set). null when the city could not be geocoded, or when there is no
+  // homeCity; absent on every pre-SP11 doc and read as null.
+  homeGeo?: { lat: number; lng: number } | null;
   createdAt: number; // epoch ms
   // Task 8: lowercased displayName for prefix search (searchUsersByName).
   // Written by onUserCreated and kept in sync by the onUserDocWritten
@@ -109,7 +130,9 @@ export interface NotificationDoc {
   // the member's account is not enabled yet; "share_released" is a held
   // share later transferring once the account is enabled; "member_payout_failed"
   // is a member's own standard/instant cash-out bouncing.
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match" | "share_paid" | "share_held" | "share_released" | "member_payout_failed";
+  // SP11: "artist_tag" is a curator tagging this musician profile on an
+  // event lineup; refId is the eventId, and it routes to the event page.
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match" | "share_paid" | "share_held" | "share_released" | "member_payout_failed" | "artist_tag";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -1097,9 +1120,18 @@ export interface PosterUploadDoc { path: string; createdAt: number; }
 // ---------- Sub-project 6: events & ticketing ----------
 
 export type EventStatus = "draft" | "published" | "completed" | "cancelled";
+// SP11: a curator-tagged GateKeep artist on a standalone event. `name` is
+// the musician profile's display name snapshotted at tag time; `status` is
+// server-owned (only eventArtistTags.ts writes it). A tagged act renders as
+// a plain name to the public until it is "accepted".
+export type TaggedActStatus = "pending" | "accepted" | "declined";
 export type EventAct =
   | { kind: "booking"; bookingId: string; musicianProfileId: string; name: string }
-  | { kind: "external"; name: string };
+  | { kind: "external"; name: string }
+  | {
+    kind: "tagged"; musicianProfileId: string; name: string;
+    status: TaggedActStatus; taggedAt: number; respondedAt: number | null;
+  };
 export interface EventDoc {
   curatorProfileId: string; title: string; description: string;
   location: GigPublicLocation;             // reuses SP3's public-precision location type
@@ -1108,11 +1140,17 @@ export interface EventDoc {
   status: EventStatus;
   maxTicketsPerBuyer: number;              // default 8
   lineup: EventAct[];
-  // Server-maintained projection of lineup's "booking" acts' musicianProfileId
-  // values, kept in sync wherever lineup is written. Task 9's musician public
-  // page query (array-contains on this field) needs a flat array rather than
-  // scanning lineup's discriminated-union entries per read.
+  // Server-maintained projection of lineup's booking acts and ACCEPTED tagged
+  // acts' musicianProfileId values, kept in sync wherever lineup is written.
+  // Task 9's musician public page query (array-contains on this field) needs
+  // a flat array rather than scanning lineup's discriminated-union entries
+  // per read.
   lineupMusicianProfileIds: string[];
+  // SP11: optional door time (epoch ms), before startsAt and within
+  // DOORS_MAX_BEFORE_START_MS of it. Absent on pre-SP11 docs, read as null.
+  doorsAt?: number | null;
+  // SP11: absent on pre-SP11 docs, read as "all_ages".
+  ageRestriction?: AgeRestriction;
   gigId: string | null;                    // set when promoted from a filled gig
   createdAt: number; updatedAt: number;
   cancelledAt?: number; completedAt?: number;

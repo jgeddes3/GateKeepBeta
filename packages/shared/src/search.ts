@@ -1,4 +1,4 @@
-import { GENRES, ACT_SIZES, LAUNCH_TIMEZONE, type ActSize } from "./types.js";
+import { GENRES, ACT_SIZES, LAUNCH_TIMEZONE, type ActSize, type AgeRestriction } from "./types.js";
 
 // ---------- kinds, faces, constants ----------
 
@@ -46,6 +46,7 @@ export interface SearchFilters {
   when?: SearchWhen;
   genres?: string[];
   freeOnly?: boolean;
+  allAges?: boolean;
   nearMe?: boolean;
   budgetMinCents?: number;
   actSize?: ActSize;
@@ -55,7 +56,7 @@ export interface SearchFilters {
 }
 
 export const FACE_FILTER_KEYS: Record<SearchFace, ReadonlyArray<keyof SearchFilters>> = {
-  fan: ["when", "genres", "freeOnly", "nearMe"],
+  fan: ["when", "genres", "freeOnly", "allAges", "nearMe"],
   musician_gigs: ["when", "genres", "budgetMinCents", "nearMe"],
   musician_venues: ["genres", "nearMe"],
   curator: ["genres", "actSize", "city", "hasAudio", "availableOn"],
@@ -78,6 +79,7 @@ export interface SearchIndexDoc {
   endsAt: number | null;
   priceFromCents: number | null;
   hasFreeTier: boolean;
+  ageRestriction: AgeRestriction;
   budgetMinCents: number | null;
   budgetMaxCents: number | null;
   actSize: ActSize | null;
@@ -257,6 +259,7 @@ export function matchesFilters(doc: SearchIndexDoc, filters: SearchFilters, now:
   }
   if (filters.genres && filters.genres.length > 0 && !filters.genres.some((g) => doc.genres.includes(g))) return false;
   if (filters.freeOnly && !doc.hasFreeTier) return false;
+  if (filters.allAges && doc.ageRestriction !== "all_ages") return false;
   if (filters.budgetMinCents !== undefined && (doc.budgetMaxCents === null || doc.budgetMaxCents < filters.budgetMinCents)) return false;
   if (filters.actSize && doc.actSize !== filters.actSize) return false;
   if (filters.city !== undefined && filters.city.trim() !== "" && doc.cityLower !== filters.city.trim().toLowerCase()) return false;
@@ -295,6 +298,7 @@ export function savedSearchLabel(face: SearchFace, q: string, filters: SearchFil
   if (allowed.includes("when") && filters.when && WHEN_LABEL[filters.when]) parts.push(WHEN_LABEL[filters.when]!);
   if (filters.genres && filters.genres.length > 0) parts.push(filters.genres.map(titleCase).join(", "));
   if (allowed.includes("freeOnly") && filters.freeOnly) parts.push("Free");
+  if (allowed.includes("allAges") && filters.allAges) parts.push("All ages only");
   if (allowed.includes("budgetMinCents") && filters.budgetMinCents !== undefined) {
     parts.push(`Budget from $${Math.round(filters.budgetMinCents / 100).toLocaleString("en-US")}`);
   }
@@ -337,9 +341,9 @@ function validateFilters(face: SearchFace, raw: unknown): { ok: true; filters: S
         if (new Set(value).size !== value.length) return fail("Duplicate genres.");
         for (const g of value) if (typeof g !== "string" || !(GENRES as readonly string[]).includes(g)) return fail("Unknown genre.");
         filters.genres = value as string[]; break;
-      case "freeOnly": case "nearMe": case "hasAudio":
+      case "freeOnly": case "allAges": case "nearMe": case "hasAudio":
         if (typeof value !== "boolean") return fail(`Filter "${key}" must be true or false.`);
-        filters[key as "freeOnly" | "nearMe" | "hasAudio"] = value; break;
+        filters[key as "freeOnly" | "allAges" | "nearMe" | "hasAudio"] = value; break;
       case "budgetMinCents":
         if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100_000_000) return fail("Invalid budget floor.");
         filters.budgetMinCents = value; break;

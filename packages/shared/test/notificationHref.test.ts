@@ -48,4 +48,9 @@ describe("notificationHref", () => {
       expect(notificationHref(kind, null, "mobile", "payouts")).toBe("/(fan)/payouts");
     }
   });
+  it("routes artist_tag to the event page on both platforms", () => {
+    expect(notificationHref("artist_tag", "ev1", "web")).toBe("/e/ev1");
+    expect(notificationHref("artist_tag", "ev1", "mobile")).toBe("/event/ev1");
+    expect(notificationHref("artist_tag", null, "web")).toBeNull();
+  });
 });

@@ -12,7 +12,7 @@ function doc(overrides: Partial<SearchIndexDoc> = {}): SearchIndexDoc {
     kind: "show", sourceId: "ev1", handle: null, title: "The Night Owls", subtitle: "Mohawk",
     words, tokens: buildTokens(words), genres: ["rock", "indie"], city: "Austin", cityLower: "austin",
     neighborhood: "Red River", geo: { lat: 30.27, lng: -97.74 }, startsAt: 1_800_000_000_000, endsAt: 1_800_010_000_000,
-    priceFromCents: 0, hasFreeTier: true, budgetMinCents: null, budgetMaxCents: null, actSize: null,
+    priceFromCents: 0, hasFreeTier: true, ageRestriction: "all_ages", budgetMinCents: null, budgetMaxCents: null, actSize: null,
     hasAudio: false, busyDays: [], relatedProfileIds: ["cur1", "mus1"], followerCount: 0, imagePath: null,
     updatedAt: 1, ...overrides,
   };
@@ -197,5 +197,27 @@ describe("face and kind mapping", () => {
     expect(refKindForKind("gig")).toBe("gig");
     expect(refKindForKind("artist")).toBe("profile");
     expect(refKindForKind("venue")).toBe("profile");
+  });
+});
+
+describe("allAges filter", () => {
+  it("keeps all-ages shows and drops 18+ and 21+ when set, and is a no-op when unset", () => {
+    const allAges = doc({ ageRestriction: "all_ages" });
+    const eighteen = doc({ ageRestriction: "18_plus" });
+    const twentyOne = doc({ ageRestriction: "21_plus" });
+    expect(matchesFilters(allAges, { allAges: true }, Date.now())).toBe(true);
+    expect(matchesFilters(eighteen, { allAges: true }, Date.now())).toBe(false);
+    expect(matchesFilters(twentyOne, { allAges: true }, Date.now())).toBe(false);
+    for (const d of [allAges, eighteen, twentyOne]) {
+      expect(matchesFilters(d, {}, Date.now())).toBe(true);
+      expect(matchesFilters(d, { allAges: false }, Date.now())).toBe(true);
+    }
+  });
+  it("validates on the fan face only, and labels a saved search", () => {
+    const ok = validateSearchInput({ face: "fan", q: "", filters: { allAges: true }, location: null, page: 0, includePins: false });
+    expect(ok.ok).toBe(true);
+    const bad = validateSearchInput({ face: "curator", q: "", filters: { allAges: true }, location: null, page: 0, includePins: false });
+    expect(bad.ok).toBe(false);
+    expect(savedSearchLabel("fan", "owls", { allAges: true })).toBe('"owls" · All ages only');
   });
 });

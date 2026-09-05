@@ -183,3 +183,22 @@ export const SEARCH_SIGN_IN_MESSAGE = "Sign in to search.";
 // types.ts) and re-exported here so both import paths read the same
 // constant; validatePayoutShares itself uses the payoutShares.ts copy.
 export { SHARES_SUM_MESSAGE, SHARES_MEMBER_MESSAGE, SHARES_ADMIN_MESSAGE, MEMBER_PAYOUT_SETUP_REQUIRED_MESSAGE } from "./payoutShares.js";
+
+// ---------- Sub-project 11 SP7 reconciliation ----------
+export const ACCOUNT_NAME_MESSAGE = "Display name must be 1 to 80 characters.";
+export const ACCOUNT_CITY_MESSAGE = "Home city must be 80 characters or fewer.";
+export const ACCOUNT_SAVED_MESSAGE = "Saved.";
+export const ACCOUNT_NAME_HELP = "Shown on tickets you buy from now on.";
+export const ACCOUNT_CITY_HELP = "Used to rank shows near you when your location is off.";
+export const ACCOUNT_GEOCODE_MISS_MESSAGE = "We could not place that city; ranking will not use it.";
+export const EVENT_DOORS_MESSAGE = "Doors must be before the start time and within 12 hours of it.";
+export const EVENT_AGE_MESSAGE = "Pick an age restriction.";
+export const ARTIST_TAG_DUPLICATE_MESSAGE = "That artist is already on the lineup.";
+export const ARTIST_TAG_UNAPPROVED_MESSAGE = "Only approved artists can be tagged.";
+export const ARTIST_TAG_ANSWERED_MESSAGE = "This tag has already been answered.";
+// Refusal for an updateEvent payload inventing a tagged act the server has
+// never seen: tags are created only by tagEventArtist.
+export const ARTIST_TAG_UNKNOWN_MESSAGE = "Tag artists from the lineup editor.";
+export const ARTIST_TAG_BANNER_TITLE = "You were tagged on this lineup";
+export const SHARE_LINK_COPIED_MESSAGE = "Link copied";
+export const HOME_CITY_PROMPT_LINE = "Or set a home city under Account.";
