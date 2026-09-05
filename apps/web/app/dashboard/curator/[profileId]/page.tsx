@@ -13,6 +13,7 @@ import { validateLookingFor, type ProfileDoc, type ProfileStatus, type CuratorDe
 import { Button } from "../../../../src/ui/button";
 import { Badge } from "../../../../src/ui/badge";
 import { Skeleton } from "../../../../src/ui/skeleton";
+import { ListError } from "../../../../src/ui/ListError";
 import { useConfirm } from "../../../../src/ui/confirm-dialog";
 import { IconCheck, IconCircle, IconWarning } from "../../../../src/ui/icons";
 
@@ -69,7 +70,8 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
   const { profileId } = use(props.params); // client components unwrap params with use()
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -88,10 +90,27 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [user, profileId]);
+      // Fix round, Important finding #4: a failed read used to collapse
+      // into `null`, indistinguishable from "no such profile" (which then
+      // rendered as the not-found panel below, with a "back to dashboard"
+      // link and no way to retry). Now a distinct "error" sentinel with its
+      // own ListError + Retry, the same four-way shape the sibling gigs
+      // page (app/dashboard/curator/[profileId]/gigs/page.tsx) already uses
+      // for its own profile subscription.
+      (e) => { console.error("CuratorEditor: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [user, profileId, profileReloadKey]);
 
   if (loading || !user || profile === "loading") return <EditorSkeleton />;
+  if (profile === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError
+          message="Couldn't load your curator profile."
+          onRetry={() => { setProfile("loading"); setProfileReloadKey((k) => k + 1); }}
+        />
+      </main>
+    );
+  }
   if (!profile || profile.type !== "curator") {
     return (
       <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 text-center sm:px-6">

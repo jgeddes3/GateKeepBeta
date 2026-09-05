@@ -124,7 +124,17 @@ export function useOtherProfiles(
 // well-formed pair id. Client mirror of messaging.ts's own parsePairId:
 // pure string work, no read, so a malformed or foreign id is turned away
 // before anything is fetched.
-function parsePairId(conversationId: string): { musicianProfileId: string; curatorProfileId: string } | null {
+//
+// Exported (fix round, finding #1): ConversationThread.tsx's own effects
+// build `conversations/{conversationId}/messages` and
+// `profiles/{profileId}/conversations/{conversationId}` Firestore paths
+// directly out of the raw `?c=` value; a value containing "/" (or any other
+// character outside isValidDocId's allowlist) throws SYNCHRONOUSLY inside
+// collection()/doc(), before that component's own "conversation isn't
+// available" render path ever gets a chance to bail out. Reusing this exact
+// check there (rather than a second, hand-rolled one) means the two call
+// sites can never drift on what counts as a well-formed pair id.
+export function parsePairId(conversationId: string): { musicianProfileId: string; curatorProfileId: string } | null {
   const parts = conversationId.split("__");
   if (parts.length !== 2) return null;
   const [musicianProfileId, curatorProfileId] = parts;

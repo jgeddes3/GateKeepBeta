@@ -5,7 +5,7 @@ import { collection, doc, getDoc, limit, onSnapshot, orderBy, query } from "fire
 import {
   MESSAGE_MAX_CHARS, MESSAGE_SEND_LABEL, MESSAGE_COMPOSER_PLACEHOLDER, CONVERSATION_BLOCKED_MESSAGE,
   UNBLOCK_LABEL, BLOCK_LABEL, REPORT_LABEL, CONVERSATION_EMPTY_MESSAGE, REPORT_SENT_MESSAGE,
-  REPORT_REASON_PROMPT, REPORT_REASON_MAX_CHARS,
+  REPORT_REASON_PROMPT, REPORT_REASON_MAX_CHARS, REPORT_DUPLICATE_MESSAGE,
   type ConversationRefDoc, type MessageDoc, type ProfileDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
@@ -19,7 +19,7 @@ import { ErrorBox } from "../ui/ErrorBox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 import { IconDotsVertical } from "../ui/icons";
-import type { OtherProfileSummary } from "./useConversations";
+import { parsePairId, type OtherProfileSummary } from "./useConversations";
 
 type MessageRow = { id: string } & MessageDoc;
 
@@ -46,10 +46,26 @@ function ThreadSkeleton() {
 // keyed by `${conversationId}-${profileId}` (page.tsx), so a different
 // conversation is always a FRESH instance whose initial state is already
 // "loading"; only `retry`'s own event handler ever needs to reset it back.
-function useMessages(conversationId: string): { messages: MessageRow[] | "loading" | "error"; retry: () => void } {
+//
+// `enabled` (fix round, Critical finding #1): the caller only flips this to
+// true once the viewer's own mirror doc (useMirror below) has been
+// CONFIRMED to exist. For a pair that has never been messaged, the parent
+// conversations/{pairId} doc this query's own security rule get()s does not
+// exist either, so firestore.rules denies the listen outright and this
+// component used to render "Couldn't load messages." with no way to
+// recover short of Retry, even on the very first visit. Staying disabled
+// (never subscribing at all, rather than subscribing and swallowing the
+// expected denial) means `messages` simply stays at its initial "loading"
+// value the whole time the caller is showing its own empty-state copy
+// instead; the moment the mirror doc appears (sendMessage's own transaction
+// writes the mirror and the first message together), `enabled` flips true
+// and this effect subscribes for the first time, delivering that first
+// bubble immediately rather than needing a manual Retry.
+function useMessages(conversationId: string, enabled: boolean): { messages: MessageRow[] | "loading" | "error"; retry: () => void } {
   const [messages, setMessages] = useState<MessageRow[] | "loading" | "error">("loading");
   const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    if (!enabled) return;
     const { db } = getFirebase();
     const unsub = onSnapshot(
       query(collection(db, `conversations/${conversationId}/messages`), orderBy("at", "asc"), limit(200)),
@@ -57,7 +73,7 @@ function useMessages(conversationId: string): { messages: MessageRow[] | "loadin
       () => setMessages("error"),
     );
     return () => { unsub(); };
-  }, [conversationId, reloadKey]);
+  }, [conversationId, enabled, reloadKey]);
   return { messages, retry: () => { setMessages("loading"); setReloadKey((k) => k + 1); } };
 }
 
@@ -67,16 +83,39 @@ function useMessages(conversationId: string): { messages: MessageRow[] | "loadin
 // packages/shared/src/types.ts's own comments on ConversationDoc/
 // ConversationStateDoc/ConversationRefDoc). Same "no reset needed" reasoning
 // as useMessages above: a fresh conversationId is always a fresh mount.
-function useMirror(profileId: string, conversationId: string): ConversationRefDoc | null | "loading" | "error" {
+//
+// `pairValid` (fix round, Critical finding #1): a `?c=` value the router
+// handed straight through can carry a "/" or other character outside
+// isValidDocId's allowlist, which throws SYNCHRONOUSLY inside doc() before
+// this component's own "conversation isn't available" render path ever
+// gets a chance to bail out. The caller computes this once via
+// useConversations.ts's own parsePairId (the exact check
+// useOtherProfileForConversation already uses to decide the very same
+// thing) and this effect simply never subscribes when it's false; `mirror`
+// then stays at its initial "loading", which is harmless because the
+// render below already returns the "conversation isn't available" state
+// for an invalid pair BEFORE it ever looks at `mirror` (see the reordered
+// checks below).
+//
+// The three-way return (loading / null-for-missing / a real doc / "error")
+// is deliberately NOT collapsed: a mirror that doesn't exist yet (this pair
+// has never been messaged) is not a failure, it's the normal state for
+// every "Message" deep link's first visit, and must never be confused with
+// a genuine read failure.
+function useMirror(profileId: string, conversationId: string, pairValid: boolean): {
+  mirror: ConversationRefDoc | null | "loading" | "error"; retryMirror: () => void;
+} {
   const [mirror, setMirror] = useState<ConversationRefDoc | null | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    if (!pairValid) return;
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, `profiles/${profileId}/conversations/${conversationId}`),
       (s) => setMirror(s.exists() ? (s.data() as ConversationRefDoc) : null),
       () => setMirror("error"));
     return () => { unsub(); };
-  }, [profileId, conversationId]);
-  return mirror;
+  }, [profileId, conversationId, pairValid, reloadKey]);
+  return { mirror, retryMirror: () => { setMirror("loading"); setReloadKey((k) => k + 1); } };
 }
 
 export function ConversationThread({ profileId, conversationId, otherProfile, isAdminOfProfile }: {
@@ -86,8 +125,23 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
   isAdminOfProfile: boolean;
 }) {
   const { user } = useAuth();
-  const { messages, retry: retryMessages } = useMessages(conversationId);
-  const mirror = useMirror(profileId, conversationId);
+  // Fix round, Critical finding #1: computed fresh every render, same as
+  // useOtherProfileForConversation's own `pair`/`invalid` derivation (this
+  // IS that same check, reused via useConversations.ts's exported
+  // parsePairId) rather than trusted blindly off the prop. A malformed
+  // `?c=` value (a "/" in it, say) must never reach collection()/doc() in
+  // either hook below.
+  const pairValid = parsePairId(conversationId) !== null;
+  const { mirror, retryMirror } = useMirror(profileId, conversationId, pairValid);
+  // The messages listener only ever attaches once the viewer's own mirror
+  // doc is CONFIRMED to exist (mirror is a real ConversationRefDoc, not
+  // "loading", not "error", and not null-for-missing): see useMessages' own
+  // comment above for why. `mirrorMissing` is exported to the render below
+  // as its own named state (never folded into `messages`) so "no messages
+  // yet" and "couldn't load messages" stay two visibly different things.
+  const mirrorReady = pairValid && mirror !== "loading" && mirror !== "error" && mirror !== null;
+  const mirrorMissing = pairValid && mirror === null;
+  const { messages, retry: retryMessages } = useMessages(conversationId, mirrorReady);
 
   // The acting profile's OWN name, for its own bubbles: not something either
   // prop already carries (`otherProfile` only ever names the OTHER side).
@@ -108,11 +162,19 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
   // open, so a message that arrives while this screen is already open also
   // clears the badge rather than waiting for the next visit. Failures are
   // swallowed: a read receipt is not worth an error banner.
+  //
+  // `mirrorReady` (fix round, Critical finding #1): belt-and-suspenders
+  // alongside `messages` never resolving out of "loading" while the mirror
+  // is missing (useMessages stays disabled the whole time, so
+  // `messageCount` alone already stays null) - there is nothing to mark
+  // read for a conversation that has never received a first message, and
+  // this makes that explicit rather than relying only on the other hook's
+  // own gating.
   const messageCount = messages === "loading" || messages === "error" ? null : messages.length;
   useEffect(() => {
-    if (messageCount === null) return;
+    if (messageCount === null || !mirrorReady) return;
     callFn("markConversationRead", { profileId, conversationId }).catch(() => {});
-  }, [profileId, conversationId, messageCount]);
+  }, [profileId, conversationId, messageCount, mirrorReady]);
 
   const [blockOverride, setBlockOverride] = useState<boolean | null>(null);
   const [blockBusy, setBlockBusy] = useState(false);
@@ -166,14 +228,19 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
   const [reportReason, setReportReason] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
-  const [reportDone, setReportDone] = useState(false);
+  // Fix round, Important finding #3: a single calm-text result, not a bare
+  // `reportDone` boolean, so a duplicate report (already-exists) can share
+  // this exact same "rendered as text here, never a failure state" branch as
+  // a genuine first-time success, matching EventComments.tsx's own
+  // `reportResult` pattern for the identical situation.
+  const [reportResult, setReportResult] = useState<string | null>(null);
 
   const closeReport = (open: boolean) => {
     setReportOpen(open);
     if (!open) {
       setReportReason("");
       setReportError(null);
-      setReportDone(false);
+      setReportResult(null);
     }
   };
 
@@ -186,21 +253,31 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
       // this task's own gate time; if it is absent this simply surfaces the
       // callable's own error text below, unstubbed.
       await callFn("reportConversation", { profileId, conversationId, reason: trimmed });
-      setReportDone(true);
+      setReportResult(REPORT_SENT_MESSAGE);
     } catch (e) {
+      const message = e instanceof Error ? e.message : "";
       // A duplicate report (reporters cannot read reports, so there is no
-      // client-side "already reported" special case) comes back as a calm
-      // callable error too: rendered as text here, never a failure state.
-      setReportError(e instanceof Error ? e.message : "Could not send this report.");
+      // other way to learn a first attempt already landed) is a statement
+      // of fact, not a failure: rendered in the same calm `role="status"`
+      // line as success, never inside an ErrorBox.
+      if (message === REPORT_DUPLICATE_MESSAGE) setReportResult(REPORT_DUPLICATE_MESSAGE);
+      else setReportError(message || "Could not send this report.");
     } finally {
       setReportBusy(false);
     }
   };
 
-  if (otherProfile === "loading" || mirror === "loading") return <ThreadSkeleton />;
+  // Reordered (fix round, Critical finding #1): the "conversation isn't
+  // available" case (an invalid `?c=` pair, or one naming neither of this
+  // profile's own two ids) is checked FIRST, before `mirror === "loading"`.
+  // `mirror` never resolves out of "loading" for an invalid pair (its own
+  // hook stays disabled via `pairValid`), so checking it first used to hang
+  // this branch in ThreadSkeleton forever instead of ever reaching this
+  // "isn't available" message.
   if (otherProfile === "error" || otherProfile === null) {
     return <ErrorBox message="This conversation isn't available." />;
   }
+  if (otherProfile === "loading" || mirror === "loading") return <ThreadSkeleton />;
 
   const typeLabel = otherProfile.type === "curator" ? "Curator" : "Musician";
 
@@ -238,45 +315,66 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
       {blockError && <ErrorBox message={blockError} />}
 
       <div className="grid gap-3">
-        {messages === "loading" && (
-          <div className="grid gap-3" role="status" aria-label="Loading messages">
-            <div className="flex justify-start"><Skeleton className="h-16 w-2/3 max-w-sm" /></div>
-            <div className="flex justify-end"><Skeleton className="h-16 w-2/3 max-w-sm" /></div>
-          </div>
-        )}
-        {messages === "error" && (
-          <div className="grid gap-2">
-            <ErrorBox message="Couldn't load messages." />
-            <Button type="button" variant="secondary" onClick={retryMessages} className="w-fit">Retry</Button>
-          </div>
-        )}
-        {messages !== "loading" && messages !== "error" && messages.length === 0 && (
+        {/* Fix round, Critical finding #1: `mirrorMissing`/`mirror === "error"`
+            are checked before ever looking at `messages` at all, since the
+            messages listener never even attaches (stays disabled via
+            `mirrorReady`) in either of those two states. A pair never
+            messaged before renders the plain empty-state line here, same
+            copy and same composer as an ordinary empty thread, with no
+            "Couldn't load" flash and nothing to retry; a genuine mirror read
+            failure gets its own ErrorBox + Retry, distinct from "no
+            messages yet" so the two can never be confused. */}
+        {mirrorMissing ? (
           <p className="font-sora text-sm text-gk-muted">{CONVERSATION_EMPTY_MESSAGE}</p>
-        )}
-        {messages !== "loading" && messages !== "error" && messages.map((m) => {
-          const isMine = m.senderProfileId === profileId;
-          // The spec asks for the sender's profile name plus the member's
-          // display name; a users/{uid} read is owner-only (firestore.rules),
-          // so that display name is only ever known for the VIEWER'S OWN
-          // sends (useAuth()'s own displayName). Any other sender, own side
-          // or the other side, renders the profile name alone.
-          const isViewerSend = isMine && m.senderUid === user?.uid;
-          const senderProfileName = isMine ? (myProfileName ?? "You") : otherProfile.name;
-          const label = isViewerSend && user?.displayName ? `${senderProfileName} · ${user.displayName}` : senderProfileName;
-          return (
-            <div key={m.id} className={cn("flex", isMine ? "justify-end" : "justify-start")}>
-              <div
-                className={cn(
-                  "grid max-w-[85%] gap-2 rounded-gk border p-3.5 sm:max-w-[70%]",
-                  isMine ? "border-gk-accent/50 bg-gk-accent/14" : "border-gk-border bg-gk-surface",
-                )}
-              >
-                <p className="whitespace-pre-wrap font-sora text-sm text-gk-text">{m.text}</p>
-                <p className="font-sora text-xs text-gk-muted">{label} · {new Date(m.at).toLocaleString()}</p>
+        ) : mirror === "error" ? (
+          <div className="grid gap-2">
+            <ErrorBox message="Couldn't load this conversation." />
+            <Button type="button" variant="secondary" onClick={retryMirror} className="w-fit">Retry</Button>
+          </div>
+        ) : (
+          <>
+            {messages === "loading" && (
+              <div className="grid gap-3" role="status" aria-label="Loading messages">
+                <div className="flex justify-start"><Skeleton className="h-16 w-2/3 max-w-sm" /></div>
+                <div className="flex justify-end"><Skeleton className="h-16 w-2/3 max-w-sm" /></div>
               </div>
-            </div>
-          );
-        })}
+            )}
+            {messages === "error" && (
+              <div className="grid gap-2">
+                <ErrorBox message="Couldn't load messages." />
+                <Button type="button" variant="secondary" onClick={retryMessages} className="w-fit">Retry</Button>
+              </div>
+            )}
+            {messages !== "loading" && messages !== "error" && messages.length === 0 && (
+              <p className="font-sora text-sm text-gk-muted">{CONVERSATION_EMPTY_MESSAGE}</p>
+            )}
+            {messages !== "loading" && messages !== "error" && messages.map((m) => {
+              const isMine = m.senderProfileId === profileId;
+              // The spec asks for the sender's profile name plus the
+              // member's display name; a users/{uid} read is owner-only
+              // (firestore.rules), so that display name is only ever known
+              // for the VIEWER'S OWN sends (useAuth()'s own displayName).
+              // Any other sender, own side or the other side, renders the
+              // profile name alone.
+              const isViewerSend = isMine && m.senderUid === user?.uid;
+              const senderProfileName = isMine ? (myProfileName ?? "You") : otherProfile.name;
+              const label = isViewerSend && user?.displayName ? `${senderProfileName} · ${user.displayName}` : senderProfileName;
+              return (
+                <div key={m.id} className={cn("flex", isMine ? "justify-end" : "justify-start")}>
+                  <div
+                    className={cn(
+                      "grid max-w-[85%] gap-2 rounded-gk border p-3.5 sm:max-w-[70%]",
+                      isMine ? "border-gk-accent/50 bg-gk-accent/14" : "border-gk-border bg-gk-surface",
+                    )}
+                  >
+                    <p className="whitespace-pre-wrap font-sora text-sm text-gk-text">{m.text}</p>
+                    <p className="font-sora text-xs text-gk-muted">{label} · {new Date(m.at).toLocaleString()}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        )}
       </div>
 
       {blockedByMe ? (
@@ -320,8 +418,8 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
           <DialogHeader>
             <DialogTitle>{REPORT_REASON_PROMPT}</DialogTitle>
           </DialogHeader>
-          {reportDone ? (
-            <p role="status" className="font-sora text-sm text-gk-text">{REPORT_SENT_MESSAGE}</p>
+          {reportResult ? (
+            <p role="status" className="font-sora text-sm text-gk-text">{reportResult}</p>
           ) : (
             <div className="grid gap-2">
               <Textarea
@@ -337,7 +435,7 @@ export function ConversationThread({ profileId, conversationId, otherProfile, is
             </div>
           )}
           <DialogFooter>
-            {reportDone ? (
+            {reportResult ? (
               <Button type="button" onClick={() => closeReport(false)}>Close</Button>
             ) : (
               <>

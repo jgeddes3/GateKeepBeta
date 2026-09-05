@@ -4,12 +4,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { useMyProfilesState } from "../../../src/shell/useMyProfiles";
 import { useProfileRole } from "../../../src/payments/useProfileRole";
-import { useOtherProfileForConversation } from "../../../src/messaging/useConversations";
+import { useOtherProfileForConversation, parsePairId } from "../../../src/messaging/useConversations";
 import { ConversationList } from "../../../src/messaging/ConversationList";
 import { ConversationThread } from "../../../src/messaging/ConversationThread";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../../src/ui/select";
 import { Button } from "../../../src/ui/button";
 import { Skeleton } from "../../../src/ui/skeleton";
+import { ListError } from "../../../src/ui/ListError";
 import { cn } from "../../../src/lib/utils";
 
 // Task 6: the web Messages page (spec 3.1). Fully client, same signed-in
@@ -35,7 +36,7 @@ function MessagesBody() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const selectedId = searchParams.get("c");
-  const { profiles, loaded } = useMyProfilesState(user?.uid ?? null);
+  const { profiles, loaded, error: profilesError, retry: retryProfiles } = useMyProfilesState(user?.uid ?? null);
 
   // Only an approved musician or curator profile can send a message
   // (messaging.ts's own resolvePair gate); a draft/pending/rejected profile
@@ -46,9 +47,23 @@ function MessagesBody() {
   // so a chosen id that no longer names an approved profile (or hasn't
   // been chosen yet) always falls back to the first approved profile.
   const [chosenProfileId, setChosenProfileId] = useState<string | null>(null);
+  // Fix round, Important finding #2: a `?c=` deep link (a notification, or
+  // Task 7's MessageButton) can name the user's OTHER profile, not
+  // approvedProfiles[0] - a curator getting a notification about a message
+  // to their musician profile, say. Only applies while nothing has been
+  // explicitly chosen via "Messaging as" (`chosenProfileId` still wins once
+  // set, exactly as before): the pair is parsed with the same
+  // useConversations.ts's own parsePairId useOtherProfileForConversation
+  // already uses, and whichever side of it names a profile this account
+  // actually holds becomes the default, so the thread renders immediately
+  // instead of "This conversation isn't available." until a manual switch.
+  const pair = selectedId ? parsePairId(selectedId) : null;
+  const pairProfileId = pair
+    ? (approvedProfiles.find((p) => p.profileId === pair.musicianProfileId || p.profileId === pair.curatorProfileId)?.profileId ?? null)
+    : null;
   const actingProfileId = (chosenProfileId && approvedProfiles.some((p) => p.profileId === chosenProfileId))
     ? chosenProfileId
-    : (approvedProfiles[0]?.profileId ?? null);
+    : (pairProfileId ?? approvedProfiles[0]?.profileId ?? null);
 
   const isAdmin = useProfileRole(actingProfileId ?? undefined, user?.uid) === "admin";
   const otherProfile = useOtherProfileForConversation(selectedId, actingProfileId);
@@ -59,6 +74,24 @@ function MessagesBody() {
   useEffect(() => { if (!loading && !user) router.replace("/sign-in?next=/dashboard/messages"); }, [user, loading, router]);
 
   if (loading || !user || !loaded) return <MessagesPageSkeleton />;
+
+  // Fix round, Important finding #4: useMyProfilesState's own members-read
+  // listener now surfaces a failed read as a real error state (previously
+  // no error callback at all: a permanent skeleton). `loaded` is already
+  // true by the time `error` can be true (the hook sets both together), so
+  // this is checked right after the loading gate above, before the
+  // approvedProfiles-empty branch below, which a stale [] from the failed
+  // read would otherwise satisfy and render the wrong "set one up" message.
+  if (profilesError) {
+    return (
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+        <h1 className="font-syne text-3xl font-extrabold text-gk-text sm:text-4xl">Messages</h1>
+        <div className="mt-6">
+          <ListError message="Couldn't load your profiles." onRetry={retryProfiles} />
+        </div>
+      </main>
+    );
+  }
 
   if (approvedProfiles.length === 0) {
     return (

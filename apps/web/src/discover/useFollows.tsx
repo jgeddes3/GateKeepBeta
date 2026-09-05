@@ -5,7 +5,7 @@ import { parseGenreTarget, type FollowDoc, type FollowTargetType } from "@gateke
 import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 
-export type FollowState = { targets: Set<string>; loading: boolean; genres: string[] };
+export type FollowState = { targets: Set<string>; loading: boolean; genres: string[]; error: boolean };
 
 // Live subscription on this signed-in user's own follows
 // (follows/{uid}_{targetId}, readable only by their owner per
@@ -28,6 +28,7 @@ export function useFollows(uid: string | null): FollowState {
   const [targets, setTargets] = useState<Set<string>>(new Set());
   const [genres, setGenres] = useState<string[]>([]);
   const [loading, setLoading] = useState(uid != null);
+  const [error, setError] = useState(false);
   // Render-time reset on an identity change, same idiom useMyProfiles.ts
   // and usePosterUrl.ts already use: adjusting state synchronously during
   // render (rather than in an effect) means React re-renders once more
@@ -39,6 +40,7 @@ export function useFollows(uid: string | null): FollowState {
     setTargets(new Set());
     setGenres([]);
     setLoading(uid != null);
+    setError(false);
   }
 
   useEffect(() => {
@@ -58,11 +60,29 @@ export function useFollows(uid: string | null): FollowState {
       setTargets(nextTargets);
       setGenres(nextGenres);
       setLoading(false);
+      setError(false);
+    },
+    // Fix round, Important finding #4: this listener carried no error
+    // callback at all, so a failed read left `loading` stuck at `true`
+    // forever. `error` is exposed on FollowState (a real field a caller
+    // COULD render), but logged only here rather than surfaced as its own
+    // ListError line: every call site reads this through useFollowsContext
+    // from deep inside a small per-row control (FollowButton's own heart
+    // icon on up to 60 ArtistsList rows, GenrePicker's gate check), none of
+    // which has a sensible place for an inline error line without a larger
+    // redesign of that surface. `loading` still clears so nothing spins
+    // forever; FollowButton/GenrePicker fall back to their own "nothing
+    // followed yet" defaults, the same as a genuinely empty result.
+    (e) => {
+      if (cancelled) return;
+      console.error("useFollows: follows onSnapshot failed", uid, e);
+      setLoading(false);
+      setError(true);
     });
     return () => { cancelled = true; unsubscribe(); };
   }, [uid]);
 
-  return { targets, loading, genres };
+  return { targets, loading, genres, error };
 }
 
 // Distinguishable from "no provider mounted" (useContext's default) even

@@ -7,6 +7,7 @@ import { getFirebase } from "../lib/firebase";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { IconWarning } from "../ui/icons";
+import { ListError } from "../ui/ListError";
 import { deleteSavedSearch } from "./searchApi";
 
 type SavedSearchRow = { id: string } & SavedSearchDoc;
@@ -29,6 +30,8 @@ const FACE_NAME: Record<SearchFace, string> = {
 // a search yet needs to see.
 export function SavedSearches({ uid }: { uid: string }) {
   const [rows, setRows] = useState<SavedSearchRow[]>([]);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -36,12 +39,22 @@ export function SavedSearches({ uid }: { uid: string }) {
     const { db } = getFirebase();
     const unsubscribe = onSnapshot(
       query(collection(db, "savedSearches"), where("uid", "==", uid), orderBy("createdAt", "desc")),
-      (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as SavedSearchDoc) }))),
+      (snap) => { setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as SavedSearchDoc) }))); setLoadError(false); },
+      // Fix round, Important finding #4: this listener carried no error
+      // callback at all, so a failed read left `rows` at its initial `[]`,
+      // which the "hidden while empty" gate right below then rendered as
+      // though the user had never saved a search at all. This component has
+      // a real host UI (the Card below) once something IS wrong, so a load
+      // failure now surfaces there as its own ListError + Retry instead of
+      // silently vanishing.
+      (e) => { console.error("SavedSearches: savedSearches onSnapshot failed", uid, e); setLoadError(true); },
     );
     return () => unsubscribe();
-  }, [uid]);
+  }, [uid, reloadKey]);
 
-  if (rows.length === 0) return null;
+  if (rows.length === 0 && !loadError) return null;
+
+  const retryLoad = () => { setLoadError(false); setReloadKey((k) => k + 1); };
 
   const remove = async (id: string) => {
     setDeletingId(id);
@@ -62,6 +75,11 @@ export function SavedSearches({ uid }: { uid: string }) {
     <Card>
       <CardHeader><CardTitle>Saved searches</CardTitle></CardHeader>
       <CardContent>
+        {loadError && (
+          <div className="mb-3">
+            <ListError message="Couldn't load your saved searches." onRetry={retryLoad} />
+          </div>
+        )}
         {deleteError && (
           <p
             role="alert"

@@ -266,7 +266,7 @@ function CommentRow({ eventId, row, uid, authority, replies, parentMissing, onOp
   );
 
   if (row.hidden) {
-    const who = row.hiddenBy?.role === "admin" ? "an admin" : row.hiddenBy?.role === "curator" ? "the curator" : "an artist";
+    const who = row.hiddenBy?.role === "admin" ? "an admin" : row.hiddenBy?.role === "curator" ? "the curator" : "the artist";
     return (
       <li className="grid gap-1 rounded-gk-sm border border-gk-border bg-gk-surface p-3">
         <span className="font-syne text-sm font-semibold text-gk-text">{row.authorName}</span>

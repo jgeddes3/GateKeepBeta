@@ -75,7 +75,8 @@ function PostRowItem({ post, canRemove, onRemoved }: {
   // SP12 (spec 3.2): one heart per signed-in user per lineup post. The
   // count comes off the post doc (server-maintained by setPostHeart), the
   // "did I heart it" flag from a single getDoc on the per-user heart doc,
-  // which the rules allow any signed-in caller to read (never a list).
+  // which firestore.rules restricts to that heart's own owner (or an admin),
+  // never any signed-in caller, and never a list.
   const [hearted, setHearted] = useState(false);
   const [heartCount, setHeartCount] = useState(post.heartCount ?? 0);
   const [hearting, setHearting] = useState(false);

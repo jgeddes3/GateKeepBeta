@@ -28,14 +28,27 @@ export type ProfileSummary = { profileId: string; type: ProfileType; name: strin
 // needs to know "the first snapshot hasn't arrived yet" (or "signed out, so
 // there never will be one") to hold its own face choice rather than
 // defaulting to FanFace for a moment on every signed-in visit.
-function useMyProfilesInternal(uid: string | null): { profiles: ProfileSummary[]; loaded: boolean } {
+//
+// `error`/`retry` (fix round, Important finding #4): the members-read
+// listener carried no error callback at all, so a failed read left `loaded`
+// stuck at `false` forever - a permanent skeleton on every screen that gates
+// on it (app/dashboard/messages/page.tsx among them), indistinguishable from
+// a slow network. Added as new fields on the object both hooks already
+// return (useMyProfilesState's own callers only ever destructure the fields
+// they use), never a breaking change to useMyProfiles' bare-array shape.
+function useMyProfilesInternal(uid: string | null): {
+  profiles: ProfileSummary[]; loaded: boolean; error: boolean; retry: () => void;
+} {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [loaded, setLoaded] = useState(uid === null);
+  const [error, setError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [trackedUid, setTrackedUid] = useState(uid);
   if (uid !== trackedUid) {
     setTrackedUid(uid);
     setProfiles([]);
     setLoaded(uid === null);
+    setError(false);
   }
   useEffect(() => {
     if (!uid) return;
@@ -52,11 +65,19 @@ function useMyProfilesInternal(uid: string | null): { profiles: ProfileSummary[]
           out.push({ profileId: p.id, type: d.type, name: d.name, status: d.status });
         }
       }
-      if (!cancelled) { setProfiles(out); setLoaded(true); }
+      if (!cancelled) { setProfiles(out); setLoaded(true); setError(false); }
+    }, (e) => {
+      if (cancelled) return;
+      console.error("useMyProfiles: members onSnapshot failed", uid, e);
+      setError(true);
+      setLoaded(true);
     });
     return () => { cancelled = true; unsubscribe(); };
-  }, [uid]);
-  return { profiles, loaded };
+  }, [uid, reloadKey]);
+  return {
+    profiles, loaded, error,
+    retry: () => { setLoaded(false); setError(false); setReloadKey((k) => k + 1); },
+  };
 }
 
 export function useMyProfiles(uid: string | null): ProfileSummary[] {
@@ -68,7 +89,9 @@ export function useMyProfiles(uid: string | null): ProfileSummary[] {
 // other caller of useMyProfiles already depends on the bare-array return, so
 // this is a second hook onto the same subscription rather than a breaking
 // change to that shape.
-export function useMyProfilesState(uid: string | null): { profiles: ProfileSummary[]; loaded: boolean } {
+export function useMyProfilesState(uid: string | null): {
+  profiles: ProfileSummary[]; loaded: boolean; error: boolean; retry: () => void;
+} {
   return useMyProfilesInternal(uid);
 }
 
