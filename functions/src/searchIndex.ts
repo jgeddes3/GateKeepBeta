@@ -25,7 +25,7 @@ const base = (kind: SearchKind, sourceId: string, now: number): SearchIndexDoc =
   kind, sourceId, handle: null, title: "", subtitle: "", words: [], tokens: [], genres: [],
   city: null, cityLower: null, neighborhood: null, geo: null, startsAt: null, endsAt: null,
   priceFromCents: null, hasFreeTier: false,
-  // SP11 Task 1 default; Task 6 projects the event's value
+  // SP11: every non-show kind keeps the default; only projectShow overrides it.
   ageRestriction: "all_ages",
   budgetMinCents: null, budgetMaxCents: null, actSize: null,
   hasAudio: false, busyDays: [], relatedProfileIds: [], followerCount: 0, imagePath: null, updatedAt: now,
@@ -45,6 +45,7 @@ export function projectShow(eventId: string, event: EventDoc | undefined, now: n
     neighborhood: event.location.neighborhood ?? null, geo: event.location.geo ?? null,
     startsAt: event.startsAt, endsAt: event.endsAt, priceFromCents: event.priceFromCents ?? null,
     hasFreeTier: event.hasFreeTier ?? false,
+    ageRestriction: event.ageRestriction ?? "all_ages",
     relatedProfileIds: [...new Set([event.curatorProfileId, ...lineupMusicianProfileIds])],
     imagePath: event.posterPath ?? null,
   };
