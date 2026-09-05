@@ -45,11 +45,26 @@ import { tokens } from "../theme/tokens";
 // sent yet" that needs no read of the (rules-closed-until-it-exists) parent
 // itself. useMirror below returns "loading" | null (confirmed missing, not
 // an error) | "error" | the doc, and the messages listener only attaches
-// once the mirror is a real doc (or the mirror read itself failed, the
-// prior unconditional-subscribe behavior, kept as a fallback for that one
-// edge case); while the mirror is missing this renders the empty state with
-// the composer enabled and never attaches the messages listener at all, so
-// there is no errored, dead listener to survive past the first send.
+// once the mirror is a CONFIRMED real doc; while the mirror is missing this
+// renders the empty state with the composer enabled and never attaches the
+// messages listener at all, so there is no errored, dead listener to
+// survive past the first send.
+//
+// Fix round 2b (whole-branch fix wave, second pass): two more mirror-gating
+// gaps. First, a deep-linked conversationId whose segment decodes to a "/"
+// (or is otherwise not doc-id-shaped) used to reach useMirror's doc() call
+// unguarded, which throws SYNCHRONOUSLY inside the effect, an RN error
+// screen, even though the render below already has an "isn't available"
+// path for exactly this case. Both useMirror and useMessages now stay
+// disabled for an invalid pair (`pairValid`, the same parsePairId check the
+// render's own `invalid` derivation already uses), so `doc()`/`collection()`
+// are never called with an unsafe segment. Second, a genuine mirror-read
+// failure ("error", not "missing") no longer falls back to attaching the
+// messages listener: that fallback just reproduced the exact denied-listen
+// bug this fix wave started with, only for a never-messaged pair. Instead
+// the render shows its own error banner with a Retry that re-subscribes the
+// mirror itself (a reload key, matching web's own retryMirror), and the
+// messages listener stays unattached the whole time the mirror is in error.
 
 type MessageRow = MessageDoc & { id: string };
 type MessagesState = MessageRow[] | "loading" | "error";
@@ -71,12 +86,16 @@ export function parsePairId(conversationId: string): { musicianProfileId: string
 }
 
 // `enabled` gates the subscription itself: false while the mirror is still
-// resolving or confirmed missing (see useMirror below), so a never-messaged
-// pair's rules-denied parent doc never gets a listen attempt at all, no
-// errored/dead listener to survive past the first send. Skipping the
-// subscribe inside the effect body when disabled (not a synchronous
-// setState there) follows the same discipline BookingThread's own useGig
-// uses for its `if (!gigId) return;` guard.
+// resolving, confirmed missing, in error, or the pair itself is invalid
+// (see useMirror/mirrorReady below), so a never-messaged pair's rules-denied
+// parent doc never gets a listen attempt at all, no errored/dead listener to
+// survive past the first send. Fix round 2b: a genuine mirror-read failure
+// no longer falls back to attaching this listener either, that fallback
+// used to reproduce the exact same denied-listen error this fix wave
+// started with; the render shows the mirror's own error+Retry instead.
+// Skipping the subscribe inside the effect body when disabled (not a
+// synchronous setState there) follows the same discipline BookingThread's
+// own useGig uses for its `if (!gigId) return;` guard.
 function useMessages(conversationId: string, enabled: boolean): { state: MessagesState; retry: () => void } {
   const [state, setState] = useState<MessagesState>("loading");
   const [token, setToken] = useState(0);
@@ -106,17 +125,38 @@ function useMessages(conversationId: string, enabled: boolean): { state: Message
 // expected "never messaged" outcome, NOT an error), and "error" (the
 // subscription itself failed, kept distinct from null so callers can choose
 // to fall back rather than treat a transient failure as "never messaged").
-function useMirror(profileId: string, conversationId: string): MirrorState {
+//
+// `pairValid` (fix round 2b): the caller passes parsePairId(conversationId)
+// !== null, the exact same check the render's own `invalid` derivation
+// uses. Skipping the subscribe entirely when false (rather than trying and
+// catching) matters because doc() itself throws SYNCHRONOUSLY on a
+// malformed segment (a decoded "/" from a deep link, say), before onSnapshot
+// ever gets a chance to turn that into a clean "error" state. `state` simply
+// stays at its initial "loading" for an invalid pair, which is harmless:
+// the render below already returns its "isn't available" path for an
+// invalid pair before it ever looks at `mirror`.
+//
+// `retryMirror` (fix round 2b): re-subscribes via a reload key, matching
+// web's own retryMirror/useMirror shape, so a genuine mirror read failure
+// (as opposed to a confirmed-missing mirror) is recoverable from the
+// render's own Retry button rather than requiring the whole screen to
+// remount.
+function useMirror(profileId: string, conversationId: string, pairValid: boolean): { mirror: MirrorState; retryMirror: () => void } {
   const [state, setState] = useState<MirrorState>("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    if (!pairValid) return;
     let cancelled = false;
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, `profiles/${profileId}/conversations/${conversationId}`),
       (s) => { if (!cancelled) setState(s.exists() ? (s.data() as ConversationRefDoc) : null); },
       () => { if (!cancelled) setState("error"); });
     return () => { cancelled = true; unsub(); };
-  }, [profileId, conversationId]);
-  return state;
+  }, [profileId, conversationId, pairValid, reloadKey]);
+  // A plain event-handler setState, not inside the effect body, same
+  // discipline as useMessages' own retry below: it only fires from a user's
+  // Retry press.
+  return { mirror: state, retryMirror: () => { setState("loading"); setReloadKey((n) => n + 1); } };
 }
 
 // One-shot lookup of the other side's public profile: its name (the header
@@ -175,6 +215,7 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   // (conversationPairId's own format), so the other side is a pure, sync
   // derivation, no read needed just to learn who it is.
   const pair = parsePairId(conversationId);
+  const pairValid = pair !== null;
   const invalid = !pair || (pair.musicianProfileId !== profileId && pair.curatorProfileId !== profileId);
   const otherProfileId = pair && !invalid
     ? (pair.musicianProfileId === profileId ? pair.curatorProfileId : pair.musicianProfileId)
@@ -183,16 +224,18 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   // Hooks run unconditionally, every render (same discipline BookingThread
   // follows); the early returns below happen AFTER all of these are called.
   const otherProfile = useOtherProfile(otherProfileId);
-  const mirror = useMirror(profileId, conversationId);
-  // Confirmed missing (a real "never messaged" outcome, not an error) is its
-  // own boolean so the render below and markRead's guard can both check it
-  // without repeating the three-way mirror comparison. The messages
-  // listener attaches once the mirror is a real doc, OR the mirror read
-  // itself errored (fall back to the old unconditional-subscribe behavior
-  // for that one edge case rather than getting stuck); it stays unattached
-  // only for a confirmed-missing mirror.
-  const mirrorMissing = mirror === null;
-  const messagesQ = useMessages(conversationId, mirror !== "loading" && !mirrorMissing);
+  const { mirror, retryMirror } = useMirror(profileId, conversationId, pairValid);
+  // Confirmed missing (a real "never messaged" outcome, not an error) and
+  // "ready" (a real doc, safe to read blockedByMe off of and to attach the
+  // messages listener) are each their own boolean so the render below and
+  // markRead's guard can check them without repeating the mirror comparison
+  // every time. `pairValid` is checked again here too (belt-and-suspenders,
+  // matching web): the mirror hook itself already stays stuck at "loading"
+  // forever for an invalid pair, so this is never actually the thing that
+  // decides it, but it keeps the intent explicit at the call site.
+  const mirrorReady = pairValid && mirror !== "loading" && mirror !== "error" && mirror !== null;
+  const mirrorMissing = pairValid && mirror === null;
+  const messagesQ = useMessages(conversationId, mirrorReady);
 
   const [myProfileName, setMyProfileName] = useState<string | null>(null);
   useEffect(() => {
@@ -382,6 +425,18 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
         // this branch off and attaches the real listener.
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <Text muted>{CONVERSATION_EMPTY_MESSAGE}</Text>
+        </View>
+      ) : mirror === "error" ? (
+        // Fix round 2b: a genuine mirror-read failure, distinct from
+        // "never messaged". The messages listener was never attached here
+        // either (mirrorReady requires a confirmed real doc), so this gets
+        // its OWN error banner and Retry, re-subscribing the mirror itself
+        // rather than falling back to a messages listener that would just
+        // reproduce the same denied-listen failure for a never-messaged
+        // pair, or masking a real mirror outage for an existing one.
+        <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this conversation." />
+          <Button variant="secondary" title="Retry" onPress={retryMirror} style={{ alignSelf: "flex-start" }} />
         </View>
       ) : messages === "loading" ? (
         <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
