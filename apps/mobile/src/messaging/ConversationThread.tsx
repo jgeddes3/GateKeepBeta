@@ -35,12 +35,33 @@ import { tokens } from "../theme/tokens";
 // shape) already names the other participant, the same client-side parse
 // web's own useOtherProfileForConversation uses, so the thread never needs
 // an extra listener just to learn who the other side is.
+//
+// Fix round 2 (whole-branch fix wave): the mirror gates the messages
+// subscription too, not just blockedByMe. A pair that has never been
+// messaged has no conversations/{pairId} doc, so the messages subcollection
+// rule's own get() on that missing parent denies the listen outright. The
+// mirror doc is written in the SAME transaction as the first message, so
+// "mirror missing" is a reliable, client-readable stand-in for "nothing
+// sent yet" that needs no read of the (rules-closed-until-it-exists) parent
+// itself. useMirror below returns "loading" | null (confirmed missing, not
+// an error) | "error" | the doc, and the messages listener only attaches
+// once the mirror is a real doc (or the mirror read itself failed, the
+// prior unconditional-subscribe behavior, kept as a fallback for that one
+// edge case); while the mirror is missing this renders the empty state with
+// the composer enabled and never attaches the messages listener at all, so
+// there is no errored, dead listener to survive past the first send.
 
 type MessageRow = MessageDoc & { id: string };
 type MessagesState = MessageRow[] | "loading" | "error";
+type MirrorState = ConversationRefDoc | null | "loading" | "error";
 type OtherProfile = { profileId: string; name: string; handle: string; type: "musician" | "curator" };
 
-function parsePairId(conversationId: string): { musicianProfileId: string; curatorProfileId: string } | null {
+// Exported: both Messages tab group screens (app/(musician|curator)/
+// messages/[conversationId].tsx) parse the same pair id to resolve the
+// acting profile from myProfiles when the `acting` route param is absent
+// or invalid, the same doc-id-shaped validation this function already does
+// internally, kept in one place rather than duplicated per screen.
+export function parsePairId(conversationId: string): { musicianProfileId: string; curatorProfileId: string } | null {
   const parts = conversationId.split("__");
   if (parts.length !== 2) return null;
   const [musicianProfileId, curatorProfileId] = parts;
@@ -49,10 +70,18 @@ function parsePairId(conversationId: string): { musicianProfileId: string; curat
   return { musicianProfileId, curatorProfileId };
 }
 
-function useMessages(conversationId: string): { state: MessagesState; retry: () => void } {
+// `enabled` gates the subscription itself: false while the mirror is still
+// resolving or confirmed missing (see useMirror below), so a never-messaged
+// pair's rules-denied parent doc never gets a listen attempt at all, no
+// errored/dead listener to survive past the first send. Skipping the
+// subscribe inside the effect body when disabled (not a synchronous
+// setState there) follows the same discipline BookingThread's own useGig
+// uses for its `if (!gigId) return;` guard.
+function useMessages(conversationId: string, enabled: boolean): { state: MessagesState; retry: () => void } {
   const [state, setState] = useState<MessagesState>("loading");
   const [token, setToken] = useState(0);
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     const { db } = getFirebase();
     const unsub = onSnapshot(
@@ -60,7 +89,7 @@ function useMessages(conversationId: string): { state: MessagesState; retry: () 
       (snap) => { if (!cancelled) setState(snap.docs.map((d) => ({ id: d.id, ...(d.data() as MessageDoc) }))); },
       () => { if (!cancelled) setState("error"); });
     return () => { cancelled = true; unsub(); };
-  }, [conversationId, token]);
+  }, [conversationId, token, enabled]);
   // A plain event-handler setState, not inside the effect body (no
   // react-hooks/set-state-in-effect exception needed): it only fires from a
   // user's Retry press.
@@ -68,16 +97,22 @@ function useMessages(conversationId: string): { state: MessagesState; retry: () 
 }
 
 // This profile's own mirror, live: the ONLY place `blockedByMe` is visible
-// to a client at all. A missing mirror (should not happen once a
-// conversation exists) or a failed subscription both read as "not blocked"
-// rather than hanging forever, matching web's own useMirror fallback.
-function useBlockedByMe(profileId: string, conversationId: string): boolean | "loading" | "error" {
-  const [state, setState] = useState<boolean | "loading" | "error">("loading");
+// to a client at all, AND (fix round 2) the sole client-readable signal for
+// whether this pair has ever been messaged at all, since the shared
+// conversations/{pairId} parent doc is unreadable (and unwritten) until the
+// first send. Three states besides the doc itself: "loading" (not yet
+// resolved, render the thread's own loading skeleton, don't decide
+// anything yet), null (the doc read cleanly and does not exist, a real,
+// expected "never messaged" outcome, NOT an error), and "error" (the
+// subscription itself failed, kept distinct from null so callers can choose
+// to fall back rather than treat a transient failure as "never messaged").
+function useMirror(profileId: string, conversationId: string): MirrorState {
+  const [state, setState] = useState<MirrorState>("loading");
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, `profiles/${profileId}/conversations/${conversationId}`),
-      (s) => { if (!cancelled) setState(s.exists() ? Boolean((s.data() as ConversationRefDoc).blockedByMe) : false); },
+      (s) => { if (!cancelled) setState(s.exists() ? (s.data() as ConversationRefDoc) : null); },
       () => { if (!cancelled) setState("error"); });
     return () => { cancelled = true; unsub(); };
   }, [profileId, conversationId]);
@@ -148,8 +183,16 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   // Hooks run unconditionally, every render (same discipline BookingThread
   // follows); the early returns below happen AFTER all of these are called.
   const otherProfile = useOtherProfile(otherProfileId);
-  const messagesQ = useMessages(conversationId);
-  const blockedState = useBlockedByMe(profileId, conversationId);
+  const mirror = useMirror(profileId, conversationId);
+  // Confirmed missing (a real "never messaged" outcome, not an error) is its
+  // own boolean so the render below and markRead's guard can both check it
+  // without repeating the three-way mirror comparison. The messages
+  // listener attaches once the mirror is a real doc, OR the mirror read
+  // itself errored (fall back to the old unconditional-subscribe behavior
+  // for that one edge case rather than getting stuck); it stays unattached
+  // only for a confirmed-missing mirror.
+  const mirrorMissing = mirror === null;
+  const messagesQ = useMessages(conversationId, mirror !== "loading" && !mirrorMissing);
 
   const [myProfileName, setMyProfileName] = useState<string | null>(null);
   useEffect(() => {
@@ -189,14 +232,17 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   // count grows while this screen is focused (a new message arriving while
   // the thread is on screen is still something the viewer has now seen).
   // Best-effort: a failure here leaves the badge one message stale, not
-  // worth an error banner.
+  // worth an error banner. Never fires while the mirror is missing: there is
+  // no conversation to mark read yet, and the callable's own doc reads would
+  // just fail the same way the old unconditional messages listener did.
   const isFocusedRef = useRef(true);
   const markedCountRef = useRef(0);
   const markRead = useCallback(() => {
+    if (mirrorMissing) return;
     if (messagesQ.state === "loading" || messagesQ.state === "error") return;
     markedCountRef.current = messagesQ.state.length;
     void callFn("markConversationRead", { profileId, conversationId }).catch(() => {});
-  }, [messagesQ.state, profileId, conversationId]);
+  }, [mirrorMissing, messagesQ.state, profileId, conversationId]);
 
   // markReadRef always points at the CURRENT render's markRead (reassigned
   // every render, no deps array): the focus callback below is intentionally
@@ -227,7 +273,7 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
       </View>
     );
   }
-  if (otherProfile === "loading" || blockedState === "loading") {
+  if (otherProfile === "loading" || mirror === "loading") {
     return (
       <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
         <SkeletonCard />
@@ -243,7 +289,10 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
     );
   }
 
-  const blockedByMe = blockedState === "error" ? false : blockedState;
+  // A confirmed-missing or errored mirror both read as "not blocked" (the
+  // errored case matches the previous fallback exactly); only a real mirror
+  // doc with blockedByMe true renders the blocked state.
+  const blockedByMe = mirror !== "error" && mirror ? mirror.blockedByMe : false;
   const isAdmin = role === "admin";
 
   const doSetBlock = async (blocked: boolean) => {
@@ -323,14 +372,25 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={0}>
-      {messages === "loading" ? (
+      {mirrorMissing ? (
+        // Never messaged: the messages listener was never attached (its
+        // rules-closed parent doc does not exist yet), so this renders the
+        // same empty copy the FlatList's own ListEmptyComponent uses below,
+        // straight off the mirror instead of an errored subscription. The
+        // composer underneath stays enabled either way; the first send
+        // writes the mirror and the message in one transaction, which flips
+        // this branch off and attaches the real listener.
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+          <Text muted>{CONVERSATION_EMPTY_MESSAGE}</Text>
+        </View>
+      ) : messages === "loading" ? (
         <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
           <SkeletonCard />
           <SkeletonCard />
         </View>
       ) : messages === "error" ? (
         <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load these messages." />
+          <ErrorBanner message="Couldn't load messages." />
           <Button variant="secondary" title="Retry" onPress={messagesQ.retry} style={{ alignSelf: "flex-start" }} />
         </View>
       ) : (

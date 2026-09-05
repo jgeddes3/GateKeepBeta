@@ -17,7 +17,11 @@ import { tokens } from "../theme/tokens";
 // The conversation id is computed client-side (conversationPairId) purely
 // to pre-select the thread; the conversation itself is created server-side
 // on the first send, so linking to a pair that has never been messaged is
-// safe and simply shows the empty state.
+// safe. ConversationThread gates its messages listener on the acting
+// profile's own mirror doc (profiles/{acting}/conversations/{pairId}),
+// which does not exist yet for such a pair, so it renders the empty state
+// with the composer enabled instead of attempting a read the rules would
+// deny; the first send writes the mirror and attaches the real listener.
 //
 // Fix round 1 (review ruling): each Messages tab group's own thread screen
 // now reads an optional `acting` search param first, falling back to the
