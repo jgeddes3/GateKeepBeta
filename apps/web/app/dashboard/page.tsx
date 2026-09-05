@@ -10,6 +10,7 @@ import { cn } from "../../src/lib/utils";
 import { notificationHref, type ProfileType, type ProfileStatus, type ProfileDoc, type NotificationDoc } from "@gatekeep/shared";
 import { SavedSearches } from "../../src/search/SavedSearches";
 import { MemberPayoutsCard } from "../../src/payments/MemberPayoutsCard";
+import { AccountCard } from "../../src/account/AccountCard";
 import { Button } from "../../src/ui/button";
 import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
@@ -369,6 +370,10 @@ export default function Dashboard() {
 
       <section className="mt-8">
         <MemberPayoutsCard uid={user.uid} />
+      </section>
+
+      <section id="account" className="mt-10">
+        <AccountCard key={`account-${user.uid}`} uid={user.uid} />
       </section>
 
       <section className="mt-10">
