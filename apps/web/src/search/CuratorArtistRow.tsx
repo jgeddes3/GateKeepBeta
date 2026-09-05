@@ -7,6 +7,7 @@ import { getFirebase } from "../lib/firebase";
 import { formatChipLabel } from "../portfolio/PortfolioForms";
 import { formatReliabilityLine } from "../bookings/BookingForms";
 import { OfferComposer } from "../bookings/OfferComposer";
+import { MessageButton } from "../messaging/MessageButton";
 import { Button } from "../ui/button";
 import { ACT_SIZE_LABEL } from "./ResultRows";
 
@@ -58,9 +59,15 @@ export function CuratorArtistRow({ curatorProfileId, r }: { curatorProfileId: st
           {reliabilityLine && <p className="font-sora text-xs text-gk-muted">{reliabilityLine}</p>}
         </div>
       </Link>
-      <Button type="button" variant="secondary" size="sm" className="justify-self-start" onClick={() => setOffering((v) => !v)}>
-        {offering ? "Cancel" : "Offer a gig"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="secondary" size="sm" className="justify-self-start" onClick={() => setOffering((v) => !v)}>
+          {offering ? "Cancel" : "Offer a gig"}
+        </Button>
+        {/* Task 7 (spec 3.1): "Message" beside "Offer a gig". The acting
+            profile is already known here (curatorProfileId), so this skips
+            MessageButton's own picker sheet and links straight to the pair. */}
+        <MessageButton targetProfileId={r.id} targetProfileType="musician" targetName={r.title} actingProfileId={curatorProfileId} />
+      </div>
       {offering && (
         <OfferComposer
           key={`${curatorProfileId}-${r.id}`}

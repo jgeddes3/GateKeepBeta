@@ -11,6 +11,7 @@ import { formatChipLabel } from "./chipLabel";
 import { IconImages } from "../../../src/ui/icons";
 import { cn } from "../../../src/lib/utils";
 import { ShareButton } from "../../../src/share/ShareButton";
+import { MessageButton } from "../../../src/messaging/MessageButton";
 
 // Sub-project 9A task 10: full restyle to the owner-locked anatomy (spec
 // section 6.6, docs/superpowers/mocks/sp9a/venue-page.html): the owner's
@@ -247,6 +248,12 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {chips.map((label) => <Badge key={label} variant="secondary">{label}</Badge>)}
             <FollowButton targetId={profileId} targetType="curator" label={isVenue ? "Follow venue" : undefined} />
+            {/* Task 7 (spec 3.1): "Message" opens the web Messages page with
+                this curator's pair pre-selected, from a musician viewer's
+                eligible profile(s). Hidden entirely for a viewer with none
+                (the button's own gate), so it costs this row nothing when
+                it doesn't apply. */}
+            <MessageButton targetProfileId={profileId} targetProfileType="curator" targetName={profile.name} />
           </div>
           {openGigs.length > 0 && (
             <div className="mt-4">

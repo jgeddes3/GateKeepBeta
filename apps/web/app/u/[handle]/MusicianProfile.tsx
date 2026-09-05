@@ -15,6 +15,7 @@ import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
 import { IconInstagram, IconLink, IconSpotify, IconUser, IconWebsite, IconYoutube } from "../../../src/ui/icons";
 import { ShareButton } from "../../../src/share/ShareButton";
+import { MessageButton } from "../../../src/messaging/MessageButton";
 
 // Sub-project 9A task 9: full restyle to the owner-locked anatomy (spec
 // section 6.4, docs/superpowers/mocks/sp9a/artist-hero.html option A) with
@@ -191,6 +192,11 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
             <div className="mt-4 flex flex-wrap items-center gap-3">
               {firstTrack && <HeroPlayButton id={firstTrack.id} title={firstTrack.title} url={firstTrack.url} />}
               <OfferGigButton musicianProfileId={profileId} musicianName={profile.name} />
+              {/* Task 7 (spec 3.1): "Message" opens the web Messages page
+                  with this musician's pair pre-selected, from a curator
+                  viewer's eligible profile(s). Hidden entirely for a
+                  viewer with none (the button's own gate). */}
+              <MessageButton targetProfileId={profileId} targetProfileType="musician" targetName={profile.name} />
               {hasShows && (
                 <Button asChild variant="secondary" size="sm">
                   <a href="#shows">Shows</a>
