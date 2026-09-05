@@ -6,7 +6,7 @@ import { formatChipLabel } from "../portfolio/PortfolioForms";
 import { Input } from "../ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Skeleton } from "../ui/skeleton";
-import { ErrorBox } from "./EventEditor";
+import { ErrorBox } from "../ui/ErrorBox";
 
 // Sub-project 11 (spec section 3.5): the lineup editor's second "Add act"
 // path. Backed by the SAME `search` callable the curator musicians page

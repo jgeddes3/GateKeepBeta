@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { collection, getDocs, orderBy, query } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, orderBy, query } from "firebase/firestore";
 import {
   AGE_RESTRICTIONS, AGE_RESTRICTION_LABEL, DOORS_MAX_BEFORE_START_MS, EVENT_DOORS_MESSAGE,
   GENRES, type AgeRestriction, type EventAct, type EventDoc, type EventStatus, type TaggedActStatus, type TicketTierDoc,
@@ -17,6 +17,7 @@ import { Textarea } from "../ui/textarea";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Badge } from "../ui/badge";
+import { ErrorBox } from "../ui/ErrorBox";
 import { IconPlus, IconTrash, IconWarning } from "../ui/icons";
 
 // Sub-project 6 task 10 (brief anatomy: "EventEditor: fields per
@@ -92,15 +93,6 @@ const fromLocalInput = (value: string): number | null => {
   return Number.isFinite(ms) ? ms : null;
 };
 
-export function ErrorBox({ message }: { message: string }) {
-  return (
-    <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
-      <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-      <span>{message}</span>
-    </p>
-  );
-}
-
 // ---------- Lineup editor (shared by create + edit) ----------
 
 interface TagEventArtistPayload { curatorProfileId: string; eventId: string; musicianProfileId: string; }
@@ -116,6 +108,7 @@ function LineupFields({ lineup, onChange, eventId, profileId }: {
   const [draft, setDraft] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [tagError, setTagError] = useState<string | null>(null);
+  const [tagBusy, setTagBusy] = useState(false);
   const [untagBusyId, setUntagBusyId] = useState<string | null>(null);
 
   const addAct = () => {
@@ -125,24 +118,38 @@ function LineupFields({ lineup, onChange, eventId, profileId }: {
     setDraft("");
   };
 
-  // tagEventArtist is the ONLY writer of a `tagged` act (eventArtistTags.ts's
-  // own header comment); this just mirrors its result locally (status
-  // "pending", the id and name the picker already resolved) so the row
-  // appears without a refetch. Save later resends this placeholder verbatim,
-  // and the server's own reconcileTaggedActs replaces it with its stored
-  // copy by musicianProfileId, so nothing here ever invents or edits status.
-  const handlePick = async (musicianProfileId: string, name: string) => {
+  // Fix round 1 (Critical, ruling 1): tagEventArtist can convert a same-
+  // named EXTERNAL act already on the bill into the tagged one in place
+  // (functions/src/eventArtistTags.ts's own matchIndex logic), rather than
+  // appending a brand-new row. A locally-built placeholder act can't know
+  // whether that happened, so this refetches the event document itself
+  // (this editor already reads events through the client SDK) and replaces
+  // local state with the server's own lineup wholesale, keeping the busy
+  // state up through the refetch. Save later resends whatever comes back
+  // here verbatim, and the server's own reconcileTaggedActs treats every
+  // tagged act as already-known, so nothing here ever invents or edits a
+  // tagged act's status.
+  const handlePick = async (musicianProfileId: string) => {
     if (!eventId) return;
     setTagError(null);
+    setTagBusy(true);
     try {
       await callFn<TagEventArtistPayload, { actIndex: number }>("tagEventArtist",
         { curatorProfileId: profileId, eventId, musicianProfileId });
-      onChange([...lineup, { kind: "tagged", musicianProfileId, name, status: "pending", taggedAt: Date.now(), respondedAt: null }]);
+      const snap = await getDoc(doc(getFirebase().db, `events/${eventId}`));
+      const fresh = snap.data() as EventDoc | undefined;
+      if (!fresh) throw new Error("Could not refresh the lineup.");
+      onChange(fresh.lineup);
     } catch (e) {
       // The three ARTIST_TAG_* messages are the whole vocabulary here
       // (duplicate, unapproved, cap); surfaced verbatim, same discipline as
-      // every other callable rejection in this file.
+      // every other callable rejection in this file. A refetch failure
+      // (network blip after a successful tag) surfaces the same way: the
+      // tag itself already landed server-side, so the next save or reload
+      // still picks it up even if this particular refresh failed.
       setTagError(e instanceof Error ? e.message : "Could not tag this artist.");
+    } finally {
+      setTagBusy(false);
     }
   };
 
@@ -203,9 +210,9 @@ function LineupFields({ lineup, onChange, eventId, profileId }: {
           <IconPlus size={16} aria-hidden="true" />
           Add act
         </Button>
-        <Button type="button" variant="secondary" onClick={() => setPickerOpen(true)} disabled={!eventId}>
+        <Button type="button" variant="secondary" onClick={() => setPickerOpen(true)} disabled={!eventId || tagBusy}>
           <IconPlus size={16} aria-hidden="true" />
-          Tag a GateKeep artist
+          {tagBusy ? "Tagging…" : "Tag a GateKeep artist"}
         </Button>
       </div>
       {/* tagEventArtist requires a real eventId (it appends to a stored
@@ -214,7 +221,7 @@ function LineupFields({ lineup, onChange, eventId, profileId }: {
       {!eventId && <p className="font-sora text-xs text-gk-muted">Save the event first, then tag artists.</p>}
       {tagError && <ErrorBox message={tagError} />}
       <p className="font-sora text-xs text-gk-muted">At least one act is required.</p>
-      <ArtistPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={(id, name) => { void handlePick(id, name); }} />
+      <ArtistPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={(id) => { void handlePick(id); }} />
     </div>
   );
 }
