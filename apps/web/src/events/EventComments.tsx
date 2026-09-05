@@ -162,8 +162,8 @@ function CommentComposer({ eventId, parentId, ariaLabel, submitLabel, onCancel, 
   );
 }
 
-function CommentRow({ eventId, row, uid, authority, replies, onOptimisticRemove, onRowActionError, reconcile }: {
-  eventId: string; row: Row; uid: string | undefined; authority: CommentAuthority; replies: Row[];
+function CommentRow({ eventId, row, uid, authority, replies, parentMissing, onOptimisticRemove, onRowActionError, reconcile }: {
+  eventId: string; row: Row; uid: string | undefined; authority: CommentAuthority; replies: Row[]; parentMissing: boolean;
   onOptimisticRemove: (commentId: string) => void; onRowActionError: (message: string) => void; reconcile: () => void;
 }) {
   const isReply = row.parentId !== null;
@@ -249,23 +249,42 @@ function CommentRow({ eventId, row, uid, authority, replies, onOptimisticRemove,
     }
   };
 
+  // Shared between the hidden and the normal render below: an admin's query
+  // includes hidden top-level comments (fetchCommentsPage above), so a
+  // hidden row still needs its own nested replies rendered, exactly like a
+  // visible one. Non-admins never reach this branch with a hidden parent,
+  // since their own query excludes hidden rows entirely.
+  const repliesList = replies.length > 0 && (
+    <ul className="mt-1 grid gap-2 border-l border-gk-border pl-3">
+      {replies.map((reply) => (
+        <CommentRow
+          key={reply.id} eventId={eventId} row={reply} uid={uid} authority={authority} replies={[]} parentMissing={false}
+          onOptimisticRemove={onOptimisticRemove} onRowActionError={onRowActionError} reconcile={reconcile}
+        />
+      ))}
+    </ul>
+  );
+
   if (row.hidden) {
-    const who = row.hiddenBy?.role === "admin" ? "an admin" : row.hiddenBy?.role === "curator" ? "the organizer" : "an artist";
+    const who = row.hiddenBy?.role === "admin" ? "an admin" : row.hiddenBy?.role === "curator" ? "the curator" : "an artist";
     return (
       <li className="grid gap-1 rounded-gk-sm border border-gk-border bg-gk-surface p-3">
         <span className="font-syne text-sm font-semibold text-gk-text">{row.authorName}</span>
         <p className="font-sora text-xs text-gk-muted">{commentHiddenLine(who)}</p>
         <p className="whitespace-pre-wrap font-sora text-sm text-gk-muted">{row.text}</p>
+        {repliesList}
       </li>
     );
   }
 
   return (
     <li className="grid gap-1.5 rounded-gk-sm border border-gk-border bg-gk-surface p-3">
-      {/* A reply whose real parent is not on this loaded page (or was
-          deleted) has nowhere to nest, so it renders at the top level with
-          this quoted line standing in for the parent it can't show. */}
-      {isReply && <p className="font-sora text-xs italic text-gk-muted">{COMMENT_DELETED_LINE}</p>}
+      {/* A reply whose real parent is not on this loaded page (hidden from
+          this query, or deleted) has nowhere to nest, so it renders at the
+          top level with this quoted line standing in for the parent it
+          can't show. A reply nested under its rendered parent (below) never
+          shows this line, regardless of isReply. */}
+      {parentMissing && <p className="font-sora text-xs italic text-gk-muted">{COMMENT_DELETED_LINE}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-syne text-sm font-semibold text-gk-text">{row.authorName}</span>
         {row.authorRole !== "fan" && (
@@ -306,16 +325,7 @@ function CommentRow({ eventId, row, uid, authority, replies, onOptimisticRemove,
         />
       )}
 
-      {replies.length > 0 && (
-        <ul className="mt-1 grid gap-2 border-l border-gk-border pl-3">
-          {replies.map((reply) => (
-            <CommentRow
-              key={reply.id} eventId={eventId} row={reply} uid={uid} authority={authority} replies={[]}
-              onOptimisticRemove={onOptimisticRemove} onRowActionError={onRowActionError} reconcile={reconcile}
-            />
-          ))}
-        </ul>
-      )}
+      {repliesList}
 
       <Dialog open={reportOpen} onOpenChange={closeReport}>
         <DialogContent>
@@ -452,12 +462,15 @@ export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMu
 
   // Top-level comments render at the top level; a reply nests under its
   // parent WHEN that parent is loaded on this same page, grouped client-side
-  // (Step 3). A reply whose parent isn't loaded (or was deleted) has no row
-  // to nest under, so it falls into the top-level list too; CommentRow
-  // renders its own quoted COMMENT_DELETED_LINE for that case.
+  // (Step 3). A reply whose parent isn't loaded (hidden from this query, or
+  // deleted) has no row to nest under, so it falls into the top-level list
+  // too; parentMissingById flags exactly those rows so CommentRow renders
+  // its quoted COMMENT_DELETED_LINE only for them, not for every reply
+  // (spec 3.2: a reply nested under a rendered parent never shows the line).
   const byId = new Map(list.map((r) => [r.id, r]));
   const childrenOf = new Map<string, Row[]>();
   const displayRows: Row[] = [];
+  const parentMissingById = new Map<string, boolean>();
   for (const r of list) {
     if (r.parentId && byId.has(r.parentId)) {
       const siblings = childrenOf.get(r.parentId) ?? [];
@@ -465,6 +478,7 @@ export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMu
       childrenOf.set(r.parentId, siblings);
     } else {
       displayRows.push(r);
+      parentMissingById.set(r.id, r.parentId !== null);
     }
   }
   for (const siblings of childrenOf.values()) siblings.sort((a, b) => a.at - b.at);
@@ -506,7 +520,7 @@ export function EventComments({ eventId, eventStatus, curatorProfileId, lineupMu
           {displayRows.map((row) => (
             <CommentRow
               key={row.id} eventId={eventId} row={row} uid={uid} authority={authority}
-              replies={childrenOf.get(row.id) ?? []}
+              replies={childrenOf.get(row.id) ?? []} parentMissing={parentMissingById.get(row.id) ?? false}
               onOptimisticRemove={removeRowLocally} onRowActionError={setRowActionError} reconcile={reconcile}
             />
           ))}

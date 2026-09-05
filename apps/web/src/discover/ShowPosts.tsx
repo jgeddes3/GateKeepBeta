@@ -78,6 +78,21 @@ function PostRowItem({ post, canRemove, onRemoved }: {
   const [heartCount, setHeartCount] = useState(post.heartCount ?? 0);
   const [hearting, setHearting] = useState(false);
 
+  // Rows are keyed by stable post id, so a refresh() that reuses this same
+  // PostRowItem instance would otherwise leave heartCount stuck at whatever
+  // useState first seeded it with. Resynced directly during render (React's
+  // own "adjusting state when a prop changes" pattern) rather than in a
+  // useEffect, which eslint-config-next's React Compiler rule refuses for a
+  // plain setState call with no external system involved; syncedHeartCount
+  // exists only to track the last post.heartCount already applied, so this
+  // never loops. hearted is untouched here: it's its own getDoc lookup below.
+  const normalizedHeartCount = post.heartCount ?? 0;
+  const [syncedHeartCount, setSyncedHeartCount] = useState(normalizedHeartCount);
+  if (normalizedHeartCount !== syncedHeartCount) {
+    setSyncedHeartCount(normalizedHeartCount);
+    setHeartCount(normalizedHeartCount);
+  }
+
   useEffect(() => {
     let cancelled = false;
     const lookup = user
