@@ -1392,6 +1392,40 @@ settlement.
 - Each payout notification kind (`share_paid`, `share_held`, `share_released`,
   `member_payout_failed`) deep-links to the payouts surface on tap.
 
+### Sub-project 12 launch checklist (messaging and comments)
+
+- **Deploy the two new composite indexes** in `firestore.indexes.json`: `comments (hidden asc, at
+  desc)` and `reports (status asc, createdAt desc)`. Same caveat as every prior sub-project's
+  indexes: the emulator does not enforce composite indexes, so confirm both show Enabled in the
+  Firebase console after `firebase deploy --only firestore:indexes` before the show-page comment
+  feed and the admin Reports panel work in production. Sub-project 12 also adds two new top-level
+  collections, `conversations` and `reports`, plus new subcollections: `conversations/{pairId}/messages`,
+  `profiles/{profileId}/conversations` (the per-profile inbox mirror), `events/{eventId}/comments`,
+  `events/{eventId}/reactions`, and `events/{eventId}/posts/{postId}/hearts`.
+- **Confirm the two new push kinds route on a real device.** `message` and `comment_reply` both
+  need a tap on a real device to prove `notificationHref` lands on the right conversation or event
+  thread; the emulator suite proves the fan-out and dedupe, not the tap.
+- **Decide and record the abuse-response runbook.** Who watches the `/admin` Reports panel (open
+  reports, reporter, reason, target, time) and how fast they act on one is an operational decision,
+  not a code change, and nothing in the app enforces a response time.
+
+### Sub-project 12 smoke checklist (messaging and comments)
+
+Sub-project 12 adds direct messaging between a musician profile and a curator profile, fan
+comments and reactions on the public show page, and an admin Reports panel over both. The emulator
+suite covers every server-side saga; this walkthrough is what it cannot prove.
+
+- Send a message from each entry point and from both roles.
+- Block and unblock.
+- Report a conversation and resolve it on `/admin`.
+- Post a comment and a reply from a fan account.
+- Hide as the curator.
+- Tap Going and a heart.
+- Confirm the inline comment composer clears the keyboard on a phone.
+- Confirm the unread tab badge clears on refocus.
+- Open `/admin` and a booking thread in a browser (the dialog conversions and the Reports panel
+  are behind auth and were not live-loaded).
+
 ### Sub-project 11 launch checklist (SP7 reconciliation)
 
 - **Choose the domain and replace `REPLACE_WITH_LINK_DOMAIN`** in `app.json` (associated domains

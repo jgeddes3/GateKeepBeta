@@ -1,7 +1,7 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-09-05, after the 5c and
-11 merges. Update this file whenever a sub-project merges.
+Read this first in any new session or on a new machine. Last updated 2026-09-05, after the 12
+merge, the final sub-project. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
 
@@ -94,17 +94,27 @@ Done and merged (each has a rulings doc that is the authority for its area):
    config. Owner smoke owed: the second Stripe endpoint and a simulated dispute, the new EAS dev
    build, then the 9A, 9B, 6, and 7 lists plus the sub-10 additions (table below, rows 48 to 59).
 
+12. Messaging, fan comments, and the follow-ons (`sp12-rulings.md`): direct messaging between a
+   musician profile and a curator profile, opened from either side, member-readable, admin-blocked
+   and admin-reported per pair, with an admin Reports panel over both messaging and comments. Fans
+   comment and reply one level deep on the public show page; curator and artist lineup members
+   reply with a tag and hide; fans get Going plus lineup-post hearts. This sub-project also closes
+   the antislop audit's follow-on wave (#10 to #29) and the hardening ledger rows L64, L68, L70,
+   L79; both mobile Messages tabs are real screens now, not coming-soon. Owner smoke owed: the
+   sub-12 checklist in README, both platforms, both themes; two composite index confirmations; the
+   abuse-response runbook (who watches `/admin` Reports and how fast) still needs an owner
+   decision.
+
 ## Roadmap
 
 - The SP7 reconciliation's five gaps (event sharing and deep links, web location story, fan
   account editor, event doorsAt and age fields, non-booking artist linkage) shipped in
   sub-project 11 (`sp11-rulings.md`).
-- **Messaging**: general musician to curator chat beyond the terms-only booking thread.
-  Unscheduled; the mobile Messages tabs stay coming-soon until it gets a number. Owner decision
-  2026-09-04: Messaging plus the optional follow-ons (antislop #10 to #29, hardening rows L62 to
-  L80) form the final sub-project.
-- **Follow-on if wanted**: the accessibility and state-coverage findings (antislop #10 to #29)
-  and the hardening ledger rows L62 to L80.
+- **Messaging and the follow-ons shipped in sub-project 12** (`sp12-rulings.md`): musician to
+  curator chat beyond the terms-only booking thread, fan comments and reactions on the public show
+  page,
+  and the antislop (#10 to #29) and hardening-ledger (L64, L68, L70, L79) follow-on wave. The
+  mobile Messages tabs are real screens now, not coming-soon.
 - Unscheduled by design: advertising, subscriptions, 2FA beyond Google-only admins, SMS, video
   hosting, guest checkout, seat maps, promo codes, resale.
 
@@ -174,6 +184,17 @@ sub-project 11. Detail reports live in `docs/superpowers/audit/` and
 10. Tagged lineup acts are created only by `tagEventArtist` and their status is written only by
     `respondToArtistTag`; `updateEvent` reconciles a resent tag against the doc and refuses an
     invented one (`sp11-rulings.md` ruling 1).
+11. `conversations/{pairId}` is `{musicianProfileId}__{curatorProfileId}` and every write goes
+    through `messaging.ts`; a new reader must use `conversationPairId`, never string-concatenate
+    the id (`sp12-rulings.md` ruling 2).
+12. An admin can read a conversation only while `openReports > 0`, so any new admin surface over
+    chat must go through a report, not a direct query (`sp12-rulings.md` ruling 2).
+13. Parallel implementers in one worktree commit by pathspec (`git commit -- <own paths>`), never
+    a plain `git commit`; a plain commit from one implementer once swept another's staged fix into
+    its own commit (`sp12-rulings.md`, execution lessons).
+14. `next dev` and `next build` append a generated block containing an em dash to
+    `apps/web/CLAUDE.md`; revert it before every commit (CI fails a push with U+2014)
+    (`sp12-rulings.md`, execution lessons).
 
 ## Dev environment quickstart
 
@@ -194,8 +215,8 @@ sub-project 11. Detail reports live in `docs/superpowers/audit/` and
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (212), web tests (14), `pnpm emu:test`
-  (936 across 58 files, single blocking call), `pnpm emu:rules` (140 across 9 files), web lint (0
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (218), web tests (14), `pnpm emu:test`
+  (955 across 61 files, single blocking call), `pnpm emu:rules` (150 across 10 files), web lint (0
   errors) + build, mobile lint (0 new warnings) + `expo export` bundles.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
@@ -287,3 +308,7 @@ section names refer to the README as rewritten in sub-project 10.
 | 73 | Set the four well-known env values (`APPLE_TEAM_ID`, `IOS_BUNDLE_ID`, `ANDROID_PACKAGE`, `ANDROID_CERT_SHA256`) and verify both well-known URLs resolve | Launch | README "Sub-project 11 launch checklist" |
 | 74 | New EAS build for associated domains and intent filters | Device | README "Sub-project 11 launch checklist" |
 | 75 | Sub-11 device smoke: share from each screen, open a shared link cold and warm, tag an artist and accept from the other account, set a home city and confirm Discover ranks by it with location off, set doors and an age on an event and see the badge and the all-ages filter on both platforms | Device | README "Sub-project 11 launch checklist" |
+| 76 | Deploy and confirm the two new composite indexes (`comments (hidden asc, at desc)`, `reports (status asc, createdAt desc)`) finish building after `firebase deploy --only firestore:indexes` | Launch | README "Sub-project 12 launch checklist" |
+| 77 | Confirm the two new push kinds (`message`, `comment_reply`) route on a real device | Device | README "Sub-project 12 launch checklist" |
+| 78 | Decide and record the abuse-response runbook: who watches `/admin` Reports and how fast | Runbook | README "Sub-project 12 launch checklist" |
+| 79 | Sub-12 device smoke: send a message from each entry point and from both roles, block and unblock, report a conversation and resolve it on `/admin`, post a comment and a reply from a fan account, hide as the curator, tap Going and a heart, confirm the inline comment composer clears the keyboard on a phone, confirm the unread tab badge clears on refocus, and open `/admin` and a booking thread in a browser (the dialog conversions and the Reports panel are behind auth and were not live-loaded) | Device | README "Sub-project 12 smoke checklist" |

@@ -15,8 +15,14 @@ SP7, SP8, 5c, launch-checklist (operator or console work, not a sub-project), un
 sub-project claims it; needs an owner decision).
 
 Counts: 91 ledger rows. 61 open, 9 partial, 21 resolved (11 in section A5 plus 10 folded into
-its closing note). Of the 70 open or partial rows: 19 proposed SP7, 8 proposed SP8, 1 proposed 5c,
-20 launch-checklist, 8 fix-now, 14 unowned.
+its closing note) as of the original 2026-09-01 audit. Of the 70 open or partial rows: 19 proposed
+SP7, 8 proposed SP8, 1 proposed 5c, 20 launch-checklist, 8 fix-now, 14 unowned.
+
+**Updated 2026-09-05 (sub-project 12, Task 21):** L63, L64, L68, L70, and L79 moved from open to
+resolved (L63 was already resolved in code and stale, not a sub-12 task; the other four closed by
+sub-12 Tasks 19 and 20), all five previously counted unowned. Current totals: 56 open, 9 partial,
+26 resolved; of the 65 open or partial rows, 19 proposed SP7, 8 proposed SP8, 1 proposed 5c, 20
+launch-checklist, 8 fix-now, 9 unowned.
 
 ---
 
@@ -103,14 +109,14 @@ its closing note). Of the 70 open or partial rows: 19 proposed SP7, 8 proposed S
 | id | item | origin | verified status in code | owner | why |
 |---|---|---|---|---|---|
 | L62 | TrimUploader loads the whole file via fetch().blob(); mobile 25 MB cap | README.md:959-963; apps/mobile/src/portfolio/TrimUploader.tsx:19-27, :192 | open | unowned | Mobile polish |
-| L63 | Mobile grace-period flash warning (startsSoonFlash) never ported | sp5b-rulings.md:66-69; only apps/web/src/bookings/BookingThread.tsx:404 | open | unowned ("do it with the next mobile booking-UI touch") | Small |
-| L64 | TrueUpForm silently rounds "3.5" on both platforms | sp5b-rulings.md:70-71; apps/web/src/payments/TrueUpForm.tsx:61 | open | unowned | Shared validation someday |
+| L63 | Mobile grace-period flash warning (startsSoonFlash) never ported | sp5b-rulings.md:66-69; apps/mobile/src/bookings/BookingThread.tsx:266, rendered at :527; apps/web/src/bookings/BookingThread.tsx:437 | resolved in code | n/a | Stale row, updated in sub-project 12 Task 21: startsSoonFlash is on mobile today, matching web. No sub-project ported it as a task; it was already there when this row was last checked |
+| L64 | TrueUpForm silently rounds "3.5" on both platforms | sp5b-rulings.md:70-71; apps/web/src/payments/TrueUpForm.tsx:61 | resolved in code, sub-project 12 Task 20 | n/a | TrueUpForm now refuses a fractional value on both platforms instead of rounding it |
 | L65 | Materializer birth-decision race (filled gigs linked to a non-confirmed booking; no reconciling step) | README.md:272-277; sp5-rulings.md:332-333 | open (accepted at v1) | unowned | Fix menu recorded |
 | L66 | Sweep step 6 reads each gig with a separate get(); db.getAll batching | README.md:278-279; grep getAll in functions/src/scheduled.ts: none | open | unowned | Scale only |
 | L67 | functions/test helper duplication (makeApprovedCuratorProfile now defined in 10 test files) | README.md:283-287; functions/test/*.test.ts (10 files) | open, worse than recorded | unowned | Grows with every sub-project |
-| L68 | BookingInbox pagination past the soft 50 cap | sp4-rulings.md:166; sp5-rulings.md:333 | open per docs (cap not re-located in code this pass) | unowned | Scale only |
+| L68 | BookingInbox pagination past the soft 50 cap | sp4-rulings.md:166; sp5-rulings.md:333 | resolved in code, sub-project 12 Task 20 | n/a | Both platforms' BookingInbox now pages past the cap with a Show more control instead of a fixed `limit()` |
 | L69 | getStripeStatus TTL cache (M7); revokeAdmin/checkRevoked path (L9) | sp5-rulings.md:334-335; grep: none | open | unowned | Noted, never built |
-| L70 | window.prompt/confirm/alert still used in 10 web files; shared toast/modal primitive | README.md:947-949; grep count: 10 files | open | unowned | UI polish |
+| L70 | window.prompt/confirm/alert still used in 10 web files; shared toast/modal primitive | README.md:947-949; grep count: 10 files (11 by the time sub-project 12 started, AttendeeList.tsx added by SP6) | resolved in code, sub-project 12 Task 19 | n/a | Shared confirm and prompt dialogs replace the last native browser dialogs across every listed web file |
 | L71 | Public page perf: resolve Storage URLs at write time; public route group without the auth bundle | README.md:943-946 | open | unowned | Perf |
 | L72 | processPhoto 3-read optimization | sp3-rulings.md:312-315 | open | unowned | Volume-gated |
 | L73 | Admin name-search UX iteration (debounce, pagination past 10, zero-results state and test) | sp3-rulings.md:303-311 | open | unowned | Admin polish |
@@ -119,7 +125,7 @@ its closing note). Of the 70 open or partial rows: 19 proposed SP7, 8 proposed S
 | L76 | ProfileContext switchTo reconciliation footgun | README.md:964-970 | open | unowned | Not a live bug |
 | L77 | SP2 web polish: Promise.allSettled in admin tracks queue, upload cancel + beforeunload, accessibility pass, positive save feedback | README.md:947-951 | open | unowned | Polish |
 | L78 | Two-hop transfer chains under a raced refund escalate rather than auto-resolve; grace-vs-cancel race delays a remainder ~24h | sp6-rulings.md:193-195 | open (accepted) | unowned | Alerted, self-healing |
-| L79 | events/index series-list badge fixed neutral tone vs SERIES_STATUS_TONE on detail | sp9b-rulings.md:195-197 | open | unowned | Cosmetic |
+| L79 | events/index series-list badge fixed neutral tone vs SERIES_STATUS_TONE on detail | sp9b-rulings.md:195-197 | resolved in code, sub-project 12 Task 20 | n/a | The series badge now uses SERIES_STATUS_TONE, matching the detail screen |
 | L80 | Geocoder StubGeocoder US bounding box; Google null-branch untested | sp3-rulings.md:318-325 | open | unowned | Dev-only |
 
 ### A5. Resolved rows (verified in code; do not re-open)
