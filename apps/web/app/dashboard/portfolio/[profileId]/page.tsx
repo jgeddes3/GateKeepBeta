@@ -97,6 +97,10 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Fix round 1 (finding #4): one full-width error line for the whole
+  // Photos section (avatar + cover), fed by both PhotoUploader instances'
+  // onError, rather than each 112px tile rendering its own squashed message.
+  const [photoError, setPhotoError] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
 
   // Resets `booking` back to "loading" the instant profileId changes: an
@@ -278,6 +282,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
                   uid={user.uid}
                   kind="avatar"
                   currentPath={profile.portfolio?.avatarPhotoPath ?? null}
+                  onError={setPhotoError}
                 />
                 <span className="font-sora text-xs text-gk-muted">Profile photo</span>
               </div>
@@ -287,12 +292,19 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
                   uid={user.uid}
                   kind="cover"
                   currentPath={profile.portfolio?.coverPhotoPath ?? null}
+                  onError={setPhotoError}
                 />
                 <span className="font-sora text-xs text-gk-muted">Cover photo</span>
               </div>
             </CardContent>
           </Card>
           <p className="mt-2 font-sora text-xs text-gk-muted">Photos appear on your page a few seconds after upload.</p>
+          {photoError && (
+            <p role="alert" className="mt-2 flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              {photoError}
+            </p>
+          )}
         </section>
 
         {/* Keyed by profileId: these forms seed their local state from

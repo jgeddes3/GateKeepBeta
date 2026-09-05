@@ -259,8 +259,16 @@ const VISUALLY_HIDDEN_INPUT: CSSProperties = {
 // fingerprint of the list (e.g. its length) instead of one path, so the
 // exact same "baseline moved, awaiting cleared" logic still detects
 // completion, see CuratorForms.tsx's GalleryPhotosSection.
-export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
-  { profileId: string; uid: string; kind: PhotoKind; currentPath: string | null; disabled?: boolean }) {
+// Fix round 1 (finding #4): `onError` replaces this component's own local
+// error state. This tile is a fixed 112px (size-28) square, and an ErrorBox
+// rendered inside it (or inside a `flex` row of several of these) squashed
+// or widened the tile instead of reading as a message. Every caller now
+// owns one full-width error line for its whole photo section (see
+// PortfolioEditor's `photoError` and CuratorForms.tsx's
+// GalleryPhotosSection `error`, both modeled on AttendeeList's `onError`
+// prop) and passes it in here.
+export function PhotoUploader({ profileId, uid, kind, currentPath, disabled, onError }:
+  { profileId: string; uid: string; kind: PhotoKind; currentPath: string | null; disabled?: boolean; onError: (message: string) => void }) {
   const [busy, setBusy] = useState(false);
   // The pipeline rewrites the profile doc's avatar/coverPhotoPath a few
   // seconds after the storage upload lands. We don't know its eventual
@@ -276,7 +284,6 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   // sitting idle and inviting a second upload before the first has landed.
   const [awaiting, setAwaiting] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [baseline, setBaseline] = useState(currentPath);
   if (currentPath !== baseline) {
     setBaseline(currentPath);
@@ -297,9 +304,8 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   }, [awaiting]);
 
   const upload = async (f: File) => {
-    if (f.size > MAX_PHOTO_UPLOAD_BYTES) { setError("Photos must be under 10 MB."); return; }
+    if (f.size > MAX_PHOTO_UPLOAD_BYTES) { onError("Photos must be under 10 MB."); return; }
     setBusy(true);
-    setError(null);
     setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
@@ -311,7 +317,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
       // `currentPath`, which the render-time check above picks up and
       // flips `awaiting` back to false.
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Upload failed.");
+      onError(e instanceof Error ? e.message : "Upload failed.");
     } finally { setBusy(false); }
   };
   const processing = awaiting;
@@ -355,7 +361,6 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
           Still processing. If your photo doesn&apos;t appear, try a smaller one.
         </span>
       )}
-      {error && <ErrorBox message={error} />}
     </div>
   );
 }

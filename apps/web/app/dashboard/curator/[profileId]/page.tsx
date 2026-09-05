@@ -124,8 +124,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
     } catch (e) {
       // The 24h resubmit cooldown (failed-precondition) and the 1-pending-
       // curator-profile cap (resource-exhausted) both land here verbatim:
-      // this banner (not window.alert, unlike the other forms' plain-alert
-      // failures) is the "friendly wrapper" the brief calls for, a curator
+      // this banner is the "friendly wrapper" the brief calls for, a curator
       // who did everything right and just has to wait deserves better than
       // a modal dialog. Also the backstop for the ordinary submit-gate race
       // the client-side `missing` check above hasn't caught up to yet.

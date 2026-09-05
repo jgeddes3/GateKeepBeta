@@ -132,7 +132,15 @@ export function TrackManager({ profileId }: { profileId: string }) {
                     disabled={busy}
                     aria-label="Rename track"
                     onClick={async () => {
-                      const title = await prompt({ title: "Rename track", label: "New title", initialValue: t.title });
+                      // Fix round 1, finding 6: 80, matching updateTrack's
+                      // own server-side limit (functions/src/tracks.ts,
+                      // "Track titles are 1-80 characters."), the same cap
+                      // validateTrackCreate enforces in packages/shared for
+                      // a track's initial title. No exported shared
+                      // constant exists for it; both sides hardcode 80.
+                      const title = await prompt({
+                        title: "Rename track", label: "New title", initialValue: t.title, maxLength: 80,
+                      });
                       if (title) void call("updateTrack", { profileId, trackId: t.id, title });
                     }}
                   >

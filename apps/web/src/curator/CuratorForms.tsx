@@ -330,10 +330,14 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
 // once), removeCuratorPhoto only ever affects the ONE path it's called
 // with, so per-tile busy state is both simpler and doesn't over-lock unrelated
 // rows.
-function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) {
+// Fix round 1 (finding #4): `onError` replaces this tile's own local error
+// state, same reasoning as PhotoUploader's identical change (PortfolioForms.tsx):
+// this is a fixed 112px (w-28) tile inside GalleryPhotosSection's flex-wrap
+// row, not a place an ErrorBox can render without squashing the row. The
+// parent section owns one full-width error line instead.
+function GalleryPhoto({ path, profileId, onError }: { path: string; profileId: string; onError: (message: string) => void }) {
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
   useEffect(() => {
     let cancelled = false;
@@ -345,7 +349,6 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
   const remove = async () => {
     if (!(await confirm({ title: "Remove this photo?" }))) return;
     setBusy(true);
-    setError(null);
     try {
       await callFn("removeCuratorPhoto", { profileId, path });
       // No local state update needed on success: the parent editor's
@@ -353,7 +356,7 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
       // drops this path from the list and unmounts this tile (keyed by
       // path) on its own.
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not remove photo.");
+      onError(e instanceof Error ? e.message : "Could not remove photo.");
       setBusy(false);
     }
   };
@@ -373,7 +376,6 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
         <IconTrash size={14} aria-hidden="true" />
         {busy ? "Removing…" : "Remove"}
       </Button>
-      {error && <ErrorBox message={error} />}
       {confirmDialog}
     </div>
   );
@@ -387,6 +389,10 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
 export function GalleryPhotosSection({ profileId, uid, photoPaths }:
   { profileId: string; uid: string; photoPaths: string[] }) {
   const atCap = photoPaths.length >= MAX_CURATOR_PHOTOS;
+  // Fix round 1 (finding #4): one full-width error line for the whole
+  // section, fed by every tile's (and the uploader's) onError, instead of
+  // each 112px tile rendering its own squashed message.
+  const [error, setError] = useState<string | null>(null);
   return (
     <Card>
       <CardHeader>
@@ -395,13 +401,14 @@ export function GalleryPhotosSection({ profileId, uid, photoPaths }:
       <CardContent className="grid gap-4">
         {photoPaths.length > 0 && (
           <div className="flex flex-wrap gap-4">
-            {photoPaths.map((path) => <GalleryPhoto key={path} path={path} profileId={profileId} />)}
+            {photoPaths.map((path) => <GalleryPhoto key={path} path={path} profileId={profileId} onError={setError} />)}
           </div>
         )}
         {atCap
           ? <p className="font-sora text-sm text-gk-warning">Gallery is full. Remove a photo to add another.</p>
-          : <PhotoUploader profileId={profileId} uid={uid} kind="gallery" currentPath={String(photoPaths.length)} />}
+          : <PhotoUploader profileId={profileId} uid={uid} kind="gallery" currentPath={String(photoPaths.length)} onError={setError} />}
         <p className="font-sora text-sm text-gk-muted">New photos appear here a few seconds after upload.</p>
+        {error && <ErrorBox message={error} />}
       </CardContent>
     </Card>
   );

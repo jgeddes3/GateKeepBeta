@@ -162,9 +162,12 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
   const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "loading" | "error">("loading");
   const [occurrencesReloadKey, setOccurrencesReloadKey] = useState(0);
   const [pauseBusy, setPauseBusy] = useState(false);
-  const [pauseError, setPauseError] = useState<string | null>(null);
   const [endBusy, setEndBusy] = useState(false);
-  const [endError, setEndError] = useState<string | null>(null);
+  // Fix round 1 (finding #3): one shared error, not pauseError/endError:
+  // the two actions already render into a single warning line below (only
+  // one of pause/end is ever busy at a time), so a lingering error from one
+  // action must not survive into the other's attempt.
+  const [seriesError, setSeriesError] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
@@ -253,11 +256,11 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     });
     if (!ok) return;
     setPauseBusy(true);
-    setPauseError(null);
+    setSeriesError(null);
     try {
       await callFn("pauseSeries", { seriesId });
     } catch (e) {
-      setPauseError(e instanceof Error ? e.message : "Could not pause this series.");
+      setSeriesError(e instanceof Error ? e.message : "Could not pause this series.");
     } finally {
       setPauseBusy(false);
     }
@@ -270,11 +273,11 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     });
     if (!ok) return;
     setEndBusy(true);
-    setEndError(null);
+    setSeriesError(null);
     try {
       await callFn("endSeries", { seriesId });
     } catch (e) {
-      setEndError(e instanceof Error ? e.message : "Could not end this series.");
+      setSeriesError(e instanceof Error ? e.message : "Could not end this series.");
     } finally {
       setEndBusy(false);
     }
@@ -310,13 +313,13 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
             </Button>
           )}
         </div>
-        {(pauseError || endError) && (
+        {seriesError && (
           <div
             role="alert"
             className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
           >
             <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-            <p>{pauseError ?? endError}</p>
+            <p>{seriesError}</p>
           </div>
         )}
       </section>
