@@ -104,6 +104,7 @@ describe("users.displayName (F7)", () => {
     // A photoUrl-only update must still pass: displayName stays present in the resulting doc.
     await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: "https://example.com/a.jpg" }));
     await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { homeGeo: { lat: 30.27, lng: -97.74 } })); // SP11: homeGeo is written only by updateAccount
   });
   it("a whitespace-only displayName cannot be set in SP11", async () => {
     await seed("users/alice", { displayName: "Alice", email: "a@x.com" });

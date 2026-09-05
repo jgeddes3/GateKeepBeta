@@ -3,7 +3,7 @@ import {
   initializeTestEnvironment, assertSucceeds, assertFails, type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import { readFileSync } from "node:fs";
-import { doc, setDoc, updateDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 
 // Sub-project 11 rules matrix: the users/{uid} owner update keeps photoUrl
 // and loses displayName, homeCity, and homeGeo (updateAccount owns all
@@ -59,7 +59,13 @@ describe("events with a tagged lineup act", () => {
       lineupMusicianProfileIds: [], startsAt: 2, endsAt: 3,
       ageRestriction: "18_plus", doorsAt: 1,
     });
+    // World-readable: the half the title names, asserted for a signed-out
+    // reader (the public event page renders server-side with no session).
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "events/ev1")));
+
     const bob = env.authenticatedContext("bob").firestore();
+    await assertSucceeds(getDoc(doc(bob, "events/ev1")));
     await assertFails(updateDoc(doc(bob, "events/ev1"), {
       lineup: [{ kind: "tagged", musicianProfileId: "mus1", name: "The Act", status: "accepted", taggedAt: 1, respondedAt: 2 }],
     }));
