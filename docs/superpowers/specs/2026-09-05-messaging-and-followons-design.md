@@ -133,14 +133,22 @@ launch.
   both. A `message` notification carries `refKind: "musician" | "curator"` (the recipient
   profile's type) so the mobile href can pick the tab group, the way `saved_search_match`
   already branches on `refKind`.
+- Per-profile mirrors for listing: `profiles/{profileId}/conversations/{pairId}` with
+  `otherProfileId`, `otherProfileName`, `otherProfileType`, `lastMessage`, `lastMessageAt`,
+  `unread` (this profile's count), `blockedByMe`, and `openReports`, written by the messaging
+  callables in the same transaction as the top-level doc. Clients list a profile's conversations
+  from its mirror (readable by that profile's members, ordered by `lastMessageAt`) and open the
+  top-level doc by id; a security rule cannot prove membership for a top-level
+  `participants array-contains` query, and mirrors avoid syncing member uids onto every
+  conversation.
 - Server-only rate windows: `messageWindows/{profileId}` and `commentWindows/{uid}` hold the
   recent timestamps for the rolling caps (client-unreadable, same posture as `geocodeBudgets`).
 - Rules: `conversations` and their `messages` readable by members of either participant profile
   or admins when `openReports > 0`; `reports` admin-read; `comments` readable by anyone signed in
   when not hidden (admins see hidden); `reactions` and `hearts` readable by anyone signed in;
-  every write callable-only. Indexes: `conversations (participants array-contains,
-  lastMessageAt desc)`; `comments (hidden, at desc)` if the query needs it; `reports (status,
-  createdAt desc)`.
+  every write callable-only; the per-profile conversation mirrors readable by that profile's
+  members only. Indexes: `comments (hidden, at desc)` if the query needs it; `reports (status,
+  createdAt desc)`; the mirrors order by a single field and need no composite.
 
 ## 5. Backend
 
