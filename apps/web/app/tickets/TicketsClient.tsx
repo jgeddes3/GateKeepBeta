@@ -14,6 +14,7 @@ import { useNow } from "../../src/bookings/BookingThread";
 import { TicketQr } from "./TicketQr";
 import { Badge } from "../../src/ui/badge";
 import { Skeleton } from "../../src/ui/skeleton";
+import { ListError } from "../../src/ui/ListError";
 import { PhotoPlaceholder } from "../../src/components/GigCard";
 import { IconMapPin, IconTicket } from "../../src/ui/icons";
 
@@ -42,16 +43,18 @@ import { IconMapPin, IconTicket } from "../../src/ui/icons";
 type TicketRow = { id: string } & TicketDoc;
 type EventLoad = { kind: "ok"; event: EventDoc } | { kind: "unavailable" };
 
-function useMyTickets(uid: string): TicketRow[] | "loading" {
-  const [rows, setRows] = useState<TicketRow[] | "loading">("loading");
+function useMyTickets(uid: string): [TicketRow[] | "loading" | "error", () => void] {
+  const [rows, setRows] = useState<TicketRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `users/${uid}/tickets`), orderBy("createdAt", "desc")),
       (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketDoc) }))),
+      (e) => { console.error("my tickets onSnapshot failed", e); setRows("error"); },
     );
-  }, [uid]);
-  return rows;
+  }, [uid, reloadKey]);
+  return [rows, () => setReloadKey((k) => k + 1)];
 }
 
 // One-shot fetch-and-cache for every distinct eventId named by the ticket
@@ -249,8 +252,8 @@ function TicketSection({ title, rows, uid, eventCache }: {
 }
 
 export function TicketsClient({ uid }: { uid: string }) {
-  const rows = useMyTickets(uid);
-  const eventIds = rows === "loading" ? [] : [...new Set(rows.map((t) => t.eventId))];
+  const [rows, retryTickets] = useMyTickets(uid);
+  const eventIds = rows === "loading" || rows === "error" ? [] : [...new Set(rows.map((t) => t.eventId))];
   const eventCache = useEventCache(eventIds);
   // Render-safe "now" (BookingThread.tsx's own useNow, reused here exactly
   // as CancelDialog.tsx already reuses it cross-feature): the React
@@ -261,6 +264,7 @@ export function TicketsClient({ uid }: { uid: string }) {
   const now = useNow();
 
   if (rows === "loading" || now == null) return <TicketListSkeleton />;
+  if (rows === "error") return <ListError message="Couldn't load your tickets." onRetry={retryTickets} />;
   if (rows.length === 0) return <EmptyTickets />;
 
   const upcoming: TicketRow[] = []; const past: TicketRow[] = []; const unavailable: TicketRow[] = [];

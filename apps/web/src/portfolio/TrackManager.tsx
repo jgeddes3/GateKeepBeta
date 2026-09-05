@@ -8,6 +8,8 @@ import { TrimUploader } from "./TrimUploader";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Skeleton } from "../ui/skeleton";
+import { ListError } from "../ui/ListError";
 import { IconArrowDown, IconArrowUp, IconPencil, IconTrash } from "../ui/icons";
 
 type Row = TrackDoc & { id: string };
@@ -26,7 +28,8 @@ const STATUS_VARIANT: Record<TrackDoc["status"], "success" | "warning" | "destru
 };
 
 export function TrackManager({ profileId }: { profileId: string }) {
-  const [tracks, setTracks] = useState<Row[]>([]);
+  const [tracks, setTracks] = useState<Row[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   // Single flag, not per-row: reorderTracks affects TWO rows at once (the
   // swapped pair), so a per-row lock wouldn't stop a second click from
   // racing the first move's still-in-flight call against a still-stale
@@ -37,8 +40,9 @@ export function TrackManager({ profileId }: { profileId: string }) {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
-  }, [profileId]);
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => { console.error("TrackManager onSnapshot failed", profileId, e); setTracks("error"); });
+  }, [profileId, reloadKey]);
 
   const call = async (name: string, data: object) => {
     setBusy(true);
@@ -47,7 +51,7 @@ export function TrackManager({ profileId }: { profileId: string }) {
     finally { setBusy(false); }
   };
   const move = (i: number, dir: -1 | 1) => {
-    if (busy || !tracks[i] || !tracks[i + dir]) return;
+    if (busy || tracks === "loading" || tracks === "error" || !tracks[i] || !tracks[i + dir]) return;
     // A single reorderTracks call with the whole reordered id list, not two
     // sequential updateTrack({ order }) calls: updateTrack no longer takes
     // an order field (reorderTracks owns ordering, atomically), and two
@@ -62,11 +66,22 @@ export function TrackManager({ profileId }: { profileId: string }) {
     <Card>
       <CardHeader>
         <CardTitle>
-          Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
+          {tracks === "loading" || tracks === "error"
+            ? "Tracks"
+            : `Tracks (${tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/${MAX_TRACKS})`}
         </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {tracks.length > 0 && (
+        {tracks === "loading" && (
+          <div className="grid gap-2" role="status" aria-label="Loading tracks">
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
+        )}
+        {tracks === "error" && (
+          <ListError message="Couldn't load tracks." onRetry={() => setReloadKey((k) => k + 1)} />
+        )}
+        {tracks !== "loading" && tracks !== "error" && tracks.length > 0 && (
           <div className="grid gap-2">
             {tracks.map((t, i) => (
               <div key={t.id} className="rounded-gk-sm border border-gk-border p-3">

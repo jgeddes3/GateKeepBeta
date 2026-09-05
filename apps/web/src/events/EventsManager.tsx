@@ -15,6 +15,7 @@ import { AttendeeList } from "./AttendeeList";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
+import { ListError } from "../ui/ListError";
 import { PhotoPlaceholder } from "../components/GigCard";
 import { IconEvents, IconPlus, IconTicket, IconWarning } from "../ui/icons";
 
@@ -46,13 +47,21 @@ type View =
 // TierEditor comment): this one is read-only and always fresh, exactly
 // what a list overview needs.
 function TierBars({ eventId }: { eventId: string }) {
-  const [tiers, setTiers] = useState<({ id: string } & TicketTierDoc)[] | "loading">("loading");
+  const [tiers, setTiers] = useState<({ id: string } & TicketTierDoc)[] | "loading" | "error">("loading");
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder")),
-      (snap) => setTiers(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketTierDoc) }))));
+      (snap) => setTiers(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketTierDoc) }))),
+      (e) => { console.error("EventsManager: tier bars onSnapshot failed", eventId, e); setTiers("error"); });
   }, [eventId]);
-  if (tiers === "loading" || tiers.length === 0) return null;
+  if (tiers === "loading") return null;
+  // Nested inside EventListRow's own <button> (list row = a click target):
+  // ListError's Retry button would be an interactive element inside another
+  // one, so this renders the warning line only, no onRetry. A failed read
+  // here self-heals on the next snapshot (or the next time this row
+  // mounts), same as a transient offline blip anywhere else in the app.
+  if (tiers === "error") return <ListError message="Couldn't load ticket tiers." />;
+  if (tiers.length === 0) return null;
   return (
     <div className="mt-2 grid gap-1">
       {tiers.map((t) => {
@@ -131,18 +140,21 @@ function GigPromotePicker({ gigs, onPick, onClose }: { gigs: GigRow[]; onPick: (
 }
 
 export function EventsManager({ profileId, name }: { profileId: string; name: string }) {
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
-  const [events, setEvents] = useState<EventRow[] | "loading">("loading");
-  const [gigs, setGigs] = useState<GigRow[]>([]);
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [events, setEvents] = useState<EventRow[] | "loading" | "error">("loading");
+  const [gigs, setGigs] = useState<GigRow[] | "loading" | "error">("loading");
   const [view, setView] = useState<View>({ kind: "list" });
   const [manageTiers, setManageTiers] = useState<TierRowState[] | "loading">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
+  const [eventsReloadKey, setEventsReloadKey] = useState(0);
+  const [gigsReloadKey, setGigsReloadKey] = useState(0);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [profileId]);
+      (e) => { console.error("EventsManager: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [profileId, profileReloadKey]);
   // where(curatorProfileId=='X') with no status filter: rules-provable for a
   // member via the isMember disjunct alone (firestore.rules' events read
   // rule), same shape gigs/page.tsx's own curator-dashboard query already
@@ -150,13 +162,15 @@ export function EventsManager({ profileId, name }: { profileId: string; name: st
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(query(collection(db, "events"), where("curatorProfileId", "==", profileId)),
-      (snap) => setEvents(snap.docs.map((d) => ({ id: d.id, ...(d.data() as EventDoc) }))));
-  }, [profileId]);
+      (snap) => setEvents(snap.docs.map((d) => ({ id: d.id, ...(d.data() as EventDoc) }))),
+      (e) => { console.error("EventsManager: events onSnapshot failed", profileId, e); setEvents("error"); });
+  }, [profileId, eventsReloadKey]);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(query(collection(db, "gigs"), where("curatorProfileId", "==", profileId), where("status", "==", "filled")),
-      (snap) => setGigs(snap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))));
-  }, [profileId]);
+      (snap) => setGigs(snap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))),
+      (e) => { console.error("EventsManager: filled gigs onSnapshot failed", profileId, e); setGigs("error"); });
+  }, [profileId, gigsReloadKey]);
 
   // Loading a specific event's tier rows for EventEditor's create-once
   // buffer (see TierEditor's own header comment on why this is a one-shot
@@ -197,12 +211,31 @@ export function EventsManager({ profileId, name }: { profileId: string; name: st
       </div>
     );
   }
+  // Audit #13: a failed profile read used to fall through to the bare
+  // `!profile` branch below and render nothing. Checked BEFORE that branch
+  // since the "error" sentinel is a truthy string (!profile would be false
+  // for it, and everything past that line dereferences profile.subtype).
+  if (profile === "error") {
+    return (
+      <div className="rounded-gk border border-gk-border bg-gk-surface p-5">
+        <ListError message="Couldn't load this profile." onRetry={() => setProfileReloadKey((k) => k + 1)} />
+      </div>
+    );
+  }
   if (!profile) return null;
+  if (events === "error") {
+    return (
+      <div className="rounded-gk border border-gk-border bg-gk-surface p-5">
+        <ListError message="Couldn't load events." onRetry={() => setEventsReloadKey((k) => k + 1)} />
+      </div>
+    );
+  }
 
   const isVenue = profile.subtype === "venue";
   const curatorAddress = profile.curator?.location?.address ?? null;
   const usedGigIds = new Set(events.filter((e) => e.gigId).map((e) => e.gigId));
-  const eligibleGigs = gigs.filter((g) => !usedGigIds.has(g.id));
+  const gigsList = gigs === "loading" || gigs === "error" ? [] : gigs;
+  const eligibleGigs = gigsList.filter((g) => !usedGigIds.has(g.id));
 
   const promoteGig = async (gig: GigRow) => {
     let seedLineup: EventAct[] = [];
@@ -224,7 +257,19 @@ export function EventsManager({ profileId, name }: { profileId: string; name: st
   if (view.kind === "picker") {
     return (
       <div className="rounded-gk border border-gk-border bg-gk-surface p-5">
-        <GigPromotePicker gigs={eligibleGigs} onPick={promoteGig} onClose={() => setView({ kind: "list" })} />
+        {gigs === "loading" ? (
+          <div className="grid gap-2" role="status" aria-label="Loading filled gigs">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </div>
+        ) : gigs === "error" ? (
+          <ListError message="Couldn't load your filled gigs." onRetry={() => setGigsReloadKey((k) => k + 1)} />
+        ) : (
+          <GigPromotePicker gigs={eligibleGigs} onPick={promoteGig} onClose={() => setView({ kind: "list" })} />
+        )}
+        {gigs !== "loading" && gigs !== "error" ? null : (
+          <Button type="button" variant="secondary" onClick={() => setView({ kind: "list" })} className="mt-3">Back</Button>
+        )}
       </div>
     );
   }

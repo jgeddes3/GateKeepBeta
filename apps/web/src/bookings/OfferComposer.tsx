@@ -10,6 +10,8 @@ import type { GigDoc } from "@gatekeep/shared";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { Skeleton } from "../ui/skeleton";
+import { ListError } from "../ui/ListError";
 
 type GigRow = GigDoc & { id: string };
 
@@ -24,7 +26,8 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
   // page (one per artist row), so a literal "offer-composer-gig" id would
   // collide across them; useId() gives each mounted instance its own.
   const gigSelectId = useId();
-  const [openGigs, setOpenGigs] = useState<GigRow[] | "loading">("loading");
+  const [openGigs, setOpenGigs] = useState<GigRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   const [gigOverride, setGigOverride] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferState>(emptyOffer());
   const [busy, setBusy] = useState(false);
@@ -42,16 +45,20 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
       query(collection(db, "gigs"),
         where("curatorProfileId", "==", curatorProfileId), where("status", "==", "open"), orderBy("startsAt")),
       (snap) => setOpenGigs(snap.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))),
-      (e) => { setOpenGigs([]); setError(e instanceof Error ? e.message : "Could not load your open gigs."); });
+      // Audit #13: a failed read used to set [] here, which rendered the
+      // same "no open gigs" empty state as a genuinely empty result. Now a
+      // distinct "error" sentinel, so a permission/offline failure gets its
+      // own ListError + Retry instead of masquerading as "post a gig".
+      (e) => { console.error("OfferComposer onSnapshot failed", curatorProfileId, e); setOpenGigs("error"); });
     return unsub;
-  }, [curatorProfileId]);
+  }, [curatorProfileId, reloadKey]);
 
   // Derived default selection (no setState-in-effect, see the gig detail
   // page's ApplyPanel comment for the same rationale).
-  const selectedGigId = gigOverride && openGigs !== "loading" && openGigs.some((g) => g.id === gigOverride)
+  const selectedGigId = gigOverride && openGigs !== "loading" && openGigs !== "error" && openGigs.some((g) => g.id === gigOverride)
     ? gigOverride
-    : (openGigs !== "loading" && openGigs.length > 0 ? openGigs[0].id : "");
-  const selectedGig = openGigs !== "loading" ? openGigs.find((g) => g.id === selectedGigId) ?? null : null;
+    : (openGigs !== "loading" && openGigs !== "error" && openGigs.length > 0 ? openGigs[0].id : "");
+  const selectedGig = openGigs !== "loading" && openGigs !== "error" ? openGigs.find((g) => g.id === selectedGigId) ?? null : null;
 
   const submit = async () => {
     if (!selectedGig) { setError("Pick a gig to offer."); return; }
@@ -89,7 +96,15 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
             <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
           </>
         ) : openGigs === "loading" ? (
-          <p className="font-sora text-sm text-gk-muted">Loading your open gigs…</p>
+          <div className="grid gap-2" role="status" aria-label="Loading your open gigs">
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+        ) : openGigs === "error" ? (
+          <>
+            <ListError message="Couldn't load your open gigs." onRetry={() => setReloadKey((k) => k + 1)} />
+            <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
+          </>
         ) : openGigs.length === 0 ? (
           <>
             <p className="font-sora text-sm text-gk-muted">

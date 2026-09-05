@@ -7,6 +7,7 @@ import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-
 import {
   DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals, SALES_FINAL_LINE,
   EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
+  NO_TICKETS_YET_MESSAGE,
   type EventStatus, type TicketOrderStatus, type TicketTierDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../lib/firebase";
@@ -382,6 +383,19 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
         >
           Try again
         </Button>
+      </div>
+    );
+  }
+
+  // SP12 follow-on (audit #14): a published event with no tiers used to
+  // render an empty picker under the "Tickets" heading and no sticky bar.
+  // Mobile has said this since SP6; web now matches, and names the next
+  // action rather than leaving the fan on a dead heading.
+  if (liveTiers.length === 0) {
+    return (
+      <div className="grid gap-2">
+        <p className="font-sora text-sm text-gk-text">{NO_TICKETS_YET_MESSAGE}</p>
+        <p className="font-sora text-sm text-gk-muted">Check back soon, or follow the venue to hear when they go on sale.</p>
       </div>
     );
   }

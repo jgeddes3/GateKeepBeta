@@ -8,6 +8,7 @@ import { validateProfileDraft, type ProfileDraftInput, type MusicianSubtype, typ
 import { Button } from "../../src/ui/button";
 import { Input } from "../../src/ui/input";
 import { Card, CardContent } from "../../src/ui/card";
+import { Skeleton } from "../../src/ui/skeleton";
 import { IconWarning } from "../../src/ui/icons";
 
 const CURATOR_SUBTYPES: { value: CuratorSubtype; label: string }[] = [
@@ -69,8 +70,20 @@ export default function Join() {
 
   if (loading) {
     return (
-      <main className="flex flex-1 items-center justify-center px-4 py-16">
-        <p className="font-sora text-sm text-gk-muted">Loading…</p>
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="mt-4 h-9 w-56" />
+        <Card className="mt-6">
+          <CardContent className="grid gap-5" role="status" aria-label="Loading the join form">
+            <div className="grid gap-2">
+              <Skeleton className="h-4 w-24" />
+              <div className="flex gap-2"><Skeleton className="h-9 w-24 rounded-full" /><Skeleton className="h-9 w-24 rounded-full" /></div>
+            </div>
+            <div className="grid gap-1.5"><Skeleton className="h-4 w-32" /><Skeleton className="h-10 w-full" /></div>
+            <div className="grid gap-1.5"><Skeleton className="h-4 w-20" /><Skeleton className="h-10 w-full" /></div>
+            <Skeleton className="h-10 w-40" />
+          </CardContent>
+        </Card>
       </main>
     );
   }

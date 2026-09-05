@@ -14,6 +14,7 @@ import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
+import { ListError } from "../ui/ListError";
 import { IconSearch, IconUser, IconWarning } from "../ui/icons";
 
 // Sub-project 6 task 10 (brief anatomy: "AttendeeList: live onSnapshot
@@ -31,14 +32,16 @@ import { IconSearch, IconUser, IconWarning } from "../ui/icons";
 
 type AttendeeRow = { id: string } & AttendeeDoc;
 
-function useAttendees(eventId: string): AttendeeRow[] | "loading" {
-  const [rows, setRows] = useState<AttendeeRow[] | "loading">("loading");
+function useAttendees(eventId: string): [AttendeeRow[] | "loading" | "error", () => void] {
+  const [rows, setRows] = useState<AttendeeRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(collection(db, `events/${eventId}/attendees`),
-      (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as AttendeeDoc) }))));
-  }, [eventId]);
-  return rows;
+      (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as AttendeeDoc) }))),
+      (e) => { console.error("attendees onSnapshot failed", e); setRows("error"); });
+  }, [eventId, reloadKey]);
+  return [rows, () => setReloadKey((k) => k + 1)];
 }
 
 function checkedInLabel(checkedInAt: number | undefined): string | null {
@@ -134,7 +137,7 @@ function AttendeeListSkeleton() {
 export function AttendeeList({ curatorProfileId, eventId, eventStatus, eventEndsAt }: {
   curatorProfileId: string; eventId: string; eventStatus: EventStatus; eventEndsAt: number;
 }) {
-  const rows = useAttendees(eventId);
+  const [rows, retryAttendees] = useAttendees(eventId);
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   // Same window refundTicket itself enforces (functions/src/ticketing.ts):
@@ -152,6 +155,7 @@ export function AttendeeList({ curatorProfileId, eventId, eventStatus, eventEnds
   const refundable = now != null && eventStatus !== "cancelled" && now < eventEndsAt;
 
   if (rows === "loading") return <AttendeeListSkeleton />;
+  if (rows === "error") return <ListError message="Couldn't load attendees." onRetry={retryAttendees} />;
 
   const q = search.trim().toLowerCase();
   const filtered = q

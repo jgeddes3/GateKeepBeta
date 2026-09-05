@@ -19,6 +19,7 @@ import { Textarea } from "../../src/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../src/ui/select";
 import { Switch } from "../../src/ui/switch";
 import { Skeleton } from "../../src/ui/skeleton";
+import { ListError } from "../../src/ui/ListError";
 import { IconGigs, IconInfo, IconUser, IconWarning } from "../../src/ui/icons";
 import {
   GIG_STATUSES,
@@ -426,27 +427,31 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
 }
 
 function Queue() {
-  const [pending, setPending] = useState<Row<ProfileDoc>[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [pending, setPending] = useState<Row<ProfileDoc>[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "profiles"), where("status", "==", "pending_review")),
-      (s) => { setPending(s.docs.map((d) => ({ id: d.id, ...(d.data() as ProfileDoc) }))); setLoaded(true); },
+      (s) => setPending(s.docs.map((d) => ({ id: d.id, ...(d.data() as ProfileDoc) }))),
+      (e) => { console.error("Queue onSnapshot failed", e); setPending("error"); },
     );
-  }, []);
+  }, [reloadKey]);
+  const loaded = pending !== "loading";
   return (
     <section className="grid gap-3">
       <h2 className="font-syne text-lg font-semibold text-gk-text">
-        Profile queue{loaded ? ` (${pending.length})` : ""}
+        Profile queue{loaded && pending !== "error" ? ` (${pending.length})` : ""}
       </h2>
       {/* Review checklist per spec §6: shown to the reviewing admin, not just a code comment. */}
       <GuidanceBanner>
         Before approving: verify this is really them. Check the name, handle, and submitted details for
         impersonation.
       </GuidanceBanner>
-      {!loaded ? (
+      {pending === "loading" ? (
         <CardRowsSkeleton label="Loading the profile queue" />
+      ) : pending === "error" ? (
+        <ListError message="Couldn't load the profile queue." onRetry={() => setReloadKey((k) => k + 1)} />
       ) : pending.length === 0 ? (
         <SectionEmpty icon={IconUser}>Queue&rsquo;s clear. New profile submissions land here.</SectionEmpty>
       ) : (
@@ -593,8 +598,8 @@ function TrackQueueRow({ t }: { t: TrackRow }) {
 // monotonic `seq` token so a slower, older snapshot's resolution can never
 // finish after and repaint over a newer one's already-committed state.
 function TracksQueue() {
-  const [pending, setPending] = useState<TrackRow[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [pending, setPending] = useState<TrackRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     let cancelled = false;
@@ -629,15 +634,15 @@ function TracksQueue() {
           });
         }
         setPending(rows);
-        setLoaded(true);
       },
+      (e) => { console.error("TracksQueue onSnapshot failed", e); if (!cancelled) setPending("error"); },
     );
     return () => { cancelled = true; unsubscribe(); };
-  }, []);
+  }, [reloadKey]);
   return (
     <section className="grid gap-3">
       <h2 className="font-syne text-lg font-semibold text-gk-text">
-        Track queue{loaded ? ` (${pending.length})` : ""}
+        Track queue{pending !== "loading" && pending !== "error" ? ` (${pending.length})` : ""}
       </h2>
       {/* Screening guidance per spec §6: admins hear exactly what the public would. */}
       <GuidanceBanner>
@@ -645,8 +650,10 @@ function TracksQueue() {
         artist&rsquo;s own performance (not AI-generated, not someone else&rsquo;s recording)? When unsure, reject with
         a note asking for context.
       </GuidanceBanner>
-      {!loaded ? (
+      {pending === "loading" ? (
         <CardRowsSkeleton label="Loading the track queue" />
+      ) : pending === "error" ? (
+        <ListError message="Couldn't load the track queue." onRetry={() => setReloadKey((k) => k + 1)} />
       ) : pending.length === 0 ? (
         <SectionEmpty icon={IconGigs}>Queue&rsquo;s clear. New track submissions land here.</SectionEmpty>
       ) : (
@@ -776,8 +783,8 @@ function GigModerationRow({ g }: { g: GigModRow }) {
 // synchronous reset), matching the keyed-component reset pattern used
 // throughout this file (dashboard's ProfilesList, AdminGate's ClaimCheck).
 function GigsAdminList({ status, showVenue }: { status: GigStatus; showVenue: boolean }) {
-  const [rows, setRows] = useState<GigModRow[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [rows, setRows] = useState<GigModRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     let cancelled = false;
@@ -810,17 +817,19 @@ function GigsAdminList({ status, showVenue }: { status: GigStatus; showVenue: bo
             curatorSubtype: p ? (p.subtype as CuratorSubtype) : null,
           };
         }));
-        setLoaded(true);
       },
+      (e) => { console.error("GigsAdminList onSnapshot failed", status, e); if (!cancelled) setRows("error"); },
     );
     return () => { cancelled = true; unsubscribe(); };
-  }, [status]);
+  }, [status, reloadKey]);
+
+  if (rows === "loading") return <CardRowsSkeleton label="Loading gigs" />;
+  if (rows === "error") return <ListError message="Couldn't load gigs." onRetry={() => setReloadKey((k) => k + 1)} />;
 
   const filtered = rows.filter((g) => (
     showVenue ? g.curatorSubtype === "venue" : g.curatorSubtype === null || NON_VENUE_SUBTYPES.has(g.curatorSubtype)
   ));
 
-  if (!loaded) return <CardRowsSkeleton label="Loading gigs" />;
   if (filtered.length === 0) {
     return (
       <SectionEmpty icon={IconGigs}>
@@ -1535,7 +1544,7 @@ function ShowPostsPanel() {
           {error}
         </p>
       )}
-      {rows === "loading" && <p className="font-sora text-sm text-gk-muted">Loading…</p>}
+      {rows === "loading" && <CardRowsSkeleton count={2} label="Loading show posts" />}
       {rows !== "loading" && rows.length === 0 && !error && (
         <p className="font-sora text-sm text-gk-muted">No live show posts right now.</p>
       )}
@@ -1916,26 +1925,39 @@ function SearchIndexPanel() {
 // any uid's membership docs this way (firestore.rules grants isAdmin() the
 // same collection-group access as the self-read clause).
 function UserProfiles({ uid }: { uid: string }) {
-  const [profiles, setProfiles] = useState<Row<ProfileDoc>[] | "loading">("loading");
+  const [profiles, setProfiles] = useState<Row<ProfileDoc>[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { db } = getFirebase();
-      const memberships = await getDocs(query(collectionGroup(db, "members"), where("uid", "==", uid)));
-      const out: Row<ProfileDoc>[] = [];
-      for (const m of memberships.docs) {
-        if (cancelled) return;
-        const profileRef = m.ref.parent.parent;
-        if (!profileRef) continue;
-        const p = await getDoc(profileRef);
-        if (cancelled) return;
-        if (p.exists()) out.push({ id: p.id, ...(p.data() as ProfileDoc) });
+      try {
+        const { db } = getFirebase();
+        const memberships = await getDocs(query(collectionGroup(db, "members"), where("uid", "==", uid)));
+        const out: Row<ProfileDoc>[] = [];
+        for (const m of memberships.docs) {
+          if (cancelled) return;
+          const profileRef = m.ref.parent.parent;
+          if (!profileRef) continue;
+          const p = await getDoc(profileRef);
+          if (cancelled) return;
+          if (p.exists()) out.push({ id: p.id, ...(p.data() as ProfileDoc) });
+        }
+        if (!cancelled) setProfiles(out);
+      } catch (e) {
+        console.error("UserProfiles load failed", uid, e);
+        if (!cancelled) setProfiles("error");
       }
-      if (!cancelled) setProfiles(out);
     })();
     return () => { cancelled = true; };
-  }, [uid]);
+  }, [uid, reloadKey]);
   if (profiles === "loading") return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">Loading profiles…</p>;
+  if (profiles === "error") {
+    return (
+      <div className="ml-4 mt-1">
+        <ListError message="Couldn't load this user's profiles." onRetry={() => setReloadKey((k) => k + 1)} />
+      </div>
+    );
+  }
   if (profiles.length === 0) return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">No profiles.</p>;
   return (
     <ul className="ml-4 mt-1 grid gap-1">
@@ -1958,18 +1980,31 @@ function UserProfiles({ uid }: { uid: string }) {
 // (a single getDoc, not an N+1 loop), but the guard costs nothing and keeps
 // this file's async-effect shape consistent.
 function AdminNotes({ uid }: { uid: string }) {
-  const [notes, setNotes] = useState<AdminNoteDoc["notes"] | "loading">("loading");
+  const [notes, setNotes] = useState<AdminNoteDoc["notes"] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { db } = getFirebase();
-      const snap = await getDoc(doc(db, "adminNotes", uid));
-      if (cancelled) return;
-      setNotes(snap.exists() ? (snap.data() as AdminNoteDoc).notes : []);
+      try {
+        const { db } = getFirebase();
+        const snap = await getDoc(doc(db, "adminNotes", uid));
+        if (cancelled) return;
+        setNotes(snap.exists() ? (snap.data() as AdminNoteDoc).notes : []);
+      } catch (e) {
+        console.error("AdminNotes load failed", uid, e);
+        if (!cancelled) setNotes("error");
+      }
     })();
     return () => { cancelled = true; };
-  }, [uid]);
+  }, [uid, reloadKey]);
   if (notes === "loading") return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">Loading notes…</p>;
+  if (notes === "error") {
+    return (
+      <div className="ml-4 mt-1">
+        <ListError message="Couldn't load admin notes." onRetry={() => setReloadKey((k) => k + 1)} />
+      </div>
+    );
+  }
   if (notes.length === 0) return null;
   return (
     <ul className="ml-4 mt-1 grid gap-1">
@@ -2122,19 +2157,20 @@ const AUDIT_ACTION_LABEL: Record<AuditLogDoc["action"], string> = {
 };
 
 function AuditLog() {
-  const [logs, setLogs] = useState<Row<AuditLogDoc>[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [logs, setLogs] = useState<Row<AuditLogDoc>[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "auditLogs"), orderBy("at", "desc"), limit(50)),
-      (s) => { setLogs(s.docs.map((d) => ({ id: d.id, ...(d.data() as AuditLogDoc) }))); setLoaded(true); },
+      (s) => setLogs(s.docs.map((d) => ({ id: d.id, ...(d.data() as AuditLogDoc) }))),
+      (e) => { console.error("AuditLog onSnapshot failed", e); setLogs("error"); },
     );
-  }, []);
+  }, [reloadKey]);
   return (
     <section className="grid gap-3">
       <h2 className="font-syne text-lg font-semibold text-gk-text">Audit log</h2>
-      {!loaded ? (
+      {logs === "loading" ? (
         <div className="overflow-hidden rounded-gk border border-gk-border" role="status" aria-label="Loading the audit log">
           {[0, 1, 2, 3].map((i) => (
             <div key={i} className="flex items-center gap-4 border-b border-gk-border p-3.5 last:border-0">
@@ -2144,6 +2180,8 @@ function AuditLog() {
             </div>
           ))}
         </div>
+      ) : logs === "error" ? (
+        <ListError message="Couldn't load the audit log." onRetry={() => setReloadKey((k) => k + 1)} />
       ) : logs.length === 0 ? (
         <p className="font-sora text-sm text-gk-muted">
           No activity yet. Approvals, rejections, and moderation actions will show up here.
@@ -2281,7 +2319,8 @@ function AdminAlertRow({ a }: { a: AlertRow }) {
 // active 100 and filtering resolvedAt==null client-side is the same
 // bounded-no-new-index shape TracksQueue/GigsAdmin already use above.
 function AdminAlerts() {
-  const [alerts, setAlerts] = useState<AlertRow[]>([]);
+  const [alerts, setAlerts] = useState<AlertRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
@@ -2289,8 +2328,20 @@ function AdminAlerts() {
       (s) => setAlerts(
         s.docs.map((d) => ({ id: d.id, ...(d.data() as AdminAlertDoc) })).filter((a) => a.resolvedAt == null),
       ),
+      (e) => { console.error("AdminAlerts onSnapshot failed", e); setAlerts("error"); },
     );
-  }, []);
+  }, [reloadKey]);
+  // Quiet while resolving (no flash of an empty "Needs a human" banner): this
+  // section is meant to appear only once there's something to act on, or a
+  // real failure to surface (below), never as a loading placeholder.
+  if (alerts === "loading") return null;
+  if (alerts === "error") {
+    return (
+      <section className="rounded-gk border border-gk-warning/40 bg-gk-warning/14 p-4">
+        <ListError message="Couldn't load admin alerts." onRetry={() => setReloadKey((k) => k + 1)} />
+      </section>
+    );
+  }
   if (alerts.length === 0) return null;
   return (
     <section className="grid gap-3 rounded-gk border border-gk-warning/40 bg-gk-warning/14 p-4">

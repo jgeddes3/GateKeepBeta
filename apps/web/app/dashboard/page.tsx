@@ -15,6 +15,7 @@ import { Button } from "../../src/ui/button";
 import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
 import { Skeleton } from "../../src/ui/skeleton";
+import { ListError } from "../../src/ui/ListError";
 import { IconBell, IconBuildings, IconEarnings, IconGigs, IconUser, IconWarning } from "../../src/ui/icons";
 
 // Task 9 (SP7): followerCount, read straight off the same profile doc this
@@ -44,8 +45,8 @@ const STATUS_BADGE: Record<ProfileStatus, { variant: "secondary" | "warning" | "
 // instead of a synchronous setState-in-effect reset, which eslint-config-next's React
 // Compiler rules (react-hooks/set-state-in-effect) flag as an anti-pattern.
 function ProfilesList({ uid }: { uid: string }) {
-  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [profiles, setProfiles] = useState<ProfileSummary[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
@@ -60,10 +61,10 @@ function ProfilesList({ uid }: { uid: string }) {
           out.push({ profileId: p.id, type: d.type, name: d.name, status: d.status, followerCount: d.followerCount ?? 0 });
         }
       }
-      if (!cancelled) { setProfiles(out); setLoaded(true); }
-    });
+      if (!cancelled) setProfiles(out);
+    }, (e) => { console.error("ProfilesList onSnapshot failed", uid, e); if (!cancelled) setProfiles("error"); });
     return () => { cancelled = true; unsubscribe(); };
-  }, [uid]);
+  }, [uid, reloadKey]);
   const editHref = (p: ProfileSummary) =>
     p.type === "musician" ? `/dashboard/portfolio/${p.profileId}` : `/dashboard/curator/${p.profileId}`;
   const editLabel = (p: ProfileSummary) =>
@@ -71,7 +72,7 @@ function ProfilesList({ uid }: { uid: string }) {
       : p.status === "rejected" ? "revise & resubmit"
       : p.type === "musician" ? "edit portfolio" : "edit profile";
 
-  if (!loaded) {
+  if (profiles === "loading") {
     return (
       <div className="grid gap-3" role="status" aria-label="Loading your profiles">
         {[0, 1].map((i) => (
@@ -86,6 +87,10 @@ function ProfilesList({ uid }: { uid: string }) {
         ))}
       </div>
     );
+  }
+
+  if (profiles === "error") {
+    return <ListError message="Couldn't load your profiles." onRetry={() => setReloadKey((k) => k + 1)} />;
   }
 
   if (profiles.length === 0) {
@@ -259,8 +264,8 @@ function NotificationListRow({ n, markRead }: { n: NotificationRow; markRead: (i
 // identity change instead of a setState-in-effect reset. Web has no background push
 // (deliberately deferred, see task 13 notes); this realtime inbox is the only surface.
 function NotificationsList({ uid }: { uid: string }) {
-  const [notes, setNotes] = useState<NotificationRow[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [notes, setNotes] = useState<NotificationRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
@@ -269,14 +274,14 @@ function NotificationsList({ uid }: { uid: string }) {
       (snap) => {
         if (cancelled) return;
         setNotes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as NotificationDoc) })));
-        setLoaded(true);
-      });
+      },
+      (e) => { console.error("NotificationsList onSnapshot failed", uid, e); if (!cancelled) setNotes("error"); });
     return () => { cancelled = true; unsubscribe(); };
-  }, [uid]);
+  }, [uid, reloadKey]);
   const markRead = (id: string) =>
     updateDoc(doc(getFirebase().db, `users/${uid}/notifications/${id}`), { read: true });
 
-  if (!loaded) {
+  if (notes === "loading") {
     return (
       <div className="divide-y divide-gk-border overflow-hidden rounded-gk border border-gk-border bg-gk-surface" role="status" aria-label="Loading notifications">
         {[0, 1, 2].map((i) => (
@@ -291,6 +296,10 @@ function NotificationsList({ uid }: { uid: string }) {
         ))}
       </div>
     );
+  }
+
+  if (notes === "error") {
+    return <ListError message="Couldn't load notifications." onRetry={() => setReloadKey((k) => k + 1)} />;
   }
 
   if (notes.length === 0) {
@@ -349,8 +358,11 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <main className="flex items-center justify-center px-4 py-16">
-        <p className="font-sora text-sm text-gk-muted">Loading…</p>
+      <main className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
+        <div className="grid gap-2" role="status" aria-label="Loading your account">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-4 w-72" />
+        </div>
       </main>
     );
   }

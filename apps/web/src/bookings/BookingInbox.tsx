@@ -13,6 +13,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DateBlockRow } from "../components/DateBlockRow";
 import { Skeleton } from "../ui/skeleton";
+import { ListError } from "../ui/ListError";
 import { IconBookings } from "../ui/icons";
 import { cn } from "../lib/utils";
 
@@ -336,12 +337,15 @@ const HISTORY_PAGE_INCREMENT = 20;
 
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
-  const [open, setOpen] = useState<BookingRow[]>([]);
-  const [confirmed, setConfirmed] = useState<BookingRow[]>([]);
-  const [history, setHistory] = useState<BookingRow[]>([]);
+  const [open, setOpen] = useState<BookingRow[] | "error">([]);
+  const [confirmed, setConfirmed] = useState<BookingRow[] | "error">([]);
+  const [history, setHistory] = useState<BookingRow[] | "error">([]);
   const [openPageSize, setOpenPageSize] = useState(OPEN_PAGE_INCREMENT);
   const [confirmedPageSize, setConfirmedPageSize] = useState(CONFIRMED_PAGE_INCREMENT);
   const [historyPageSize, setHistoryPageSize] = useState(HISTORY_PAGE_INCREMENT);
+  const [openReloadKey, setOpenReloadKey] = useState(0);
+  const [confirmedReloadKey, setConfirmedReloadKey] = useState(0);
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -349,8 +353,8 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "open"),
         orderBy("updatedAt", "desc"), limit(openPageSize)),
       (snap) => setOpen(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
-      () => setOpen([]));
-  }, [field, profileId, openPageSize]);
+      (e) => { console.error("BookingInbox: open onSnapshot failed", profileId, e); setOpen("error"); });
+  }, [field, profileId, openPageSize, openReloadKey]);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -358,8 +362,8 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "confirmed"),
         orderBy("updatedAt", "desc"), limit(confirmedPageSize)),
       (snap) => setConfirmed(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
-      () => setConfirmed([]));
-  }, [field, profileId, confirmedPageSize]);
+      (e) => { console.error("BookingInbox: confirmed onSnapshot failed", profileId, e); setConfirmed("error"); });
+  }, [field, profileId, confirmedPageSize, confirmedReloadKey]);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -368,21 +372,23 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         where("status", "in", [...BOOKING_TERMINAL_STATUSES]),
         orderBy("updatedAt", "desc"), limit(historyPageSize)),
       (snap) => setHistory(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
-      () => setHistory([]));
-  }, [field, profileId, historyPageSize]);
+      (e) => { console.error("BookingInbox: history onSnapshot failed", profileId, e); setHistory("error"); });
+  }, [field, profileId, historyPageSize, historyReloadKey]);
 
   return (
     <div className="grid gap-6">
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">
-          Open threads{open.length > 0 ? ` (${open.length})` : ""}
+          Open threads{open !== "error" && open.length > 0 ? ` (${open.length})` : ""}
         </h3>
-        {open.length === 0 ? (
+        {open === "error" ? (
+          <ListError message="Couldn't load your bookings. Retry." onRetry={() => setOpenReloadKey((k) => k + 1)} />
+        ) : open.length === 0 ? (
           <InboxEmpty>No open threads yet. Offers and counters will show up here.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
-        {open.length === openPageSize && (
+        {open !== "error" && open.length === openPageSize && (
           <Button type="button" variant="secondary" size="sm" className="justify-self-start"
             onClick={() => setOpenPageSize((n) => n + OPEN_PAGE_INCREMENT)}>
             {SHOW_MORE_LABEL}
@@ -391,14 +397,16 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       </section>
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">
-          Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}
+          Upcoming confirmed{confirmed !== "error" && confirmed.length > 0 ? ` (${confirmed.length})` : ""}
         </h3>
-        {confirmed.length === 0 ? (
+        {confirmed === "error" ? (
+          <ListError message="Couldn't load your bookings. Retry." onRetry={() => setConfirmedReloadKey((k) => k + 1)} />
+        ) : confirmed.length === 0 ? (
           <InboxEmpty>Nothing confirmed yet. Accept an offer in Open threads above and it lands here as a date.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
-        {confirmed.length === confirmedPageSize && (
+        {confirmed !== "error" && confirmed.length === confirmedPageSize && (
           <Button type="button" variant="secondary" size="sm" className="justify-self-start"
             onClick={() => setConfirmedPageSize((n) => n + CONFIRMED_PAGE_INCREMENT)}>
             {SHOW_MORE_LABEL}
@@ -407,12 +415,14 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       </section>
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">History</h3>
-        {history.length === 0 ? (
+        {history === "error" ? (
+          <ListError message="Couldn't load your bookings. Retry." onRetry={() => setHistoryReloadKey((k) => k + 1)} />
+        ) : history.length === 0 ? (
           <InboxEmpty>No history yet. Completed and closed bookings will land here.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
-        {history.length === historyPageSize && (
+        {history !== "error" && history.length === historyPageSize && (
           <Button type="button" variant="secondary" size="sm" className="justify-self-start"
             onClick={() => setHistoryPageSize((n) => n + HISTORY_PAGE_INCREMENT)}>
             {SHOW_MORE_LABEL}

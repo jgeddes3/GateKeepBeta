@@ -17,12 +17,14 @@ import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../../src/ui/select";
 import { Skeleton } from "../../../src/ui/skeleton";
+import { ListError } from "../../../src/ui/ListError";
 import { IconWarning } from "../../../src/ui/icons";
 
 type MusicianOption = { profileId: string; name: string };
 
 function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: string }) {
-  const [musicianProfiles, setMusicianProfiles] = useState<MusicianOption[] | "loading">("loading");
+  const [musicianProfiles, setMusicianProfiles] = useState<MusicianOption[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   const [selectedOverride, setSelectedOverride] = useState<string | null>(null);
   const [offer, setOffer] = useState<OfferState>(emptyOffer());
   const [busy, setBusy] = useState(false);
@@ -49,20 +51,31 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
         }
       }
       if (!cancelled) setMusicianProfiles(out);
-    });
+    }, (e) => { console.error("ApplyPanel: musician profiles onSnapshot failed", uid, e); if (!cancelled) setMusicianProfiles("error"); });
     return () => { cancelled = true; unsub(); };
-  }, [uid]);
+  }, [uid, reloadKey]);
 
   // Derived, not effect-reset: the default selection is a pure function of
   // the fetched list + whatever the musician has explicitly picked, so it's
   // computed at render time rather than via a setState-in-effect (which
   // eslint-config-next's React Compiler rules flag, see
   // app/dashboard/page.tsx's ProfilesList comment on the same tradeoff).
-  const selected = selectedOverride && musicianProfiles !== "loading" && musicianProfiles.some((m) => m.profileId === selectedOverride)
+  const selected = selectedOverride && musicianProfiles !== "loading" && musicianProfiles !== "error"
+      && musicianProfiles.some((m) => m.profileId === selectedOverride)
     ? selectedOverride
-    : (musicianProfiles !== "loading" && musicianProfiles.length > 0 ? musicianProfiles[0].profileId : "");
+    : (musicianProfiles !== "loading" && musicianProfiles !== "error" && musicianProfiles.length > 0
+      ? musicianProfiles[0].profileId : "");
 
-  if (musicianProfiles === "loading") return <p className="font-sora text-sm text-gk-muted">Loading your musician profiles…</p>;
+  if (musicianProfiles === "loading") {
+    return (
+      <div role="status" aria-label="Loading your musician profiles">
+        <Skeleton className="h-4 w-56" />
+      </div>
+    );
+  }
+  if (musicianProfiles === "error") {
+    return <ListError message="Couldn't load your musician profiles." onRetry={() => setReloadKey((k) => k + 1)} />;
+  }
   if (musicianProfiles.length === 0) {
     return (
       <p className="font-sora text-sm text-gk-muted">

@@ -13,6 +13,7 @@ import type { ProfileDoc, GigDoc, GigSeriesDoc, SeriesStatus } from "@gatekeep/s
 import { Button } from "../../../../../src/ui/button";
 import { Badge } from "../../../../../src/ui/badge";
 import { Skeleton } from "../../../../../src/ui/skeleton";
+import { ListError } from "../../../../../src/ui/ListError";
 import { IconGigs } from "../../../../../src/ui/icons";
 
 type GigRow = GigDoc & { id: string };
@@ -78,8 +79,10 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
   const { user, loading } = useAuth();
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
-  const [gigs, setGigs] = useState<GigRow[]>([]);
-  const [series, setSeries] = useState<SeriesRow[]>([]);
+  const [gigs, setGigs] = useState<GigRow[] | "loading" | "error">("loading");
+  const [series, setSeries] = useState<SeriesRow[] | "loading" | "error">("loading");
+  const [gigsReloadKey, setGigsReloadKey] = useState(0);
+  const [seriesReloadKey, setSeriesReloadKey] = useState(0);
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   useEffect(() => {
@@ -100,8 +103,9 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "gigs"), where("curatorProfileId", "==", profileId)),
-      (s) => setGigs(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))));
-  }, [user, profileId]);
+      (s) => setGigs(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))),
+      (e) => { console.error("GigsList: gigs onSnapshot failed", profileId, e); setGigs("error"); });
+  }, [user, profileId, gigsReloadKey]);
   // Same shape for gigSeries: its read rule (isMember(curatorProfileId) ||
   // isAdmin(), no public disjunct) is provable the identical way.
   useEffect(() => {
@@ -109,8 +113,9 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "gigSeries"), where("curatorProfileId", "==", profileId)),
-      (s) => setSeries(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigSeriesDoc) }))));
-  }, [user, profileId]);
+      (s) => setSeries(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigSeriesDoc) }))),
+      (e) => { console.error("GigsList: series onSnapshot failed", profileId, e); setSeries("error"); });
+  }, [user, profileId, seriesReloadKey]);
 
   if (loading || !user || profile === "loading") {
     return (
@@ -134,9 +139,10 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
     );
   }
 
-  const open = gigs.filter((g) => g.status === "open").sort(byStartsAtAsc);
-  const drafts = gigs.filter((g) => g.status === "draft").sort(byStartsAtAsc);
-  const past = gigs.filter((g) => g.status === "closed" || g.status === "cancelled" || g.status === "taken_down").sort(byStartsAtDesc);
+  const gigsList = gigs === "loading" || gigs === "error" ? [] : gigs;
+  const open = gigsList.filter((g) => g.status === "open").sort(byStartsAtAsc);
+  const drafts = gigsList.filter((g) => g.status === "draft").sort(byStartsAtAsc);
+  const past = gigsList.filter((g) => g.status === "closed" || g.status === "cancelled" || g.status === "taken_down").sort(byStartsAtDesc);
 
   return (
     <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
@@ -159,6 +165,9 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
       )}
 
       <div className="mt-8 grid gap-8">
+        {gigs === "error" && (
+          <ListError message="Couldn't load your gigs." onRetry={() => setGigsReloadKey((k) => k + 1)} />
+        )}
         <ListSection title="Open" count={open.length} emptyLabel="No open gigs.">
           {open.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
         </ListSection>
@@ -172,8 +181,12 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
         </ListSection>
 
         <section className="grid gap-3 border-t border-gk-border pt-8">
-          <h2 className="font-syne text-lg font-semibold text-gk-text">Series ({series.length})</h2>
-          {series.length === 0 ? (
+          <h2 className="font-syne text-lg font-semibold text-gk-text">
+            Series ({series === "loading" || series === "error" ? 0 : series.length})
+          </h2>
+          {series === "error" ? (
+            <ListError message="Couldn't load your series." onRetry={() => setSeriesReloadKey((k) => k + 1)} />
+          ) : series === "loading" || series.length === 0 ? (
             <p className="font-sora text-sm text-gk-muted">No recurring series yet.</p>
           ) : (
             <ul className="grid gap-2">

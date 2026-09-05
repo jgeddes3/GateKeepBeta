@@ -14,6 +14,7 @@ import { Button } from "../../../../src/ui/button";
 import { Card, CardContent } from "../../../../src/ui/card";
 import { Badge } from "../../../../src/ui/badge";
 import { Skeleton } from "../../../../src/ui/skeleton";
+import { ListError } from "../../../../src/ui/ListError";
 import { IconWarning } from "../../../../src/ui/icons";
 
 type TrackRow = TrackDoc & { id: string };
@@ -85,7 +86,8 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
   const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
-  const [tracks, setTracks] = useState<TrackRow[]>([]);
+  const [tracks, setTracks] = useState<TrackRow[] | "loading" | "error">("loading");
+  const [tracksReloadKey, setTracksReloadKey] = useState(0);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -133,8 +135,9 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))));
-  }, [user, profileId]);
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => { console.error("PortfolioEditor: tracks onSnapshot failed", profileId, e); setTracks("error"); });
+  }, [user, profileId, tracksReloadKey]);
 
   // `booking === "loading"` is load-bearing here, not just a nicety. When
   // profileId changes, the render-time reset above only resets `booking`:
@@ -163,7 +166,8 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     );
   }
 
-  const missing = missingForSubmit(profile, tracks);
+  const trackList = tracks === "loading" || tracks === "error" ? [] : tracks;
+  const missing = missingForSubmit(profile, trackList);
   const canSubmit = missing.length === 0;
   const showSubmit = profile.status === "draft" || profile.status === "rejected";
   const status = STATUS_BADGE[profile.status];
@@ -284,7 +288,13 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
         {showSubmit && (
           <section className="grid gap-3 border-t border-gk-border pt-8">
             <h2 className="font-syne text-lg font-semibold text-gk-text">Ready to submit?</h2>
-            {!canSubmit && (
+            {tracks === "error" && (
+              <ListError
+                message="Couldn't check your tracks for submission."
+                onRetry={() => setTracksReloadKey((k) => k + 1)}
+              />
+            )}
+            {tracks !== "error" && !canSubmit && (
               <p className="rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
                 {/* Same construction as the server's failed-precondition message
                     (functions/src/profiles.ts): "a bio, at least one genre, and

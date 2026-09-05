@@ -23,6 +23,7 @@ import { Button } from "../../../../../../src/ui/button";
 import { Badge } from "../../../../../../src/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/ui/card";
 import { Skeleton } from "../../../../../../src/ui/skeleton";
+import { ListError } from "../../../../../../src/ui/ListError";
 import { IconWarning } from "../../../../../../src/ui/icons";
 
 type OccurrenceRow = GigDoc & { id: string };
@@ -155,7 +156,8 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
   const [series, setSeries] = useState<GigSeriesDoc | null | "loading">("loading");
-  const [occurrences, setOccurrences] = useState<OccurrenceRow[]>([]);
+  const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "loading" | "error">("loading");
+  const [occurrencesReloadKey, setOccurrencesReloadKey] = useState(0);
   const [pauseBusy, setPauseBusy] = useState(false);
   const [endBusy, setEndBusy] = useState(false);
 
@@ -193,8 +195,9 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "gigs"), where("curatorProfileId", "==", curatorProfileId), where("seriesId", "==", seriesId)),
-      (s) => setOccurrences(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) })).sort((a, b) => a.startsAt - b.startsAt)));
-  }, [user, curatorProfileId, seriesId]);
+      (s) => setOccurrences(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) })).sort((a, b) => a.startsAt - b.startsAt)),
+      (e) => { console.error("SeriesDetail: occurrences onSnapshot failed", seriesId, e); setOccurrences("error"); });
+  }, [user, curatorProfileId, seriesId, occurrencesReloadKey]);
 
   if (loading || !user || profile === "loading" || series === "loading") {
     return (
@@ -277,7 +280,9 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
 
       <section className="mt-8 grid gap-3">
         <h2 className="font-syne text-lg font-semibold text-gk-text">Occurrences</h2>
-        {occurrences.length === 0 ? (
+        {occurrences === "error" ? (
+          <ListError message="Couldn't load this series' occurrences." onRetry={() => setOccurrencesReloadKey((k) => k + 1)} />
+        ) : occurrences === "loading" || occurrences.length === 0 ? (
           <p className="font-sora text-sm text-gk-muted">
             No dates yet. The daily sweep materializes upcoming occurrences from this template automatically.
           </p>

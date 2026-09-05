@@ -10,6 +10,7 @@ import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { Textarea } from "../ui/textarea";
 import { Button } from "../ui/button";
+import { Skeleton } from "../ui/skeleton";
 import { IconHeart, IconTrash, IconWarning } from "../ui/icons";
 
 // Task 9: a musician's "show note" thread on one event, and its one-line
@@ -227,7 +228,11 @@ export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt
 
   return (
     <div className="grid gap-3">
-      {posts === "loading" && <p className="font-sora text-sm text-gk-muted">Loading posts…</p>}
+      {posts === "loading" && (
+        <div role="status" aria-label="Loading posts">
+          <Skeleton className="h-4 w-full" />
+        </div>
+      )}
       {posts !== "loading" && posts.length > 0 && (
         <ul className="grid gap-2">
           {posts.map((p) => (
