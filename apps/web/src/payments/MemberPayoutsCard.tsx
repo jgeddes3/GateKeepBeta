@@ -217,12 +217,19 @@ export function MemberPayoutsCard({ uid }: { uid: string }) {
                 </Button>
                 <Button onClick={() => submitPayout("instant")}
                   disabled={payoutBusy || !status.instantEligible || belowInstantMin
-                    || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}
-                  title={!status.instantEligible ? PAYOUT_INSTANT_INELIGIBLE_MESSAGE
-                    : belowInstantMin ? PAYOUT_INSTANT_MIN_MESSAGE : undefined}>
+                    || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}>
                   {`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
                 </Button>
               </div>
+              {/* Fix round 1 (finding #10): the disabled reason used to live
+                  only in the Instant button's title attribute, unreachable
+                  by keyboard or touch. Rendered as visible text instead,
+                  mirroring EarningsPanel.tsx's own identical fix. */}
+              {!status.instantEligible ? (
+                <p className="font-sora text-xs text-gk-muted">{PAYOUT_INSTANT_INELIGIBLE_MESSAGE}</p>
+              ) : belowInstantMin ? (
+                <p className="font-sora text-xs text-gk-muted">{PAYOUT_INSTANT_MIN_MESSAGE}</p>
+              ) : null}
               {payoutError && (
                 <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
                   <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />

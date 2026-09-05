@@ -337,9 +337,15 @@ const HISTORY_PAGE_INCREMENT = 20;
 
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
-  const [open, setOpen] = useState<BookingRow[] | "error">([]);
-  const [confirmed, setConfirmed] = useState<BookingRow[] | "error">([]);
-  const [history, setHistory] = useState<BookingRow[] | "error">([]);
+  // Fix round 1 (finding #1): a proper "loading" sentinel, distinct from
+  // both "error" and a real empty list, matching every other listener's own
+  // three-state shape (ListError.tsx's own header comment). Previously
+  // seeded straight into `[]`, which meant the very first render, before
+  // the initial onSnapshot callback ever fired, rendered the SAME empty
+  // state as a genuinely empty inbox.
+  const [open, setOpen] = useState<BookingRow[] | "loading" | "error">("loading");
+  const [confirmed, setConfirmed] = useState<BookingRow[] | "loading" | "error">("loading");
+  const [history, setHistory] = useState<BookingRow[] | "loading" | "error">("loading");
   const [openPageSize, setOpenPageSize] = useState(OPEN_PAGE_INCREMENT);
   const [confirmedPageSize, setConfirmedPageSize] = useState(CONFIRMED_PAGE_INCREMENT);
   const [historyPageSize, setHistoryPageSize] = useState(HISTORY_PAGE_INCREMENT);
@@ -379,16 +385,24 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
     <div className="grid gap-6">
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">
-          Open threads{open !== "error" && open.length > 0 ? ` (${open.length})` : ""}
+          Open threads{open !== "loading" && open !== "error" && open.length > 0 ? ` (${open.length})` : ""}
         </h3>
         {open === "error" ? (
-          <ListError message="Couldn't load your bookings. Retry." onRetry={() => setOpenReloadKey((k) => k + 1)} />
+          <ListError
+            message="Couldn't load your bookings."
+            onRetry={() => { setOpen("loading"); setOpenReloadKey((k) => k + 1); }}
+          />
+        ) : open === "loading" ? (
+          <div className="grid gap-2" role="status" aria-label="Loading open threads">
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
         ) : open.length === 0 ? (
           <InboxEmpty>No open threads yet. Offers and counters will show up here.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
-        {open !== "error" && open.length === openPageSize && (
+        {open !== "loading" && open !== "error" && open.length === openPageSize && (
           <Button type="button" variant="secondary" size="sm" className="justify-self-start"
             onClick={() => setOpenPageSize((n) => n + OPEN_PAGE_INCREMENT)}>
             {SHOW_MORE_LABEL}
@@ -397,16 +411,24 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       </section>
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">
-          Upcoming confirmed{confirmed !== "error" && confirmed.length > 0 ? ` (${confirmed.length})` : ""}
+          Upcoming confirmed{confirmed !== "loading" && confirmed !== "error" && confirmed.length > 0 ? ` (${confirmed.length})` : ""}
         </h3>
         {confirmed === "error" ? (
-          <ListError message="Couldn't load your bookings. Retry." onRetry={() => setConfirmedReloadKey((k) => k + 1)} />
+          <ListError
+            message="Couldn't load your bookings."
+            onRetry={() => { setConfirmed("loading"); setConfirmedReloadKey((k) => k + 1); }}
+          />
+        ) : confirmed === "loading" ? (
+          <div className="grid gap-2" role="status" aria-label="Loading upcoming confirmed">
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
         ) : confirmed.length === 0 ? (
           <InboxEmpty>Nothing confirmed yet. Accept an offer in Open threads above and it lands here as a date.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
-        {confirmed !== "error" && confirmed.length === confirmedPageSize && (
+        {confirmed !== "loading" && confirmed !== "error" && confirmed.length === confirmedPageSize && (
           <Button type="button" variant="secondary" size="sm" className="justify-self-start"
             onClick={() => setConfirmedPageSize((n) => n + CONFIRMED_PAGE_INCREMENT)}>
             {SHOW_MORE_LABEL}
@@ -416,13 +438,21 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">History</h3>
         {history === "error" ? (
-          <ListError message="Couldn't load your bookings. Retry." onRetry={() => setHistoryReloadKey((k) => k + 1)} />
+          <ListError
+            message="Couldn't load your bookings."
+            onRetry={() => { setHistory("loading"); setHistoryReloadKey((k) => k + 1); }}
+          />
+        ) : history === "loading" ? (
+          <div className="grid gap-2" role="status" aria-label="Loading history">
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
         ) : history.length === 0 ? (
           <InboxEmpty>No history yet. Completed and closed bookings will land here.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
-        {history !== "error" && history.length === historyPageSize && (
+        {history !== "loading" && history !== "error" && history.length === historyPageSize && (
           <Button type="button" variant="secondary" size="sm" className="justify-self-start"
             onClick={() => setHistoryPageSize((n) => n + HISTORY_PAGE_INCREMENT)}>
             {SHOW_MORE_LABEL}

@@ -451,7 +451,10 @@ function Queue() {
       {pending === "loading" ? (
         <CardRowsSkeleton label="Loading the profile queue" />
       ) : pending === "error" ? (
-        <ListError message="Couldn't load the profile queue." onRetry={() => setReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load the profile queue."
+          onRetry={() => { setPending("loading"); setReloadKey((k) => k + 1); }}
+        />
       ) : pending.length === 0 ? (
         <SectionEmpty icon={IconUser}>Queue&rsquo;s clear. New profile submissions land here.</SectionEmpty>
       ) : (
@@ -653,7 +656,10 @@ function TracksQueue() {
       {pending === "loading" ? (
         <CardRowsSkeleton label="Loading the track queue" />
       ) : pending === "error" ? (
-        <ListError message="Couldn't load the track queue." onRetry={() => setReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load the track queue."
+          onRetry={() => { setPending("loading"); setReloadKey((k) => k + 1); }}
+        />
       ) : pending.length === 0 ? (
         <SectionEmpty icon={IconGigs}>Queue&rsquo;s clear. New track submissions land here.</SectionEmpty>
       ) : (
@@ -824,7 +830,14 @@ function GigsAdminList({ status, showVenue }: { status: GigStatus; showVenue: bo
   }, [status, reloadKey]);
 
   if (rows === "loading") return <CardRowsSkeleton label="Loading gigs" />;
-  if (rows === "error") return <ListError message="Couldn't load gigs." onRetry={() => setReloadKey((k) => k + 1)} />;
+  if (rows === "error") {
+    return (
+      <ListError
+        message="Couldn't load gigs."
+        onRetry={() => { setRows("loading"); setReloadKey((k) => k + 1); }}
+      />
+    );
+  }
 
   const filtered = rows.filter((g) => (
     showVenue ? g.curatorSubtype === "venue" : g.curatorSubtype === null || NON_VENUE_SUBTYPES.has(g.curatorSubtype)
@@ -884,7 +897,8 @@ function GigsAdmin() {
 // against, a booking can carry at most one mark of each kind), mirrors
 // QueueRow/TrackQueueRow's per-row busy state.
 function ReliabilityPanel({ profileId }: { profileId: string }) {
-  const [marks, setMarks] = useState<ReliabilityMark[] | "loading">("loading");
+  const [marks, setMarks] = useState<ReliabilityMark[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
 
@@ -896,10 +910,13 @@ function ReliabilityPanel({ profileId }: { profileId: string }) {
       if (!cancelled) setMarks(snap.exists() ? (snap.data() as ReliabilityDoc).marks : []);
     })().catch((e) => {
       console.error("ReliabilityPanel: load failed", profileId, e);
-      if (!cancelled) setMarks([]);
+      // Fix round 1 (finding #7): a failed read used to fall back to `[]`,
+      // reading identically to a genuinely clean reliability record. Now a
+      // distinct "error" sentinel, with its own ListError + Retry.
+      if (!cancelled) setMarks("error");
     });
     return () => { cancelled = true; };
-  }, [profileId]);
+  }, [profileId, reloadKey]);
 
   const remove = async (mark: ReliabilityMark) => {
     const key = `${mark.bookingId}-${mark.kind}`;
@@ -907,7 +924,7 @@ function ReliabilityPanel({ profileId }: { profileId: string }) {
     try {
       await callFn("removeReliabilityMark",
         { musicianProfileId: profileId, bookingId: mark.bookingId, kind: mark.kind });
-      setMarks((prev) => (prev === "loading" ? prev : prev.map((m) => (
+      setMarks((prev) => (prev === "loading" || prev === "error" ? prev : prev.map((m) => (
         m.bookingId === mark.bookingId && m.kind === mark.kind ? { ...m, removedByAdmin: true } : m))));
     } catch (e) {
       setRemoveError(e instanceof Error ? e.message : "Could not remove the mark, try again.");
@@ -916,7 +933,23 @@ function ReliabilityPanel({ profileId }: { profileId: string }) {
     }
   };
 
-  if (marks === "loading") return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">Loading reliability record…</p>;
+  if (marks === "loading") {
+    return (
+      <div className="ml-4 mt-1">
+        <CardRowsSkeleton count={1} label="Loading reliability record" />
+      </div>
+    );
+  }
+  if (marks === "error") {
+    return (
+      <div className="ml-4 mt-1">
+        <ListError
+          message="Couldn't load the reliability record."
+          onRetry={() => { setMarks("loading"); setReloadKey((k) => k + 1); }}
+        />
+      </div>
+    );
+  }
   if (marks.length === 0) return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">No reliability marks.</p>;
   return (
     <div className="ml-4 mt-1 grid gap-2">
@@ -983,7 +1016,8 @@ type AdminBookingRow = Row<BookingRequestDoc>;
 // `key={profileId}` by TakedownsPanel, so a fresh lookup remounts fresh
 // "loading" state rather than needing an imperative reset).
 function ProfileBookingsList({ profileId }: { profileId: string }) {
-  const [rows, setRows] = useState<AdminBookingRow[] | "loading">("loading");
+  const [rows, setRows] = useState<AdminBookingRow[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1008,12 +1042,30 @@ function ProfileBookingsList({ profileId }: { profileId: string }) {
       setRows(merged);
     })().catch((e) => {
       console.error("ProfileBookingsList: load failed", profileId, e);
-      if (!cancelled) setRows([]);
+      // Fix round 1 (finding #7): distinct "error" sentinel, was `[]`
+      // before (read identically to a profile with no bookings at all).
+      if (!cancelled) setRows("error");
     });
     return () => { cancelled = true; };
-  }, [profileId]);
+  }, [profileId, reloadKey]);
 
-  if (rows === "loading") return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">Loading bookings…</p>;
+  if (rows === "loading") {
+    return (
+      <div className="ml-4 mt-1">
+        <CardRowsSkeleton count={1} label="Loading bookings" />
+      </div>
+    );
+  }
+  if (rows === "error") {
+    return (
+      <div className="ml-4 mt-1">
+        <ListError
+          message="Couldn't load bookings."
+          onRetry={() => { setRows("loading"); setReloadKey((k) => k + 1); }}
+        />
+      </div>
+    );
+  }
   if (rows.length === 0) return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">No bookings.</p>;
   return (
     <ul className="ml-4 mt-1 grid gap-2">
@@ -1952,11 +2004,20 @@ function UserProfiles({ uid }: { uid: string }) {
     })();
     return () => { cancelled = true; };
   }, [uid, reloadKey]);
-  if (profiles === "loading") return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">Loading profiles…</p>;
+  if (profiles === "loading") {
+    return (
+      <div className="ml-4 mt-1">
+        <CardRowsSkeleton count={1} label="Loading profiles" />
+      </div>
+    );
+  }
   if (profiles === "error") {
     return (
       <div className="ml-4 mt-1">
-        <ListError message="Couldn't load this user's profiles." onRetry={() => setReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load this user's profiles."
+          onRetry={() => { setProfiles("loading"); setReloadKey((k) => k + 1); }}
+        />
       </div>
     );
   }
@@ -1999,11 +2060,20 @@ function AdminNotes({ uid }: { uid: string }) {
     })();
     return () => { cancelled = true; };
   }, [uid, reloadKey]);
-  if (notes === "loading") return <p className="ml-4 mt-1 font-sora text-sm text-gk-muted">Loading notes…</p>;
+  if (notes === "loading") {
+    return (
+      <div className="ml-4 mt-1">
+        <CardRowsSkeleton count={1} label="Loading notes" />
+      </div>
+    );
+  }
   if (notes === "error") {
     return (
       <div className="ml-4 mt-1">
-        <ListError message="Couldn't load admin notes." onRetry={() => setReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load admin notes."
+          onRetry={() => { setNotes("loading"); setReloadKey((k) => k + 1); }}
+        />
       </div>
     );
   }
@@ -2184,7 +2254,10 @@ function AuditLog() {
           ))}
         </div>
       ) : logs === "error" ? (
-        <ListError message="Couldn't load the audit log." onRetry={() => setReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load the audit log."
+          onRetry={() => { setLogs("loading"); setReloadKey((k) => k + 1); }}
+        />
       ) : logs.length === 0 ? (
         <p className="font-sora text-sm text-gk-muted">
           No activity yet. Approvals, rejections, and moderation actions will show up here.
@@ -2339,10 +2412,15 @@ function AdminAlerts() {
   // real failure to surface (below), never as a loading placeholder.
   if (alerts === "loading") return null;
   if (alerts === "error") {
+    // Fix round 1 (finding #3): ListError already carries its own warning
+    // border/background (ListError.tsx); the wrapping <section> used to
+    // repeat that exact tint, so a failed load rendered as a box inside an
+    // identical box. Just the one box now.
     return (
-      <section className="rounded-gk border border-gk-warning/40 bg-gk-warning/14 p-4">
-        <ListError message="Couldn't load admin alerts." onRetry={() => setReloadKey((k) => k + 1)} />
-      </section>
+      <ListError
+        message="Couldn't load admin alerts."
+        onRetry={() => { setAlerts("loading"); setReloadKey((k) => k + 1); }}
+      />
     );
   }
   if (alerts.length === 0) return null;

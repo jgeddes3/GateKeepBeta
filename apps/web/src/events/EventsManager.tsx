@@ -48,19 +48,28 @@ type View =
 // what a list overview needs.
 function TierBars({ eventId }: { eventId: string }) {
   const [tiers, setTiers] = useState<({ id: string } & TicketTierDoc)[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder")),
       (snap) => setTiers(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketTierDoc) }))),
       (e) => { console.error("EventsManager: tier bars onSnapshot failed", eventId, e); setTiers("error"); });
-  }, [eventId]);
+  }, [eventId, reloadKey]);
   if (tiers === "loading") return null;
-  // Nested inside EventListRow's own <button> (list row = a click target):
-  // ListError's Retry button would be an interactive element inside another
-  // one, so this renders the warning line only, no onRetry. A failed read
-  // here self-heals on the next snapshot (or the next time this row
-  // mounts), same as a transient offline blip anywhere else in the app.
-  if (tiers === "error") return <ListError message="Couldn't load ticket tiers." />;
+  // Fix round 1 (finding #6): EventListRow no longer wraps this in its own
+  // <button> (the row's click affordance moved to a sibling button around
+  // just the title), so a normal Retry button here is valid, unnested
+  // interactive markup.
+  if (tiers === "error") {
+    return (
+      <div className="mt-2">
+        <ListError
+          message="Couldn't load ticket tiers."
+          onRetry={() => { setTiers("loading"); setReloadKey((k) => k + 1); }}
+        />
+      </div>
+    );
+  }
   if (tiers.length === 0) return null;
   return (
     <div className="mt-2 grid gap-1">
@@ -82,11 +91,15 @@ function TierBars({ eventId }: { eventId: string }) {
 
 function EventListRow({ event, onManage }: { event: EventRow; onManage: () => void }) {
   const posterUrl = posterPublicUrl(event.posterPath);
+  // Fix round 1 (finding #6): the row used to be one giant <button> with
+  // TierBars nested inside it, which meant a failed tier read could never
+  // carry its own Retry button (an interactive element nested inside
+  // another is invalid HTML, and would also steal clicks meant for the
+  // row). The row is a <div> now; only the title/date block (the row's own
+  // click affordance) is a <button>, and TierBars sits beside it as a
+  // sibling, free to render a normal ListError+Retry on error.
   return (
-    <button
-      type="button" onClick={onManage}
-      className="flex w-full items-start gap-3.5 rounded-gk border border-gk-border bg-gk-surface p-3.5 text-left outline-none transition-colors hover:border-gk-accent/50 focus-visible:ring-2 focus-visible:ring-gk-focus"
-    >
+    <div className="flex w-full items-start gap-3.5 rounded-gk border border-gk-border bg-gk-surface p-3.5 transition-colors hover:border-gk-accent/50">
       <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-gk-sm border border-gk-border bg-gk-surface">
         {posterUrl ? (
           <img src={posterUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
@@ -95,16 +108,21 @@ function EventListRow({ event, onManage }: { event: EventRow; onManage: () => vo
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="truncate font-syne text-sm font-semibold text-gk-text">{event.title || "Untitled event"}</p>
-          <Badge variant={EVENT_STATUS_BADGE[event.status]}>{EVENT_STATUS_LABEL[event.status]}</Badge>
-        </div>
-        <p className="mt-0.5 font-sora text-sm text-gk-muted">
-          {formatEventFullDate(event.startsAt)} · {formatGigTime(event.startsAt)}
-        </p>
+        <button
+          type="button" onClick={onManage}
+          className="block w-full text-left outline-none focus-visible:ring-2 focus-visible:ring-gk-focus"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate font-syne text-sm font-semibold text-gk-text">{event.title || "Untitled event"}</p>
+            <Badge variant={EVENT_STATUS_BADGE[event.status]}>{EVENT_STATUS_LABEL[event.status]}</Badge>
+          </div>
+          <p className="mt-0.5 font-sora text-sm text-gk-muted">
+            {formatEventFullDate(event.startsAt)} · {formatGigTime(event.startsAt)}
+          </p>
+        </button>
         <TierBars eventId={event.id} />
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -211,14 +229,17 @@ export function EventsManager({ profileId, name }: { profileId: string; name: st
       </div>
     );
   }
-  // Audit #13: a failed profile read used to fall through to the bare
+  // Audit #10: a failed profile read used to fall through to the bare
   // `!profile` branch below and render nothing. Checked BEFORE that branch
   // since the "error" sentinel is a truthy string (!profile would be false
   // for it, and everything past that line dereferences profile.subtype).
   if (profile === "error") {
     return (
       <div className="rounded-gk border border-gk-border bg-gk-surface p-5">
-        <ListError message="Couldn't load this profile." onRetry={() => setProfileReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load this profile."
+          onRetry={() => { setProfile("loading"); setProfileReloadKey((k) => k + 1); }}
+        />
       </div>
     );
   }
@@ -226,7 +247,10 @@ export function EventsManager({ profileId, name }: { profileId: string; name: st
   if (events === "error") {
     return (
       <div className="rounded-gk border border-gk-border bg-gk-surface p-5">
-        <ListError message="Couldn't load events." onRetry={() => setEventsReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load events."
+          onRetry={() => { setEvents("loading"); setEventsReloadKey((k) => k + 1); }}
+        />
       </div>
     );
   }
@@ -263,11 +287,16 @@ export function EventsManager({ profileId, name }: { profileId: string; name: st
             <Skeleton className="h-10 w-full" />
           </div>
         ) : gigs === "error" ? (
-          <ListError message="Couldn't load your filled gigs." onRetry={() => setGigsReloadKey((k) => k + 1)} />
+          <ListError
+            message="Couldn't load your filled gigs."
+            onRetry={() => { setGigs("loading"); setGigsReloadKey((k) => k + 1); }}
+          />
         ) : (
           <GigPromotePicker gigs={eligibleGigs} onPick={promoteGig} onClose={() => setView({ kind: "list" })} />
         )}
-        {gigs !== "loading" && gigs !== "error" ? null : (
+        {/* Fix round 1 (finding #9): reads forwards now, not as the negated
+            "everything settled? no back button" ternary this used to be. */}
+        {(gigs === "loading" || gigs === "error") && (
           <Button type="button" variant="secondary" onClick={() => setView({ kind: "list" })} className="mt-3">Back</Button>
         )}
       </div>

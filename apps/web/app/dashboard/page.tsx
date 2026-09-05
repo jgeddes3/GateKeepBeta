@@ -90,7 +90,12 @@ function ProfilesList({ uid }: { uid: string }) {
   }
 
   if (profiles === "error") {
-    return <ListError message="Couldn't load your profiles." onRetry={() => setReloadKey((k) => k + 1)} />;
+    return (
+      <ListError
+        message="Couldn't load your profiles."
+        onRetry={() => { setProfiles("loading"); setReloadKey((k) => k + 1); }}
+      />
+    );
   }
 
   if (profiles.length === 0) {
@@ -299,7 +304,12 @@ function NotificationsList({ uid }: { uid: string }) {
   }
 
   if (notes === "error") {
-    return <ListError message="Couldn't load notifications." onRetry={() => setReloadKey((k) => k + 1)} />;
+    return (
+      <ListError
+        message="Couldn't load notifications."
+        onRetry={() => { setNotes("loading"); setReloadKey((k) => k + 1); }}
+      />
+    );
   }
 
   if (notes.length === 0) {

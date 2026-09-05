@@ -11,6 +11,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { Textarea } from "../ui/textarea";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
+import { ListError } from "../ui/ListError";
 import { IconHeart, IconTrash, IconWarning } from "../ui/icons";
 
 // Task 9: a musician's "show note" thread on one event, and its one-line
@@ -169,19 +170,26 @@ export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt
   eventId: string; musicianProfileId: string; artistName: string; endsAt: number;
 }) {
   const { user } = useAuth();
-  const [posts, setPosts] = useState<PostRow[] | "loading">("loading");
+  const [posts, setPosts] = useState<PostRow[] | "loading" | "error">("loading");
   const [isMember, setIsMember] = useState(false);
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState<string | null>(null);
 
+  // Fix round 1 (finding #7): a failed load used to fall back to `[]`,
+  // reading identically to a show with no posts at all. Now a distinct
+  // "error" sentinel with its own ListError + Retry.
   const refresh = useCallback(() => {
     fetchLivePosts(eventId, musicianProfileId)
       .then((rows) => setPosts(rows))
-      .catch(() => setPosts([]));
+      .catch((e) => {
+        console.error("ShowPostsForAct: posts load failed", eventId, musicianProfileId, e);
+        setPosts("error");
+      });
   }, [eventId, musicianProfileId]);
 
   useEffect(() => { refresh(); }, [refresh]);
+  const retryPosts = () => { setPosts("loading"); refresh(); };
 
   useEffect(() => {
     // Every setIsMember call below runs inside a .then()/.catch() callback,
@@ -233,14 +241,15 @@ export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt
           <Skeleton className="h-4 w-full" />
         </div>
       )}
-      {posts !== "loading" && posts.length > 0 && (
+      {posts === "error" && <ListError message="Couldn't load posts." onRetry={retryPosts} />}
+      {posts !== "loading" && posts !== "error" && posts.length > 0 && (
         <ul className="grid gap-2">
           {posts.map((p) => (
             <PostRowItem key={p.id} post={p} canRemove={isMember} onRemoved={refresh} />
           ))}
         </ul>
       )}
-      {posts !== "loading" && posts.length === 0 && !showComposer && (
+      {posts !== "loading" && posts !== "error" && posts.length === 0 && !showComposer && (
         <p className="font-sora text-sm text-gk-muted">No posts yet about this show.</p>
       )}
       {isMember && eventEnded && (

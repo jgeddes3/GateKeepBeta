@@ -242,7 +242,10 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
       <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
         <ListError
           message="Couldn't load this gig."
-          onRetry={() => { setProfileReloadKey((k) => k + 1); setGigReloadKey((k) => k + 1); }}
+          onRetry={() => {
+            setProfile("loading"); setProfileReloadKey((k) => k + 1);
+            setGig("loading"); setGigReloadKey((k) => k + 1);
+          }}
         />
       </main>
     );

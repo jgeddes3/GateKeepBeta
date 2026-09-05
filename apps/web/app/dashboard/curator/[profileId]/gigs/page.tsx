@@ -78,7 +78,8 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
   const { profileId } = use(props.params);
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [gigs, setGigs] = useState<GigRow[] | "loading" | "error">("loading");
   const [series, setSeries] = useState<SeriesRow[] | "loading" | "error">("loading");
   const [gigsReloadKey, setGigsReloadKey] = useState(0);
@@ -90,8 +91,11 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [user, profileId]);
+      // Fix round 1 (finding #7): a failed read used to collapse into
+      // `null`, indistinguishable from "no such profile". Now a distinct
+      // "error" sentinel with its own ListError + Retry.
+      (e) => { console.error("GigsList: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [user, profileId, profileReloadKey]);
   // where(curatorProfileId=='X') with NO status filter: rules-provable for
   // a member via the member disjunct alone (see firestore.rules' comment on
   // gigs' read rule + tests-rules/rules.test.ts's "curator dashboard" test),
@@ -125,6 +129,16 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
         <div className="mt-8 grid gap-2">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
         </div>
+      </main>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError
+          message="Couldn't load your curator profile."
+          onRetry={() => { setProfile("loading"); setProfileReloadKey((k) => k + 1); }}
+        />
       </main>
     );
   }
@@ -166,27 +180,52 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
 
       <div className="mt-8 grid gap-8">
         {gigs === "error" && (
-          <ListError message="Couldn't load your gigs." onRetry={() => setGigsReloadKey((k) => k + 1)} />
+          <ListError
+            message="Couldn't load your gigs."
+            onRetry={() => { setGigs("loading"); setGigsReloadKey((k) => k + 1); }}
+          />
         )}
-        <ListSection title="Open" count={open.length} emptyLabel="No open gigs.">
-          {open.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
-        </ListSection>
+        {/* Fix round 1 (finding #8): a loading gigs list used to fall
+            through to gigsList = [], which rendered every section's own
+            "No open gigs." / "No drafts." / "Nothing here yet." empty
+            label, indistinguishable from a genuinely empty result. A single
+            loading skeleton stands in for all three sections instead. */}
+        {gigs === "loading" ? (
+          <div className="grid gap-2" role="status" aria-label="Loading your gigs">
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-16 w-full" />
+          </div>
+        ) : (
+          <>
+            <ListSection title="Open" count={open.length} emptyLabel="No open gigs.">
+              {open.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
+            </ListSection>
 
-        <ListSection title="Drafts" count={drafts.length} emptyLabel="No drafts.">
-          {drafts.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
-        </ListSection>
+            <ListSection title="Drafts" count={drafts.length} emptyLabel="No drafts.">
+              {drafts.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
+            </ListSection>
 
-        <ListSection title="Past & closed" count={past.length} emptyLabel="Nothing here yet.">
-          {past.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
-        </ListSection>
+            <ListSection title="Past & closed" count={past.length} emptyLabel="Nothing here yet.">
+              {past.map((g) => <GigListItem key={g.id} profileId={profileId} gig={g} />)}
+            </ListSection>
+          </>
+        )}
 
         <section className="grid gap-3 border-t border-gk-border pt-8">
           <h2 className="font-syne text-lg font-semibold text-gk-text">
             Series ({series === "loading" || series === "error" ? 0 : series.length})
           </h2>
           {series === "error" ? (
-            <ListError message="Couldn't load your series." onRetry={() => setSeriesReloadKey((k) => k + 1)} />
-          ) : series === "loading" || series.length === 0 ? (
+            <ListError
+              message="Couldn't load your series."
+              onRetry={() => { setSeries("loading"); setSeriesReloadKey((k) => k + 1); }}
+            />
+          ) : series === "loading" ? (
+            <div className="grid gap-2" role="status" aria-label="Loading your series">
+              <Skeleton className="h-14 w-full" />
+            </div>
+          ) : series.length === 0 ? (
             <p className="font-sora text-sm text-gk-muted">No recurring series yet.</p>
           ) : (
             <ul className="grid gap-2">

@@ -68,7 +68,10 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
   if (profile === "error") {
     return (
       <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
-        <ListError message="Couldn't load your curator profile." onRetry={() => setProfileReloadKey((k) => k + 1)} />
+        <ListError
+          message="Couldn't load your curator profile."
+          onRetry={() => { setProfile("loading"); setProfileReloadKey((k) => k + 1); }}
+        />
       </main>
     );
   }

@@ -46,11 +46,14 @@ export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: st
         variant="secondary"
         size="sm"
         disabled={disabled || state === "saving"}
-        title={disabled ? SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE : undefined}
         onClick={() => void onClick()}
       >
         {state === "saved" ? "Saved" : "Save search"}
       </Button>
+      {/* Fix round 1 (finding #10): the disabled reason used to live only in
+          a title attribute, unreachable by keyboard or touch. Rendered as
+          visible text instead, mirroring EarningsPanel.tsx's own fix. */}
+      {disabled && <span className="font-sora text-xs text-gk-muted">{SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE}</span>}
       {error && <span role="alert" className="font-sora text-xs text-gk-warning">{error}</span>}
     </div>
   );

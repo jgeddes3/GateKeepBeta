@@ -79,7 +79,10 @@ export function TrackManager({ profileId }: { profileId: string }) {
           </div>
         )}
         {tracks === "error" && (
-          <ListError message="Couldn't load tracks." onRetry={() => setReloadKey((k) => k + 1)} />
+          <ListError
+            message="Couldn't load tracks."
+            onRetry={() => { setTracks("loading"); setReloadKey((k) => k + 1); }}
+          />
         )}
         {tracks !== "loading" && tracks !== "error" && tracks.length > 0 && (
           <div className="grid gap-2">

@@ -105,23 +105,23 @@ export function FilterBar({ face, filters, onChange, location }: {
           </Chip>
         ))}
 
+        {/* Fix round 1 (finding #10): the disabled reason used to live only
+            in a wrapping span's title attribute (unreachable by keyboard or
+            touch); this file already renders SEARCH_LOCATION_OFF_MESSAGE as
+            visible text below (`has("nearMe") && locationOff`), so the
+            title-only tooltip was pure redundant duplication of that text,
+            dropped along with the wrapper it needed. */}
         {has("nearMe") && (
-          // Chip itself doesn't forward a `title` prop; a wrapping span
-          // carries the tooltip instead, matching how any other
-          // non-Chip-supported HTML attribute would have to reach this
-          // control.
-          <span title={locationOff ? SEARCH_LOCATION_OFF_MESSAGE : undefined}>
-            <Chip
-              active={!!filters.nearMe && location.status === "granted"}
-              disabled={locationOff}
-              onClick={() => {
-                if (location.status !== "granted") { location.request(); return; }
-                onChange({ ...filters, nearMe: !filters.nearMe });
-              }}
-            >
-              Near me
-            </Chip>
-          </span>
+          <Chip
+            active={!!filters.nearMe && location.status === "granted"}
+            disabled={locationOff}
+            onClick={() => {
+              if (location.status !== "granted") { location.request(); return; }
+              onChange({ ...filters, nearMe: !filters.nearMe });
+            }}
+          >
+            Near me
+          </Chip>
         )}
 
         {has("budgetMinCents") && (

@@ -84,7 +84,8 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const { profileId } = use(props.params); // client components unwrap params with use()
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
   const [tracks, setTracks] = useState<TrackRow[] | "loading" | "error">("loading");
   const [tracksReloadKey, setTracksReloadKey] = useState(0);
@@ -113,7 +114,9 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     const { db } = getFirebase();
     const unsub = onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
+      // Fix round 1 (finding #7): distinct "error" sentinel, was collapsed
+      // into `null` before (indistinguishable from "no such profile").
+      (e) => { console.error("PortfolioEditor: profile onSnapshot failed", profileId, e); setProfile("error"); });
     // `cancelled` guards against a stale WRITE (as opposed to the stale
     // READ the render-time reset above handles): without it, navigating
     // from profile A's editor to profile B's can let A's getDoc resolve
@@ -124,7 +127,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
       .catch(() => { if (!cancelled) setBooking(null); });
     return () => { cancelled = true; unsub(); };
-  }, [user, profileId]);
+  }, [user, profileId, profileReloadKey]);
   // Own subscription, separate from TrackManager's below: the submit-lock
   // gate below needs live track statuses at THIS level (to enable/disable
   // the button and render the missing-items hint) independent of
@@ -149,6 +152,16 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   // setState, so the reset itself is never committed stale: the gap is the
   // un-reset profile/tracks state, not the reset mechanism.)
   if (loading || !user || profile === "loading" || booking === "loading") return <EditorSkeleton />;
+  if (profile === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError
+          message="Couldn't load this profile."
+          onRetry={() => { setProfile("loading"); setProfileReloadKey((k) => k + 1); }}
+        />
+      </main>
+    );
+  }
   if (!profile || profile.type !== "musician") {
     return (
       <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 text-center sm:px-6">
@@ -288,13 +301,23 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
         {showSubmit && (
           <section className="grid gap-3 border-t border-gk-border pt-8">
             <h2 className="font-syne text-lg font-semibold text-gk-text">Ready to submit?</h2>
+            {/* Fix round 1 (finding #8): while tracks is still "loading",
+                trackList above is [], which made `missing` claim "at least
+                one track" is needed even though nothing has actually been
+                checked yet. A skeleton stands in until the real answer
+                arrives. */}
+            {tracks === "loading" && (
+              <div role="status" aria-label="Checking your tracks">
+                <Skeleton className="h-9 w-72" />
+              </div>
+            )}
             {tracks === "error" && (
               <ListError
                 message="Couldn't check your tracks for submission."
-                onRetry={() => setTracksReloadKey((k) => k + 1)}
+                onRetry={() => { setTracks("loading"); setTracksReloadKey((k) => k + 1); }}
               />
             )}
-            {tracks !== "error" && !canSubmit && (
+            {tracks !== "loading" && tracks !== "error" && !canSubmit && (
               <p className="rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
                 {/* Same construction as the server's failed-precondition message
                     (functions/src/profiles.ts): "a bio, at least one genre, and

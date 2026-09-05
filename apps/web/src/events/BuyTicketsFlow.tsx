@@ -391,7 +391,12 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
   // render an empty picker under the "Tickets" heading and no sticky bar.
   // Mobile has said this since SP6; web now matches, and names the next
   // action rather than leaving the fan on a dead heading.
-  if (liveTiers.length === 0) {
+  // Fix round 1 (finding #4): guarded with `&& !unavailable` so this
+  // zero-tier branch never pre-empts the sale-closed reason below it. An
+  // event that's closed (or not yet on sale, or sold out) AND has no tiers
+  // must still show WHY it's closed, not the generic "check back soon"
+  // line meant for an event that's simply still building its tier list.
+  if (liveTiers.length === 0 && !unavailable) {
     return (
       <div className="grid gap-2">
         <p className="font-sora text-sm text-gk-text">{NO_TICKETS_YET_MESSAGE}</p>

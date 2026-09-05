@@ -52,7 +52,12 @@ function EarningsProfilesList({ uid }: { uid: string }) {
     );
   }
   if (profiles === "error") {
-    return <ListError message="Couldn't load your profiles." onRetry={() => setReloadKey((k) => k + 1)} />;
+    return (
+      <ListError
+        message="Couldn't load your profiles."
+        onRetry={() => { setProfiles("loading"); setReloadKey((k) => k + 1); }}
+      />
+    );
   }
   if (profiles.length === 0) {
     return (

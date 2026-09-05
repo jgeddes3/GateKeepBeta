@@ -54,7 +54,7 @@ function useMyTickets(uid: string): [TicketRow[] | "loading" | "error", () => vo
       (e) => { console.error("my tickets onSnapshot failed", e); setRows("error"); },
     );
   }, [uid, reloadKey]);
-  return [rows, () => setReloadKey((k) => k + 1)];
+  return [rows, () => { setRows("loading"); setReloadKey((k) => k + 1); }];
 }
 
 // One-shot fetch-and-cache for every distinct eventId named by the ticket

@@ -154,8 +154,10 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
   const { profileId, seriesId } = use(props.params);
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
-  const [series, setSeries] = useState<GigSeriesDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
+  const [series, setSeries] = useState<GigSeriesDoc | null | "loading" | "error">("loading");
+  const [seriesReloadKey, setSeriesReloadKey] = useState(0);
   const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "loading" | "error">("loading");
   const [occurrencesReloadKey, setOccurrencesReloadKey] = useState(0);
   const [pauseBusy, setPauseBusy] = useState(false);
@@ -167,15 +169,17 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [user, profileId]);
+      // Fix round 1 (finding #7): distinct "error" sentinel, was collapsed
+      // into `null` before (indistinguishable from "no such profile").
+      (e) => { console.error("SeriesDetail: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [user, profileId, profileReloadKey]);
   useEffect(() => {
     if (!user) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "gigSeries", seriesId),
       (s) => setSeries(s.exists() ? (s.data() as GigSeriesDoc) : null),
-      () => setSeries(null));
-  }, [user, seriesId]);
+      (e) => { console.error("SeriesDetail: series onSnapshot failed", seriesId, e); setSeries("error"); });
+  }, [user, seriesId, seriesReloadKey]);
   // Keyed off the series' OWN curatorProfileId (not the route's profileId
   // segment) so this query is always tied to the doc's actual owner even if
   // the two ever disagree: depending on the primitive string, not the whole
@@ -189,7 +193,7 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
   // membership for the whole result set. Sorted client-side by startsAt: no
   // (curatorProfileId,seriesId,startsAt) composite exists, only
   // (seriesId,startsAt) and (curatorProfileId,status).
-  const curatorProfileId = series && series !== "loading" ? series.curatorProfileId : null;
+  const curatorProfileId = series && series !== "loading" && series !== "error" ? series.curatorProfileId : null;
   useEffect(() => {
     if (!user || !curatorProfileId) return;
     const { db } = getFirebase();
@@ -207,6 +211,19 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
         <div className="mt-8 grid gap-6">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32 w-full" />)}
         </div>
+      </main>
+    );
+  }
+  if (profile === "error" || series === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError
+          message="Couldn't load this series."
+          onRetry={() => {
+            setProfile("loading"); setProfileReloadKey((k) => k + 1);
+            setSeries("loading"); setSeriesReloadKey((k) => k + 1);
+          }}
+        />
       </main>
     );
   }
@@ -281,8 +298,20 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
       <section className="mt-8 grid gap-3">
         <h2 className="font-syne text-lg font-semibold text-gk-text">Occurrences</h2>
         {occurrences === "error" ? (
-          <ListError message="Couldn't load this series' occurrences." onRetry={() => setOccurrencesReloadKey((k) => k + 1)} />
-        ) : occurrences === "loading" || occurrences.length === 0 ? (
+          <ListError
+            message="Couldn't load this series' occurrences."
+            onRetry={() => { setOccurrences("loading"); setOccurrencesReloadKey((k) => k + 1); }}
+          />
+        ) : occurrences === "loading" ? (
+          // Fix round 1 (finding #8): a loading list used to fall through
+          // to the SAME "No dates yet" copy an actually empty result shows,
+          // which reads as a confident (and possibly wrong) claim while the
+          // listener hasn't even reported back yet.
+          <div className="grid gap-2" role="status" aria-label="Loading occurrences">
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+          </div>
+        ) : occurrences.length === 0 ? (
           <p className="font-sora text-sm text-gk-muted">
             No dates yet. The daily sweep materializes upcoming occurrences from this template automatically.
           </p>

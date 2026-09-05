@@ -102,7 +102,10 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
           </div>
         ) : openGigs === "error" ? (
           <>
-            <ListError message="Couldn't load your open gigs." onRetry={() => setReloadKey((k) => k + 1)} />
+            <ListError
+              message="Couldn't load your open gigs."
+              onRetry={() => { setOpenGigs("loading"); setReloadKey((k) => k + 1); }}
+            />
             <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
           </>
         ) : openGigs.length === 0 ? (

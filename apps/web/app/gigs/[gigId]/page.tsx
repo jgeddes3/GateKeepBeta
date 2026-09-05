@@ -74,7 +74,12 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
     );
   }
   if (musicianProfiles === "error") {
-    return <ListError message="Couldn't load your musician profiles." onRetry={() => setReloadKey((k) => k + 1)} />;
+    return (
+      <ListError
+        message="Couldn't load your musician profiles."
+        onRetry={() => { setMusicianProfiles("loading"); setReloadKey((k) => k + 1); }}
+      />
+    );
   }
   if (musicianProfiles.length === 0) {
     return (

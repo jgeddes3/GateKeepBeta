@@ -41,7 +41,7 @@ function useAttendees(eventId: string): [AttendeeRow[] | "loading" | "error", ()
       (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as AttendeeDoc) }))),
       (e) => { console.error("attendees onSnapshot failed", e); setRows("error"); });
   }, [eventId, reloadKey]);
-  return [rows, () => setReloadKey((k) => k + 1)];
+  return [rows, () => { setRows("loading"); setReloadKey((k) => k + 1); }];
 }
 
 function checkedInLabel(checkedInAt: number | undefined): string | null {
