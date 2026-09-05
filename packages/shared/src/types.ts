@@ -1334,6 +1334,14 @@ export interface GetDiscoverDeckResult { cards: DeckCard[]; seed: number; }
 // send. Every field below is server-owned: firestore.rules grants reads to
 // members of either participant profile (and to an admin doing a single get
 // on a REPORTED conversation) and no writes at all.
+//
+// It holds ONLY what both sides may see. Task 3 fix round 1 moved two fields
+// off it because "readable by members of either side" made them leaks:
+// `unread` was a per-profile map, so each side could watch the other's read
+// activity, and `blockedBy` named the blocker, so the blocked side could tell
+// a block from silence (spec 3.1 requires that it cannot). Each side's unread
+// count now lives only on its own ConversationRefDoc mirror below, and the
+// block list moved to the server-only ConversationStateDoc.
 export interface ConversationDoc {
   musicianProfileId: string;
   curatorProfileId: string;
@@ -1343,14 +1351,6 @@ export interface ConversationDoc {
   participants: string[];
   lastMessage: { text: string; senderProfileId: string; at: number } | null;
   lastMessageAt: number;
-  // profileId -> unread count for THAT profile. Incremented for the
-  // recipient on every send, zeroed by markConversationRead.
-  unread: Record<string, number>;
-  // Profile ids that have blocked this pair. Either side's admins may add
-  // their own id. A non-empty array closes sends in BOTH directions
-  // (spec 3.1: the blocked side sees no difference and its sends are
-  // refused with CONVERSATION_CLOSED_MESSAGE).
-  blockedBy: string[];
   // Count of OPEN reports against this conversation. > 0 is what opens the
   // admin read disjunct in firestore.rules, and resolveReport decrements it.
   openReports: number;
@@ -1358,11 +1358,29 @@ export interface ConversationDoc {
   updatedAt: number;
 }
 
+// conversations/{pairId}/private/state: the block list, kept off the
+// client-readable conversation doc so a blocked profile cannot read who
+// blocked it (spec 3.1: a block is silent, and the blocked side must not be
+// able to tell one from an unanswered thread). No rule matches this path, so
+// firestore.rules' terminal `match /{document=**}` deny closes it to every
+// client including admins; only the messaging callables read or write it.
+// Created by sendMessage alongside the conversation on the first send.
+export interface ConversationStateDoc {
+  // Profile ids that have blocked this pair. Either side's admins may add
+  // their own id, and only their own. A non-empty array closes sends in BOTH
+  // directions, refused with CONVERSATION_CLOSED_MESSAGE.
+  blockedBy: string[];
+  updatedAt: number;
+}
+
 // profiles/{profileId}/conversations/{pairId}: this profile's own view of a
 // conversation, written by the messaging callables in the same transaction as
 // the top-level doc. It exists because a top-level `participants
 // array-contains` list rule is not provable (firestore.rules explains why),
-// so the inbox lists the mirror and opens the top-level doc by id.
+// so the inbox lists the mirror and opens the top-level doc by id. It is also
+// where the two per-side fields live, readable only by this profile's own
+// members: `unread` is this profile's count and nobody else's, and
+// `blockedByMe` is set only on the BLOCKER's mirror.
 export interface ConversationRefDoc {
   pairId: string;
   otherProfileId: string;
@@ -1370,7 +1388,7 @@ export interface ConversationRefDoc {
   otherProfileType: "musician" | "curator";
   lastMessage: ConversationDoc["lastMessage"];
   lastMessageAt: number;
-  unread: number;          // THIS profile's count, not the map
+  unread: number;          // THIS profile's count; the conversation doc has no unread map at all
   blockedByMe: boolean;    // whether THIS profile blocked the pair; blocks are silent, so the other side's mirror never says so
   openReports: number;
   updatedAt: number;

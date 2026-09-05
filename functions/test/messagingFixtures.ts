@@ -2,7 +2,8 @@ import type { User } from "firebase/auth";
 import { callFn } from "./helpers";
 import { adb, makeApprovedCuratorProfile, makeApprovedMusicianProfile } from "./discoverFixtures";
 import {
-  conversationPairId, type ConversationDoc, type ConversationRefDoc, type MessageDoc,
+  conversationPairId, MESSAGE_NOTIFY_BUCKET_MS,
+  type ConversationDoc, type ConversationRefDoc, type ConversationStateDoc, type MessageDoc,
 } from "@gatekeep/shared";
 
 // An approved musician profile and an approved curator profile plus their
@@ -41,7 +42,21 @@ export async function messages(pairId: string): Promise<MessageDoc[]> {
   return snap.docs.map((d) => d.data() as MessageDoc);
 }
 
+// conversations/{pairId}/private/state: the block list, off the
+// client-readable conversation doc since fix round 1. Only the admin SDK (and
+// the callables) can see it, which is the point.
+export async function blockState(pairId: string): Promise<ConversationStateDoc | undefined> {
+  return (await adb.doc(`conversations/${pairId}/private/state`).get())
+    .data() as ConversationStateDoc | undefined;
+}
+
 export async function notesOfKind(uid: string, kind: string) {
   const snap = await adb.collection(`users/${uid}/notifications`).where("kind", "==", kind).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
+
+// The dedupe bucket a message notification's doc id encodes
+// ("message:{pairId}:{bucket}"), and the bucket the clock is in right now.
+// Tests compare the two rather than assuming a send stays inside one bucket.
+export const bucketOfNoteId = (id: string): number => Number(id.split(":").pop());
+export const currentBucket = (): number => Math.floor(Date.now() / MESSAGE_NOTIFY_BUCKET_MS);

@@ -33,25 +33,32 @@ async function seedPair() {
   await seed("profiles/cur1", { type: "curator", status: "approved", name: "The Room" });
   await seed("profiles/mus1/members/mo", { uid: "mo", role: "admin", label: "", joinedAt: 1 });
   await seed("profiles/cur1/members/co", { uid: "co", role: "admin", label: "", joinedAt: 1 });
+  // Task 3 fix round 1: the conversation doc carries ONLY what both sides may
+  // see. The unread map and the block list moved off it (a member of either
+  // side can read this doc, which made the map a read-receipt leak and the
+  // list a way for a blocked profile to learn it was blocked).
   await seed(`conversations/${PAIR}`, {
     musicianProfileId: "mus1", curatorProfileId: "cur1", participants: ["mus1", "cur1"],
     lastMessage: { text: "hi", senderProfileId: "mus1", at: 2 }, lastMessageAt: 2,
-    unread: { cur1: 1 }, blockedBy: [], openReports: 0, createdAt: 1, updatedAt: 2,
+    openReports: 0, createdAt: 1, updatedAt: 2,
   });
+  await seed(`conversations/${PAIR}/private/state`, { blockedBy: ["cur1"], updatedAt: 3 });
   await seed(`conversations/${PAIR}/messages/m1`, { senderProfileId: "mus1", senderUid: "mo", text: "hi", at: 2 });
   // Per-profile mirrors, written by the same messaging callable transaction
   // that writes the top-level doc (Task 3): the inbox list query targets
   // these, never the top-level collection, since a top-level
   // participants array-contains list can't be proven by security rules.
+  // They also hold the two per-side fields, each readable only by its own
+  // profile's members.
   await seed(`profiles/mus1/conversations/${PAIR}`, {
-    otherProfileId: "cur1", otherProfileName: "The Room", otherProfileType: "curator",
+    pairId: PAIR, otherProfileId: "cur1", otherProfileName: "The Room", otherProfileType: "curator",
     lastMessage: { text: "hi", senderProfileId: "mus1", at: 2 }, lastMessageAt: 2,
-    unread: 0, blockedByMe: false, openReports: 0,
+    unread: 0, blockedByMe: false, openReports: 0, updatedAt: 2,
   });
   await seed(`profiles/cur1/conversations/${PAIR}`, {
-    otherProfileId: "mus1", otherProfileName: "The Act", otherProfileType: "musician",
+    pairId: PAIR, otherProfileId: "mus1", otherProfileName: "The Act", otherProfileType: "musician",
     lastMessage: { text: "hi", senderProfileId: "mus1", at: 2 }, lastMessageAt: 2,
-    unread: 1, blockedByMe: false, openReports: 0,
+    unread: 1, blockedByMe: true, openReports: 0, updatedAt: 3,
   });
 }
 
@@ -106,9 +113,37 @@ describe("conversations and messages", () => {
     await assertFails(getDocs(query(
       collection(member, "conversations"),
       where("participants", "array-contains", "mus1"), orderBy("lastMessageAt", "desc"))));
-    await assertFails(updateDoc(doc(member, `conversations/${PAIR}`), { unread: { cur1: 0 } }));
+    await assertFails(updateDoc(doc(member, `conversations/${PAIR}`), { lastMessageAt: 99 }));
     await assertFails(setDoc(doc(member, `conversations/${PAIR}/messages/m2`),
       { senderProfileId: "mus1", senderUid: "mo", text: "sneak", at: 3 }));
+  });
+
+  it("hides the private block state from BOTH participants, an admin, and a stranger", async () => {
+    await seedPair();
+    // No rule matches conversations/{pairId}/private/{doc}, so the terminal
+    // `match /{document=**}` deny closes it. That is the whole point of
+    // moving blockedBy here: cur1 blocked mus1, and mus1's members must not
+    // be able to tell a block from an unanswered thread (spec 3.1). The
+    // blocker learns its own state from its own mirror instead, which is why
+    // profiles/cur1/conversations/{PAIR}.blockedByMe is readable above and
+    // profiles/mus1's copy says nothing.
+    for (const uid of ["mo", "co", "zz"]) {
+      const db = env.authenticatedContext(uid).firestore();
+      await assertFails(getDoc(doc(db, `conversations/${PAIR}/private/state`)));
+      await assertFails(getDocs(collection(db, `conversations/${PAIR}/private`)));
+      await assertFails(setDoc(doc(db, `conversations/${PAIR}/private/state`), { blockedBy: [], updatedAt: 9 }));
+    }
+    const admin = env.authenticatedContext("ad", { admin: true }).firestore();
+    await assertFails(getDoc(doc(admin, `conversations/${PAIR}/private/state`)));
+    // Even on a REPORTED conversation, which is the one case an admin may get
+    // the parent doc, the block state stays closed.
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `conversations/${PAIR}`), { openReports: 1 });
+    });
+    await assertSucceeds(getDoc(doc(admin, `conversations/${PAIR}`)));
+    await assertFails(getDoc(doc(admin, `conversations/${PAIR}/private/state`)));
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(anon, `conversations/${PAIR}/private/state`)));
   });
 
   it("lets an admin get a REPORTED conversation only", async () => {
