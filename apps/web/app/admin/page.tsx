@@ -2061,9 +2061,15 @@ function AdminNotes({ uid }: { uid: string }) {
     return () => { cancelled = true; };
   }, [uid, reloadKey]);
   if (notes === "loading") {
+    // Fix round 2 (finding #5): CardRowsSkeleton is a full card-shaped
+    // placeholder, sized for the profile/track/gig queues it was built for;
+    // here it flashed in and straight back out for the common case (a user
+    // with no notes), a much bigger shape than the one-line list this
+    // section actually renders. A single inline Skeleton line matches the
+    // real content instead.
     return (
-      <div className="ml-4 mt-1">
-        <CardRowsSkeleton count={1} label="Loading notes" />
+      <div className="ml-4 mt-1" role="status" aria-label="Loading notes">
+        <Skeleton className="h-4 w-40" />
       </div>
     );
   }

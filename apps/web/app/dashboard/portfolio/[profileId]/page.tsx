@@ -86,7 +86,10 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
   const [profileReloadKey, setProfileReloadKey] = useState(0);
-  const [booking, setBooking] = useState<BookingDoc | null | "loading">("loading");
+  // Fix round 2 (finding #6): distinct "error" sentinel, added alongside
+  // the private/booking read below (was collapsed into `null`, which
+  // rendered exactly like a musician with no rates set at all).
+  const [booking, setBooking] = useState<BookingDoc | null | "loading" | "error">("loading");
   const [tracks, setTracks] = useState<TrackRow[] | "loading" | "error">("loading");
   const [tracksReloadKey, setTracksReloadKey] = useState(0);
   const [submitBusy, setSubmitBusy] = useState(false);
@@ -125,7 +128,10 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
     let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
       .then((s) => { if (!cancelled) setBooking(s.exists() ? (s.data() as BookingDoc) : null); })
-      .catch(() => { if (!cancelled) setBooking(null); });
+      .catch((e) => {
+        console.error("PortfolioEditor: booking rates getDoc failed", profileId, e);
+        if (!cancelled) setBooking("error");
+      });
     return () => { cancelled = true; unsub(); };
   }, [user, profileId, profileReloadKey]);
   // Own subscription, separate from TrackManager's below: the submit-lock
@@ -158,6 +164,19 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
         <ListError
           message="Couldn't load this profile."
           onRetry={() => { setProfile("loading"); setProfileReloadKey((k) => k + 1); }}
+        />
+      </main>
+    );
+  }
+  // Fix round 2 (finding #6): same shape as the profile listener's own
+  // error branch just above; shares profileReloadKey since both reads live
+  // in the same effect and already refetch together.
+  if (booking === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError
+          message="Couldn't load your booking rates."
+          onRetry={() => { setBooking("loading"); setProfileReloadKey((k) => k + 1); }}
         />
       </main>
     );

@@ -179,18 +179,17 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
       )}
 
       <div className="mt-8 grid gap-8">
-        {gigs === "error" && (
+        {/* Fix round 2 (finding #2): loading and error are now exclusive of
+            the list render below (previously only "loading" was excluded,
+            so an errored listener fell through to gigsList = [] and
+            rendered every ListSection's own empty label, with a "(0)"
+            count, underneath the error box). */}
+        {gigs === "error" ? (
           <ListError
             message="Couldn't load your gigs."
             onRetry={() => { setGigs("loading"); setGigsReloadKey((k) => k + 1); }}
           />
-        )}
-        {/* Fix round 1 (finding #8): a loading gigs list used to fall
-            through to gigsList = [], which rendered every section's own
-            "No open gigs." / "No drafts." / "Nothing here yet." empty
-            label, indistinguishable from a genuinely empty result. A single
-            loading skeleton stands in for all three sections instead. */}
-        {gigs === "loading" ? (
+        ) : gigs === "loading" ? (
           <div className="grid gap-2" role="status" aria-label="Loading your gigs">
             <Skeleton className="h-16 w-full" />
             <Skeleton className="h-16 w-full" />
@@ -214,7 +213,11 @@ export default function GigsList(props: { params: Promise<{ profileId: string }>
 
         <section className="grid gap-3 border-t border-gk-border pt-8">
           <h2 className="font-syne text-lg font-semibold text-gk-text">
-            Series ({series === "loading" || series === "error" ? 0 : series.length})
+            {/* Fix round 2 (finding #2): no "(0)" beside the heading while
+                loading or errored, matching BookingInbox's own header-count
+                convention: a count only ever appears once it's a real,
+                positive number. */}
+            Series{series !== "loading" && series !== "error" && series.length > 0 ? ` (${series.length})` : ""}
           </h2>
           {series === "error" ? (
             <ListError

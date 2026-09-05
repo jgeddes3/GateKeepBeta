@@ -159,7 +159,11 @@ export function MemberPayoutsCard({ uid }: { uid: string }) {
         <p className="flex flex-wrap items-center gap-2 font-sora text-sm text-gk-warning">
           <IconWarning size={16} className="shrink-0" aria-hidden="true" />
           Couldn&apos;t load payout status.
-          <Button onClick={() => setReloadKey((k) => k + 1)} variant="link" className="h-auto p-0">Retry</Button>
+          {/* Fix round 2 (finding #4): reset the sentinel to "loading"
+              before bumping the reload key, matching every other retry in
+              the app, so a persistent failure visibly retries instead of
+              silently re-firing the same effect dependencies. */}
+          <Button onClick={() => { setStatus("loading"); setReloadKey((k) => k + 1); }} variant="link" className="h-auto p-0">Retry</Button>
         </p>
       )}
       {typeof status === "object" && (
@@ -179,7 +183,7 @@ export function MemberPayoutsCard({ uid }: { uid: string }) {
           ) : !status.payoutsEnabled ? (
             <p className="flex flex-wrap items-center gap-2 font-sora text-sm text-gk-text">
               Verifying your account
-              <Button onClick={() => setReloadKey((k) => k + 1)} variant="link" className="h-auto p-0">Retry</Button>
+              <Button onClick={() => { setStatus("loading"); setReloadKey((k) => k + 1); }} variant="link" className="h-auto p-0">Retry</Button>
             </p>
           ) : (
             <div className="grid gap-3">

@@ -405,8 +405,16 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
     );
   }
 
+  // Fix round 2 (finding #7): StickyBuyBar itself renders nothing while
+  // totalQty is 0 (nothing picked yet, which is every render of a closed
+  // event that has tiers but is unavailable, and the only remaining shape
+  // that reaches this return with liveTiers.length === 0). The wrapping
+  // div's own bottom padding, reserved for that bar, is now conditioned on
+  // the same check, so a lone error box doesn't sit above dead space.
+  const showStickyBar = totalQty > 0 && (phase === "idle" || phase === "creating");
+
   return (
-    <div className="grid gap-4 pb-24">
+    <div className={`grid gap-4${showStickyBar ? " pb-24" : ""}`}>
       {unavailable && <ErrorBox message={unavailable} />}
       <TierPicker
         tiers={liveTiers}
@@ -434,7 +442,7 @@ export function BuyTicketsFlow({ eventId, eventStatus, startsAt, tiers, now: ini
           the braces half (the bar simply doesn't render clickable outside
           "idle"/"creating" at all), that guard is the belt (holds even if
           some other path ever reaches startPurchase). */}
-      {(phase === "idle" || phase === "creating") && (
+      {showStickyBar && (
         <StickyBuyBar
           totalQty={totalQty}
           totalCents={totalCents}

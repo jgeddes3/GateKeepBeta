@@ -11,13 +11,6 @@ import { saveSearch } from "./searchApi";
 // (Task 8's header-slot contract): reads the SAME live q/filters the face's
 // own useSearch instance holds, rather than a second copy of "what is this
 // search actually" that could drift from what's on screen.
-//
-// disabled carries its own title (SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE, the
-// exact copy validateSavedSearchInput's own empty-criteria failure uses
-// server-side) so a user who hovers a disabled button understands why
-// without having to click it first. The cap error (failed-precondition,
-// SAVED_SEARCH_LIMIT_MESSAGE) surfaces the same way: e.message is exactly
-// the HttpsError message the server sent, so this never restates it.
 export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: string; filters: SearchFilters }) {
   const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -40,21 +33,29 @@ export function SaveSearchButton({ face, q, filters }: { face: SearchFace; q: st
   };
 
   return (
-    <div className="flex items-center gap-2">
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        disabled={disabled || state === "saving"}
-        onClick={() => void onClick()}
-      >
-        {state === "saved" ? "Saved" : "Save search"}
-      </Button>
-      {/* Fix round 1 (finding #10): the disabled reason used to live only in
-          a title attribute, unreachable by keyboard or touch. Rendered as
-          visible text instead, mirroring EarningsPanel.tsx's own fix. */}
-      {disabled && <span className="font-sora text-xs text-gk-muted">{SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE}</span>}
-      {error && <span role="alert" className="font-sora text-xs text-gk-warning">{error}</span>}
+    // Fix round 2 (finding #1): the disabled hint used to render inline in
+    // this button's own row, which is the search header's own no-wrap flex
+    // row on every face (Task 8's headerSlot contract): at 360px that
+    // sentence wrapped onto several lines and squeezed the search input out
+    // of the row. Stacked onto its own line below the button now, and
+    // hidden below the sm breakpoint entirely, so the header row's own
+    // width never depends on this sentence fitting.
+    <div className="grid gap-1">
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={disabled || state === "saving"}
+          onClick={() => void onClick()}
+        >
+          {state === "saved" ? "Saved" : "Save search"}
+        </Button>
+        {error && <span role="alert" className="font-sora text-xs text-gk-warning">{error}</span>}
+      </div>
+      {disabled && (
+        <span className="hidden font-sora text-xs text-gk-muted sm:inline">{SAVED_SEARCH_EMPTY_CRITERIA_MESSAGE}</span>
+      )}
     </div>
   );
 }

@@ -91,36 +91,49 @@ function TierBars({ eventId }: { eventId: string }) {
 
 function EventListRow({ event, onManage }: { event: EventRow; onManage: () => void }) {
   const posterUrl = posterPublicUrl(event.posterPath);
+  const title = event.title || "Untitled event";
   // Fix round 1 (finding #6): the row used to be one giant <button> with
   // TierBars nested inside it, which meant a failed tier read could never
   // carry its own Retry button (an interactive element nested inside
   // another is invalid HTML, and would also steal clicks meant for the
-  // row). The row is a <div> now; only the title/date block (the row's own
-  // click affordance) is a <button>, and TierBars sits beside it as a
-  // sibling, free to render a normal ListError+Retry on error.
+  // row). Fix round 2 (finding #3): round 1's follow-up shrank the click
+  // target (and the focus ring) down to just the title/date text instead of
+  // the whole row. The row is `relative` now; a single `<button>` stretches
+  // over it with `absolute inset-0` (carrying the row's full look: border,
+  // hover, and the focus ring) and the row's accessible name (title, status,
+  // date) via `aria-label`, since its own text content is now decorative.
+  // Everything visible sits in a `pointer-events-none` layer so clicks fall
+  // through to that stretched button, except TierBars, which opts back into
+  // `pointer-events-auto` (and `relative z-10`, to paint above the button)
+  // so a failed tier read's own Retry button stays genuinely clickable and
+  // still isn't nested inside another interactive element.
   return (
-    <div className="flex w-full items-start gap-3.5 rounded-gk border border-gk-border bg-gk-surface p-3.5 transition-colors hover:border-gk-accent/50">
-      <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-gk-sm border border-gk-border bg-gk-surface">
-        {posterUrl ? (
-          <img src={posterUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
-        ) : (
-          <PhotoPlaceholder icon={<IconTicket size={18} aria-hidden="true" />} />
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <button
-          type="button" onClick={onManage}
-          className="block w-full text-left outline-none focus-visible:ring-2 focus-visible:ring-gk-focus"
-        >
+    <div className="relative flex w-full items-start gap-3.5 rounded-gk border border-gk-border bg-gk-surface p-3.5 transition-colors hover:border-gk-accent/50">
+      <button
+        type="button" onClick={onManage}
+        aria-label={`${title}, ${EVENT_STATUS_LABEL[event.status]}, ${formatEventFullDate(event.startsAt)} at ${formatGigTime(event.startsAt)}`}
+        className="absolute inset-0 rounded-gk outline-none focus-visible:ring-2 focus-visible:ring-gk-focus"
+      />
+      <div className="pointer-events-none flex w-full items-start gap-3.5">
+        <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-gk-sm border border-gk-border bg-gk-surface">
+          {posterUrl ? (
+            <img src={posterUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
+          ) : (
+            <PhotoPlaceholder icon={<IconTicket size={18} aria-hidden="true" />} />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate font-syne text-sm font-semibold text-gk-text">{event.title || "Untitled event"}</p>
+            <p className="truncate font-syne text-sm font-semibold text-gk-text">{title}</p>
             <Badge variant={EVENT_STATUS_BADGE[event.status]}>{EVENT_STATUS_LABEL[event.status]}</Badge>
           </div>
           <p className="mt-0.5 font-sora text-sm text-gk-muted">
             {formatEventFullDate(event.startsAt)} · {formatGigTime(event.startsAt)}
           </p>
-        </button>
-        <TierBars eventId={event.id} />
+          <div className="pointer-events-auto relative z-10">
+            <TierBars eventId={event.id} />
+          </div>
+        </div>
       </div>
     </div>
   );
