@@ -198,11 +198,19 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
     void callFn("markConversationRead", { profileId, conversationId }).catch(() => {});
   }, [messagesQ.state, profileId, conversationId]);
 
+  // markReadRef always points at the CURRENT render's markRead (reassigned
+  // every render, no deps array): the focus callback below is intentionally
+  // stable across renders (deps []), so without this indirection it would
+  // close over the very first render's markRead forever, whose guard sees
+  // messagesQ.state === "loading" permanently and never actually marks
+  // anything read on refocus.
+  const markReadRef = useRef(markRead);
+  useEffect(() => { markReadRef.current = markRead; });
+
   useFocusEffect(useCallback(() => {
     isFocusedRef.current = true;
-    markRead();
+    markReadRef.current();
     return () => { isFocusedRef.current = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- markRead is refreshed every render via useCallback above; only the focus transition itself should re-run this
   }, []));
 
   useEffect(() => {

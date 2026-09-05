@@ -11,9 +11,14 @@ import { tokens } from "../../../src/theme/tokens";
 // instead of reusing stale per-action state.
 export default function CuratorConversation() {
   const { activeContext } = useProfileContext();
-  const { conversationId } = useLocalSearchParams<{ conversationId: string }>();
-  const profileId = typeof activeContext === "object" && activeContext.type === "curator"
-    ? activeContext.profileId : null;
+  const { conversationId, acting } = useLocalSearchParams<{ conversationId: string; acting?: string }>();
+  // A non-empty `acting` param (SP12 fix round 1: MessageButton/BookingThread
+  // carry the acting profile on the route instead of switching the shared
+  // activeContext app-wide) wins over the derived activeContext profile;
+  // otherwise this falls back to the existing derivation exactly as before.
+  const profileId = acting
+    ? acting
+    : (typeof activeContext === "object" && activeContext.type === "curator" ? activeContext.profileId : null);
 
   if (!profileId || !conversationId) {
     return (

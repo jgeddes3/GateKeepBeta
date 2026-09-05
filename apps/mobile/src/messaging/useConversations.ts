@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, limit, onSnapshot, orderBy, query } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import type { ConversationRefDoc } from "@gatekeep/shared";
 
@@ -44,7 +44,7 @@ export function useConversations(profileId: string | null): {
     let cancelled = false;
     const { db } = getFirebase();
     const unsub = onSnapshot(
-      query(collection(db, `profiles/${profileId}/conversations`), orderBy("lastMessageAt", "desc")),
+      query(collection(db, `profiles/${profileId}/conversations`), orderBy("lastMessageAt", "desc"), limit(50)),
       (snap) => { if (!cancelled) setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as ConversationRefDoc) }))); },
       () => { if (!cancelled) setRows("error"); },
     );

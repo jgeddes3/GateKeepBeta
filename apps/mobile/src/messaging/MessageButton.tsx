@@ -19,19 +19,20 @@ import { tokens } from "../theme/tokens";
 // on the first send, so linking to a pair that has never been messaged is
 // safe and simply shows the empty state.
 //
-// Each Messages tab group's own thread screen resolves ITS profileId from
-// the shared activeContext, not from any param this button passes (Task
-// 10's app/(musician|curator)/messages/[conversationId].tsx), so switching
-// to the chosen acting profile here (same switchTo + navigate pairing
-// ContextSwitcher.tsx already uses) is required for the opened thread to
-// actually be the one this button just computed a pair id for.
+// Fix round 1 (review ruling): each Messages tab group's own thread screen
+// now reads an optional `acting` search param first, falling back to the
+// shared activeContext only when it's absent (Task 10's app/(musician|
+// curator)/messages/[conversationId].tsx). This button carries the chosen
+// acting profile on the route itself instead of calling switchTo, so a
+// press here never silently re-identifies a dual-role user app-wide just to
+// open one thread.
 export function MessageButton({ targetProfileId, targetProfileType, targetName, actingProfileId }: {
   targetProfileId: string;
   targetProfileType: ProfileType;
   targetName: string;
   actingProfileId?: string;
 }) {
-  const { myProfiles, switchTo } = useProfileContext();
+  const { myProfiles } = useProfileContext();
   const router = useRouter();
   const [picking, setPicking] = useState(false);
 
@@ -45,11 +46,10 @@ export function MessageButton({ targetProfileId, targetProfileType, targetName, 
     const pairId = targetProfileType === "musician"
       ? conversationPairId(targetProfileId, acting.profileId)
       : conversationPairId(acting.profileId, targetProfileId);
-    switchTo(acting);
     router.push(
       acting.type === "musician"
-        ? { pathname: "/(musician)/messages/[conversationId]", params: { conversationId: pairId } }
-        : { pathname: "/(curator)/messages/[conversationId]", params: { conversationId: pairId } },
+        ? { pathname: "/(musician)/messages/[conversationId]", params: { conversationId: pairId, acting: acting.profileId } }
+        : { pathname: "/(curator)/messages/[conversationId]", params: { conversationId: pairId, acting: acting.profileId } },
     );
   };
 
