@@ -146,8 +146,9 @@ launch.
 
 - `sendMessage({ fromProfileId, toProfileId, text })`: verified email; caller is a member of
   `fromProfileId`; the two profiles are one musician and one curator, both `approved`; the pair
-  is not blocked by either side; 30 messages per 10 minutes per sender profile (a rolling window
-  kept on the conversation doc); creates the conversation on first send; writes the message,
+  is not blocked by either side; 30 messages per 10 minutes per sender profile across all conversations (a rolling window in
+  the server-only `messageWindows/{profileId}` doc, read and trimmed inside the send
+  transaction); creates the conversation on first send; writes the message,
   `lastMessage`, `lastMessageAt`, and increments the recipient's unread count in one
   transaction; notifies the recipient profile's members under `message:{pairId}:{10-minute
   bucket}`.
