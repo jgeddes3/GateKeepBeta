@@ -36,6 +36,21 @@ export type ProfileSummary = { profileId: string; type: ProfileType; name: strin
 // a slow network. Added as new fields on the object both hooks already
 // return (useMyProfilesState's own callers only ever destructure the fields
 // they use), never a breaking change to useMyProfiles' bare-array shape.
+//
+// Round 2 ruling: `loaded` does NOT flip to `true` on a failed read.
+// SearchFaces, AppShell, dashboard/events, MessageButton, and OfferGigButton
+// all key on `loaded` (or the bare array from useMyProfiles) with no idea
+// this new `error` field even exists; if a failed read still set
+// `loaded: true`, every one of those five would silently render as though
+// the account holds zero profiles (a signed-in curator presented as a bare
+// fan, no retry) instead of staying in their existing skeleton/loading
+// state, which is what a genuine slow network already does to them. Leaving
+// `loaded` false on error preserves that pre-existing behaviour for every
+// consumer that only reads `loaded`; a caller that wants to distinguish
+// "still loading" from "failed and never going to load without a retry"
+// must check `error` itself (dashboard/messages/page.tsx does, BEFORE its
+// own `loaded` gate, since `loaded` alone would otherwise keep it stuck in
+// the skeleton forever on a real failure).
 function useMyProfilesInternal(uid: string | null): {
   profiles: ProfileSummary[]; loaded: boolean; error: boolean; retry: () => void;
 } {
@@ -69,8 +84,9 @@ function useMyProfilesInternal(uid: string | null): {
     }, (e) => {
       if (cancelled) return;
       console.error("useMyProfiles: members onSnapshot failed", uid, e);
+      // `loaded` deliberately stays as it was (false, on any first load):
+      // see the round-2 ruling above.
       setError(true);
-      setLoaded(true);
     });
     return () => { cancelled = true; unsubscribe(); };
   }, [uid, reloadKey]);

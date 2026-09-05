@@ -73,15 +73,17 @@ function MessagesBody() {
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in?next=/dashboard/messages"); }, [user, loading, router]);
 
-  if (loading || !user || !loaded) return <MessagesPageSkeleton />;
+  if (loading || !user) return <MessagesPageSkeleton />;
 
-  // Fix round, Important finding #4: useMyProfilesState's own members-read
-  // listener now surfaces a failed read as a real error state (previously
-  // no error callback at all: a permanent skeleton). `loaded` is already
-  // true by the time `error` can be true (the hook sets both together), so
-  // this is checked right after the loading gate above, before the
-  // approvedProfiles-empty branch below, which a stale [] from the failed
-  // read would otherwise satisfy and render the wrong "set one up" message.
+  // Fix round, Important finding #4 (round 2 ruling): useMyProfilesState's
+  // members-read listener now surfaces a failed read as a real error state,
+  // but `loaded` deliberately never flips to `true` on that failure (see
+  // useMyProfiles.ts's own round-2 comment: several other consumers key on
+  // `loaded` alone and must keep their pre-existing skeleton behaviour
+  // rather than silently rendering "zero profiles"). That means `error` has
+  // to be checked BEFORE the `loaded` gate below, not after: an error would
+  // otherwise leave this page stuck in MessagesPageSkeleton forever, with
+  // no way to ever reach a Retry.
   if (profilesError) {
     return (
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
@@ -92,6 +94,8 @@ function MessagesBody() {
       </main>
     );
   }
+
+  if (!loaded) return <MessagesPageSkeleton />;
 
   if (approvedProfiles.length === 0) {
     return (
