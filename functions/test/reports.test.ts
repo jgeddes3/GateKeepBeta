@@ -125,6 +125,89 @@ describe("reportConversation", () => {
     expect(await auditRows(res.reportId)).toHaveLength(1);
   });
 
+  // deleteProfile recursively deletes the profile doc together with its
+  // subcollections, the `conversations` mirror rows among them. Reproduced
+  // through the admin SDK because the callable itself only runs on a
+  // draft/rejected profile, and a profile that has been messaging is
+  // approved until an admin retroactively rejects it.
+  async function deleteProfileAsOwnerWould(profileId: string) {
+    const mirrors = await adb.collection(`profiles/${profileId}/conversations`).get();
+    await Promise.all(mirrors.docs.map((d) => d.ref.delete()));
+    await adb.doc(`profiles/${profileId}`).delete();
+  }
+
+  it("still files a report when the other participant's profile has been deleted", async () => {
+    // The abuse case this exists for: the offending profile is deleted by its
+    // own owner, and the side that was on the receiving end still has to be
+    // able to flag the thread. A vanished profile has no name and no mirror
+    // row, and insisting on one used to fail the whole call with `internal`.
+    const p = await makeMessagingPair("rc5");
+    await sendAs(p.musician.owner.user, p.musicianProfileId, p.curatorProfileId, "hello");
+    await deleteProfileAsOwnerWould(p.musicianProfileId);
+
+    const res = await callFn<Record<string, unknown>, { reportId: string }>("reportConversation",
+      { profileId: p.curatorProfileId, conversationId: p.pairId, reason: "abusive" },
+      p.curator.owner.user);
+    expect(await report(res.reportId)).toMatchObject({
+      kind: "conversation", targetPath: p.pairId, status: "open", reason: "abusive",
+    });
+    // The shared doc and the SURVIVING mirror both carry the count; the
+    // deleted side gains no ghost row.
+    expect((await conversation(p.pairId))!.openReports).toBe(1);
+    expect((await mirror(p.curatorProfileId, p.pairId))!.openReports).toBe(1);
+    expect(await mirror(p.musicianProfileId, p.pairId)).toBeUndefined();
+    // The surviving row keeps the name it already had rather than being
+    // merged into a blank one.
+    expect((await mirror(p.curatorProfileId, p.pairId))!.otherProfileName).toBe("The Act");
+  });
+
+  it("still resolves a conversation report when a participant's profile has been deleted", async () => {
+    // The other half of the same story, and the worse one: a report that
+    // cannot be resolved never leaves the admin panel, and its openReports > 0
+    // keeps the thread admin-readable forever.
+    const p = await makeMessagingPair("rc6");
+    await sendAs(p.musician.owner.user, p.musicianProfileId, p.curatorProfileId, "hello");
+    const res = await callFn<Record<string, unknown>, { reportId: string }>("reportConversation",
+      { profileId: p.curatorProfileId, conversationId: p.pairId, reason: "abusive" },
+      p.curator.owner.user);
+    expect((await conversation(p.pairId))!.openReports).toBe(1);
+    await deleteProfileAsOwnerWould(p.musicianProfileId);
+
+    const admin = await makeAdminUser("rc6a");
+    await callFn("resolveReport", { reportId: res.reportId }, admin.user);
+    expect(await report(res.reportId)).toMatchObject({ status: "resolved", resolvedBy: admin.uid });
+    expect((await conversation(p.pairId))!.openReports).toBe(0);
+    expect((await mirror(p.curatorProfileId, p.pairId))!.openReports).toBe(0);
+    expect(await mirror(p.musicianProfileId, p.pairId)).toBeUndefined();
+    expect(await auditRows(res.reportId)).toMatchObject([
+      { actorUid: admin.uid, action: "report_resolved", detail: `conversation ${p.pairId}` },
+    ]);
+  });
+
+  it("still resolves a conversation report when BOTH participant profiles have been deleted", async () => {
+    // The sharpest form of the same defect. With one side gone the surviving
+    // mirror still carries a name, so the old code merely resurrected a row
+    // under the deleted profile; with both gone neither side has a name or a
+    // mirror, the write refused outright, and resolveReport failed with
+    // `internal`. The report then never left the admin panel, and its
+    // openReports > 0 kept the thread admin-readable for good.
+    const p = await makeMessagingPair("rc7");
+    await sendAs(p.musician.owner.user, p.musicianProfileId, p.curatorProfileId, "hello");
+    const res = await callFn<Record<string, unknown>, { reportId: string }>("reportConversation",
+      { profileId: p.curatorProfileId, conversationId: p.pairId, reason: "abusive" },
+      p.curator.owner.user);
+    await deleteProfileAsOwnerWould(p.musicianProfileId);
+    await deleteProfileAsOwnerWould(p.curatorProfileId);
+
+    const admin = await makeAdminUser("rc7a");
+    await callFn("resolveReport", { reportId: res.reportId }, admin.user);
+    expect(await report(res.reportId)).toMatchObject({ status: "resolved", resolvedBy: admin.uid });
+    expect((await conversation(p.pairId))!.openReports).toBe(0);
+    expect(await mirror(p.musicianProfileId, p.pairId)).toBeUndefined();
+    expect(await mirror(p.curatorProfileId, p.pairId)).toBeUndefined();
+    expect(await auditRows(res.reportId)).toHaveLength(1);
+  });
+
   it("caps one user at REPORT_RATE_MAX reports per window, across targets and across both surfaces", async () => {
     const e = await makePublishedBookingEvent("rl1");
     const p = await makeMessagingPair("rl1p");

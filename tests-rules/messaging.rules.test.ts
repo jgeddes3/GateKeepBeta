@@ -28,11 +28,17 @@ const seed = async (path: string, data: object) => {
 
 const PAIR = "mus1__cur1";
 
-async function seedPair() {
+// The two profiles and their owning members, and nothing else: the state of
+// a pair that has never exchanged a message.
+async function seedProfiles() {
   await seed("profiles/mus1", { type: "musician", status: "approved", name: "The Act" });
   await seed("profiles/cur1", { type: "curator", status: "approved", name: "The Room" });
   await seed("profiles/mus1/members/mo", { uid: "mo", role: "admin", label: "", joinedAt: 1 });
   await seed("profiles/cur1/members/co", { uid: "co", role: "admin", label: "", joinedAt: 1 });
+}
+
+async function seedPair() {
+  await seedProfiles();
   // Task 3 fix round 1: the conversation doc carries ONLY what both sides may
   // see. The unread map and the block list moved off it (a member of either
   // side can read this doc, which made the map a read-receipt leak and the
@@ -70,6 +76,28 @@ describe("conversations and messages", () => {
       await assertSucceeds(getDoc(doc(db, `conversations/${PAIR}`)));
       await assertSucceeds(getDoc(doc(db, `conversations/${PAIR}/messages/m1`)));
       await assertSucceeds(getDocs(query(collection(db, `conversations/${PAIR}/messages`), orderBy("at", "asc"))));
+    }
+  });
+
+  it("denies a messages listen on a pair that has never been messaged", async () => {
+    await seedProfiles();
+    // No conversations/{PAIR} doc, because nobody has sent anything yet. The
+    // messages rule proves its audience with a get() on that parent, and a
+    // get() on a doc that does not exist yields no data to read
+    // musicianProfileId off, so the listen is denied even for a real member of
+    // either side.
+    //
+    // That denial is the intended posture, not a bug: the web and mobile
+    // thread screens attach the messages listener only once this profile's
+    // mirror row exists, and the mirror is written in the same transaction as
+    // the first message. A rule that answered "allowed, empty" for a
+    // non-existent parent would have to fall back to something other than the
+    // parent's participant ids, and the only candidates (a path-derived pair
+    // id, an unbound resource.data) are exactly what the comments above this
+    // block rule out.
+    for (const uid of ["mo", "co"]) {
+      const db = env.authenticatedContext(uid).firestore();
+      await assertFails(getDocs(query(collection(db, `conversations/${PAIR}/messages`), orderBy("at"))));
     }
   });
 

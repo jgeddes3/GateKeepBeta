@@ -89,18 +89,34 @@ function requireReportId(reportId: unknown): string {
   return reportId;
 }
 
-// Display names for both sides of a pair, read BEFORE the transaction (a
-// non-transactional read of two public docs, neither of which the transaction
-// writes). writeConversationMirrors refuses to create a nameless mirror, so a
-// counter bump has to arrive holding the names in case a side's mirror is
-// somehow missing.
-async function pairProfileNames(conversationId: string): Promise<Record<string, string | undefined>> {
+// Display names for both sides of a pair, plus the ids whose profile doc is
+// GONE, read BEFORE the transaction (a non-transactional read of two public
+// docs, neither of which the transaction writes).
+//
+// Names, because writeConversationMirrors refuses to create a nameless
+// mirror, so a counter bump has to arrive holding them in case a side's
+// mirror is somehow missing. `gone`, because a participant profile can be
+// deleted by its own owner (deleteProfile, on a draft or retroactively
+// rejected profile), which takes the profile doc AND that profile's
+// conversations mirror subcollection with it. Such a side has no name and no
+// row, and demanding one made every report on the surviving side fail with
+// `internal`: the abusive party could delete its profile and leave the other
+// side unable to file, while an already-filed report could not be resolved,
+// so it sat in the admin panel forever and its openReports > 0 kept the
+// thread admin-readable. Skipping the vanished side's mirror is the fix.
+interface PairProfiles { names: Record<string, string | undefined>; gone: string[] }
+
+async function pairProfiles(conversationId: string): Promise<PairProfiles> {
   const db = getFirestore();
   const ids = conversationId.split("__").filter((id) => isValidDocId(id));
   const snaps = await Promise.all(ids.map((id) => db.doc(`profiles/${id}`).get()));
   const names: Record<string, string | undefined> = {};
-  ids.forEach((id, i) => { names[id] = (snaps[i].data() as ProfileDoc | undefined)?.name; });
-  return names;
+  const gone: string[] = [];
+  ids.forEach((id, i) => {
+    names[id] = (snaps[i].data() as ProfileDoc | undefined)?.name;
+    if (!snaps[i].exists) gone.push(id);
+  });
+  return { names, gone };
 }
 
 // The read half of a conversation counter change, inside the caller's
@@ -113,7 +129,7 @@ async function pairProfileNames(conversationId: string): Promise<Record<string, 
 // as a refusal; resolveReport tolerates it, because a report must still be
 // resolvable after its target has gone.
 async function stageConversationReports(
-  tx: Transaction, conversationId: string, names: Record<string, string | undefined>,
+  tx: Transaction, conversationId: string, profiles: PairProfiles,
 ): Promise<((delta: 1 | -1) => void) | null> {
   const db = getFirestore();
   const convRef = db.doc(`conversations/${conversationId}`);
@@ -140,7 +156,11 @@ async function stageConversationReports(
     // just happened to this thread. The count is all either side gets.
     const next: ConversationDoc = { ...conv, openReports };
     tx.update(convRef, { openReports });
-    writeConversationMirrors(tx, next, blockedBy, names, { mirrorExists });
+    // A deleted participant's mirror is skipped, never conjured back: the
+    // count on the shared doc still moves, so the report is filable and the
+    // resolve still clears the panel row and drops openReports back to zero.
+    writeConversationMirrors(tx, next, blockedBy, profiles.names,
+      { mirrorExists, skipProfileIds: profiles.gone });
   };
 }
 
@@ -163,7 +183,7 @@ export const reportConversation = onCall<{ profileId: string; conversationId: st
     // nothing about who talks to whom.
     await requireConversationParticipant(profileId, conversationId, uid, "member");
 
-    const names = await pairProfileNames(conversationId);
+    const profiles = await pairProfiles(conversationId);
     const db = getFirestore();
     const reportId = `conv:${conversationId}:${uid}`;
     const reportRef = db.doc(`reports/${reportId}`);
@@ -177,7 +197,7 @@ export const reportConversation = onCall<{ profileId: string; conversationId: st
       const prior = existing.exists ? (existing.data() as ReportDoc) : null;
       if (prior?.status === "open") throw new HttpsError("already-exists", REPORT_DUPLICATE_MESSAGE);
       const spend = await stageReportWindow(tx, uid, now);
-      const apply = await stageConversationReports(tx, conversationId, names);
+      const apply = await stageConversationReports(tx, conversationId, profiles);
       // A conversation that does not exist answers with the same refusal as a
       // missing membership: no not-found anywhere on this path either.
       if (!apply) throw new HttpsError("permission-denied", CONVERSATION_DENIED_MESSAGE);
@@ -237,13 +257,15 @@ export const resolveReport = onCall<{ reportId: string }>({ region: "us-central1
   const reportRef = db.doc(`reports/${reportId}`);
   // One read outside the transaction, only to learn which target shape this
   // is: a conversation resolve needs both profile names in hand before the
-  // transaction opens (mirrors again). The transaction re-reads the report and
-  // decides on that copy, so a concurrent resolve still cannot double-count.
+  // transaction opens (mirrors again), and needs to know which of the two
+  // profiles has since been deleted, so the resolve skips that side's mirror
+  // instead of failing on it. The transaction re-reads the report and decides
+  // on that copy, so a concurrent resolve still cannot double-count.
   const pre = await reportRef.get();
   if (!pre.exists) throw new HttpsError("not-found", "Report not found.");
   const preReport = pre.data() as ReportDoc;
-  const names = preReport.kind === "conversation"
-    ? await pairProfileNames(preReport.targetPath) : {};
+  const profiles: PairProfiles = preReport.kind === "conversation"
+    ? await pairProfiles(preReport.targetPath) : { names: {}, gone: [] };
 
   const now = Date.now();
   const resolved = await db.runTransaction(async (tx) => {
@@ -254,7 +276,7 @@ export const resolveReport = onCall<{ reportId: string }>({ region: "us-central1
     // also keeps the audit log honest, one row per real resolution.
     if (report.status === "resolved") return null;
     if (report.kind === "conversation") {
-      const apply = await stageConversationReports(tx, report.targetPath, names);
+      const apply = await stageConversationReports(tx, report.targetPath, profiles);
       tx.update(reportRef, { status: "resolved", resolvedBy: uid, resolvedAt: now });
       // A vanished conversation is not an error: the row still has to leave
       // the panel.

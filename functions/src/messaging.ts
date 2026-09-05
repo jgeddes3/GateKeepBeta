@@ -85,12 +85,26 @@ type MirrorWrite = Omit<Partial<ConversationRefDoc>, "unread"> & { unread?: Fiel
 // one. Every other side gets increment(0), which initializes the field to 0
 // on a fresh mirror and leaves an existing count exactly where it was. That
 // is why no mirror read is needed to keep the two counts independent.
+//
+// `opts.skipProfileIds` names sides with NO mirror to write at all, because
+// the profile itself is gone: deleteProfile recursively deletes the profile
+// doc together with its `conversations` subcollection, so a deleted
+// participant has neither a name nor a row, and the rule above would refuse
+// the whole write. That refusal used to strand the surviving side (a report
+// on the thread failed with `internal`, and the resolve that would have
+// cleared it failed the same way, so the row never left the admin panel).
+// The counter change on the shared conversation doc is the caller's, and it
+// still happens; only the vanished profile's row is skipped.
 export function writeConversationMirrors(
   tx: Transaction,
   conversation: ConversationDoc,
   blockedBy: string[],
   names: Record<string, string | undefined>,
-  opts: { unreadIncrementFor?: string; mirrorExists?: Record<string, boolean> } = {},
+  opts: {
+    unreadIncrementFor?: string;
+    mirrorExists?: Record<string, boolean>;
+    skipProfileIds?: string[];
+  } = {},
 ): void {
   const db = getFirestore();
   const pairId = conversationPairId(conversation.musicianProfileId, conversation.curatorProfileId);
@@ -99,6 +113,7 @@ export function writeConversationMirrors(
     { me: conversation.curatorProfileId, other: conversation.musicianProfileId, otherType: "musician" as const },
   ];
   for (const side of sides) {
+    if (opts.skipProfileIds?.includes(side.me)) continue;
     const otherProfileName = names[side.other];
     if (otherProfileName === undefined && opts.mirrorExists?.[side.me] !== true) {
       throw new HttpsError("internal", "A new conversation mirror needs the other profile's name.");
