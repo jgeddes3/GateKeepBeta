@@ -1,4 +1,4 @@
-import { Stack, useRouter, useSegments } from "expo-router";
+import { Stack, useRouter, useSegments, usePathname, type Href } from "expo-router";
 import { useEffect, useRef } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { View } from "react-native";
@@ -41,18 +41,40 @@ function MaybeStripeProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// SP11: the routes an incoming universal/app link can land on. `e` and `u`
+// are the link shims themselves; `event`, `artist` and `venue` are the
+// screens they redirect to, and a cold start can already have been through
+// that redirect by the time auth resolves, so both halves count.
+const LINK_ROUTES = ["e", "u", "event", "artist", "venue"];
+
 function Gate() {
   const { user, loading } = useAuth();
   const segments = useSegments();
+  const pathname = usePathname();
   const router = useRouter();
   const t = useTokens();
   const { active } = useThemeChoice();
+  // SP11: a universal link that cold-starts the app for a SIGNED-OUT fan is
+  // bounced to sign-in below, and without this the destination is simply
+  // lost: they land on Home with no idea what they tapped. The href is kept
+  // in a ref across the sign-in round trip and pushed once, mirroring the
+  // push-tap posture in the effect below (both wait for a user, both push on
+  // top of the tab root so Back goes Home).
+  const pendingLink = useRef<Href | null>(null);
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === "(auth)";
-    if (!user && !inAuthGroup) router.replace("/(auth)/sign-in");
-    if (user && inAuthGroup) router.replace("/");
-  }, [user, loading, segments, router]);
+    if (!user && !inAuthGroup) {
+      if (LINK_ROUTES.includes(segments[0] ?? "")) pendingLink.current = pathname as Href;
+      router.replace("/(auth)/sign-in");
+    }
+    if (user && inAuthGroup) {
+      const href = pendingLink.current;
+      pendingLink.current = null;
+      router.replace("/");
+      if (href) router.push(href);
+    }
+  }, [user, loading, segments, pathname, router]);
 
   // Push taps (sp1 audit finding 8, sp4 finding 5, sp6 finding 10). A tap
   // while the app is running arrives through the response listener; a tap
