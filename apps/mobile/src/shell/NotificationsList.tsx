@@ -1,12 +1,12 @@
-import { Pressable, FlatList } from "react-native";
+import { Pressable, FlatList, View } from "react-native";
 import { useEffect, useState } from "react";
 import { useRouter, type Href } from "expo-router";
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
-import { Text } from "../ui";
+import { Badge, Text } from "../ui";
 import { tokens } from "../theme/tokens";
-import { notificationHref, type NotificationDoc, type ProfileDoc } from "@gatekeep/shared";
+import { notificationHref, UNREAD_MARKER_LABEL, type NotificationDoc, type ProfileDoc } from "@gatekeep/shared";
 
 export function NotificationsList() {
   const { user } = useAuth();
@@ -61,9 +61,20 @@ export function NotificationsList() {
       ListHeaderComponent={<Text variant="title">Notifications</Text>}
       ListEmptyComponent={<Text variant="body" muted style={{ padding: tokens.space.md }}>No notifications yet.</Text>}
       renderItem={({ item }) => (
+        // SP12 follow-on (audit #26): read no longer relies on opacity
+        // alone. An unread row carries a "New" Badge (a real text channel,
+        // not just weight/colour) and the accessibilityLabel repeats it so
+        // VoiceOver/TalkBack announce it too; a read row's title just goes
+        // muted, matching the web twin.
         <Pressable onPress={() => onPress(item)}
-          style={{ padding: tokens.space.md, opacity: item.read ? 0.5 : 1 }}>
-          <Text variant="label">{item.title}</Text>
+          accessibilityLabel={item.read ? item.title : `${UNREAD_MARKER_LABEL}, ${item.title}`}
+          style={{ padding: tokens.space.md }}>
+          {!item.read && (
+            <View style={{ marginBottom: tokens.space.xs, alignSelf: "flex-start" }}>
+              <Badge label={UNREAD_MARKER_LABEL} />
+            </View>
+          )}
+          <Text variant="label" muted={item.read}>{item.title}</Text>
           <Text variant="body" muted>{item.body}</Text>
         </Pressable>
       )} />

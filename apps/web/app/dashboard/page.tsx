@@ -7,7 +7,7 @@ import { getFirebase } from "../../src/lib/firebase";
 import { callFn } from "../../src/lib/callable";
 import { useAuth } from "../../src/auth/AuthProvider";
 import { cn } from "../../src/lib/utils";
-import { notificationHref, type ProfileType, type ProfileStatus, type ProfileDoc, type NotificationDoc } from "@gatekeep/shared";
+import { notificationHref, UNREAD_MARKER_LABEL, type ProfileType, type ProfileStatus, type ProfileDoc, type NotificationDoc } from "@gatekeep/shared";
 import { SavedSearches } from "../../src/search/SavedSearches";
 import { MemberPayoutsCard } from "../../src/payments/MemberPayoutsCard";
 import { AccountCard } from "../../src/account/AccountCard";
@@ -211,6 +211,17 @@ function NotificationListRow({ n, markRead }: { n: NotificationRow; markRead: (i
       />
       <span className="min-w-0 flex-1">
         <span className={cn("block font-sora text-sm font-semibold", n.read ? "text-gk-muted" : "text-gk-text")}>
+          {/* SP12 follow-on (audit #26): "New" is a real text channel beside
+              the dot and the weight change, so unread is not carried by
+              colour and opacity alone. Rendered for screen readers and on
+              screen: a small muted-accent pill reads at a glance and does
+              not add a second ember to the row (the dot already is one, and
+              the pill reuses it rather than introducing another). */}
+          {!n.read && (
+            <span className="mr-2 rounded-gk-sm bg-gk-accent/14 px-1.5 py-0.5 align-middle font-sora text-[11px] font-medium text-gk-focus">
+              {UNREAD_MARKER_LABEL}
+            </span>
+          )}
           {n.title}
         </span>
         <span className="mt-0.5 block font-sora text-sm text-gk-muted">{n.body}</span>
