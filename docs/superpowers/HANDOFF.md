@@ -168,6 +168,12 @@ sub-project 11. Detail reports live in `docs/superpowers/audit/` and
 8. `isLinkableAct` (booking, or tagged and accepted) is the one predicate for treating a lineup
    act as a linked artist; a new consumer of `lineup` must use it, never `kind === "booking"`
    alone (`sp11-rulings.md` ruling 12).
+9. `updateAccount` is the only writer of `displayName`, `homeCity`, and `homeGeo`; the
+   `users/{uid}` owner rule allows `photoUrl` only, so a new client write of those fields must go
+   through the callable (`sp11-rulings.md` ruling 6).
+10. Tagged lineup acts are created only by `tagEventArtist` and their status is written only by
+    `respondToArtistTag`; `updateEvent` reconciles a resent tag against the doc and refuses an
+    invented one (`sp11-rulings.md` ruling 1).
 
 ## Dev environment quickstart
 
