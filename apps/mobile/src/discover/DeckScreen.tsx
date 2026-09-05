@@ -395,7 +395,14 @@ export function DeckScreen() {
                 <IconMusicNotes size={48} color={t.muted} />
                 <Text variant="heading" style={{ textAlign: "center" }}>Nothing to show yet</Text>
                 <Text muted style={{ textAlign: "center" }}>
-                  {location.location
+                  {/* Fix round 1, finding 2: the ", or turn on location"
+                      clause only makes sense when the deck isn't ranked by
+                      distance at all. A fan already ranked by their home
+                      city (position set from home.homeGeo, device location
+                      still absent) gets the plain sentence; the button below
+                      still offers device location on its own, since it is
+                      more precise than a home city. */}
+                  {position
                     ? "Follow a few genres and check back."
                     : "Follow a few genres and check back, or turn on location."}
                 </Text>
