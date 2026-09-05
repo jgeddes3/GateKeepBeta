@@ -155,17 +155,20 @@ story so that the next sub-project (Messaging and the optional follow-ons) is th
     Removing the act entirely goes through the existing lineup edit path.
   - `respondToArtistTag({ eventId, musicianProfileId, accept })`: musician profile admin; the act
     must be `pending`; accept sets `accepted`, adds the id, and, when the event is published, fans
-    out `show_announced` to that artist's followers under the dedupe id
-    `show_announced:{eventId}:{musicianProfileId}` (the publish path's id shape, so a later
-    publish cannot double-send); decline sets `declined` (kept as `tagged/declined` in the doc for
+    out `show_announced` to that artist's followers under the publish path's own per-event dedupe
+    id (`announce:{eventId}`), so a fan who already heard about the show at publish is not told
+    twice and a later publish cannot double-send; decline sets `declined` (kept as `tagged/declined` in the doc for
     the curator's editor; public readers render it as a plain name).
   - `publishEvent`: for every `pending` tagged act, send `artist_tag` to that musician's admins
     (dedupe `artist_tag:{eventId}:{musicianProfileId}`); accepted tagged acts already ride the
     existing follower fan-out through `lineupMusicianProfileIds`.
 - Search index: the events trigger already re-projects on write; the show projection reads
   `ageRestriction`; the artist projection's `busyDays` keeps using `lineupMusicianProfileIds`.
-- Deep-link verification route handlers live under `apps/web/app/.well-known/` and read the four
-  env values at request time.
+- Deep-link verification route handlers live under `apps/web/app/well-known/` (a dot-prefixed
+  app-router segment is unreliable) with `next.config.ts` rewrites that keep the public
+  `/.well-known/...` URLs, and read the four env values at request time. Mobile also gains a
+  one-line `app/e/[eventId].tsx` redirect so the web path shape resolves natively. Shared profile
+  links use `/u/{handle}` (the browser redirects to the canonical `/@{handle}`).
 
 ## 6. Messages (final copy)
 
