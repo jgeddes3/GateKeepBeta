@@ -13,6 +13,7 @@ import { validateLookingFor, type ProfileDoc, type ProfileStatus, type CuratorDe
 import { Button } from "../../../../src/ui/button";
 import { Badge } from "../../../../src/ui/badge";
 import { Skeleton } from "../../../../src/ui/skeleton";
+import { useConfirm } from "../../../../src/ui/confirm-dialog";
 import { IconCheck, IconCircle, IconWarning } from "../../../../src/ui/icons";
 
 // Same status -> tint mapping as the musician portfolio editor and the
@@ -73,6 +74,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   // A single onSnapshot subscription, re-run when profileId changes: no
@@ -134,9 +136,11 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
   };
 
   const deleteDraft = async () => {
-    const ok = window.confirm(
-      `Delete "${profile.name}"? This permanently deletes the profile and its photos, ` +
-      `and releases the handle @${profile.handle}. This can't be undone.`);
+    const ok = await confirm({
+      title: `Delete "${profile.name}"?`,
+      body: `This permanently deletes the profile and its photos, and releases the handle @${profile.handle}. This can't be undone.`,
+      destructive: true,
+    });
     if (!ok) return;
     setDeleteBusy(true);
     setDeleteError(null);
@@ -292,6 +296,7 @@ export default function CuratorEditor(props: { params: Promise<{ profileId: stri
           </section>
         )}
       </div>
+      {confirmDialog}
     </main>
   );
 }

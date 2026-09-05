@@ -15,6 +15,7 @@ import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
 import { ListError } from "../ui/ListError";
+import { useConfirm } from "../ui/confirm-dialog";
 import { IconSearch, IconUser, IconWarning } from "../ui/icons";
 
 // Sub-project 6 task 10 (brief anatomy: "AttendeeList: live onSnapshot
@@ -59,6 +60,7 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
 }) {
   const [busy, setBusy] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const canRefund = refundable && (row.status === "valid" || row.status === "checked_in");
 
   const undo = async () => {
@@ -73,7 +75,12 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
   };
 
   const refund = async () => {
-    if (!window.confirm(`Refund ${row.ownerName}'s "${row.tierName}" ticket? This can't be undone.`)) return;
+    const ok = await confirm({
+      title: `Refund ${row.ownerName}'s "${row.tierName}" ticket?`,
+      body: "This can't be undone.",
+      destructive: true,
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await callFn("refundTicket",
@@ -122,6 +129,7 @@ function AttendeeRowView({ curatorProfileId, eventId, row, refundable, onError }
           </Button>
         )}
       </div>
+      {confirmDialog}
     </li>
   );
 }

@@ -14,10 +14,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
+import { ErrorBox } from "../ui/ErrorBox";
+import { useConfirm } from "../ui/confirm-dialog";
 import { IconTrash } from "../ui/icons";
 
 // Sub-project 3's curator equivalent of ../portfolio/PortfolioForms.tsx:
-// same shapes (busy-locked save, alert-on-failure, seed-once-from-`initial`
+// same shapes (busy-locked save, error-on-failure, seed-once-from-`initial`
 // local state) applied to CuratorDetails' fields instead of PortfolioData's.
 // Kept in its own file (mirrors functions/src/curator.ts being split from
 // portfolio.ts server-side) rather than folded into PortfolioForms.tsx,
@@ -25,17 +27,21 @@ import { IconTrash } from "../ui/icons";
 // was widened there, plus the Chip/formatChipLabel restyle helpers this
 // file now reuses too, see their comments).
 
-const callOrAlert = async (name: string, data: object): Promise<boolean> => {
-  try { await callFn(name, data); return true; }
-  catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
+// Task 19 (L70): returns the friendly failure message instead of
+// window.alert()-ing it, so every caller below can show it as its own
+// inline ErrorBox line rather than a native dialog. null means success.
+const callOrError = async (name: string, data: object): Promise<string | null> => {
+  try { await callFn(name, data); return null; }
+  catch (e) { return e instanceof Error ? e.message : "Save failed. Try again."; }
 };
 
 export function AboutForm({ profileId, initial }: { profileId: string; initial: string | undefined }) {
   const [about, setAbout] = useState(initial ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const save = async () => {
     setBusy(true);
-    await callOrAlert("updateCuratorProfile", { profileId, about });
+    setError(await callOrError("updateCuratorProfile", { profileId, about }));
     setBusy(false);
   };
   return (
@@ -55,6 +61,7 @@ export function AboutForm({ profileId, initial }: { profileId: string; initial: 
             onChange={(e) => setAbout(e.target.value)}
           />
         </div>
+        {error && <ErrorBox message={error} />}
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save about"}
         </Button>
@@ -69,25 +76,27 @@ export function LocationForm({ profileId, subtype, initial }:
   const [address, setAddress] = useState(initial?.address ?? "");
   const [city, setCity] = useState(initial?.city ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const save = async () => {
     const trimmedCity = city.trim();
     if (trimmedCity.length < 1 || trimmedCity.length > MAX_CITY_LENGTH) {
-      window.alert(`City is required (1-${MAX_CITY_LENGTH} characters).`);
+      setError(`City is required (1-${MAX_CITY_LENGTH} characters).`);
       return;
     }
     if (isVenue && address.trim().length > MAX_ADDRESS_LENGTH) {
-      window.alert(`Address must be at most ${MAX_ADDRESS_LENGTH} characters.`);
+      setError(`Address must be at most ${MAX_ADDRESS_LENGTH} characters.`);
       return;
     }
     setBusy(true);
+    setError(null);
     // Planners/hosts must NOT send an address: updateCuratorProfile rejects
     // a non-empty one from a non-venue with "Only venues can set a street
     // address." This form never renders the address input for them, so
     // there's nothing typed to accidentally send, but the payload is built
     // explicitly (not just "whatever's in the address input") as a second
     // line of defense against that server error.
-    await callOrAlert("updateCuratorProfile",
-      { profileId, location: { city: trimmedCity, address: isVenue ? (address.trim() || null) : null } });
+    setError(await callOrError("updateCuratorProfile",
+      { profileId, location: { city: trimmedCity, address: isVenue ? (address.trim() || null) : null } }));
     setBusy(false);
   };
   return (
@@ -125,6 +134,7 @@ export function LocationForm({ profileId, subtype, initial }:
         <p className="font-sora text-xs text-gk-muted">
           Currently saved: {initial?.city || "none yet"}{initial?.neighborhood ? ` (${initial.neighborhood})` : ""}
         </p>
+        {error && <ErrorBox message={error} />}
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save location"}
         </Button>
@@ -138,6 +148,7 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
   const [actSizes, setActSizes] = useState<ActSize[]>(initial?.actSizes ?? []);
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const toggleGenre = (g: string) => setGenres((cur) => cur.includes(g) ? cur.filter((x) => x !== g) : [...cur, g]);
   const toggleActSize = (a: ActSize) => setActSizes((cur) => cur.includes(a) ? cur.filter((x) => x !== a) : [...cur, a]);
   const save = async () => {
@@ -147,9 +158,9 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
     // run here first so a curator gets the exact server-worded reason
     // (e.g. "Pick at least one genre.") without a round-trip.
     const v = validateLookingFor(input);
-    if (!v.ok) { window.alert(v.reason); return; }
+    if (!v.ok) { setError(v.reason); return; }
     setBusy(true);
-    await callOrAlert("updateCuratorProfile", { profileId, lookingFor: input });
+    setError(await callOrError("updateCuratorProfile", { profileId, lookingFor: input }));
     setBusy(false);
   };
   return (
@@ -189,6 +200,7 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
             onChange={(e) => setNotes(e.target.value)}
           />
         </div>
+        {error && <ErrorBox message={error} />}
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save preferences"}
         </Button>
@@ -214,6 +226,7 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [advertisingInterest, setAdvertisingInterest] = useState(initialAdvertising ?? false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
     let capacityNum: number | null = null;
@@ -221,24 +234,25 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
     if (raw !== "") {
       const n = Number(raw);
       if (!Number.isInteger(n) || n < 0 || n > MAX_CAPACITY) {
-        window.alert(`Capacity must be a whole number from 0 to ${MAX_CAPACITY}.`);
+        setError(`Capacity must be a whole number from 0 to ${MAX_CAPACITY}.`);
         return;
       }
       capacityNum = n;
     }
     if (notes.length > MAX_AMENITY_NOTES_LENGTH) {
-      window.alert(`Amenity notes must be at most ${MAX_AMENITY_NOTES_LENGTH} characters.`);
+      setError(`Amenity notes must be at most ${MAX_AMENITY_NOTES_LENGTH} characters.`);
       return;
     }
     setBusy(true);
+    setError(null);
     // Both fields land in one updateCuratorProfile call: the brief groups
     // "amenities + advertising toggle" as a single section/save, and the
     // callable already accepts them as independent partial-update keys.
-    await callOrAlert("updateCuratorProfile", {
+    setError(await callOrError("updateCuratorProfile", {
       profileId,
       amenities: { capacity: capacityNum, hasPA, hasBackline, indoorOutdoor, notes: notes.trim() || null },
       advertisingInterest,
-    });
+    }));
     setBusy(false);
   };
 
@@ -300,6 +314,7 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
             Interested in advertising opportunities on GateKeep
           </label>
         </div>
+        {error && <ErrorBox message={error} />}
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save amenities"}
         </Button>
@@ -318,6 +333,8 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
 function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) {
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   useEffect(() => {
     let cancelled = false;
     getDownloadURL(storageRef(getFirebase().storage, path))
@@ -326,8 +343,9 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
     return () => { cancelled = true; };
   }, [path]);
   const remove = async () => {
-    if (!window.confirm("Remove this photo?")) return;
+    if (!(await confirm({ title: "Remove this photo?" }))) return;
     setBusy(true);
+    setError(null);
     try {
       await callFn("removeCuratorPhoto", { profileId, path });
       // No local state update needed on success: the parent editor's
@@ -335,7 +353,7 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
       // drops this path from the list and unmounts this tile (keyed by
       // path) on its own.
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not remove photo.");
+      setError(e instanceof Error ? e.message : "Could not remove photo.");
       setBusy(false);
     }
   };
@@ -355,6 +373,8 @@ function GalleryPhoto({ path, profileId }: { path: string; profileId: string }) 
         <IconTrash size={14} aria-hidden="true" />
         {busy ? "Removing…" : "Remove"}
       </Button>
+      {error && <ErrorBox message={error} />}
+      {confirmDialog}
     </div>
   );
 }

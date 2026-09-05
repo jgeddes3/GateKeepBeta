@@ -22,6 +22,7 @@ import { Badge } from "../ui/badge";
 import { Card, CardContent } from "../ui/card";
 import { Textarea } from "../ui/textarea";
 import { Skeleton } from "../ui/skeleton";
+import { useConfirm } from "../ui/confirm-dialog";
 import { IconWarning } from "../ui/icons";
 
 export type Role = "musician" | "curator" | "both" | "none" | "loading";
@@ -310,6 +311,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const [showCancelFor, setShowCancelFor] = useState<{ mode: "booking" | "occurrence"; gigId?: string; startsAt: number } | null>(null);
   const [showReportForm, setShowReportForm] = useState(false);
   const [reportReason, setReportReason] = useState("");
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => {
     const unsub = onSnapshot(doc(getFirebase().db, "bookings", bookingId),
@@ -447,7 +449,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     }
   };
   const decline = async () => {
-    if (!window.confirm("Decline this booking request?")) return;
+    if (!(await confirm({ title: "Decline this booking request?" }))) return;
     setActionBusy("decline"); setActionError(null);
     try {
       await callFn("declineBooking", { bookingId });
@@ -458,7 +460,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
     }
   };
   const withdraw = async () => {
-    if (!window.confirm("Withdraw this booking request?")) return;
+    if (!(await confirm({ title: "Withdraw this booking request?" }))) return;
     setActionBusy("withdraw"); setActionError(null);
     try {
       await callFn("withdrawBooking", { bookingId });
@@ -838,6 +840,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
           )}
         </section>
       )}
+      {confirmDialog}
     </div>
   );
 }

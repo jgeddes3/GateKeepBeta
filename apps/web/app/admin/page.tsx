@@ -280,7 +280,11 @@ function QueueRow({ p }: { p: Row<ProfileDoc> }) {
           // admin typed: they still need it to retry.
           setFlagChecked(false); setFlagNote("");
         } catch (flagError) {
-          window.alert(
+          // Task 19 (L70): a message, not a decision, so this becomes the
+          // row's own inline error line (rendered below once showReject
+          // closes, see the unconditional reset right after this block)
+          // instead of a dialog.
+          setError(
             `The review was submitted, but the account flag failed: ${
               flagError instanceof Error ? flagError.message : "try flagging from User lookup instead."
             }`,

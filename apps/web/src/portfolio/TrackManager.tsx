@@ -10,6 +10,9 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { ListError } from "../ui/ListError";
+import { ErrorBox } from "../ui/ErrorBox";
+import { useConfirm } from "../ui/confirm-dialog";
+import { usePrompt } from "../ui/prompt-dialog";
 import { IconArrowDown, IconArrowUp, IconPencil, IconTrash } from "../ui/icons";
 
 type Row = TrackDoc & { id: string };
@@ -36,6 +39,9 @@ export function TrackManager({ profileId }: { profileId: string }) {
   // `tracks` array. Locking every action button while ANY call is in
   // flight is simpler and fully covers that.
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { prompt, dialog: promptDialog } = usePrompt();
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
@@ -46,8 +52,9 @@ export function TrackManager({ profileId }: { profileId: string }) {
 
   const call = async (name: string, data: object) => {
     setBusy(true);
+    setError(null);
     try { await callFn(name, data); }
-    catch (e) { window.alert(e instanceof Error ? e.message : "That didn't work. Try again."); }
+    catch (e) { setError(e instanceof Error ? e.message : "That didn't work. Try again."); }
     finally { setBusy(false); }
   };
   const move = (i: number, dir: -1 | 1) => {
@@ -124,8 +131,8 @@ export function TrackManager({ profileId }: { profileId: string }) {
                     size="icon"
                     disabled={busy}
                     aria-label="Rename track"
-                    onClick={() => {
-                      const title = window.prompt("New title:", t.title)?.trim();
+                    onClick={async () => {
+                      const title = await prompt({ title: "Rename track", label: "New title", initialValue: t.title });
                       if (title) void call("updateTrack", { profileId, trackId: t.id, title });
                     }}
                   >
@@ -138,8 +145,8 @@ export function TrackManager({ profileId }: { profileId: string }) {
                     disabled={busy}
                     aria-label="Delete track"
                     className="text-gk-destructive hover:bg-gk-destructive/14"
-                    onClick={() => {
-                      if (window.confirm(`Delete "${t.title}"?`)) void call("deleteTrack", { profileId, trackId: t.id });
+                    onClick={async () => {
+                      if (await confirm({ title: `Delete "${t.title}"?` })) void call("deleteTrack", { profileId, trackId: t.id });
                     }}
                   >
                     <IconTrash size={16} aria-hidden="true" />
@@ -149,8 +156,11 @@ export function TrackManager({ profileId }: { profileId: string }) {
             ))}
           </div>
         )}
+        {error && <ErrorBox message={error} />}
         <TrimUploader profileId={profileId} onDone={() => { /* onSnapshot refreshes */ }} />
       </CardContent>
+      {confirmDialog}
+      {promptDialog}
     </Card>
   );
 }

@@ -22,6 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/
 import { Input } from "../../../../../../src/ui/input";
 import { Skeleton } from "../../../../../../src/ui/skeleton";
 import { ListError } from "../../../../../../src/ui/ListError";
+import { useConfirm } from "../../../../../../src/ui/confirm-dialog";
 import { IconWarning } from "../../../../../../src/ui/icons";
 
 const toLocalInput = (ms: number) => {
@@ -197,6 +198,8 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   useEffect(() => {
@@ -284,12 +287,18 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
     }
   };
   const cancel = async () => {
-    if (!window.confirm(`Cancel "${gig.title}"? Musicians will no longer see or apply to it. This can't be undone.`)) return;
+    const ok = await confirm({
+      title: `Cancel "${gig.title}"?`,
+      body: "Musicians will no longer see or apply to it. This can't be undone.",
+      destructive: true,
+    });
+    if (!ok) return;
     setCancelBusy(true);
+    setCancelError(null);
     try {
       await callFn("cancelGig", { gigId });
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not cancel this gig.");
+      setCancelError(e instanceof Error ? e.message : "Could not cancel this gig.");
     } finally {
       setCancelBusy(false);
     }
@@ -355,11 +364,23 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
         </section>
       )}
       {(gig.status === "draft" || gig.status === "open") && (
-        <Button type="button" variant="link" onClick={cancel} disabled={cancelBusy}
-          className="mt-4 h-auto justify-self-start p-0 text-gk-destructive">
-          {cancelBusy ? "Cancelling…" : "Cancel this gig"}
-        </Button>
+        <>
+          <Button type="button" variant="link" onClick={cancel} disabled={cancelBusy}
+            className="mt-4 h-auto justify-self-start p-0 text-gk-destructive">
+            {cancelBusy ? "Cancelling…" : "Cancel this gig"}
+          </Button>
+          {cancelError && (
+            <div
+              role="alert"
+              className="mt-3 flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+            >
+              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              <p>{cancelError}</p>
+            </div>
+          )}
+        </>
       )}
+      {confirmDialog}
     </main>
   );
 }

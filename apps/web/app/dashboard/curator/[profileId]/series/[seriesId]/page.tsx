@@ -24,6 +24,7 @@ import { Badge } from "../../../../../../src/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/ui/card";
 import { Skeleton } from "../../../../../../src/ui/skeleton";
 import { ListError } from "../../../../../../src/ui/ListError";
+import { useConfirm } from "../../../../../../src/ui/confirm-dialog";
 import { IconWarning } from "../../../../../../src/ui/icons";
 
 type OccurrenceRow = GigDoc & { id: string };
@@ -161,7 +162,10 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
   const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "loading" | "error">("loading");
   const [occurrencesReloadKey, setOccurrencesReloadKey] = useState(0);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [pauseError, setPauseError] = useState<string | null>(null);
   const [endBusy, setEndBusy] = useState(false);
+  const [endError, setEndError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   useEffect(() => {
@@ -243,23 +247,34 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
     `${String(series.recurrence.hour).padStart(2, "0")}:${String(series.recurrence.minute).padStart(2, "0")} (UTC), ${formatChipLabel(series.recurrence.cadence)}`;
 
   const pause = async () => {
-    if (!window.confirm("Pause this series? No new dates will be created going forward. Already-open dates stay open. This can't be undone.")) return;
+    const ok = await confirm({
+      title: "Pause this series?",
+      body: "No new dates will be created going forward. Already-open dates stay open. This can't be undone.",
+    });
+    if (!ok) return;
     setPauseBusy(true);
+    setPauseError(null);
     try {
       await callFn("pauseSeries", { seriesId });
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not pause this series.");
+      setPauseError(e instanceof Error ? e.message : "Could not pause this series.");
     } finally {
       setPauseBusy(false);
     }
   };
   const end = async () => {
-    if (!window.confirm("End this series? Future open or draft dates will be cancelled and no new dates will be created. This can't be undone.")) return;
+    const ok = await confirm({
+      title: "End this series?",
+      body: "Future open or draft dates will be cancelled and no new dates will be created. This can't be undone.",
+      destructive: true,
+    });
+    if (!ok) return;
     setEndBusy(true);
+    setEndError(null);
     try {
       await callFn("endSeries", { seriesId });
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Could not end this series.");
+      setEndError(e instanceof Error ? e.message : "Could not end this series.");
     } finally {
       setEndBusy(false);
     }
@@ -282,16 +297,27 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
           : <SeriesTemplateForm key={seriesId} seriesId={seriesId} series={series} isVenue={isVenue} />}
       </div>
 
-      <section className="mt-8 flex flex-wrap gap-3 border-t border-gk-border pt-8">
-        {series.status === "active" && (
-          <Button type="button" variant="secondary" onClick={pause} disabled={pauseBusy}>
-            {pauseBusy ? "Pausing…" : "Pause series"}
-          </Button>
-        )}
-        {series.status !== "ended" && (
-          <Button type="button" variant="destructive" onClick={end} disabled={endBusy}>
-            {endBusy ? "Ending…" : "End series"}
-          </Button>
+      <section className="mt-8 grid gap-3 border-t border-gk-border pt-8">
+        <div className="flex flex-wrap gap-3">
+          {series.status === "active" && (
+            <Button type="button" variant="secondary" onClick={pause} disabled={pauseBusy}>
+              {pauseBusy ? "Pausing…" : "Pause series"}
+            </Button>
+          )}
+          {series.status !== "ended" && (
+            <Button type="button" variant="destructive" onClick={end} disabled={endBusy}>
+              {endBusy ? "Ending…" : "End series"}
+            </Button>
+          )}
+        </div>
+        {(pauseError || endError) && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+          >
+            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <p>{pauseError ?? endError}</p>
+          </div>
         )}
       </section>
 
@@ -329,6 +355,7 @@ export default function SeriesDetail(props: { params: Promise<{ profileId: strin
           </ul>
         )}
       </section>
+      {confirmDialog}
     </main>
   );
 }

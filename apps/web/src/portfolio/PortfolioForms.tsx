@@ -15,6 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { ErrorBox } from "../ui/ErrorBox";
 import { IconCheck, IconLink, IconPlus, IconTrash, IconUpload } from "../ui/icons";
 // Task 9 review fix: moved to a plain (non-"use client") module so a Server
 // Component (app/u/[handle]/MusicianProfile.tsx) can call it directly
@@ -27,9 +28,12 @@ import { IconCheck, IconLink, IconPlus, IconTrash, IconUpload } from "../ui/icon
 import { formatChipLabel } from "../../app/u/[handle]/chipLabel";
 export { formatChipLabel };
 
-const callOrAlert = async (name: string, data: object): Promise<boolean> => {
-  try { await callFn(name, data); return true; }
-  catch (e) { window.alert(e instanceof Error ? e.message : "Save failed. Try again."); return false; }
+// Task 19 (L70): returns the friendly failure message instead of
+// window.alert()-ing it, so every caller below can show it as its own
+// inline ErrorBox line rather than a native dialog. null means success.
+const callOrError = async (name: string, data: object): Promise<string | null> => {
+  try { await callFn(name, data); return null; }
+  catch (e) { return e instanceof Error ? e.message : "Save failed. Try again."; }
 };
 
 // Restyle-only chip button (Task 5 join-wizard precedent: secondary variant
@@ -64,6 +68,7 @@ export function BioGenresForm({ profileId, initial, onSaved }:
   const [city, setCity] = useState(initial?.location?.city ?? "");
   const [savedCity, setSavedCity] = useState(initial?.location?.city ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const toggleGenre = (g: string) => setGenres((cur) =>
     cur.includes(g) ? cur.filter((x) => x !== g) : cur.length < 3 ? [...cur, g] : cur);
   const save = async () => {
@@ -76,7 +81,7 @@ export function BioGenresForm({ profileId, initial, onSaved }:
       // which looks to the musician like their change was saved (the chips
       // show empty) when it wasn't. Block it with an explicit message
       // instead.
-      window.alert("Keep at least one genre. It's required for review.");
+      setError("Keep at least one genre. It's required for review.");
       return;
     }
     // Omit genres entirely (rather than sending []) when none are picked
@@ -88,12 +93,16 @@ export function BioGenresForm({ profileId, initial, onSaved }:
     const trimmedCity = city.trim();
     if (trimmedCity !== savedCity) Object.assign(payload, { city: trimmedCity === "" ? null : trimmedCity });
     const v = validatePortfolioUpdate(payload);
-    if (!v.ok) { window.alert(v.reason); return; }
+    if (!v.ok) { setError(v.reason); return; }
     setBusy(true);
-    if (await callOrAlert("updatePortfolio", payload)) {
+    setError(null);
+    const err = await callOrError("updatePortfolio", payload);
+    if (!err) {
       if (genres.length > 0) setSavedGenres(genres);
       setSavedCity(trimmedCity);
       onSaved?.();
+    } else {
+      setError(err);
     }
     setBusy(false);
   };
@@ -132,6 +141,7 @@ export function BioGenresForm({ profileId, initial, onSaved }:
             ))}
           </div>
         </div>
+        {error && <ErrorBox message={error} />}
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save bio, city & genres"}
         </Button>
@@ -146,14 +156,17 @@ export function LinksForm({ profileId, initial }:
   const [kind, setKind] = useState<ExternalLinkKind>("spotify");
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const save = async (next: ExternalLink[]): Promise<boolean> => {
     const v = validatePortfolioUpdate({ profileId, externalLinks: next });
-    if (!v.ok) { window.alert(v.reason); return false; }
+    if (!v.ok) { setError(v.reason); return false; }
     setBusy(true);
-    const ok = await callOrAlert("updatePortfolio", { profileId, externalLinks: next });
-    if (ok) setLinks(next);
+    setError(null);
+    const err = await callOrError("updatePortfolio", { profileId, externalLinks: next });
+    if (!err) setLinks(next);
+    else setError(err);
     setBusy(false);
-    return ok;
+    return !err;
   };
   return (
     <Card>
@@ -224,6 +237,7 @@ export function LinksForm({ profileId, initial }:
             Add
           </Button>
         </div>
+        {error && <ErrorBox message={error} />}
       </CardContent>
     </Card>
   );
@@ -262,6 +276,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   // sitting idle and inviting a second upload before the first has landed.
   const [awaiting, setAwaiting] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [baseline, setBaseline] = useState(currentPath);
   if (currentPath !== baseline) {
     setBaseline(currentPath);
@@ -282,8 +297,9 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
   }, [awaiting]);
 
   const upload = async (f: File) => {
-    if (f.size > MAX_PHOTO_UPLOAD_BYTES) { window.alert("Photos must be under 10 MB."); return; }
+    if (f.size > MAX_PHOTO_UPLOAD_BYTES) { setError("Photos must be under 10 MB."); return; }
     setBusy(true);
+    setError(null);
     setTimedOut(false); // a fresh attempt supersedes any earlier timeout hint
     try {
       const { storage } = getFirebase();
@@ -295,7 +311,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
       // `currentPath`, which the render-time check above picks up and
       // flips `awaiting` back to false.
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "Upload failed.");
+      setError(e instanceof Error ? e.message : "Upload failed.");
     } finally { setBusy(false); }
   };
   const processing = awaiting;
@@ -339,6 +355,7 @@ export function PhotoUploader({ profileId, uid, kind, currentPath, disabled }:
           Still processing. If your photo doesn&apos;t appear, try a smaller one.
         </span>
       )}
+      {error && <ErrorBox message={error} />}
     </div>
   );
 }
@@ -379,6 +396,7 @@ export function BookingForm({ profileId, initial }:
     perHour: "curators", perSong: "curators", perSet: "curators", preferences: "curators",
   });
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const rateField = (key: RateKey, label: string) => {
     const blank = rateInputs[key].amount.trim() === "";
@@ -438,16 +456,16 @@ export function BookingForm({ profileId, initial }:
       if (raw === "") continue; // stays null: field left blank on purpose
       const dollars = Number(raw);
       if (!Number.isFinite(dollars) || dollars <= 0) {
-        window.alert("Rates must be more than $0, or leave the field blank.");
+        setError("Rates must be more than $0, or leave the field blank.");
         return;
       }
       rates[key] = { amountCents: Math.round(dollars * 100), note: rateInputs[key].note || null };
     }
     const input = { profileId, rates, preferences: prefs, visibility };
     const v = validateBookingUpdate(input);
-    if (!v.ok) { window.alert(v.reason); return; }
+    if (!v.ok) { setError(v.reason); return; }
     setBusy(true);
-    await callOrAlert("updateBookingInfo", input);
+    setError(await callOrError("updateBookingInfo", input));
     setBusy(false);
   };
 
@@ -581,6 +599,7 @@ export function BookingForm({ profileId, initial }:
           </label>
         </div>
 
+        {error && <ErrorBox message={error} />}
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save rates & preferences"}
         </Button>

@@ -15,6 +15,7 @@ import { Card, CardContent } from "../../../../src/ui/card";
 import { Badge } from "../../../../src/ui/badge";
 import { Skeleton } from "../../../../src/ui/skeleton";
 import { ListError } from "../../../../src/ui/ListError";
+import { useConfirm } from "../../../../src/ui/confirm-dialog";
 import { IconWarning } from "../../../../src/ui/icons";
 
 type TrackRow = TrackDoc & { id: string };
@@ -93,8 +94,10 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
   const [tracks, setTracks] = useState<TrackRow[] | "loading" | "error">("loading");
   const [tracksReloadKey, setTracksReloadKey] = useState(0);
   const [submitBusy, setSubmitBusy] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   // Resets `booking` back to "loading" the instant profileId changes: an
   // in-app navigation from profile A's editor to profile B's (same
@@ -206,6 +209,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
 
   const submit = async () => {
     setSubmitBusy(true);
+    setSubmitError(null);
     try {
       await callFn("submitProfileForReview", { profileId });
     } catch (e) {
@@ -214,16 +218,18 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
       // hasn't caught up to yet (e.g. a track flips out of pending_review
       // between renders), not the primary UX (the button is disabled while
       // `missing` is non-empty).
-      window.alert(e instanceof Error ? e.message : "Could not submit.");
+      setSubmitError(e instanceof Error ? e.message : "Could not submit.");
     } finally {
       setSubmitBusy(false);
     }
   };
 
   const deleteDraft = async () => {
-    const ok = window.confirm(
-      `Delete "${profile.name}"? This permanently deletes the profile, its tracks, and its photos, ` +
-      `and releases the handle @${profile.handle}. This can't be undone.`);
+    const ok = await confirm({
+      title: `Delete "${profile.name}"?`,
+      body: `This permanently deletes the profile, its tracks, and its photos, and releases the handle @${profile.handle}. This can't be undone.`,
+      destructive: true,
+    });
     if (!ok) return;
     setDeleteBusy(true);
     setDeleteError(null);
@@ -349,6 +355,12 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
             <Button type="button" onClick={submit} disabled={!canSubmit || submitBusy} className="justify-self-start">
               {submitBusy ? "Submitting…" : profile.status === "rejected" ? "Resubmit for review" : "Submit for review"}
             </Button>
+            {submitError && (
+              <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">
+                <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                {submitError}
+              </p>
+            )}
             <Button
               type="button"
               variant="link"
@@ -367,6 +379,7 @@ export default function PortfolioEditor(props: { params: Promise<{ profileId: st
           </section>
         )}
       </div>
+      {confirmDialog}
     </main>
   );
 }

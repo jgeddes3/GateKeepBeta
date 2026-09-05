@@ -16,6 +16,7 @@ import { Card, CardContent } from "../../src/ui/card";
 import { Badge } from "../../src/ui/badge";
 import { Skeleton } from "../../src/ui/skeleton";
 import { ListError } from "../../src/ui/ListError";
+import { useConfirm } from "../../src/ui/confirm-dialog";
 import { IconBell, IconBuildings, IconEarnings, IconGigs, IconUser, IconWarning } from "../../src/ui/icons";
 
 // Task 9 (SP7): followerCount, read straight off the same profile doc this
@@ -364,6 +365,7 @@ export default function Dashboard() {
   const { user, loading, signOutUser } = useAuth();
   const router = useRouter();
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
 
   if (loading) {
@@ -379,7 +381,8 @@ export default function Dashboard() {
   if (!user) return null; // redirecting via the effect above
 
   const deleteAccount = async () => {
-    if (!window.confirm("This permanently deletes your account and data. Continue?")) return;
+    const ok = await confirm({ title: "This permanently deletes your account and data. Continue?", destructive: true });
+    if (!ok) return;
     try {
       setDeleteError(null);
       await callFn("deleteAccount", {});
@@ -471,6 +474,7 @@ export default function Dashboard() {
           </p>
         )}
       </div>
+      {confirmDialog}
     </main>
   );
 }
