@@ -135,11 +135,11 @@ export function TrackManager({ profileId }: { profileId: string }) {
           ) : (
             <View style={{ flexDirection: "row", gap: 16, alignItems: "center" }}>
               <Pressable disabled={busy || i === 0} onPress={() => move(i, -1)} accessibilityRole="button" accessibilityLabel="Move up"
-                hitSlop={12} style={{ minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" }}>
+                style={{ minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" }}>
                 <Text style={{ opacity: busy || i === 0 ? 0.4 : 1 }}>↑</Text>
               </Pressable>
               <Pressable disabled={busy || i === rows.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down"
-                hitSlop={12} style={{ minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" }}>
+                style={{ minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" }}>
                 <Text style={{ opacity: busy || i === rows.length - 1 ? 0.4 : 1 }}>↓</Text>
               </Pressable>
               <Button variant="ghost" title="Rename" disabled={busy} onPress={() => startRename(t)} />

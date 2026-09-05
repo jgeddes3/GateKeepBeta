@@ -59,8 +59,7 @@ function GigListItem({ gig, onPress, onSeriesPress }: {
         {gig.seriesId && (
           <Pressable
             onPress={onSeriesPress}
-            hitSlop={12}
-            style={{ minHeight: 44, justifyContent: "center" }}
+            style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start", paddingHorizontal: tokens.space.xs }}
             accessibilityRole="link"
             accessibilityLabel={`View series${gig.detachedFromTemplate ? " (detached)" : ""}`}
           >

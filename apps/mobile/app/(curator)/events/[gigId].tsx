@@ -107,7 +107,7 @@ function BookedActCard({ bookingId, musicianProfileId }: { bookingId: string; mu
             <Pressable
               hitSlop={12}
               accessibilityRole="link"
-              accessibilityLabel={act.name}
+              accessibilityLabel={`View ${act.name}'s profile`}
               onPress={() => router.push({ pathname: "/artist/[handle]", params: { handle: act.handle! } })}
               style={{ minHeight: 44, justifyContent: "center", alignSelf: "flex-start" }}
             >

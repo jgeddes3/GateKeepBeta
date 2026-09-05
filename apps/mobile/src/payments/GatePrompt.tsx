@@ -90,10 +90,10 @@ function CuratorDelinquentGate({ message, curatorProfileId }: { message: string;
       {affected === "loading" ? null : affected.length > 0 ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: tokens.space.xs }}>
           {affected.map((id, i) => (
-            <Pressable key={id} hitSlop={12} accessibilityRole="link"
+            <Pressable key={id} accessibilityRole="link"
               accessibilityLabel={`Go to the overdue booking${affected.length > 1 ? ` (${i + 1})` : ""}`}
               onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}
-              style={{ minHeight: 44, justifyContent: "center" }}>
+              style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: tokens.space.xs }}>
               <Text style={{ textDecorationLine: "underline" }}>
                 Go to the overdue booking{affected.length > 1 ? ` (${i + 1})` : ""}{i < affected.length - 1 ? "," : ""}
               </Text>

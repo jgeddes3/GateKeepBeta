@@ -50,10 +50,10 @@ export function DelinquencyBanner({ profileId }: { profileId: string }) {
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: tokens.space.xs }}>
           <Text color={t.destructive}>Settle it from </Text>
           {affected.map((id, i) => (
-            <Pressable key={id} hitSlop={12} accessibilityRole="link"
+            <Pressable key={id} accessibilityRole="link"
               accessibilityLabel={`this booking${affected.length > 1 ? ` (${i + 1})` : ""}`}
               onPress={() => router.push({ pathname: "/booking/[bookingId]", params: { bookingId: id } })}
-              style={{ minHeight: 44, justifyContent: "center" }}>
+              style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: tokens.space.xs }}>
               <Text color={t.destructive} style={{ textDecorationLine: "underline" }}>
                 this booking{affected.length > 1 ? ` (${i + 1})` : ""}{i < affected.length - 1 ? "," : ""}
               </Text>

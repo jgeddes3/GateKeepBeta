@@ -51,6 +51,7 @@ export function ContextSwitcher() {
               onPress={() => { switchTo("fan"); setOpen(false); router.replace("/(fan)"); }}
               accessibilityRole="button"
               accessibilityLabel="Switch to Me (fan)"
+              accessibilityState={{ selected: activeContext === "fan" }}
               style={{ padding: 12 }}
             >
               <Text color={t.text}>Me (fan)</Text>
@@ -61,6 +62,7 @@ export function ContextSwitcher() {
                   router.replace(p.type === "musician" ? "/(musician)/dashboard" : "/(curator)/dashboard"); }}
                 accessibilityRole="button"
                 accessibilityLabel={`Switch to ${p.name} (${p.type})${p.status !== "approved" ? `, ${p.status.replace("_", " ")}` : ""}`}
+                accessibilityState={{ selected: activeContext !== "fan" && activeContext.profileId === p.profileId }}
               >
                 <Text color={t.text}>{p.name} ({p.type}){p.status !== "approved" ? ` (${p.status.replace("_", " ")})` : ""}</Text>
               </Pressable>
