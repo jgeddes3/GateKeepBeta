@@ -53,4 +53,18 @@ describe("notificationHref", () => {
     expect(notificationHref("artist_tag", "ev1", "mobile")).toBe("/event/ev1");
     expect(notificationHref("artist_tag", null, "web")).toBeNull();
   });
+  it("routes message rows to the conversation, picking the tab group from refKind on mobile", () => {
+    expect(notificationHref("message", "mus1__cur1", "web")).toBe("/dashboard/messages?c=mus1__cur1");
+    expect(notificationHref("message", "mus1__cur1", "mobile", "musician")).toBe("/(musician)/messages/mus1__cur1");
+    expect(notificationHref("message", "mus1__cur1", "mobile", "curator")).toBe("/(curator)/messages/mus1__cur1");
+    // A legacy push with no refKind falls back to the musician group rather
+    // than dropping the tap on the floor.
+    expect(notificationHref("message", "mus1__cur1", "mobile")).toBe("/(musician)/messages/mus1__cur1");
+    expect(notificationHref("message", null, "web")).toBeNull();
+  });
+  it("routes comment_reply to the event page on both platforms", () => {
+    expect(notificationHref("comment_reply", "ev1", "web")).toBe("/e/ev1");
+    expect(notificationHref("comment_reply", "ev1", "mobile")).toBe("/event/ev1");
+    expect(notificationHref("comment_reply", null, "mobile")).toBeNull();
+  });
 });

@@ -206,3 +206,53 @@ export const ARTIST_TAG_EVENT_CLOSED_MESSAGE = "This event is no longer acceptin
 export const ARTIST_TAG_BANNER_TITLE = "You were tagged on this lineup";
 export const SHARE_LINK_COPIED_MESSAGE = "Link copied";
 export const HOME_CITY_PROMPT_LINE = "Or set a home city under Account.";
+
+// ---------- Sub-project 12 messaging, comments, follow-ons ----------
+export const MESSAGE_ACTION_LABEL = "Message";
+export const MESSAGE_SEND_LABEL = "Send";
+export const MESSAGE_COMPOSER_PLACEHOLDER = "Write a message";
+export const CONVERSATION_BLOCKED_MESSAGE = "You blocked this profile. Unblock to message again.";
+export const UNBLOCK_LABEL = "Unblock";
+export const BLOCK_LABEL = "Block";
+export const REPORT_LABEL = "Report";
+// The refusal BOTH blocked directions get: the side that was blocked must not
+// learn that it was (spec 3.1), so this is deliberately neutral.
+export const CONVERSATION_CLOSED_MESSAGE = "This conversation is closed.";
+export const CONVERSATION_EMPTY_MESSAGE = "No messages yet. Say hello.";
+export const MESSAGE_LENGTH_MESSAGE = "Messages are 1 to 1000 characters.";
+// Also the refusal for the comment cap: section 6 carries one rate sentence
+// and it reads correctly for both surfaces.
+export const MESSAGE_RATE_MESSAGE = "You are sending too fast. Try again in a few minutes.";
+export const MESSAGE_UNAPPROVED_MESSAGE = "Only approved profiles can message.";
+export const REPORT_SENT_MESSAGE = "Report sent. Thanks.";
+export const REPORT_REASON_PROMPT = "Why are you reporting this?";
+export const REPORT_REASON_MESSAGE = "Give a reason of 1 to 300 characters.";
+export const messageNotificationTitle = (senderProfile: string, recipientProfile: string): string =>
+  `${senderProfile} messaged ${recipientProfile}`;
+
+export const GOING_LABEL = "Going";
+export const COMMENT_COMPOSER_PLACEHOLDER = "Add a comment";
+export const COMMENT_REPLY_LABEL = "Reply";
+export const COMMENT_HIDE_LABEL = "Hide";
+export const COMMENT_DELETE_LABEL = "Delete";
+export const COMMENTS_CLOSED_MESSAGE = "Comments are closed.";
+export const COMMENTS_EMPTY_MESSAGE = "No comments yet.";
+export const COMMENT_LENGTH_MESSAGE = "Comments are 1 to 500 characters.";
+export const commentHiddenLine = (who: string): string => `Hidden by ${who}`;
+// The quoted parent of a reply whose parent the author deleted.
+export const COMMENT_DELETED_LINE = "Comment deleted";
+export const commentReplyNotificationTitle = (name: string): string => `${name} replied to your comment`;
+export const COMMENT_EVENT_CLOSED_MESSAGE = "Comments are closed.";
+
+export const REPORTS_PANEL_TITLE = "Reports";
+export const REPORT_RESOLVE_LABEL = "Resolve";
+export const REPORT_OPEN_CONVERSATION_LABEL = "Open conversation";
+export const REPORT_HIDE_COMMENT_LABEL = "Hide comment";
+export const REPORTS_EMPTY_MESSAGE = "No open reports.";
+
+export const TRUE_UP_WHOLE_NUMBERS_MESSAGE = "Whole numbers only.";
+export const NO_TICKETS_YET_MESSAGE = "No tickets on sale yet.";
+export const UNREAD_MARKER_LABEL = "New";
+export const SHOW_MORE_LABEL = "Show more";
+export const DIALOG_CONFIRM_LABEL = "Confirm";
+export const DIALOG_CANCEL_LABEL = "Cancel";

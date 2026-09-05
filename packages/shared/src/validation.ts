@@ -4,11 +4,13 @@ import {
   ACT_SIZES, AVAILABILITY_PATTERNS, SERIES_CADENCES,
   MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_NOTE_LENGTH, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   MAX_CITY_LENGTH,
+  MESSAGE_MAX_CHARS, COMMENT_MAX_CHARS, REPORT_REASON_MAX_CHARS,
   type PortfolioUpdateInput, type BookingUpdateInput, type CreateTrackInput,
   type ExternalLink, type RateAmount,
   type LookingFor, type GigDoc, type GigBudget, type GigSeriesDoc, type BudgetStructure,
   type BookingVisibility, type RateVisibility, type PrefsVisibility,
 } from "./types.js";
+import { MESSAGE_LENGTH_MESSAGE, COMMENT_LENGTH_MESSAGE, REPORT_REASON_MESSAGE } from "./messages.js";
 
 export const RESERVED_HANDLES = [
   "admin", "administrator", "gatekeep", "gatekeeper", "support", "help", "api", "www",
@@ -440,4 +442,32 @@ export function validateBookingVisibility(v: unknown): v is BookingVisibility {
   if (!RATE_VISIBILITIES.includes(o.perSet as RateVisibility)) return false;
   if (!PREFS_VISIBILITIES.includes(o.preferences as PrefsVisibility)) return false;
   return true;
+}
+
+// SP12: the conversation doc id for a pair. Positional, not sorted: the
+// musician profile id always leads, so both sides compute the same id and
+// firestore.rules can read musicianProfileId/curatorProfileId off the doc
+// without parsing the id.
+export function conversationPairId(musicianProfileId: string, curatorProfileId: string): string {
+  return `${musicianProfileId}__${curatorProfileId}`;
+}
+
+function lengthCheck(value: unknown, max: number, reason: string): Result {
+  if (typeof value !== "string") return { ok: false, reason };
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > max) return { ok: false, reason };
+  return { ok: true };
+}
+
+// One sentence per field for every failure shape (not a string, empty, too
+// long): each of these backs a single-field composer, so splitting the
+// reasons would only make both clients match several strings.
+export function validateMessageText(text: unknown): Result {
+  return lengthCheck(text, MESSAGE_MAX_CHARS, MESSAGE_LENGTH_MESSAGE);
+}
+export function validateCommentText(text: unknown): Result {
+  return lengthCheck(text, COMMENT_MAX_CHARS, COMMENT_LENGTH_MESSAGE);
+}
+export function validateReportReason(reason: unknown): Result {
+  return lengthCheck(reason, REPORT_REASON_MAX_CHARS, REPORT_REASON_MESSAGE);
 }

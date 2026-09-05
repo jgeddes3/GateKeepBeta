@@ -25,8 +25,21 @@ export function notificationHref(
   if (kind === "ticket") return platform === "web" ? "/tickets" : "/(fan)/tickets";
   // SP11: artist_tag carries the eventId in refId and opens the event page,
   // where the tagged artist's admins see the accept and decline banner.
-  if (kind === "show_announced" || kind === "show_rescheduled" || kind === "show_post" || kind === "artist_tag") {
+  // SP12: comment_reply carries the eventId and opens the public event page,
+  // where the fan's own comment thread lives.
+  if (kind === "show_announced" || kind === "show_rescheduled" || kind === "show_post"
+      || kind === "artist_tag" || kind === "comment_reply") {
     return refId ? (platform === "web" ? `/e/${refId}` : `/event/${refId}`) : null;
+  }
+  // SP12: message carries the conversation id. Web has one Messages page and
+  // selects the thread from the query string; mobile has one Messages stack
+  // per tab group, so refKind (the RECIPIENT profile's type) picks the group.
+  // A push written before refKind existed falls back to the musician group
+  // rather than dropping the tap.
+  if (kind === "message") {
+    if (!refId) return null;
+    if (platform === "web") return `/dashboard/messages?c=${refId}`;
+    return refKind === "curator" ? `/(curator)/messages/${refId}` : `/(musician)/messages/${refId}`;
   }
   if (kind === "new_music") return null;
   if (kind === "saved_search_match") {

@@ -132,7 +132,12 @@ export interface NotificationDoc {
   // is a member's own standard/instant cash-out bouncing.
   // SP11: "artist_tag" is a curator tagging this musician profile on an
   // event lineup; refId is the eventId, and it routes to the event page.
-  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match" | "share_paid" | "share_held" | "share_released" | "member_payout_failed" | "artist_tag";
+  // SP12: "message" is a chat message to a profile the recipient belongs to;
+  // refId is the conversation id and refKind is the RECIPIENT profile's type
+  // ("musician" or "curator"), which is what picks the mobile tab group.
+  // "comment_reply" is a curator or artist member answering a fan's comment;
+  // refId is the eventId and it opens the public event page.
+  kind: "profile_review" | "track_review" | "system" | "gig_moderation" | "booking" | "ticket" | "show_announced" | "new_music" | "show_rescheduled" | "show_post" | "saved_search_match" | "share_paid" | "share_held" | "share_released" | "member_payout_failed" | "artist_tag" | "message" | "comment_reply";
   read: boolean;
   createdAt: number;
   // SP4 Task 10: optional reference id for deep-linking a notification row
@@ -148,7 +153,9 @@ export interface NotificationDoc {
   // or profile), see notificationHref.ts for the routing.
   // SP5c: "payouts" for the four share_*/member_payout_failed kinds, which
   // always route to the payouts surface regardless of refId.
-  refKind?: "event" | "gig" | "profile" | "payouts";
+  // SP12: "musician" / "curator" say which tab group a message notification
+  // opens on mobile (the recipient profile's own type).
+  refKind?: "event" | "gig" | "profile" | "payouts" | "musician" | "curator";
 }
 
 // ---------- Sub-project 10 hardening ----------
@@ -1177,6 +1184,10 @@ export interface EventDoc {
   curatorGenres?: string[];
   priceFromCents?: number | null;
   hasFreeTier?: boolean;
+  // SP12: server-maintained reaction and comment counters. Absent on every
+  // pre-SP12 event doc and read as 0 everywhere.
+  goingCount?: number;
+  commentCount?: number;
   // SP10 hardening: epoch ms a settlement/takedown-adjacent claim was made
   // against this event (distinct from settlementStartedAt's Stripe-transfer
   // CAS above), used by the hardening sweep's own claim discipline. Optional;
@@ -1282,6 +1293,9 @@ export interface ShowPostDoc {
   text: string;                     // 1..SHOW_POST_MAX_CHARS after trim
   createdAt: number;
   status: ShowPostStatus;
+  // SP12: server-maintained heart count for this lineup post. Absent on
+  // pre-SP12 posts and read as 0.
+  heartCount?: number;
   removedBy?: "author" | "admin";
   removedAt?: number;
 }
@@ -1312,3 +1326,123 @@ export interface GetDiscoverDeckInput {
   seed?: number;
 }
 export interface GetDiscoverDeckResult { cards: DeckCard[]; seed: number; }
+
+// ---------- Sub-project 12: messaging, fan comments, reactions ----------
+
+// conversations/{pairId}, pairId = "{musicianProfileId}__{curatorProfileId}".
+// One doc per musician-curator pair, created by sendMessage on the first
+// send. Every field below is server-owned: firestore.rules grants reads to
+// members of either participant profile (and to an admin doing a single get
+// on a REPORTED conversation) and no writes at all.
+export interface ConversationDoc {
+  musicianProfileId: string;
+  curatorProfileId: string;
+  // [musicianProfileId, curatorProfileId], the array-contains field the
+  // conversation list query pins. Duplicates the two ids above on purpose:
+  // Firestore cannot array-contains across two separate string fields.
+  participants: string[];
+  lastMessage: { text: string; senderProfileId: string; at: number } | null;
+  lastMessageAt: number;
+  // profileId -> unread count for THAT profile. Incremented for the
+  // recipient on every send, zeroed by markConversationRead.
+  unread: Record<string, number>;
+  // Profile ids that have blocked this pair. Either side's admins may add
+  // their own id. A non-empty array closes sends in BOTH directions
+  // (spec 3.1: the blocked side sees no difference and its sends are
+  // refused with CONVERSATION_CLOSED_MESSAGE).
+  blockedBy: string[];
+  // Count of OPEN reports against this conversation. > 0 is what opens the
+  // admin read disjunct in firestore.rules, and resolveReport decrements it.
+  openReports: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// messageWindows/{profileId}: the rolling send-rate window for ONE sender
+// profile, across every conversation it takes part in. It is a separate
+// server-only doc, not a field on the conversation, because the cap is per
+// sender profile and spans threads: a window kept on the conversation would
+// let one profile send MESSAGE_RATE_MAX to every venue in town. Read and
+// trimmed inside sendMessage's own transaction (one extra tx.get and one
+// extra tx.set), same posture and rules stance as commentWindows/{uid} and
+// geocodeBudgets/{uid}. Absent for a profile that has never sent.
+export interface MessageWindowDoc { at: number[]; }
+
+// conversations/{pairId}/messages/{messageId}
+export interface MessageDoc {
+  senderProfileId: string;
+  // The human who pressed Send, kept alongside the profile so a thread can
+  // name the member under the bubble and so abuse review can reach a person.
+  senderUid: string;
+  text: string;                            // 1 to MESSAGE_MAX_CHARS after trim
+  at: number;
+}
+
+export const MESSAGE_MAX_CHARS = 1000;
+// 30 sends per 10 minutes per SENDER PROFILE, across every conversation that
+// profile takes part in (spec 5). Not per conversation: a per-thread window
+// would let one profile send 30 messages to every venue in town inside the
+// same window. The window lives in messageWindows/{profileId} above.
+export const MESSAGE_RATE_MAX = 30;
+export const MESSAGE_RATE_WINDOW_MS = 10 * 60 * 1000;
+// The notification body is the first MESSAGE_PREVIEW_CHARS characters of the
+// message, and at most one message notification per conversation per
+// recipient profile per MESSAGE_NOTIFY_BUCKET_MS (the dedupe key carries the
+// bucket index).
+export const MESSAGE_PREVIEW_CHARS = 120;
+export const MESSAGE_NOTIFY_BUCKET_MS = 10 * 60 * 1000;
+
+export type ReportKind = "conversation" | "comment";
+export type ReportStatus = "open" | "resolved";
+// reports/{reportId}: admin-read, callable-write. targetPath is the
+// conversation id for kind "conversation" and "events/{eventId}/comments/
+// {commentId}" for kind "comment", so one panel can render both.
+export interface ReportDoc {
+  kind: ReportKind;
+  targetPath: string;
+  reporterUid: string;
+  // The profile the reporter was acting as, when there is one (a
+  // conversation report always has one; a fan reporting a comment does not).
+  reporterProfileId: string | null;
+  reason: string;                          // 1 to REPORT_REASON_MAX_CHARS after trim
+  status: ReportStatus;
+  resolvedBy: string | null;
+  resolvedAt: number | null;
+  createdAt: number;
+}
+export const REPORT_REASON_MAX_CHARS = 300;
+
+// Server-derived at post time and never re-derived: a fan who later joins the
+// curator profile does not retroactively become a "curator" on old comments.
+export type CommentRole = "fan" | "curator" | "artist";
+// events/{eventId}/comments/{commentId}
+export interface EventCommentDoc {
+  authorUid: string;
+  // Snapshotted from users/{uid}.displayName at post time, the same
+  // snapshot discipline tickets and attendees already use.
+  authorName: string;
+  authorRole: CommentRole;
+  // The curator or artist profile the author posted through, null for a fan.
+  authorProfileId: string | null;
+  // One level only (spec 3.2). A reply's parentId always names a top-level
+  // comment; postComment refuses a parentId whose own parentId is set.
+  parentId: string | null;
+  text: string;                            // 1 to COMMENT_MAX_CHARS after trim
+  hidden: boolean;
+  hiddenBy: { uid: string; role: CommentRole | "admin" } | null;
+  openReports: number;
+  at: number;
+}
+export const COMMENT_MAX_CHARS = 500;
+// 10 comments per 10 minutes per USER, across every event (spec 5). Kept in
+// commentWindows/{uid} rather than on the event doc: the cap is per user and
+// spans events, so no single doc the write already touches can hold it.
+export const COMMENT_RATE_MAX = 10;
+export const COMMENT_RATE_WINDOW_MS = 10 * 60 * 1000;
+export const COMMENT_PAGE_SIZE = 20;
+
+// events/{eventId}/reactions/{uid}: the "Going" toggle, one doc per user.
+export interface EventReactionDoc { going: boolean; at: number; }
+// events/{eventId}/posts/{postId}/hearts/{uid}: the lineup-post heart.
+// Presence IS the heart, so there is no boolean to read.
+export interface PostHeartDoc { at: number; }

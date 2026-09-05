@@ -13,6 +13,8 @@ import {
   MAX_OPEN_BOOKINGS_INITIATED_PER_PROFILE, MAX_OFFER_AMOUNT_CENTS, MAX_OFFER_SONG_COUNT, DEPOSIT_PERCENT,
   CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, MAX_RELIABILITY_MARKS,
   NO_SHOW_REPORT_WINDOW_DAYS,
+  conversationPairId, validateMessageText, validateCommentText, validateReportReason,
+  MESSAGE_MAX_CHARS, COMMENT_MAX_CHARS, REPORT_REASON_MAX_CHARS,
 } from "../src/index";
 import type {
   ProfileDraftInput, LookingFor, GigWants, ProfileDoc, CuratorDetails, BookingVisibility,
@@ -766,5 +768,39 @@ describe("isValidDocId", () => {
     // A single-underscore-bounded value is NOT reserved and stays valid.
     expect(isValidDocId("_proto_")).toBe(true);
     expect(isValidDocId("__proto")).toBe(true);
+  });
+});
+
+describe("sub-12 messaging and comment validators", () => {
+  it("builds a stable pair id from the two profile ids, musician first", () => {
+    expect(conversationPairId("mus1", "cur1")).toBe("mus1__cur1");
+    // The id is positional, not sorted: the musician side always leads, so
+    // the same pair resolves to the same doc from either caller.
+    expect(conversationPairId("zzz", "aaa")).toBe("zzz__aaa");
+  });
+  it("accepts 1 to 1000 characters after trim and refuses everything else", () => {
+    expect(validateMessageText("  hello  ")).toEqual({ ok: true });
+    expect(validateMessageText("x".repeat(MESSAGE_MAX_CHARS))).toEqual({ ok: true });
+    for (const bad of ["", "   ", "x".repeat(MESSAGE_MAX_CHARS + 1), 5, null, undefined, {}]) {
+      const r = validateMessageText(bad);
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toBe("Messages are 1 to 1000 characters.");
+    }
+  });
+  it("accepts 1 to 500 characters for a comment and refuses everything else", () => {
+    expect(validateCommentText(" nice set ")).toEqual({ ok: true });
+    expect(validateCommentText("x".repeat(COMMENT_MAX_CHARS))).toEqual({ ok: true });
+    for (const bad of ["", "  ", "x".repeat(COMMENT_MAX_CHARS + 1), 5, null]) {
+      const r = validateCommentText(bad);
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toBe("Comments are 1 to 500 characters.");
+    }
+  });
+  it("accepts 1 to 300 characters for a report reason", () => {
+    expect(validateReportReason("spam")).toEqual({ ok: true });
+    expect(validateReportReason("x".repeat(REPORT_REASON_MAX_CHARS))).toEqual({ ok: true });
+    expect(validateReportReason("x".repeat(REPORT_REASON_MAX_CHARS + 1)).ok).toBe(false);
+    expect(validateReportReason("   ").ok).toBe(false);
+    expect(validateReportReason(7).ok).toBe(false);
   });
 });
