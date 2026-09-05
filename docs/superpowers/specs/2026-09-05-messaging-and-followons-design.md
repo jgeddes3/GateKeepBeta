@@ -113,11 +113,15 @@ launch.
 
 ## 4. Data model
 
-- `conversations/{pairId}` with `pairId = "{musicianProfileId}__{curatorProfileId}"`:
-  `musicianProfileId`, `curatorProfileId`, `participants: [musicianProfileId, curatorProfileId]`,
+- `conversations/{pairId}` with `pairId = "{musicianProfileId}__{curatorProfileId}"` holds only
+  what both sides may see: `musicianProfileId`, `curatorProfileId`,
+  `participants: [musicianProfileId, curatorProfileId]`,
   `lastMessage: { text: string; senderProfileId: string; at: number } | null`,
-  `lastMessageAt: number`, `unread: Record<profileId, number>`, `blockedBy: string[]`,
-  `openReports: number`, `createdAt`, `updatedAt`.
+  `lastMessageAt: number`, `openReports: number`, `createdAt`, `updatedAt`.
+  Per-side state never sits on it: each side's unread count lives only on its mirror, and the
+  block list lives in the server-only `conversations/{pairId}/private/state` doc
+  (`blockedBy: string[]`), so a blocked side cannot read who blocked it and neither side can
+  read the other's read activity.
 - `conversations/{pairId}/messages/{messageId}`: `senderProfileId`, `senderUid`, `text` (1 to
   1000 characters after trim), `at`.
 - `reports/{reportId}`: `kind: "conversation" | "comment"`, `targetPath` (the conversation id or
