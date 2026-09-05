@@ -205,6 +205,10 @@ launch.
   notification title "{name} replied to your comment".
 - Admin: "Reports"; "Resolve"; "Open conversation"; "Hide comment"; "Unhide"; "No open reports."
 - Comment refusals: "This comment cannot be deleted while it is hidden or reported."
+- Reports: "You already reported this." (a calm line, not an error); reports are capped at 10
+  per 10 minutes per user (`reportWindows/{uid}`, server-only) with the rate refusal above; a
+  resolved report may be reopened by the same reporter and keeps its last resolution
+  (`reopenCount`, `lastResolvedBy`, `lastResolvedAt`); every resolve writes an audit row.
 - Follow-ons: "Whole numbers only."; "No tickets on sale yet."; "New"; "Show more"; dialog
   primitives "Confirm", "Cancel".
 
