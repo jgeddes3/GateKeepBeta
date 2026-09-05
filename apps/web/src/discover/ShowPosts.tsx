@@ -135,7 +135,7 @@ function PostRowItem({ post, canRemove, onRemoved }: {
         {canRemove && (
           <button
             type="button" aria-label="Delete this post" disabled={busy} onClick={() => void remove()}
-            className="shrink-0 rounded-gk-sm p-1 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus disabled:opacity-50"
+            className="shrink-0 inline-flex items-center justify-center rounded-gk-sm p-1 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
           >
             <IconTrash size={14} aria-hidden="true" />
           </button>
@@ -151,7 +151,7 @@ function PostRowItem({ post, canRemove, onRemoved }: {
           aria-pressed={hearted}
           disabled={!user || hearting}
           onClick={() => void toggleHeart()}
-          className="flex shrink-0 items-center gap-1 rounded-gk-sm px-1.5 py-1 font-sora text-xs text-gk-muted outline-none hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus disabled:opacity-50"
+          className="flex shrink-0 items-center gap-1 rounded-gk-sm px-1.5 py-1 font-sora text-xs text-gk-muted outline-none hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus disabled:opacity-50 pointer-coarse:min-h-11"
         >
           <IconHeart size={14} aria-hidden="true" className={hearted ? "text-gk-accent" : undefined} />
           {heartCount}

@@ -123,85 +123,85 @@ export default function Join() {
           {/* Task 16 (audit #21): a real <form> so Enter submits from the
               name/handle fields, matching /sign-in's precedent. */}
           <form className="grid gap-5" onSubmit={(e) => { e.preventDefault(); if (!busy) void createDraft(); }}>
-          <div className="grid gap-2">
-            <span className="font-sora text-sm font-medium text-gk-text">Profile type</span>
-            <div className="flex flex-wrap gap-2">
-              {(["musician", "curator"] as const).map((t) => (
-                <Chip key={t} active={type === t} onClick={() => setType(t)}>
-                  {t === "musician" ? "Musician" : "Curator"}
-                </Chip>
-              ))}
-            </div>
-          </div>
-
-          {type === "musician" ? (
-            <>
-              <p className="font-sora text-sm text-gk-muted">
-                Create your act. You&apos;ll add your bio, photos, and a first track next: those are
-                required before you can submit for review.
-              </p>
-              <div className="grid gap-2">
-                <span className="font-sora text-sm font-medium text-gk-text">Act type</span>
-                <div className="flex flex-wrap gap-2">
-                  {(["solo", "band"] as const).map((s) => (
-                    <Chip key={s} active={musicianSubtype === s} onClick={() => setMusicianSubtype(s)}>
-                      {s === "solo" ? "Solo act" : "Band"}
-                    </Chip>
-                  ))}
-                </div>
+            <div className="grid gap-2">
+              <span className="font-sora text-sm font-medium text-gk-text">Profile type</span>
+              <div className="flex flex-wrap gap-2">
+                {(["musician", "curator"] as const).map((t) => (
+                  <Chip key={t} active={type === t} onClick={() => setType(t)}>
+                    {t === "musician" ? "Musician" : "Curator"}
+                  </Chip>
+                ))}
               </div>
-            </>
-          ) : (
-            <>
-              <p className="font-sora text-sm text-gk-muted">
-                Create your curator profile. You&apos;ll add an about section, photos, a location, and
-                what you&apos;re looking for next: those are required before you can submit for review.
-              </p>
-              <div className="grid gap-2">
-                <span className="font-sora text-sm font-medium text-gk-text">Curator type</span>
-                <div className="flex flex-wrap gap-2">
-                  {CURATOR_SUBTYPES.map(({ value, label }) => (
-                    <Chip key={value} active={curatorSubtype === value} onClick={() => setCuratorSubtype(value)}>
-                      {label}
-                    </Chip>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
-
-          <div className="grid gap-1.5">
-            <label htmlFor="join-name" className="font-sora text-sm font-medium text-gk-text">
-              {type === "musician" ? "Stage or band name" : "Venue or organization name"}
-            </label>
-            <Input id="join-name" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-          <div className="grid gap-1.5">
-            <label htmlFor="join-handle" className="font-sora text-sm font-medium text-gk-text">
-              Handle
-            </label>
-            <Input
-              id="join-handle"
-              placeholder="lowercase, no spaces"
-              autoCapitalize="none"
-              value={handle}
-              onChange={(e) => setHandle(e.target.value)}
-            />
-          </div>
-
-          {error && (
-            <div
-              role="alert"
-              className="flex items-start gap-2 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-2.5 font-sora text-sm text-gk-destructive"
-            >
-              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-              <p>{error}</p>
             </div>
-          )}
 
-          <Button type="submit" disabled={busy}>
-            {busy ? "Creating…" : "Create my profile"}
-          </Button>
+            {type === "musician" ? (
+              <>
+                <p className="font-sora text-sm text-gk-muted">
+                  Create your act. You&apos;ll add your bio, photos, and a first track next: those are
+                  required before you can submit for review.
+                </p>
+                <div className="grid gap-2">
+                  <span className="font-sora text-sm font-medium text-gk-text">Act type</span>
+                  <div className="flex flex-wrap gap-2">
+                    {(["solo", "band"] as const).map((s) => (
+                      <Chip key={s} active={musicianSubtype === s} onClick={() => setMusicianSubtype(s)}>
+                        {s === "solo" ? "Solo act" : "Band"}
+                      </Chip>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="font-sora text-sm text-gk-muted">
+                  Create your curator profile. You&apos;ll add an about section, photos, a location, and
+                  what you&apos;re looking for next: those are required before you can submit for review.
+                </p>
+                <div className="grid gap-2">
+                  <span className="font-sora text-sm font-medium text-gk-text">Curator type</span>
+                  <div className="flex flex-wrap gap-2">
+                    {CURATOR_SUBTYPES.map(({ value, label }) => (
+                      <Chip key={value} active={curatorSubtype === value} onClick={() => setCuratorSubtype(value)}>
+                        {label}
+                      </Chip>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div className="grid gap-1.5">
+              <label htmlFor="join-name" className="font-sora text-sm font-medium text-gk-text">
+                {type === "musician" ? "Stage or band name" : "Venue or organization name"}
+              </label>
+              <Input id="join-name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div className="grid gap-1.5">
+              <label htmlFor="join-handle" className="font-sora text-sm font-medium text-gk-text">
+                Handle
+              </label>
+              <Input
+                id="join-handle"
+                placeholder="lowercase, no spaces"
+                autoCapitalize="none"
+                value={handle}
+                onChange={(e) => setHandle(e.target.value)}
+              />
+            </div>
+
+            {error && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-2.5 font-sora text-sm text-gk-destructive"
+              >
+                <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                <p>{error}</p>
+              </div>
+            )}
+
+            <Button type="submit" disabled={busy}>
+              {busy ? "Creating…" : "Create my profile"}
+            </Button>
           </form>
         </CardContent>
       </Card>

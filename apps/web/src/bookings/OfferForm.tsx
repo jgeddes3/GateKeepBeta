@@ -35,20 +35,24 @@ export function OfferForm({ structure, busy, error, onSubmit, onCancel, submitLa
   return (
     <Card className="p-4">
       <CardContent className="grid gap-4 p-0">
-        <OfferFields structure={structure} value={offer} onChange={setOffer} disabled={busy} />
-        {(localError ?? error) && (
-          <p
-            role="alert"
-            className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
-          >
-            <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-            {localError ?? error}
-          </p>
-        )}
-        <div className="flex gap-2">
-          <Button onClick={submit} disabled={busy}>{busy ? "Sending…" : submitLabel}</Button>
-          <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
-        </div>
+        {/* Task 16 (Spec 3.4): a real <form> so Enter submits from any
+            field. Cancel stays type="button" so it never triggers submit. */}
+        <form className="grid gap-4" onSubmit={(e) => { e.preventDefault(); if (!busy) submit(); }}>
+          <OfferFields structure={structure} value={offer} onChange={setOffer} disabled={busy} />
+          {(localError ?? error) && (
+            <p
+              role="alert"
+              className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning"
+            >
+              <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              {localError ?? error}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <Button type="submit" disabled={busy}>{busy ? "Sending…" : submitLabel}</Button>
+            <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
+          </div>
+        </form>
       </CardContent>
     </Card>
   );

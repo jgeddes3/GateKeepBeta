@@ -10,7 +10,7 @@ import { useProfileRole } from "./useProfileRole";
 import { SharesCard } from "./SharesCard";
 import { PayoutHistoryList } from "./PayoutHistoryList";
 import {
-  PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
+  PAYOUT_INSTANT_INELIGIBLE_MESSAGE, PAYOUT_INSTANT_MIN_MESSAGE, PAYOUT_INSTANT_FEE_MESSAGE, INSTANT_PAYOUT_MIN_CENTS,
   instantFeePreviewCents,
   type PaymentDoc, type ProfileType, type StripeStatusResult,
 } from "@gatekeep/shared";
@@ -176,6 +176,9 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
   // letting the server bounce it. requestPayout is the actual authority; this
   // only pre-empts the round trip. A standard payout stays available below $10.
   const belowInstantMin = previewCents != null && previewCents < INSTANT_PAYOUT_MIN_CENTS;
+  // Task 16 (web audit): the fee-would-eat-the-whole-amount case, previously
+  // disabling the Instant button with no visible reason at all.
+  const feeAtOrAboveAmount = previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents;
 
   useEffect(() => {
     let cancelled = false;
@@ -263,7 +266,7 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
         <p className="flex flex-wrap items-center gap-2 font-sora text-sm text-gk-warning">
           <IconWarning size={16} className="shrink-0" aria-hidden="true" />
           Couldn&apos;t load payout status.
-          <Button onClick={() => setReloadKey((k) => k + 1)} variant="link" className="h-auto p-0">Retry</Button>
+          <Button onClick={() => { setStatus("loading"); setReloadKey((k) => k + 1); }} variant="link" className="h-auto p-0">Retry</Button>
         </p>
       )}
       {typeof status === "object" && (
@@ -335,8 +338,7 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
                       Standard (free, 1–3 business days)
                     </Button>
                     <Button onClick={() => submitPayout("instant")}
-                      disabled={payoutBusy || !status.instantEligible || belowInstantMin
-                        || (previewCents != null && previewFeeCents != null && previewFeeCents >= previewCents)}>
+                      disabled={payoutBusy || !status.instantEligible || belowInstantMin || feeAtOrAboveAmount}>
                       {`Instant${previewCents != null && previewFeeCents != null ? ` (fee ${formatCents(previewFeeCents)})` : ""}`}
                     </Button>
                   </div>
@@ -348,6 +350,8 @@ export function EarningsPanel({ profileId, name, type }: { profileId: string; na
                     <p className="font-sora text-xs text-gk-muted">{PAYOUT_INSTANT_INELIGIBLE_MESSAGE}</p>
                   ) : belowInstantMin ? (
                     <p className="font-sora text-xs text-gk-muted">{PAYOUT_INSTANT_MIN_MESSAGE}</p>
+                  ) : feeAtOrAboveAmount ? (
+                    <p className="font-sora text-xs text-gk-muted">{PAYOUT_INSTANT_FEE_MESSAGE}</p>
                   ) : null}
                   {payoutError && (
                     <p role="alert" className="flex items-start gap-2 rounded-gk border border-gk-warning/40 bg-gk-warning/14 px-3.5 py-2.5 font-sora text-sm text-gk-warning">

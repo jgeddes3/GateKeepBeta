@@ -291,7 +291,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <button
                   type="button"
                   aria-label="Open menu"
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-gk-sm text-gk-text outline-none hover:bg-gk-border/30 focus-visible:ring-2 focus-visible:ring-gk-focus md:hidden"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-gk-sm text-gk-text outline-none hover:bg-gk-border/30 focus-visible:ring-2 focus-visible:ring-gk-focus md:hidden pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                 >
                   <IconMenu size={20} aria-hidden="true" />
                 </button>

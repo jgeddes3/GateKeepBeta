@@ -27,6 +27,11 @@ import { IconWarning } from "../ui/icons";
 export type Role = "musician" | "curator" | "both" | "none" | "loading";
 export type Occurrence = { id: string; startsAt: number; durationMinutes: number };
 
+// Task 16: hoisted from three separate inline literals (report-a-no-show,
+// per-occurrence "Cancel this date" group, "Cancel this booking") into one
+// shared sentence, so all three visible disabled-reasons stay identical.
+const BOTH_SIDES_DISABLED_MESSAGE = "Disabled: you're on both sides of this booking.";
+
 function ErrorBox({ message }: { message: string }) {
   return (
     <p
@@ -556,7 +561,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
           </Button>
           {/* Task 16 (audit #27): the disabled reason used to live only in
               a title attribute, unreachable by keyboard or touch. */}
-          {bothSides && <p className="font-sora text-xs text-gk-muted">Disabled: you&apos;re on both sides of this booking</p>}
+          {bothSides && <p className="font-sora text-xs text-gk-muted">{BOTH_SIDES_DISABLED_MESSAGE}</p>}
         </div>
       )}
     </div>
@@ -773,7 +778,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                   not once per "Cancel this date" button, so the same
                   sentence doesn't repeat down the list. */}
               {bothSides && occurrences.some((o) => now != null && o.startsAt > now) && (
-                <p className="font-sora text-xs text-gk-muted">Disabled: you&apos;re on both sides of this booking</p>
+                <p className="font-sora text-xs text-gk-muted">{BOTH_SIDES_DISABLED_MESSAGE}</p>
               )}
             </div>
           )}
@@ -790,7 +795,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                   variant="secondary" className="w-fit text-gk-destructive">
                   Cancel this booking
                 </Button>
-                {bothSides && <p className="font-sora text-xs text-gk-muted">Disabled: you&apos;re on both sides of this booking</p>}
+                {bothSides && <p className="font-sora text-xs text-gk-muted">{BOTH_SIDES_DISABLED_MESSAGE}</p>}
               </div>
             )
           )}

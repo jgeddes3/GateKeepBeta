@@ -38,7 +38,7 @@ export function ContextSwitcher({ activeLabel, profiles }: { activeLabel: string
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="inline-flex h-10 items-center gap-1.5 rounded-gk border border-gk-border bg-gk-surface px-3 font-sora text-sm font-medium text-gk-text outline-none hover:bg-gk-border/20 focus-visible:ring-2 focus-visible:ring-gk-focus"
+          className="inline-flex h-10 items-center gap-1.5 rounded-gk border border-gk-border bg-gk-surface px-3 font-sora text-sm font-medium text-gk-text outline-none hover:bg-gk-border/20 focus-visible:ring-2 focus-visible:ring-gk-focus pointer-coarse:min-h-11"
         >
           <IconUser size={16} className="text-gk-muted" aria-hidden="true" />
           <span className="hidden max-w-[9rem] truncate sm:inline">{activeLabel}</span>

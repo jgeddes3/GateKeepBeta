@@ -117,7 +117,8 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
   }
 
   return (
-    <div className="grid gap-3">
+    // Task 16 (Spec 3.4): a real <form> so Enter submits from any field.
+    <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); if (!busy) void submit(); }}>
       <div className="grid max-w-xs gap-1.5">
         <label htmlFor="apply-as" className="font-sora text-sm font-medium text-gk-text">Applying as</label>
         <Select value={selected} onValueChange={setSelectedOverride}>
@@ -136,11 +137,11 @@ function ApplyPanel({ gigId, gig, uid }: { gigId: string; gig: GigDoc; uid: stri
           links to /dashboard/earnings; any other error falls through to the
           same plain warning line this used to render directly. */}
       {error && <GatePrompt message={error} viewerIsMusician onRetry={submit} />}
-      <Button type="button" onClick={submit} disabled={busy} className="justify-self-start">
+      <Button type="submit" disabled={busy} className="justify-self-start">
         {busy ? "Applying…" : "Apply"}
       </Button>
       <p className="font-sora text-xs text-gk-muted">{gig.fillMode === "whole_run" ? DEPOSIT_HONESTY_RUN_LINE : DEPOSIT_HONESTY_LINE}</p>
-    </div>
+    </form>
   );
 }
 

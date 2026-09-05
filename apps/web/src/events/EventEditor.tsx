@@ -192,7 +192,7 @@ function LineupFields({ lineup, onChange, eventId, profileId }: {
                 <button
                   type="button" aria-label={`Remove ${act.name}`}
                   onClick={() => onChange(lineup.filter((_, idx) => idx !== i))}
-                  className="shrink-0 rounded-gk-sm p-1 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus"
+                  className="shrink-0 inline-flex items-center justify-center rounded-gk-sm p-1 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                 >
                   <IconTrash size={14} aria-hidden="true" />
                 </button>
@@ -364,7 +364,7 @@ function TierEditor({ profileId, eventId, eventStatus, initialTiers }: {
               <button
                 type="button" aria-label={`Remove tier ${r.name || ""}`}
                 onClick={() => remove(r.key)}
-                className="shrink-0 rounded-gk-sm p-2 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus"
+                className="shrink-0 inline-flex items-center justify-center rounded-gk-sm p-2 text-gk-muted outline-none hover:text-gk-destructive focus-visible:ring-2 focus-visible:ring-gk-focus pointer-coarse:min-h-11 pointer-coarse:min-w-11"
               >
                 <IconTrash size={16} aria-hidden="true" />
               </button>

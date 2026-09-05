@@ -77,6 +77,10 @@ export const PAYOUT_INSTANT_MIN_MESSAGE =
 // Standard payout after the funds settle is the way to withdraw them.
 export const PAYOUT_INSTANT_HELD_MESSAGE =
   "Instant payout is temporarily unavailable on recent funds. Use a standard payout, which sends once they settle.";
+// Task 16 (web audit): the Instant button also disables when the fee would
+// consume the whole entered amount, with no visible reason before this.
+export const PAYOUT_INSTANT_FEE_MESSAGE =
+  "The instant fee would take the whole amount.";
 
 // ---------- Task 11 payPastDue (originally payments.ts) --------------------
 // Five different situations with five different fixes, Task 15's

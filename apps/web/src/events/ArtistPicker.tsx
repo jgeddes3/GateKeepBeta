@@ -111,7 +111,7 @@ export function ArtistPicker({ open, onClose, onPick }: {
         <DialogHeader>
           <DialogTitle>Tag a GateKeep artist</DialogTitle>
         </DialogHeader>
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search artists by name" autoFocus />
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search artists by name" aria-label="Search artists by name" autoFocus />
         <div className="grid max-h-80 gap-1 overflow-y-auto">
           {loading && (
             <>
