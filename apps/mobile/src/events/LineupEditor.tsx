@@ -24,32 +24,66 @@ import { useTokens } from "../theme/ThemeProvider";
 // (eventArtistTags.ts's own header comment); this component never invents
 // or edits one, it only reports the picked profile id and surfaces a
 // failure locally.
+//
+// Fix round 1 (review): `busy`/`error` now come from the screen, same
+// contract as EventDetailsFields, and reflect ONLY this card's own
+// mutations (add/remove act, routed through onChange), never the Details
+// card's save. Every action that could race a full-replace updateEvent
+// write against another (Add act, remove, Untag, Tag a GateKeep artist)
+// disables while `busy` is true, so a second rapid tap can't overwrite the
+// first save through the full-replace shape. `localError` covers this
+// card's own tag/untag failures and the client-side last-act guard below;
+// it and the passed-in `error` share one ErrorBanner since both describe a
+// failure to save THIS card's own edit.
 const TAG_STATUS_LABEL: Record<TaggedActStatus, string> = { pending: "Pending", accepted: "Accepted", declined: "Declined" };
 
 interface TagEventArtistPayload { curatorProfileId: string; eventId: string; musicianProfileId: string; }
 interface UntagEventArtistPayload { curatorProfileId: string; eventId: string; musicianProfileId: string; }
 
-export function LineupEditor({ event, eventId, onChange }: {
+// validateEventInput's own lineup bound (functions/src/eventsCore.ts): no
+// shared message constant exists for this yet, so the exact server string
+// is reused verbatim rather than inventing a client-only paraphrase that
+// could drift from it.
+const LINEUP_COUNT_MESSAGE = "Lineup must have 1-20 acts.";
+
+export function LineupEditor({ event, eventId, onChange, busy, error }: {
   event: EventDoc; eventId: string; onChange: (lineup: EventAct[]) => void;
+  busy: boolean; error: string | null;
 }) {
   const t = useTokens();
   const [draft, setDraft] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [tagError, setTagError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
   const [untagBusyId, setUntagBusyId] = useState<string | null>(null);
   const lineup = event.lineup;
 
   const addAct = () => {
     const name = draft.trim();
     if (!name) return;
+    setLocalError(null);
     onChange([...lineup, { kind: "external", name }]);
     setDraft("");
   };
 
-  const removeAt = (i: number) => onChange(lineup.filter((_, idx) => idx !== i));
+  const removeAt = (i: number) => {
+    // Client-side pre-check mirroring validateEventInput's own "1-20 acts"
+    // bound: a light UX pre-check only (the server remains the sole
+    // authority), but there's no reason to round-trip a removal the server
+    // is certain to reject.
+    if (lineup.length <= 1) {
+      setLocalError(LINEUP_COUNT_MESSAGE);
+      return;
+    }
+    setLocalError(null);
+    onChange(lineup.filter((_, idx) => idx !== i));
+  };
 
+  // tagEventArtist is the ONLY writer of a `tagged` act's stored copy
+  // (eventArtistTags.ts's own header comment); the screen's own onSnapshot
+  // listener picks the new row up once the call lands, so this never
+  // touches `lineup` locally on success, only on failure (localError).
   const handlePick = async (musicianProfileId: string) => {
-    setTagError(null);
+    setLocalError(null);
     try {
       await callFn<TagEventArtistPayload, { actIndex: number }>("tagEventArtist",
         { curatorProfileId: event.curatorProfileId, eventId, musicianProfileId });
@@ -57,18 +91,18 @@ export function LineupEditor({ event, eventId, onChange }: {
       // The ARTIST_TAG_* messages (duplicate, unapproved, cap) are surfaced
       // verbatim, same discipline every other callable rejection in this
       // codebase follows.
-      setTagError(e instanceof Error ? e.message : "Could not tag this artist.");
+      setLocalError(e instanceof Error ? e.message : "Could not tag this artist.");
     }
   };
 
   const untag = async (musicianProfileId: string) => {
-    setTagError(null);
+    setLocalError(null);
     setUntagBusyId(musicianProfileId);
     try {
       await callFn<UntagEventArtistPayload, { ok: true }>("untagEventArtist",
         { curatorProfileId: event.curatorProfileId, eventId, musicianProfileId });
     } catch (e) {
-      setTagError(e instanceof Error ? e.message : "Could not untag this artist.");
+      setLocalError(e instanceof Error ? e.message : "Could not untag this artist.");
     } finally {
       setUntagBusyId(null);
     }
@@ -87,19 +121,19 @@ export function LineupEditor({ event, eventId, onChange }: {
           </View>
           {act.kind === "tagged" && (
             <Button variant="ghost" title={untagBusyId === act.musicianProfileId ? "Untagging…" : "Untag"}
-              onPress={() => void untag(act.musicianProfileId)} disabled={untagBusyId === act.musicianProfileId} />
+              onPress={() => void untag(act.musicianProfileId)} disabled={busy || untagBusyId === act.musicianProfileId} />
           )}
-          <Button variant="ghost" onPress={() => removeAt(i)} accessibilityLabel={`Remove ${act.name}`}>
+          <Button variant="ghost" onPress={() => removeAt(i)} disabled={busy} accessibilityLabel={`Remove ${act.name}`}>
             <IconTrash size={16} color={t.muted} />
           </Button>
         </View>
       ))}
-      <ErrorBanner message={tagError} />
+      <ErrorBanner message={localError ?? error} />
       <View style={{ flexDirection: "row", gap: tokens.space.sm, alignItems: "center" }}>
-        <Input value={draft} onChangeText={setDraft} placeholder="Act name" maxLength={80} style={{ flex: 1 }} />
-        <Button variant="secondary" title="Add act" onPress={addAct} disabled={!draft.trim()} />
+        <Input value={draft} onChangeText={setDraft} placeholder="Act name" maxLength={80} editable={!busy} style={{ flex: 1 }} />
+        <Button variant="secondary" title="Add act" onPress={addAct} disabled={busy || !draft.trim()} />
       </View>
-      <Button variant="secondary" title="Tag a GateKeep artist" onPress={() => setPickerOpen(true)} />
+      <Button variant="secondary" title="Tag a GateKeep artist" onPress={() => setPickerOpen(true)} disabled={busy} />
       <ArtistPickerSheet visible={pickerOpen} onClose={() => setPickerOpen(false)}
         onPick={(profileId) => void handlePick(profileId)} />
     </Card>

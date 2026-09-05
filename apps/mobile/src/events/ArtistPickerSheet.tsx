@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from "react-native";
 import { SEARCH_EMPTY_MESSAGE, type SearchInput, type SearchOutput, type SearchResult } from "@gatekeep/shared";
 import { callFn } from "../lib/callable";
 import { formatChipLabel } from "../discover/discoverQueries";
@@ -93,18 +93,31 @@ export function ArtistPickerSheet({ visible, onClose, onPick }: {
 
   return (
     <Sheet visible={visible} onClose={close}>
-      <View style={{ gap: tokens.space.md }}>
-        <Text variant="title">Tag a GateKeep artist</Text>
-        <Input value={q} onChangeText={setQ} placeholder="Search artists by name" autoFocus />
-        <ScrollView style={{ maxHeight: 320 }}>
-          {loading && <ActivityIndicator color={t.muted} />}
-          {!loading && error && <ErrorBanner message={error} />}
-          {!loading && !error && items.length === 0 && <Text muted>{SEARCH_EMPTY_MESSAGE}</Text>}
-          {!loading && !error && items.map((item) => (
-            <ArtistPickerRow key={item.id} item={item} onPress={() => pick(item)} />
-          ))}
-        </ScrollView>
-      </View>
+      {/* Sheet itself takes no stance on keyboard avoidance (its own header
+          comment: "a caller putting a form inside a Sheet is responsible for
+          its own KeyboardAvoidingView"); without this, the keyboard covers
+          the results list on device. iOS needs an explicit "padding"
+          behavior to shift the sheet's own content up; Android's own default
+          resize behavior already handles this without one, so `behavior` is
+          left undefined there rather than forcing a second, redundant
+          shift. Same pattern ShowPosts.tsx's PostComposerSheet and
+          GigDetailSheet.tsx already established for their own Sheet-hosted
+          forms, with the autoFocus Input here the thing that raises the
+          keyboard immediately on open. */}
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={0}>
+        <View style={{ gap: tokens.space.md }}>
+          <Text variant="title">Tag a GateKeep artist</Text>
+          <Input value={q} onChangeText={setQ} placeholder="Search artists by name" autoFocus />
+          <ScrollView style={{ maxHeight: 320 }}>
+            {loading && <ActivityIndicator color={t.muted} />}
+            {!loading && error && <ErrorBanner message={error} />}
+            {!loading && !error && items.length === 0 && <Text muted>{SEARCH_EMPTY_MESSAGE}</Text>}
+            {!loading && !error && items.map((item) => (
+              <ArtistPickerRow key={item.id} item={item} onPress={() => pick(item)} />
+            ))}
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
     </Sheet>
   );
 }

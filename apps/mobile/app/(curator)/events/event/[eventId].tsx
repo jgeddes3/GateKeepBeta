@@ -94,8 +94,14 @@ export default function EventManagementScreen() {
   const [publishError, setPublishError] = useState<string | null>(null);
   const [posterBusy, setPosterBusy] = useState(false);
   const [posterError, setPosterError] = useState<string | null>(null);
-  const [saveBusy, setSaveBusy] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  // Fix round 1 (review): split per card, not one shared pair, so a save
+  // from one card never shows its busy/error state on the other, and a
+  // second rapid mutation on the SAME card is disabled while its own save
+  // is still in flight (see saveEvent below).
+  const [detailsBusy, setDetailsBusy] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [lineupBusy, setLineupBusy] = useState(false);
+  const [lineupError, setLineupError] = useState<string | null>(null);
 
   // Render-time reset, same idiom as [gigId].tsx's privLocGigId: this screen
   // does not remount when navigating from one event's management screen
@@ -182,10 +188,17 @@ export default function EventManagementScreen() {
   // mutations (add/remove act): full-replace, like savePoster above, always
   // resending whichever of doorsAt/ageRestriction/lineup this particular
   // call is NOT changing from the live event doc, so neither caller
-  // clobbers the other's last write.
-  const saveEvent = async (patch: { doorsAt?: number | null; ageRestriction?: AgeRestriction; lineup?: EventAct[] }) => {
-    setSaveBusy(true);
-    setSaveError(null);
+  // clobbers the other's last write. Fix round 1 (review): busy/error are
+  // now supplied by the caller (detailsBusy/detailsError for the Details
+  // card, lineupBusy/lineupError for the Lineup card) rather than one
+  // shared pair, so each card's own controls disable only for its own save
+  // and a failure surfaces on the card that caused it, not the other one.
+  const saveEvent = async (
+    patch: { doorsAt?: number | null; ageRestriction?: AgeRestriction; lineup?: EventAct[] },
+    setBusy: (busy: boolean) => void, setError: (message: string | null) => void,
+  ) => {
+    setBusy(true);
+    setError(null);
     try {
       await callFn("updateEvent", {
         curatorProfileId: event.curatorProfileId, eventId,
@@ -196,9 +209,9 @@ export default function EventManagementScreen() {
         ageRestriction: patch.ageRestriction ?? (event.ageRestriction ?? "all_ages"),
       });
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Could not save changes.");
+      setError(e instanceof Error ? e.message : "Could not save changes.");
     } finally {
-      setSaveBusy(false);
+      setBusy(false);
     }
   };
 
@@ -220,13 +233,16 @@ export default function EventManagementScreen() {
 
         {editable && (
           <EventDetailsFields
-            event={event} busy={saveBusy} error={saveError}
-            onSave={(v: EventDetailsSave) => void saveEvent(v)}
+            event={event} busy={detailsBusy} error={detailsError}
+            onSave={(v: EventDetailsSave) => void saveEvent(v, setDetailsBusy, setDetailsError)}
           />
         )}
 
         {editable && (
-          <LineupEditor event={event} eventId={eventId} onChange={(lineup) => void saveEvent({ lineup })} />
+          <LineupEditor
+            event={event} eventId={eventId} busy={lineupBusy} error={lineupError}
+            onChange={(lineup) => void saveEvent({ lineup }, setLineupBusy, setLineupError)}
+          />
         )}
 
         {editable && (
