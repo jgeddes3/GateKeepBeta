@@ -6,6 +6,7 @@ import type { CuratorSubtype, EventDoc, ProfileDoc } from "@gatekeep/shared";
 import { publicStorageUrl } from "../../src/discover/storageUrl";
 import { FollowButton } from "../../src/discover/FollowButton";
 import { ShareButton } from "../../src/share/ShareButton";
+import { MessageButton } from "../../src/messaging/MessageButton";
 import { getFirebase } from "../../src/lib/firebase";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import { formatEventFullDate, formatEventTimeRange } from "../../src/events/eventDisplay";
@@ -175,6 +176,9 @@ export default function Venue() {
             {/* SP11 (spec 3.1): the shared share affordance, hidden when
                 EXPO_PUBLIC_SITE_URL is unset. */}
             <ShareButton path={`/u/${handle}`} title={profile.name} />
+            {/* SP12 (spec 3.1): "Message", hidden with no eligible approved
+                musician profile. The row above already sets flexWrap: "wrap". */}
+            <MessageButton targetProfileId={profileId} targetProfileType="curator" targetName={profile.name} />
           </View>
 
           {photoUrls.length > 1 && (

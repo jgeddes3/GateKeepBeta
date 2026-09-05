@@ -7,6 +7,7 @@ import { getFirebase } from "../lib/firebase";
 import { formatChipLabel } from "../discover/discoverQueries";
 import { formatReliabilityLine } from "../bookings/BookingForms";
 import { NULL_RATES, OfferComposer, RatesSummary } from "../bookings/OfferComposer";
+import { MessageButton } from "../messaging/MessageButton";
 import { Button, Card, IconUser, Sheet, Skeleton, Text } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
@@ -67,7 +68,13 @@ export function CuratorArtistRow({ curatorProfileId, r }: { curatorProfileId: st
           <Text variant="meta" muted>{formatReliabilityLine(booking?.reliability)}</Text>
         </View>
       )}
-      <Button title={offering ? "Cancel" : "Offer a gig"} variant="secondary" onPress={() => setOffering((v) => !v)} style={{ alignSelf: "flex-start" }} />
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: tokens.space.sm }}>
+        <Button title={offering ? "Cancel" : "Offer a gig"} variant="secondary" onPress={() => setOffering((v) => !v)} style={{ alignSelf: "flex-start" }} />
+        {/* SP12 (spec 3.1): "Message", beside "Offer a gig". curatorProfileId
+            is already known here, so this skips MessageButton's own picker
+            sheet and links straight to the pair. */}
+        <MessageButton targetProfileId={r.id} targetProfileType="musician" targetName={r.title} actingProfileId={curatorProfileId} />
+      </View>
       <Sheet visible={offering} onClose={() => setOffering(false)}>
         {/* Sheet takes no stance on keyboard avoidance; the offer's
             amount/note fields need one, same pattern as GigDetailSheet's own

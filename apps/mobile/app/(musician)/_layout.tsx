@@ -1,10 +1,19 @@
 import { Tabs } from "expo-router";
 import { useShellScreenOptions } from "../../src/shell/useShellScreenOptions";
+import { useProfileContext } from "../../src/shell/ProfileContext";
+import { useUnreadTotal } from "../../src/messaging/useConversations";
+import { useTokens } from "../../src/theme/ThemeProvider";
 import {
   IconHouse, IconCalendarCheck, IconMusicNotes, IconHandshake, IconChatCircle, IconUserCircle,
 } from "../../src/ui/icons";
 
 export default function MusicianTabs() {
+  const { myProfiles } = useProfileContext();
+  const t = useTokens();
+  // SP12 (spec 3.1): the badge sums unread across every profile of THIS tab
+  // group's type, because the group's own screens can switch between them.
+  const unread = useUnreadTotal(
+    myProfiles.filter((p) => p.type === "musician" && p.status === "approved").map((p) => p.profileId));
   return (
     <Tabs screenOptions={useShellScreenOptions()}>
       <Tabs.Screen name="dashboard" options={{ title: "Dashboard",
@@ -28,6 +37,9 @@ export default function MusicianTabs() {
           reasoning (curator)/_layout.tsx already records for the "events"
           folder. */}
       <Tabs.Screen name="messages" options={{ title: "Messages", headerShown: false,
+        tabBarBadge: unread > 0 ? unread : undefined,
+        tabBarBadgeStyle: { backgroundColor: t.accent, color: t.onAccent },
+        tabBarAccessibilityLabel: unread > 0 ? `Messages, ${unread} unread` : "Messages",
         tabBarIcon: ({ color }) => <IconChatCircle color={color} size={22} /> }} />
       <Tabs.Screen name="account" options={{ title: "Account",
         tabBarIcon: ({ color }) => <IconUserCircle color={color} size={22} /> }} />

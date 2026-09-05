@@ -40,11 +40,19 @@ export async function ensureAndroidChannel(): Promise<void> {
 // dropped to undefined; notificationHref's own payout branch does not
 // actually read refKind (it routes on kind alone), so this widening is
 // purely for narrowing completeness against NotificationDoc["refKind"].
+// SP12: widened again to include "musician" and "curator", the RECIPIENT
+// profile's type for a `message` push. Without these two, a message push's
+// refKind narrowed to undefined and notificationHref fell back to the
+// musician group unconditionally, so a curator's message push opened the
+// wrong tab group's thread. comment_reply carries no refKind of its own
+// (it always routes to the event page off kind alone), so it is unaffected
+// by this widening.
 export function pushHref(response: Notifications.NotificationResponse | null | undefined): Href | null {
   const data = response?.notification.request.content.data as { kind?: unknown; refId?: unknown; refKind?: unknown } | undefined;
   if (!data || typeof data.kind !== "string") return null;
   const refId = typeof data.refId === "string" ? data.refId : null;
-  const refKind = data.refKind === "event" || data.refKind === "gig" || data.refKind === "profile" || data.refKind === "payouts"
+  const refKind = data.refKind === "event" || data.refKind === "gig" || data.refKind === "profile"
+    || data.refKind === "payouts" || data.refKind === "musician" || data.refKind === "curator"
     ? data.refKind : undefined;
   return notificationHref(data.kind as NotificationKind, refId, "mobile", refKind) as Href | null;
 }

@@ -9,6 +9,7 @@ import { bookingHistoryLabel, depositLine, CounterpartyLine } from "./BookingInb
 import { OfferForm } from "./OfferForm";
 import { CancelDialog } from "./CancelDialog";
 import { GatePrompt } from "../payments/GatePrompt";
+import { MessageButton } from "../messaging/MessageButton";
 import {
   computeExpectedTotalCents, computeDepositCents, MAX_BOOKING_THREAD_ENTRIES, MAX_CANCEL_REASON_LENGTH,
   NO_SHOW_REPORT_WINDOW_DAYS, DEPOSIT_PERCENT, THREAD_FULL_MESSAGE, CANCEL_GRACE_MS,
@@ -398,7 +399,27 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   return (
     <View style={{ gap: tokens.space.xl }}>
       <View style={{ gap: tokens.space.xs }}>
-        <Text variant="heading">{gigTitle}</Text>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: tokens.space.sm }}>
+          <Text variant="heading" style={{ flex: 1 }}>{gigTitle}</Text>
+          {/* SP12 (spec 3.1): both sides of a booking already know each
+              other's profile id, so this skips MessageButton's own picker
+              sheet and links straight to the pair. Deliberately a link into
+              free chat, separate from the terms-only offer thread below:
+              this booking's own negotiation stays structured (thread
+              entries, accept/counter/decline), while general back-and-forth
+              (logistics, questions) belongs in the Messages tab instead of
+              growing a second, informal channel inside this screen.
+              targetName is the generic fallback: no other-party name is
+              resolved in this component's scope (CounterpartyLine below
+              resolves one for ITS OWN display, but doesn't expose it here),
+              and BookingRequestDoc stores no name field to fall back to. */}
+          <MessageButton
+            targetProfileId={mySide === "musician" ? booking.curatorProfileId : booking.musicianProfileId}
+            targetProfileType={mySide === "musician" ? "curator" : "musician"}
+            targetName="this profile"
+            actingProfileId={mySide === "musician" ? booking.musicianProfileId : booking.curatorProfileId}
+          />
+        </View>
         <Text muted>
           {BUDGET_STRUCTURE_LABEL[booking.structure]} · Status: {booking.status.replace(/_/g, " ")}
         </Text>

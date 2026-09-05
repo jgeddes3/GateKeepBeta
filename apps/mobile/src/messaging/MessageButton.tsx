@@ -1,0 +1,81 @@
+import { useState } from "react";
+import { View } from "react-native";
+import { useRouter } from "expo-router";
+import { conversationPairId, MESSAGE_ACTION_LABEL, type ProfileType } from "@gatekeep/shared";
+import { useProfileContext, type ProfileSummary } from "../shell/ProfileContext";
+import { Button, Sheet, Text } from "../ui";
+import { tokens } from "../theme/tokens";
+
+// SP12 (spec 3.1). The mobile twin of Task 7's web MessageButton
+// (apps/web/src/messaging/MessageButton.tsx): same gate, HIDDEN, never
+// disabled, when the viewer has no eligible profile of the opposite type
+// (R-26 posture, same as OfferGigButton/web's own MessageButton), straight
+// through with exactly one eligible profile, a picker Sheet with several.
+// `myProfiles` comes from useProfileContext() in place of web's
+// useMyProfiles, and the Sheet primitive stands in for web's Sheet dialog.
+//
+// The conversation id is computed client-side (conversationPairId) purely
+// to pre-select the thread; the conversation itself is created server-side
+// on the first send, so linking to a pair that has never been messaged is
+// safe and simply shows the empty state.
+//
+// Each Messages tab group's own thread screen resolves ITS profileId from
+// the shared activeContext, not from any param this button passes (Task
+// 10's app/(musician|curator)/messages/[conversationId].tsx), so switching
+// to the chosen acting profile here (same switchTo + navigate pairing
+// ContextSwitcher.tsx already uses) is required for the opened thread to
+// actually be the one this button just computed a pair id for.
+export function MessageButton({ targetProfileId, targetProfileType, targetName, actingProfileId }: {
+  targetProfileId: string;
+  targetProfileType: ProfileType;
+  targetName: string;
+  actingProfileId?: string;
+}) {
+  const { myProfiles, switchTo } = useProfileContext();
+  const router = useRouter();
+  const [picking, setPicking] = useState(false);
+
+  const wantedType: ProfileType = targetProfileType === "musician" ? "curator" : "musician";
+  const eligible = actingProfileId
+    ? myProfiles.filter((p) => p.profileId === actingProfileId)
+    : myProfiles.filter((p) => p.type === wantedType && p.status === "approved");
+  if (eligible.length === 0) return null;
+
+  const open = (acting: ProfileSummary) => {
+    const pairId = targetProfileType === "musician"
+      ? conversationPairId(targetProfileId, acting.profileId)
+      : conversationPairId(acting.profileId, targetProfileId);
+    switchTo(acting);
+    router.push(
+      acting.type === "musician"
+        ? { pathname: "/(musician)/messages/[conversationId]", params: { conversationId: pairId } }
+        : { pathname: "/(curator)/messages/[conversationId]", params: { conversationId: pairId } },
+    );
+  };
+
+  return (
+    <>
+      <Button
+        variant="secondary"
+        title={MESSAGE_ACTION_LABEL}
+        accessibilityLabel={`Message ${targetName}`}
+        onPress={() => (eligible.length === 1 ? open(eligible[0]) : setPicking(true))}
+      />
+      <Sheet visible={picking} onClose={() => setPicking(false)}>
+        <View style={{ gap: tokens.space.sm }}>
+          <Text variant="title">Message {targetName} as</Text>
+          {eligible.map((p) => (
+            <Button
+              key={p.profileId}
+              variant="secondary"
+              title={p.name}
+              accessibilityLabel={`Message as ${p.name}`}
+              style={{ alignSelf: "flex-start" }}
+              onPress={() => { setPicking(false); open(p); }}
+            />
+          ))}
+        </View>
+      </Sheet>
+    </>
+  );
+}

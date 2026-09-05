@@ -10,6 +10,7 @@ import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import { formatEventFullDate } from "../../src/events/eventDisplay";
 import { LatestPostLine, PostComposerSheet, useShowPostComposerGate } from "../../src/discover/ShowPosts";
 import { ShareButton } from "../../src/share/ShareButton";
+import { MessageButton } from "../../src/messaging/MessageButton";
 import type {
   ProfileDoc, TrackDoc, GigDoc, GigPublicLocation, ActSize, AvailabilityPattern, EventDoc,
 } from "@gatekeep/shared";
@@ -388,11 +389,15 @@ export default function Artist() {
           </View>
         </View>
         <View style={{ padding: 16, gap: 12 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: tokens.space.sm, rowGap: tokens.space.sm }}>
             <Text muted style={{ flex: 1 }}>@{profile.handle}{pf?.genres?.length ? ` · ${pf.genres.join(" · ")}` : ""}</Text>
             {/* SP11 (spec 3.1): the shared share affordance, hidden when
                 EXPO_PUBLIC_SITE_URL is unset. */}
             <ShareButton path={`/u/${handle}`} title={profile.name} />
+            {/* SP12 (spec 3.1): "Message", hidden with no eligible approved
+                curator profile. flexWrap/rowGap added above so this row
+                doesn't overflow at 360px alongside Share. */}
+            <MessageButton targetProfileId={profileId} targetProfileType="musician" targetName={profile.name} />
           </View>
           {tracks.length > 0 && (
             <View style={{ gap: 8 }}>
