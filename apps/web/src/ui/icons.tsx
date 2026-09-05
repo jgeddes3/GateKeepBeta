@@ -89,6 +89,10 @@ export const IconGigs = pin(MusicNotes);
 export const IconBookings = pin(CalendarCheck);
 export const IconEarnings = pin(Wallet);
 export const IconMessages = pin(ChatCircle);
+// SP12 task 6: same ChatCircle glyph as IconMessages above, named to match
+// the Messages nav item's own field (AppShell.tsx) rather than reusing an
+// icon whose exported name doesn't say what this particular use is for.
+export const IconChatCircle = IconMessages;
 export const IconUser = pin(UserCircle);
 export const IconMenu = pin(List);
 export const IconSearch = pin(MagnifyingGlass);

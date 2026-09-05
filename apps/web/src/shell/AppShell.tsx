@@ -5,12 +5,14 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/src/lib/utils";
 import { useAuth } from "../auth/AuthProvider";
 import { useMyProfiles, type ProfileSummary } from "./useMyProfiles";
+import { useUnreadTotal } from "../messaging/useConversations";
 import { ContextSwitcher } from "./ContextSwitcher";
 import { Footer } from "./Footer";
+import { Badge } from "../ui/badge";
 import {
   Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger,
 } from "../ui/sheet";
-import { IconBookings, IconCompass, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconSearch, IconTicket, type IconProps } from "../ui/icons";
+import { IconBookings, IconChatCircle, IconCompass, IconEarnings, IconEvents, IconGigs, IconHouse, IconMenu, IconSearch, IconTicket, type IconProps } from "../ui/icons";
 
 // Routes that get the signed-in shell (slim top bar + footer). An allowlist
 // of prefixes rather than a blocklist: everything under these is the
@@ -96,10 +98,11 @@ function resolveContext(pathname: string, profiles: ProfileSummary[]): NavContex
 // project 6 task 10's own two new pages included): the browse-gigs page,
 // the profile's own editor page (where its BookingInbox section already
 // lives), the earnings page, the curator events manager, and the fan
-// tickets page. "Messages" isn't included anywhere: there's no messaging
-// surface on web (or mobile, where its own Messages tab is still a "coming
-// in a later phase" placeholder), so no context has a real destination for
-// it.
+// tickets page. Sub-project 12 task 6 adds one more: /dashboard/messages,
+// the web Messages page. It appears only in the musician and curator
+// context arrays (see `messages` below), the same profile-gated shape
+// Events already has: a profile-less account has no acting identity to
+// message as.
 //
 // Tickets is in EVERY context's array, deliberately, unlike Events below:
 // buying a ticket needs no musician/curator profile at all (any signed-in
@@ -128,11 +131,18 @@ function navItemsFor(context: NavContext): NavItem[] {
   const discover: NavItem = { label: "Discover", href: "/discover", icon: IconCompass };
   const search: NavItem = { label: "Search", href: "/search", icon: IconSearch };
   const tickets: NavItem = { label: "Tickets", href: "/tickets", icon: IconTicket };
+  // Sub-project 12 task 6: one shared Messages destination for either
+  // profile type (the acting profile is chosen inside the page itself, the
+  // same "Messaging as" switcher shape ContextSwitcher already establishes
+  // for the rest of the shell), placed right after Search in both the
+  // musician and curator arrays per the task brief.
+  const messages: NavItem = { label: "Messages", href: "/dashboard/messages", icon: IconChatCircle };
   if (context.kind === "musician") {
     return [
       dashboard,
       discover,
       search,
+      messages,
       { label: "Gigs", href: "/gigs", icon: IconGigs },
       { label: "Bookings", href: `/dashboard/portfolio/${context.profileId}`, icon: IconBookings },
       { label: "Earnings", href: "/dashboard/earnings", icon: IconEarnings },
@@ -144,6 +154,7 @@ function navItemsFor(context: NavContext): NavItem[] {
       dashboard,
       discover,
       search,
+      messages,
       { label: "Gigs", href: `/dashboard/curator/${context.profileId}/gigs`, icon: IconGigs },
       { label: "Bookings", href: `/dashboard/curator/${context.profileId}`, icon: IconBookings },
       { label: "Events", href: "/dashboard/events", icon: IconEvents },
@@ -192,6 +203,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const profiles = useMyProfiles(user?.uid ?? null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  // The Messages nav item's own unread badge: summed across every
+  // musician/curator profile this account holds (not just the CURRENT
+  // context's one), because Messages is one shared destination regardless
+  // of which profile happens to be active in the nav right now, unlike
+  // mobile's per-tab-group badge (that platform's own two Messages tabs).
+  const messagingProfileIds = profiles.filter((p) => p.type === "musician" || p.type === "curator").map((p) => p.profileId);
+  const unreadMessages = useUnreadTotal(messagingProfileIds);
 
   if (!isShellRoute(pathname)) return <>{children}</>;
 
@@ -251,6 +269,17 @@ export function AppShell({ children }: { children: ReactNode }) {
                   )}
                 >
                   {item.label}
+                  {item.href === "/dashboard/messages" && unreadMessages > 0 && (
+                    <span className="ml-1.5 inline-flex items-center align-middle">
+                      {/* variant="secondary", not the ember default: this
+                          pill can sit INSIDE the already-ember active chip,
+                          and DESIGN.md's accent-dosage rule reserves ember
+                          for one deliberate use per surface, not a nested
+                          second one. */}
+                      <Badge variant="secondary">{unreadMessages}</Badge>
+                      <span className="sr-only">{unreadMessages} unread</span>
+                    </span>
+                  )}
                 </Link>
               ))}
             </nav>
@@ -300,6 +329,12 @@ export function AppShell({ children }: { children: ReactNode }) {
                         >
                           <Icon size={18} aria-hidden="true" />
                           {item.label}
+                          {item.href === "/dashboard/messages" && unreadMessages > 0 && (
+                            <span className="ml-auto inline-flex items-center">
+                              <Badge variant="secondary">{unreadMessages}</Badge>
+                              <span className="sr-only">{unreadMessages} unread</span>
+                            </span>
+                          )}
                         </Link>
                       </SheetClose>
                     );
