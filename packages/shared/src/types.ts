@@ -1358,6 +1358,24 @@ export interface ConversationDoc {
   updatedAt: number;
 }
 
+// profiles/{profileId}/conversations/{pairId}: this profile's own view of a
+// conversation, written by the messaging callables in the same transaction as
+// the top-level doc. It exists because a top-level `participants
+// array-contains` list rule is not provable (firestore.rules explains why),
+// so the inbox lists the mirror and opens the top-level doc by id.
+export interface ConversationRefDoc {
+  pairId: string;
+  otherProfileId: string;
+  otherProfileName: string;
+  otherProfileType: "musician" | "curator";
+  lastMessage: ConversationDoc["lastMessage"];
+  lastMessageAt: number;
+  unread: number;          // THIS profile's count, not the map
+  blockedByMe: boolean;    // whether THIS profile blocked the pair; blocks are silent, so the other side's mirror never says so
+  openReports: number;
+  updatedAt: number;
+}
+
 // messageWindows/{profileId}: the rolling send-rate window for ONE sender
 // profile, across every conversation it takes part in. It is a separate
 // server-only doc, not a field on the conversation, because the cap is per

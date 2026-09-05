@@ -38,6 +38,7 @@ export {
 } from "./ticketing.js";
 export { followTarget, unfollowTarget, markGenrePickerSeen } from "./follows.js";
 export { createShowPost, removeShowPost } from "./showPosts.js";
+export { sendMessage, markConversationRead, setConversationBlock } from "./messaging.js";
 export { getDiscoverDeck } from "./discover.js";
 export {
   onProfileWrittenSearch, onTrackWrittenSearch, onEventWrittenSearch, onGigWrittenSearch, onBookingWrittenSearch,

@@ -89,9 +89,15 @@ export async function notifyUser(
   return true;
 }
 
-export async function notifyProfileMembers(profileId: string, note: Omit<NotificationDoc, "read" | "createdAt">) {
+// SP12 widens this with an optional dedupeKey the same way SP11 widened
+// notifyProfileAdmins below: every pre-SP12 caller passes two arguments and
+// is unaffected. messaging.ts passes a per-conversation, per-10-minute key so
+// a burst of messages surfaces once in each recipient member's inbox.
+export async function notifyProfileMembers(
+  profileId: string, note: Omit<NotificationDoc, "read" | "createdAt">, dedupeKey?: string,
+) {
   const members = await getFirestore().collection(`profiles/${profileId}/members`).get();
-  await Promise.all(members.docs.map((m) => notifyUser(m.id, note)));
+  await Promise.all(members.docs.map((m) => notifyUser(m.id, note, dedupeKey)));
 }
 
 // SP5c: some notes (e.g. a payout-share change) are for profile admins only,
