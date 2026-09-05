@@ -36,6 +36,7 @@ import {
   PencilSimple,
   Play,
   Plus,
+  ShareNetwork,
   SpotifyLogo,
   Sun,
   Ticket,
@@ -182,6 +183,12 @@ export const IconEvents = pin(CalendarBlank);
 // (MagnifyingGlass, already spoken for by text-search affordances
 // elsewhere) the same way antislop R-04 asks every icon choice to be.
 export const IconCompass = pin(Compass);
+
+// Sub-project 11 task 7: the web ShareButton (spec section 3.1). ShareNetwork
+// is Phosphor's own "share to other people/apps" mark, distinct from
+// IconLink's plain-chain glyph (antislop R-04: this button shares a page,
+// it doesn't just represent a link).
+export const IconShare = pin(ShareNetwork);
 
 // Radio-item indicator: a solid dot marker, not a content icon, so it uses
 // Phosphor's "fill" weight directly rather than the pinned ICON_WEIGHT. At

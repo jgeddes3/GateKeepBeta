@@ -10,6 +10,7 @@ import { Button } from "../../../src/ui/button";
 import { formatChipLabel } from "./chipLabel";
 import { IconImages } from "../../../src/ui/icons";
 import { cn } from "../../../src/lib/utils";
+import { ShareButton } from "../../../src/share/ShareButton";
 
 // Sub-project 9A task 10: full restyle to the owner-locked anatomy (spec
 // section 6.6, docs/superpowers/mocks/sp9a/venue-page.html): the owner's
@@ -236,7 +237,13 @@ export function CuratorProfile({ data }: { data: CuratorLoaded }) {
 
         {/* 2. NAME + CHIPS + CTA */}
         <div className="mt-5">
-          <h1 className="font-syne text-2xl font-extrabold leading-none text-gk-text sm:text-4xl">{profile.name}</h1>
+          <div className="flex items-start justify-between gap-3">
+            <h1 className="font-syne text-2xl font-extrabold leading-none text-gk-text sm:text-4xl">{profile.name}</h1>
+            {/* Task 7 (spec 3.1): share this profile's canonical /u/{handle}
+                link, the path the native intent filters and the AASA/
+                assetlinks components both claim. */}
+            <ShareButton path={`/u/${profile.handle}`} title={profile.name} />
+          </div>
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {chips.map((label) => <Badge key={label} variant="secondary">{label}</Badge>)}
             <FollowButton targetId={profileId} targetType="curator" label={isVenue ? "Follow venue" : undefined} />

@@ -20,6 +20,11 @@ const nextConfig: NextConfig = {
       beforeFiles: [
         { source: "/@:handle", destination: "/u/:handle" },
         { source: "/@:handle/shows", destination: "/u/:handle/shows" },
+        // SP11: the two deep-link verification files. The app-router segment
+        // lives at app/well-known/, these give it the dot-prefixed public URL
+        // Apple and Google fetch.
+        { source: "/.well-known/apple-app-site-association", destination: "/well-known/apple-app-site-association" },
+        { source: "/.well-known/assetlinks.json", destination: "/well-known/assetlinks.json" },
       ],
       afterFiles: [],
       fallback: [],

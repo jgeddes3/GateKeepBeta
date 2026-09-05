@@ -13,6 +13,7 @@ import { FollowsProvider } from "../../../src/discover/useFollows";
 import { FollowButton } from "../../../src/discover/FollowButton";
 import { ShowPostsForAct } from "../../../src/discover/ShowPosts";
 import { IconMapPin, IconTicket } from "../../../src/ui/icons";
+import { ShareButton } from "../../../src/share/ShareButton";
 
 // Sub-project 6 task 9: the public event page's client half. page.tsx
 // (server) fetches the event + tiers via the anonymous, rules-governed
@@ -63,10 +64,15 @@ export function EventPageClient({ eventId, event, posterUrl, curatorName, curato
             )}
           </div>
 
-          {/* 2. TITLE */}
-          <h1 className="mt-5 font-syne text-2xl font-extrabold leading-tight text-gk-text sm:text-4xl">
-            {event.title}
-          </h1>
+          {/* 2. TITLE: flex row so the Share button (Task 7, spec 3.1) sits to
+              the right of the heading without eating into its own line
+              length (it wraps onto its own lines above the button instead). */}
+          <div className="mt-5 flex items-start justify-between gap-3">
+            <h1 className="font-syne text-2xl font-extrabold leading-tight text-gk-text sm:text-4xl">
+              {event.title}
+            </h1>
+            <ShareButton path={`/e/${eventId}`} title={event.title} />
+          </div>
 
           {/* 3. DATE BLOCK: DateBlockRow's own anatomy (date chip + title +
               subtitle), just not a link (this IS the page, not a row pointing

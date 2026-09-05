@@ -14,6 +14,7 @@ import { formatChipLabel } from "./chipLabel";
 import { Button } from "../../../src/ui/button";
 import { Badge } from "../../../src/ui/badge";
 import { IconInstagram, IconLink, IconSpotify, IconUser, IconWebsite, IconYoutube } from "../../../src/ui/icons";
+import { ShareButton } from "../../../src/share/ShareButton";
 
 // Sub-project 9A task 9: full restyle to the owner-locked anatomy (spec
 // section 6.4, docs/superpowers/mocks/sp9a/artist-hero.html option A) with
@@ -147,23 +148,29 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
         <div aria-hidden="true" className="absolute inset-0" style={{ background: "var(--gk-scrim)" }} />
         <div className="absolute inset-x-0 bottom-0 px-4 pb-5 sm:px-6 sm:pb-7">
           <div className="mx-auto max-w-5xl">
-            <div className="flex items-end gap-3">
-              {avatarUrl ? (
-                <img
-                  src={avatarUrl} alt=""
-                  className="size-12 shrink-0 rounded-full border-2 border-gk-bg-0 object-cover sm:size-14"
-                />
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="flex size-12 shrink-0 items-center justify-center rounded-full border-2 border-gk-bg-0 bg-gk-border text-gk-muted sm:size-14"
-                >
-                  <IconUser size={22} />
-                </span>
-              )}
-              <h1 className="truncate font-syne text-2xl font-extrabold leading-none text-gk-text sm:text-4xl">
-                {profile.name}
-              </h1>
+            <div className="flex items-end justify-between gap-3">
+              <div className="flex min-w-0 items-end gap-3">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl} alt=""
+                    className="size-12 shrink-0 rounded-full border-2 border-gk-bg-0 object-cover sm:size-14"
+                  />
+                ) : (
+                  <span
+                    aria-hidden="true"
+                    className="flex size-12 shrink-0 items-center justify-center rounded-full border-2 border-gk-bg-0 bg-gk-border text-gk-muted sm:size-14"
+                  >
+                    <IconUser size={22} />
+                  </span>
+                )}
+                <h1 className="truncate font-syne text-2xl font-extrabold leading-none text-gk-text sm:text-4xl">
+                  {profile.name}
+                </h1>
+              </div>
+              {/* Task 7 (spec 3.1): share this profile's canonical /u/{handle}
+                  link, the path the native intent filters and the AASA/
+                  assetlinks components both claim. */}
+              <ShareButton path={`/u/${profile.handle}`} title={profile.name} />
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <Badge variant="secondary">{SUBTYPE_LABEL[subtype]}</Badge>
