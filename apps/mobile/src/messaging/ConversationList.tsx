@@ -2,23 +2,24 @@ import { FlatList, Pressable, View } from "react-native";
 import { Text, Badge, SkeletonCard, ErrorBanner, Button } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
-import { useConversations, unreadFor, formatConversationTime, type ConversationRow } from "./useConversations";
+import { useConversations, unreadFor, type ConversationRow } from "./useConversations";
 
 // Screen-specific copy, not a shared constant (section 6 of the spec lists
-// no "no conversations" string): the list's own empty state.
+// no "no conversations" string): matches the landed web ConversationList's
+// own empty-state copy verbatim.
 const CONVERSATIONS_EMPTY_MESSAGE = "No conversations yet. Message a venue or an artist from their page.";
 
 function ConversationRowItem({
-  row, profileId, onOpen,
-}: { row: ConversationRow; profileId: string; onOpen: (conversationId: string) => void }) {
+  row, onOpen,
+}: { row: ConversationRow; onOpen: (conversationId: string) => void }) {
   const t = useTokens();
-  const unread = unreadFor(row, profileId);
+  const unread = unreadFor(row);
   const preview = row.lastMessage?.text ?? "";
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${row.otherProfileName}, ${unread} unread`}
-      onPress={() => onOpen(row.pairId)}
+      onPress={() => onOpen(row.id)}
       style={({ pressed }) => ({
         minHeight: 44,
         flexDirection: "row",
@@ -37,8 +38,8 @@ function ConversationRowItem({
         {preview.length > 0 && <Text muted numberOfLines={1}>{preview}</Text>}
       </View>
       <View style={{ alignItems: "flex-end", gap: 4 }}>
-        <Text variant="meta" muted>{formatConversationTime(row.lastMessageAt)}</Text>
-        <Badge label={String(unread)} />
+        <Text variant="meta" muted>{new Date(row.lastMessageAt).toLocaleString()}</Text>
+        {unread > 0 && <Badge label={String(unread)} />}
       </View>
     </Pressable>
   );
@@ -65,7 +66,7 @@ export function ConversationList({
     return (
       <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
         <ErrorBanner message="Couldn't load your conversations." />
-        <Button title="Retry" onPress={retry} style={{ alignSelf: "flex-start" }} />
+        <Button variant="secondary" title="Retry" onPress={retry} style={{ alignSelf: "flex-start" }} />
       </View>
     );
   }
@@ -80,8 +81,8 @@ export function ConversationList({
     <FlatList
       style={{ flex: 1 }}
       data={rows}
-      keyExtractor={(row) => row.pairId}
-      renderItem={({ item }) => <ConversationRowItem row={item} profileId={profileId} onOpen={onOpen} />}
+      keyExtractor={(row) => row.id}
+      renderItem={({ item }) => <ConversationRowItem row={item} onOpen={onOpen} />}
     />
   );
 }

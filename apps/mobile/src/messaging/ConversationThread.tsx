@@ -7,43 +7,46 @@ import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { useProfileRole } from "../payments/useProfileRole";
 import {
+  conversationPairId, isValidDocId,
   MESSAGE_MAX_CHARS, MESSAGE_SEND_LABEL, MESSAGE_COMPOSER_PLACEHOLDER,
   CONVERSATION_BLOCKED_MESSAGE, CONVERSATION_EMPTY_MESSAGE,
   UNBLOCK_LABEL, BLOCK_LABEL, REPORT_LABEL,
   REPORT_REASON_PROMPT, REPORT_REASON_MAX_CHARS, REPORT_REASON_MESSAGE,
   REPORT_SENT_MESSAGE, REPORT_DUPLICATE_MESSAGE,
-  type ConversationDoc, type ConversationRefDoc, type MessageDoc, type ProfileDoc,
+  type ConversationRefDoc, type MessageDoc, type ProfileDoc,
 } from "@gatekeep/shared";
 import { Text, Button, TextArea, Sheet, ErrorBanner, Callout, SkeletonCard } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
-import { formatConversationTime } from "./useConversations";
 
-// RN twin of the web thread (Task 6), reading exactly what spec section 4
-// (amended) says the thread reads: conversations/{pairId} BY ID (shared
-// truth only, no unread, no blockedBy) and its messages subcollection
-// ordered by `at`. The acting profile's own block state comes from ITS
-// mirror (profiles/{profileId}/conversations/{conversationId}.blockedByMe),
-// the only client-readable surface for a block: the private state doc has
-// no rule and is closed to every client, admins included.
+// RN twin of the landed web thread (apps/web/src/messaging/
+// ConversationThread.tsx): checked against it directly once it landed
+// mid-task, so this follows the same architecture, not just the brief's
+// paraphrase of it.
+//
+// Reads exactly what spec section 4 (amended) says the thread reads: the
+// messages subcollection under conversations/{pairId}, and the acting
+// profile's OWN mirror (profiles/{profileId}/conversations/{conversationId})
+// for blockedByMe, the only client-readable surface for a block (the
+// private state doc has no rule and is closed to every client, admins
+// included). Unlike an earlier draft of this file, it does NOT subscribe to
+// the shared conversations/{pairId} doc at all: the pairId format itself
+// (conversationPairId's own "{musicianProfileId}__{curatorProfileId}"
+// shape) already names the other participant, the same client-side parse
+// web's own useOtherProfileForConversation uses, so the thread never needs
+// an extra listener just to learn who the other side is.
 
 type MessageRow = MessageDoc & { id: string };
-type ConversationState = ConversationDoc | "loading" | "error" | "notFound";
 type MessagesState = MessageRow[] | "loading" | "error";
 type OtherProfile = { profileId: string; name: string; handle: string; type: "musician" | "curator" };
 
-function useConversationDoc(conversationId: string): { state: ConversationState; retry: () => void } {
-  const [state, setState] = useState<ConversationState>("loading");
-  const [token, setToken] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    const { db } = getFirebase();
-    const unsub = onSnapshot(doc(db, "conversations", conversationId),
-      (s) => { if (!cancelled) setState(s.exists() ? (s.data() as ConversationDoc) : "notFound"); },
-      () => { if (!cancelled) setState("error"); });
-    return () => { cancelled = true; unsub(); };
-  }, [conversationId, token]);
-  return { state, retry: () => { setState("loading"); setToken((n) => n + 1); } };
+function parsePairId(conversationId: string): { musicianProfileId: string; curatorProfileId: string } | null {
+  const parts = conversationId.split("__");
+  if (parts.length !== 2) return null;
+  const [musicianProfileId, curatorProfileId] = parts;
+  if (!isValidDocId(musicianProfileId) || !isValidDocId(curatorProfileId)) return null;
+  if (conversationPairId(musicianProfileId, curatorProfileId) !== conversationId) return null;
+  return { musicianProfileId, curatorProfileId };
 }
 
 function useMessages(conversationId: string): { state: MessagesState; retry: () => void } {
@@ -58,16 +61,18 @@ function useMessages(conversationId: string): { state: MessagesState; retry: () 
       () => { if (!cancelled) setState("error"); });
     return () => { cancelled = true; unsub(); };
   }, [conversationId, token]);
+  // A plain event-handler setState, not inside the effect body (no
+  // react-hooks/set-state-in-effect exception needed): it only fires from a
+  // user's Retry press.
   return { state, retry: () => { setState("loading"); setToken((n) => n + 1); } };
 }
 
-// A missing mirror (should not happen once a conversation exists, but
-// tolerated the same n+1-permission-tolerant way the rest of this codebase
-// treats an absent doc) reads as "not blocked" rather than hanging on
-// "loading" forever.
-function useBlockedByMe(profileId: string, conversationId: string): { state: boolean | "error"; retry: () => void } {
-  const [state, setState] = useState<boolean | "error">(false);
-  const [token, setToken] = useState(0);
+// This profile's own mirror, live: the ONLY place `blockedByMe` is visible
+// to a client at all. A missing mirror (should not happen once a
+// conversation exists) or a failed subscription both read as "not blocked"
+// rather than hanging forever, matching web's own useMirror fallback.
+function useBlockedByMe(profileId: string, conversationId: string): boolean | "loading" | "error" {
+  const [state, setState] = useState<boolean | "loading" | "error">("loading");
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
@@ -75,14 +80,15 @@ function useBlockedByMe(profileId: string, conversationId: string): { state: boo
       (s) => { if (!cancelled) setState(s.exists() ? Boolean((s.data() as ConversationRefDoc).blockedByMe) : false); },
       () => { if (!cancelled) setState("error"); });
     return () => { cancelled = true; unsub(); };
-  }, [profileId, conversationId, token]);
-  return { state, retry: () => { setState(false); setToken((n) => n + 1); } };
+  }, [profileId, conversationId]);
+  return state;
 }
 
 // One-shot lookup of the other side's public profile: its name (the header
-// title), handle (the "View profile" link target) and type (which route
-// that link pushes). Permission-tolerant like BookingInbox's own row
-// lookups: a load failure just leaves the header title generic.
+// title and own bubbles' sender label), handle (the "View profile" link
+// target) and type (which route that link pushes). Permission-tolerant like
+// BookingInbox's own row lookups: a load failure just falls through to the
+// screen's "not available" state.
 function useOtherProfile(otherProfileId: string | null): OtherProfile | "loading" | "error" {
   const [state, setState] = useState<OtherProfile | "loading" | "error">("loading");
   useEffect(() => {
@@ -101,7 +107,7 @@ function useOtherProfile(otherProfileId: string | null): OtherProfile | "loading
   return state;
 }
 
-function MessageBubble({ item, mine }: { item: MessageRow; mine: boolean }) {
+function MessageBubble({ item, mine, label }: { item: MessageRow; mine: boolean; label: string }) {
   const t = useTokens();
   return (
     <View style={{ flexDirection: "row", justifyContent: mine ? "flex-end" : "flex-start", paddingVertical: tokens.space.xs }}>
@@ -117,7 +123,7 @@ function MessageBubble({ item, mine }: { item: MessageRow; mine: boolean }) {
         borderColor: mine ? t.accent + "80" : t.border,
       }}>
         <Text>{item.text}</Text>
-        <Text variant="meta" muted style={{ marginTop: 4 }}>{formatConversationTime(item.at)}</Text>
+        <Text variant="meta" muted style={{ marginTop: 4 }}>{label} · {new Date(item.at).toLocaleString()}</Text>
       </View>
     </View>
   );
@@ -130,18 +136,29 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   const router = useRouter();
   const role = useProfileRole(profileId, user?.uid);
 
-  // Hooks run unconditionally, every render (same discipline BookingThread
-  // follows); the early returns for loading/error/notFound below happen
-  // AFTER all of these are called.
-  const conversationQ = useConversationDoc(conversationId);
-  const messagesQ = useMessages(conversationId);
-  const blockedQ = useBlockedByMe(profileId, conversationId);
-
-  const conversation = conversationQ.state;
-  const otherProfileId = (conversation !== "loading" && conversation !== "error" && conversation !== "notFound")
-    ? (conversation.musicianProfileId === profileId ? conversation.curatorProfileId : conversation.musicianProfileId)
+  // The pair's two profile ids are IN the conversation id itself
+  // (conversationPairId's own format), so the other side is a pure, sync
+  // derivation, no read needed just to learn who it is.
+  const pair = parsePairId(conversationId);
+  const invalid = !pair || (pair.musicianProfileId !== profileId && pair.curatorProfileId !== profileId);
+  const otherProfileId = pair && !invalid
+    ? (pair.musicianProfileId === profileId ? pair.curatorProfileId : pair.musicianProfileId)
     : null;
+
+  // Hooks run unconditionally, every render (same discipline BookingThread
+  // follows); the early returns below happen AFTER all of these are called.
   const otherProfile = useOtherProfile(otherProfileId);
+  const messagesQ = useMessages(conversationId);
+  const blockedState = useBlockedByMe(profileId, conversationId);
+
+  const [myProfileName, setMyProfileName] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getDoc(doc(getFirebase().db, "profiles", profileId))
+      .then((snap) => { if (!cancelled && snap.exists()) setMyProfileName((snap.data() as ProfileDoc).name); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [profileId]);
 
   const [moreOpen, setMoreOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
@@ -172,7 +189,7 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   // count grows while this screen is focused (a new message arriving while
   // the thread is on screen is still something the viewer has now seen).
   // Best-effort: a failure here leaves the badge one message stale, not
-  // worth an error banner over.
+  // worth an error banner.
   const isFocusedRef = useRef(true);
   const markedCountRef = useRef(0);
   const markRead = useCallback(() => {
@@ -195,31 +212,30 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
     markRead();
   }, [messagesQ.state, markRead]);
 
-  if (conversation === "loading" || role === "loading") {
-    return (
-      <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
-        <SkeletonCard />
-        <SkeletonCard />
-      </View>
-    );
-  }
-  if (conversation === "error") {
-    return (
-      <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
-        <ErrorBanner message="Couldn't load this conversation." />
-        <Button title="Retry" onPress={conversationQ.retry} style={{ alignSelf: "flex-start" }} />
-      </View>
-    );
-  }
-  if (conversation === "notFound") {
+  if (invalid) {
     return (
       <View style={{ flex: 1, padding: tokens.space.lg }}>
-        <Text muted>You don&apos;t have access to this conversation, or it doesn&apos;t exist.</Text>
+        <Text muted>This conversation isn&apos;t available.</Text>
+      </View>
+    );
+  }
+  if (otherProfile === "loading" || blockedState === "loading") {
+    return (
+      <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
+        <SkeletonCard />
+        <SkeletonCard />
+      </View>
+    );
+  }
+  if (otherProfile === "error") {
+    return (
+      <View style={{ flex: 1, padding: tokens.space.lg }}>
+        <Text muted>This conversation isn&apos;t available.</Text>
       </View>
     );
   }
 
-  const blockedByMe = blockedQ.state === "error" ? false : blockedQ.state;
+  const blockedByMe = blockedState === "error" ? false : blockedState;
   const isAdmin = role === "admin";
 
   const doSetBlock = async (blocked: boolean) => {
@@ -245,7 +261,6 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
   };
 
   const openOtherProfile = () => {
-    if (otherProfile === "loading" || otherProfile === "error") return;
     router.push(otherProfile.type === "musician"
       ? { pathname: "/artist/[handle]", params: { handle: otherProfile.handle } }
       : { pathname: "/venue/[handle]", params: { handle: otherProfile.handle } });
@@ -281,12 +296,15 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
 
   const send = async () => {
     const trimmed = text.trim();
-    if (!trimmed || !otherProfileId) return;
+    if (!trimmed) return;
     setSending(true); setSendError(null);
     try {
-      await callFn("sendMessage", { fromProfileId: profileId, toProfileId: otherProfileId, text: trimmed });
+      await callFn("sendMessage", { fromProfileId: profileId, toProfileId: otherProfile.profileId, text: trimmed });
       setText("");
     } catch (e) {
+      // Both blocked directions land here verbatim off the server
+      // (CONVERSATION_CLOSED_MESSAGE), same as every other callable
+      // rejection this app surfaces as-is.
       setSendError(e instanceof Error ? e.message : "Could not send this message.");
     } finally {
       setSending(false);
@@ -305,7 +323,7 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
       ) : messages === "error" ? (
         <View style={{ flex: 1, padding: tokens.space.lg, gap: tokens.space.md }}>
           <ErrorBanner message="Couldn't load these messages." />
-          <Button title="Retry" onPress={messagesQ.retry} style={{ alignSelf: "flex-start" }} />
+          <Button variant="secondary" title="Retry" onPress={messagesQ.retry} style={{ alignSelf: "flex-start" }} />
         </View>
       ) : (
         <FlatList
@@ -314,7 +332,17 @@ export function ConversationThread({ profileId, conversationId }: { profileId: s
           data={[...messages].reverse()}
           keyExtractor={(m) => m.id}
           contentContainerStyle={{ padding: tokens.space.lg, flexGrow: 1 }}
-          renderItem={({ item }) => <MessageBubble item={item} mine={item.senderProfileId === profileId} />}
+          renderItem={({ item }) => {
+            const mine = item.senderProfileId === profileId;
+            // The spec's own bubble contract: the sender's profile name
+            // under each bubble, plus the member's display name on the
+            // viewer's OWN sends only (other accounts' user docs are not
+            // readable, so that's the one case this name is ever known).
+            const isViewerSend = mine && item.senderUid === user?.uid;
+            const senderProfileName = mine ? (myProfileName ?? "You") : otherProfile.name;
+            const label = isViewerSend && user?.displayName ? `${senderProfileName} · ${user.displayName}` : senderProfileName;
+            return <MessageBubble item={item} mine={mine} label={label} />;
+          }}
           ListEmptyComponent={(
             <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
               <Text muted>{CONVERSATION_EMPTY_MESSAGE}</Text>

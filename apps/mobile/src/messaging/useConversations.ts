@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { collection, limit, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import type { ConversationRefDoc } from "@gatekeep/shared";
 
-// Mobile twin of Task 6's web hook (apps/web's own useConversations,
-// landing in this same sub-project): same names, same shapes, so the two
-// clients keep one vocabulary.
+// Mobile twin of Task 6's landed web hook (apps/web/src/messaging/
+// useConversations.ts): same names, same shapes, so the two clients keep
+// one vocabulary. `unreadFor`'s signature and `useUnreadTotal`'s query below
+// were checked against that file directly once it landed mid-task.
 //
 // Spec section 4 (data facts amended after the plan was written): a
 // profile's conversation list comes from its OWN mirror subcollection
@@ -14,30 +15,15 @@ import type { ConversationRefDoc } from "@gatekeep/shared";
 // a list rule for a top-level `participants array-contains` query, so there
 // is no client list of the top-level collection at all; the mirror is
 // ordered by lastMessageAt and IS the row the inbox renders.
-export type ConversationRow = ConversationRefDoc;
+export type ConversationRow = { id: string } & ConversationRefDoc;
 
 // row.unread is already THIS profile's own count (it lives only on that
-// profile's own mirror, never a cross-profile map), so this is a thin
-// accessor. `profileId` is kept in the signature for parity with the web
-// hook (same names, same shapes) and so a call site is explicit about whose
-// unread count it means; it does not change the returned value.
-export function unreadFor(row: ConversationRow, profileId: string): number {
-  void profileId;
-  return row.unread;
-}
-
-// A short, relative "2h"/"3d" stamp for a row's last-message time and a
-// bubble's own timestamp, shared by ConversationList and ConversationThread.
-export function formatConversationTime(atMs: number): string {
-  const diff = Date.now() - atMs;
-  const MINUTE = 60_000;
-  const HOUR = 3_600_000;
-  const DAY = 86_400_000;
-  if (diff < MINUTE) return "now";
-  if (diff < HOUR) return `${Math.floor(diff / MINUTE)}m`;
-  if (diff < DAY) return `${Math.floor(diff / HOUR)}h`;
-  if (diff < 7 * DAY) return `${Math.floor(diff / DAY)}d`;
-  return new Date(atMs).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+// profile's own mirror, never a cross-profile map): every row this hook
+// returns already comes from THIS profile's own mirror, so no profileId
+// argument is needed to disambiguate (matches web's own comment on this
+// function verbatim).
+export function unreadFor(row: ConversationRow): number {
+  return row.unread ?? 0;
 }
 
 // `profileId` is expected to be STABLE for the lifetime of one hook
@@ -58,8 +44,8 @@ export function useConversations(profileId: string | null): {
     let cancelled = false;
     const { db } = getFirebase();
     const unsub = onSnapshot(
-      query(collection(db, `profiles/${profileId}/conversations`), orderBy("lastMessageAt", "desc"), limit(50)),
-      (snap) => { if (!cancelled) setRows(snap.docs.map((d) => d.data() as ConversationRefDoc)); },
+      query(collection(db, `profiles/${profileId}/conversations`), orderBy("lastMessageAt", "desc")),
+      (snap) => { if (!cancelled) setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as ConversationRefDoc) }))); },
       () => { if (!cancelled) setRows("error"); },
     );
     return () => { cancelled = true; unsub(); };
@@ -94,9 +80,9 @@ export function useUnreadTotal(profileIds: string[]): number {
     const ids = key.split(",");
     const { db } = getFirebase();
     const unsubs = ids.map((id) => onSnapshot(
-      query(collection(db, `profiles/${id}/conversations`), orderBy("lastMessageAt", "desc"), limit(50)),
+      collection(db, `profiles/${id}/conversations`),
       (snap) => {
-        const total = snap.docs.reduce((sum, d) => sum + unreadFor(d.data() as ConversationRefDoc, id), 0);
+        const total = snap.docs.reduce((sum, d) => sum + unreadFor({ id: d.id, ...(d.data() as ConversationRefDoc) }), 0);
         setTotals((prev) => ({ ...prev, [id]: total }));
       },
       () => setTotals((prev) => ({ ...prev, [id]: 0 })),
