@@ -21,33 +21,19 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow read: if isOwner(uid) || isAdmin();
-      // Created by Cloud Functions; owner may update editable fields only,
-      // and only to well-typed, size-bounded values. Fields absent from the
-      // resulting document are read via .get(key, default), direct property
-      // access on a missing map key throws during rule evaluation, which
-      // would otherwise break an update that doesn't touch every field.
+      // Created by Cloud Functions; the owner may update photoUrl only.
+      // SP11: displayName, homeCity, and homeGeo left this set. All three
+      // are written exclusively by the updateAccount callable, which trims
+      // and length-checks the name and the city and is the only thing that
+      // may geocode a city into homeGeo (server-coarsened to two decimals).
+      // A client that could still write homeCity would leave homeGeo
+      // pointing at a city the user no longer lives in.
       allow update: if isOwner(uid)
-        && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['displayName', 'photoUrl', 'homeCity'])
-        // F7: displayName is required by UserDoc and copied into attendee
-        // rows and notification copy, so the owner may neither delete it
-        // (affectedKeys admits a FieldValue.delete) nor blank it.
-        && 'displayName' in request.resource.data
-        && request.resource.data.displayName is string
-        && request.resource.data.displayName.size() >= 1
-        && request.resource.data.displayName.size() <= 80
-        // Rules audit: size() alone accepts " ", which reads as a blank name
-        // everywhere it is displayed (attendee rows, notification copy). The
-        // stored value is left untrimmed on purpose, only the emptiness test
-        // trims, so a name with meaningful inner spacing is unaffected.
-        && request.resource.data.displayName.trim().size() >= 1
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['photoUrl'])
         && (request.resource.data.get('photoUrl', null) == null
             || (request.resource.data.get('photoUrl', null) is string
                 && request.resource.data.get('photoUrl', null).matches('^https://.*')
-                && request.resource.data.get('photoUrl', null).size() <= 500))
-        && (request.resource.data.get('homeCity', null) == null
-            || (request.resource.data.get('homeCity', null) is string
-                && request.resource.data.get('homeCity', null).size() <= 80));
+                && request.resource.data.get('photoUrl', null).size() <= 500));
       allow create, delete: if false;
 
       match /notifications/{noteId} {
