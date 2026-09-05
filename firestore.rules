@@ -512,6 +512,11 @@ service cloud.firestore {
     // searchBudgets above.
     match /commentWindows/{uid} { allow read, write: if false; }
     match /messageWindows/{profileId} { allow read, write: if false; }
+    // Per-user rolling report-rate window (reports.ts). The terminal deny at
+    // the bottom of this file would already close it; it is written out here
+    // so the three windows read as one family and none of them can be
+    // "opened up" later by a rule added above the terminal deny.
+    match /reportWindows/{uid} { allow read, write: if false; }
 
     // ---------- Sub-project 10: hardening ----------
     // Poster upload receipts: processPhoto writes one doc per upload nonce

@@ -1,12 +1,13 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, type Transaction } from "firebase-admin/firestore";
 import {
-  validateReportReason, isValidDocId, conversationPairId, REPORT_DUPLICATE_MESSAGE,
+  validateReportReason, isValidDocId, conversationPairId,
+  REPORT_DUPLICATE_MESSAGE, MESSAGE_RATE_MESSAGE, REPORT_RATE_MAX, REPORT_RATE_WINDOW_MS,
   type ConversationDoc, type ConversationStateDoc, type EventCommentDoc,
-  type ProfileDoc, type ReportDoc,
+  type ProfileDoc, type ReportDoc, type ReportWindowDoc,
 } from "@gatekeep/shared";
 import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
-import { requireAdmin } from "./review.js";
+import { requireAdmin, writeAudit } from "./review.js";
 import {
   CONVERSATION_DENIED_MESSAGE, requireConversationParticipant, writeConversationMirrors,
 } from "./messaging.js";
@@ -34,7 +35,47 @@ import {
 // each), so `offenderUid` is null there and spec 3.3 sends the operator to
 // User lookup; a comment has exactly one author, and the panel flags them
 // straight from the row.
-type NewReport = Omit<ReportDoc, "status" | "resolvedBy" | "resolvedAt" | "createdAt">;
+type NewReport = Omit<ReportDoc,
+  "status" | "resolvedBy" | "resolvedAt" | "reopenCount" | "lastResolvedBy" | "lastResolvedAt" | "createdAt">;
+
+// The doc an open (or re-open) writes. A reopen does NOT erase the resolution
+// it followed: the id is deterministic, so this row is the whole history of
+// one reporter against one target, and an admin who cleared it deserves to
+// see that it came back rather than find their own resolution overwritten.
+// createdAt is refreshed because the panel sorts open reports by it.
+function openedReport(prior: ReportDoc | null, doc: NewReport, now: number): ReportDoc {
+  return {
+    ...doc,
+    status: "open", resolvedBy: null, resolvedAt: null,
+    reopenCount: prior ? (prior.reopenCount ?? 0) + 1 : 0,
+    // A prior can only be a RESOLVED one here (an open one is refused above),
+    // so resolvedBy is the resolution being archived; the lastResolved
+    // fallback keeps a chain of reopens from losing the earliest one.
+    lastResolvedBy: prior?.resolvedBy ?? prior?.lastResolvedBy ?? null,
+    lastResolvedAt: prior?.resolvedAt ?? prior?.lastResolvedAt ?? null,
+    createdAt: now,
+  };
+}
+
+// The rolling report cap, read and trimmed INSIDE the report transaction:
+// 10 per 10 minutes per user, across both surfaces and every target. Filing a
+// report is not a free action, because an open report on a comment blocks its
+// author from deleting it, so an uncapped reporter could freeze every
+// author's delete one call at a time. Any refusal aborts the whole
+// transaction, so a refused report never spends budget.
+//
+// Returns the write half, for the same reads-before-writes reason as
+// stageConversationReports.
+async function stageReportWindow(tx: Transaction, uid: string, now: number): Promise<() => void> {
+  const windowRef = getFirestore().doc(`reportWindows/${uid}`);
+  const prior = (await tx.get(windowRef)).data() as ReportWindowDoc | undefined;
+  const recent = (prior?.at ?? []).filter((t) => now - t < REPORT_RATE_WINDOW_MS);
+  if (recent.length >= REPORT_RATE_MAX) throw new HttpsError("resource-exhausted", MESSAGE_RATE_MESSAGE);
+  recent.push(now);
+  // slice keeps the array bounded at REPORT_RATE_MAX entries forever, so a
+  // busy reporter never grows an unbounded field.
+  return () => tx.set(windowRef, { at: recent.slice(-REPORT_RATE_MAX) } satisfies ReportWindowDoc);
+}
 
 // Report ids carry colons, so they are not isValidDocId shaped. They are
 // server-minted and only ever handed back to the caller, so the check on the
@@ -135,14 +176,14 @@ export const reportConversation = onCall<{ profileId: string; conversationId: st
       const existing = await tx.get(reportRef);
       const prior = existing.exists ? (existing.data() as ReportDoc) : null;
       if (prior?.status === "open") throw new HttpsError("already-exists", REPORT_DUPLICATE_MESSAGE);
+      const spend = await stageReportWindow(tx, uid, now);
       const apply = await stageConversationReports(tx, conversationId, names);
       // A conversation that does not exist answers with the same refusal as a
       // missing membership: no not-found anywhere on this path either.
       if (!apply) throw new HttpsError("permission-denied", CONVERSATION_DENIED_MESSAGE);
-      tx.set(reportRef, {
-        ...doc, status: "open", resolvedBy: null, resolvedAt: null, createdAt: now,
-      } satisfies ReportDoc);
+      tx.set(reportRef, openedReport(prior, doc, now));
       apply(1);
+      spend();
     });
     return { reportId };
   });
@@ -174,13 +215,13 @@ export const reportComment = onCall<{ eventId: string; commentId: string; reason
       const comment = commentSnap.data() as EventCommentDoc;
       const prior = existing.exists ? (existing.data() as ReportDoc) : null;
       if (prior?.status === "open") throw new HttpsError("already-exists", REPORT_DUPLICATE_MESSAGE);
+      const spend = await stageReportWindow(tx, uid, now);
       const doc: NewReport = {
         kind: "comment", targetPath, reporterUid: uid, reporterProfileId: null,
         offenderUid: comment.authorUid, reason,
       };
-      tx.set(reportRef, {
-        ...doc, status: "open", resolvedBy: null, resolvedAt: null, createdAt: now,
-      } satisfies ReportDoc);
+      tx.set(reportRef, openedReport(prior, doc, now));
+      spend();
       // Read and rewritten rather than FieldValue.increment because the same
       // transaction already holds the doc: one source for the number, and the
       // decrement in resolveReport can clamp at zero the same way.
@@ -205,18 +246,20 @@ export const resolveReport = onCall<{ reportId: string }>({ region: "us-central1
     ? await pairProfileNames(preReport.targetPath) : {};
 
   const now = Date.now();
-  await db.runTransaction(async (tx) => {
+  const resolved = await db.runTransaction(async (tx) => {
     const snap = await tx.get(reportRef);
     if (!snap.exists) throw new HttpsError("not-found", "Report not found.");
     const report = snap.data() as ReportDoc;
-    if (report.status === "resolved") return; // idempotent: the counter moved once, on the first resolve
+    // Idempotent: the counter moved once, on the first resolve. False here
+    // also keeps the audit log honest, one row per real resolution.
+    if (report.status === "resolved") return null;
     if (report.kind === "conversation") {
       const apply = await stageConversationReports(tx, report.targetPath, names);
       tx.update(reportRef, { status: "resolved", resolvedBy: uid, resolvedAt: now });
       // A vanished conversation is not an error: the row still has to leave
       // the panel.
       if (apply) apply(-1);
-      return;
+      return report;
     }
     // A comment target is a stored path. It is server-minted, but a doc path
     // with an odd number of segments would make db.doc() throw inside the
@@ -228,6 +271,16 @@ export const resolveReport = onCall<{ reportId: string }>({ region: "us-central1
       const current = (target.data() as { openReports?: number }).openReports ?? 0;
       tx.update(target.ref, { openReports: Math.max(0, current - 1) });
     }
+    return report;
   });
+  // Post-commit, like every other requireAdmin callable: moderation actions
+  // leave a trail naming the operator, and the report id alone would not say
+  // what was cleared once the report row itself is filtered out of the panel.
+  if (resolved) {
+    await writeAudit({
+      actorUid: uid, action: "report_resolved", targetId: reportId,
+      detail: `${resolved.kind} ${resolved.targetPath}`,
+    });
+  }
   return { ok: true as const };
 });

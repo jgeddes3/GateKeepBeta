@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import { callFn, signUpTestUser, makeAdminUser } from "./helpers";
 import { adb, makePublishedBookingEvent } from "./discoverFixtures";
 import { makeMessagingPair, sendAs, conversation, mirror } from "./messagingFixtures";
-import { REPORT_DUPLICATE_MESSAGE, type EventCommentDoc, type ReportDoc } from "@gatekeep/shared";
+import {
+  REPORT_DUPLICATE_MESSAGE, MESSAGE_RATE_MESSAGE, REPORT_RATE_MAX,
+  type AuditLogDoc, type EventCommentDoc, type ReportDoc,
+} from "@gatekeep/shared";
 vi.setConfig({ testTimeout: 90_000 });
 
 const report = async (reportId: string) =>
@@ -19,6 +22,12 @@ async function openReportsEverywhere(p: { pairId: string; musicianProfileId: str
   ];
 }
 
+// Every requireAdmin callable leaves a trail; resolveReport is no exception.
+async function auditRows(reportId: string): Promise<AuditLogDoc[]> {
+  const snap = await adb.collection("auditLogs").where("targetId", "==", reportId).get();
+  return snap.docs.map((d) => d.data() as AuditLogDoc);
+}
+
 describe("reportConversation", () => {
   it("opens one report per reporter, bumps openReports on the doc and both mirrors, and resolving clears it", async () => {
     const p = await makeMessagingPair("rc1");
@@ -32,6 +41,7 @@ describe("reportConversation", () => {
       kind: "conversation", targetPath: p.pairId, reporterUid: p.curator.owner.uid,
       reporterProfileId: p.curatorProfileId, offenderUid: null, reason: "abusive", status: "open",
       resolvedBy: null, resolvedAt: null,
+      reopenCount: 0, lastResolvedBy: null, lastResolvedAt: null,
     });
     expect(await openReportsEverywhere(p)).toEqual([1, 1, 1]);
 
@@ -58,24 +68,96 @@ describe("reportConversation", () => {
     await expect(callFn("resolveReport", { reportId: res.reportId }, p.curator.owner.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
     await callFn("resolveReport", { reportId: res.reportId }, admin.user);
-    expect(await report(res.reportId)).toMatchObject({ status: "resolved", resolvedBy: admin.uid });
-    expect((await report(res.reportId))!.resolvedAt).toBeTypeOf("number");
+    const cleared = (await report(res.reportId))!;
+    expect(cleared).toMatchObject({ status: "resolved", resolvedBy: admin.uid });
+    expect(cleared.resolvedAt).toBeTypeOf("number");
     expect(await openReportsEverywhere(p)).toEqual([1, 1, 1]);
-    // Resolving twice never drives openReports below zero.
+    expect(await auditRows(res.reportId)).toMatchObject([
+      { actorUid: admin.uid, action: "report_resolved", detail: `conversation ${p.pairId}` },
+    ]);
+    // Resolving twice never drives openReports below zero, and never writes a
+    // second audit row for one resolution.
     await callFn("resolveReport", { reportId: res.reportId }, admin.user);
     expect(await openReportsEverywhere(p)).toEqual([1, 1, 1]);
+    expect(await auditRows(res.reportId)).toHaveLength(1);
     await callFn("resolveReport", { reportId: second.reportId }, admin.user);
     expect(await openReportsEverywhere(p)).toEqual([0, 0, 0]);
 
     // A resolved report is not a life sentence: the same reporter may open it
-    // again, on the same deterministic id, and the counter moves again.
+    // again, on the same deterministic id, and the counter moves again. The
+    // resolution it followed is kept, not overwritten.
     await callFn("reportConversation",
       { profileId: p.curatorProfileId, conversationId: p.pairId, reason: "it started again" },
       p.curator.owner.user);
-    expect(await report(res.reportId)).toMatchObject({
+    const reopened = (await report(res.reportId))!;
+    expect(reopened).toMatchObject({
       status: "open", reason: "it started again", resolvedBy: null, resolvedAt: null,
+      reopenCount: 1, lastResolvedBy: admin.uid, lastResolvedAt: cleared.resolvedAt,
     });
+    // The panel sorts open reports by createdAt, so a reopen is new work.
+    expect(reopened.createdAt).toBeGreaterThan(cleared.createdAt);
     expect(await openReportsEverywhere(p)).toEqual([1, 1, 1]);
+  });
+
+  it("refuses a member of a real pair whose conversation was never started, and resolves a report whose conversation is gone", async () => {
+    // The pair id is derivable from two PUBLIC profile ids, so a member can
+    // name a thread that does not exist. That answers with the same sentence
+    // as every other refusal here rather than a not-found, which would make a
+    // constructed pair id an existence oracle.
+    const quiet = await makeMessagingPair("rc3");
+    await expect(callFn("reportConversation",
+      { profileId: quiet.curatorProfileId, conversationId: quiet.pairId, reason: "nothing here" },
+      quiet.curator.owner.user))
+      .rejects.toMatchObject({ code: "functions/permission-denied" });
+    expect(await report(`conv:${quiet.pairId}:${quiet.curator.owner.uid}`)).toBeUndefined();
+
+    // And the other end of the same story: a report whose conversation has
+    // since gone still resolves, because the row has to leave the panel.
+    const p = await makeMessagingPair("rc4");
+    await sendAs(p.musician.owner.user, p.musicianProfileId, p.curatorProfileId, "hello");
+    const res = await callFn<Record<string, unknown>, { reportId: string }>("reportConversation",
+      { profileId: p.curatorProfileId, conversationId: p.pairId, reason: "abusive" },
+      p.curator.owner.user);
+    await adb.doc(`conversations/${p.pairId}`).delete();
+    const admin = await makeAdminUser("rc4a");
+    await callFn("resolveReport", { reportId: res.reportId }, admin.user);
+    expect(await report(res.reportId)).toMatchObject({ status: "resolved", resolvedBy: admin.uid });
+    expect(await auditRows(res.reportId)).toHaveLength(1);
+  });
+
+  it("caps one user at REPORT_RATE_MAX reports per window, across targets and across both surfaces", async () => {
+    const e = await makePublishedBookingEvent("rl1");
+    const p = await makeMessagingPair("rl1p");
+    await sendAs(p.musician.owner.user, p.musicianProfileId, p.curatorProfileId, "hello");
+    const fan = await signUpTestUser(`rl1f-${Date.now()}@test.com`);
+    const reporter = p.curator.owner;
+
+    const commentIds: string[] = [];
+    for (let i = 0; i < REPORT_RATE_MAX; i++) {
+      const { commentId } = await callFn<Record<string, unknown>, { commentId: string }>(
+        "postComment", { eventId: e.eventId, text: `noise ${i}` }, fan.user);
+      commentIds.push(commentId);
+    }
+    // Ten DIFFERENT targets: the window is per user, not per target, so a
+    // reporter cannot spend it ten times over by moving to the next comment.
+    for (const commentId of commentIds) {
+      await callFn("reportComment", { eventId: e.eventId, commentId, reason: "spam" }, reporter.user);
+    }
+    // The eleventh is a conversation, on a thread this reporter really is in:
+    // one window covers both surfaces, so the refusal is the rate sentence.
+    await expect(callFn("reportConversation",
+      { profileId: p.curatorProfileId, conversationId: p.pairId, reason: "abusive" }, reporter.user))
+      .rejects.toMatchObject({ code: "functions/resource-exhausted", message: MESSAGE_RATE_MESSAGE });
+    // A refused report spends nothing and leaves nothing behind.
+    expect(await report(`conv:${p.pairId}:${reporter.uid}`)).toBeUndefined();
+    expect(await openReportsEverywhere(p)).toEqual([0, 0, 0]);
+    // Another user is unaffected: the window is per reporter.
+    const other = await signUpTestUser(`rl1o-${Date.now()}@test.com`);
+    await callFn("reportComment",
+      { eventId: e.eventId, commentId: commentIds[0], reason: "spam" }, other.user);
+    const target = (await adb.doc(`events/${e.eventId}/comments/${commentIds[0]}`).get())
+      .data() as EventCommentDoc;
+    expect(target.openReports).toBe(2);
   });
 
   it("refuses a non-participant, a stranger, and a bad reason", async () => {

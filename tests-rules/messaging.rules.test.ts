@@ -188,8 +188,11 @@ describe("reports", () => {
   it("is admin-read and client-unwritable", async () => {
     await seed("reports/r1", {
       kind: "comment", targetPath: "events/ev1/comments/c1", reporterUid: "fan1",
-      reporterProfileId: null, reason: "spam", status: "open",
-      resolvedBy: null, resolvedAt: null, createdAt: 1,
+      reporterProfileId: null, offenderUid: "fan2", reason: "spam", status: "open",
+      resolvedBy: null, resolvedAt: null,
+      // Task 5 fix round 1: a reopen keeps the resolution it followed rather
+      // than overwriting it, so every report row carries this history.
+      reopenCount: 0, lastResolvedBy: null, lastResolvedAt: null, createdAt: 1,
     });
     const admin = env.authenticatedContext("ad", { admin: true }).firestore();
     await assertSucceeds(getDoc(doc(admin, "reports/r1")));
@@ -272,13 +275,18 @@ describe("event comments, reactions, and post hearts", () => {
 });
 
 describe("the rate-limit windows", () => {
-  it("keeps commentWindows and messageWindows invisible to owners, members, and admins", async () => {
+  it("keeps commentWindows, messageWindows, and reportWindows invisible to owners, members, and admins", async () => {
     await seedPair();
     await seed("commentWindows/fan1", { at: [1, 2, 3] });
     await seed("messageWindows/mus1", { at: [1, 2, 3] });
+    await seed("reportWindows/fan1", { at: [1, 2, 3] });
     const fan = env.authenticatedContext("fan1").firestore();
     await assertFails(getDoc(doc(fan, "commentWindows/fan1")));
     await assertFails(setDoc(doc(fan, "commentWindows/fan1"), { at: [] }));
+    // The report cap is server bookkeeping too: a reporter cannot read how
+    // much of their own window is left, or clear it.
+    await assertFails(getDoc(doc(fan, "reportWindows/fan1")));
+    await assertFails(setDoc(doc(fan, "reportWindows/fan1"), { at: [] }));
     // A member of the very profile the window belongs to still cannot read
     // it: the window is server bookkeeping, not a user-facing quota display.
     const member = env.authenticatedContext("mo").firestore();
@@ -287,5 +295,6 @@ describe("the rate-limit windows", () => {
     const admin = env.authenticatedContext("ad", { admin: true }).firestore();
     await assertFails(getDoc(doc(admin, "commentWindows/fan1")));
     await assertFails(getDoc(doc(admin, "messageWindows/mus1")));
+    await assertFails(getDoc(doc(admin, "reportWindows/fan1")));
   });
 });

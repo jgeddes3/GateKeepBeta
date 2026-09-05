@@ -111,7 +111,10 @@ export interface AuditLogDoc {
     | "show_post_removed"
     // SP10 hardening: an admin took down a published event; an account
     // deletion completed; a profile's Stripe ids were cleared on deletion.
-    | "event_taken_down" | "account_deleted" | "profile_deleted_stripe_ids";
+    | "event_taken_down" | "account_deleted" | "profile_deleted_stripe_ids"
+    // SP12: an admin resolved an abuse report (targetId is the report id,
+    // detail names the kind and the target it pointed at).
+    | "report_resolved";
   targetId: string;          // profileId, uid, or bookingId (booking_saga_released)
   detail: string;
   at: number;
@@ -1454,9 +1457,32 @@ export interface ReportDoc {
   status: ReportStatus;
   resolvedBy: string | null;
   resolvedAt: number | null;
+  // The report id is deterministic per reporter per target, so one reporter
+  // gets one row per target forever and a report can be RE-opened after an
+  // admin resolved it. The resolution is not overwritten when that happens:
+  // these three keep the history, so a panel can see that this is the third
+  // time this target has been reported by this person and who cleared it
+  // last.
+  reopenCount: number;                     // 0 on the first open
+  lastResolvedBy: string | null;
+  lastResolvedAt: number | null;
+  // Refreshed on every (re)open, because the admin panel sorts open reports
+  // by createdAt: a reopened report is new work, not a stale row from
+  // whenever the first version of it was filed.
   createdAt: number;
 }
 export const REPORT_REASON_MAX_CHARS = 300;
+// 10 reports per 10 minutes per USER, across both surfaces and every target
+// (Task 5 fix round 1). Reporting is not free: a comment with an open report
+// cannot be deleted by its author, so an uncapped reporter could freeze every
+// author's delete one call at a time. The window lives in the server-only
+// reportWindows/{uid} doc, same shape and posture as commentWindows.
+export const REPORT_RATE_MAX = 10;
+export const REPORT_RATE_WINDOW_MS = 10 * 60 * 1000;
+// reportWindows/{uid}: server-only, client-unreadable (firestore.rules), read
+// and trimmed inside the report transaction so a refused report never spends
+// budget and an accepted one can never be counted twice.
+export interface ReportWindowDoc { at: number[]; }
 
 // Server-derived at post time and never re-derived: a fan who later joins the
 // curator profile does not retroactively become a "curator" on old comments.
