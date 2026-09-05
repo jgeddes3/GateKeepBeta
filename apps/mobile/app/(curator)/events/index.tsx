@@ -311,14 +311,16 @@ export default function GigsList() {
   // comment.
   const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
   const [profileRetry, setProfileRetry] = useState(0);
-  // Each list also carries an "error" sentinel (audit #12): a failed read
-  // is not the same as a genuinely empty result, so the empty-state copy
-  // below only renders once the read has actually succeeded.
-  const [gigs, setGigs] = useState<GigRow[] | "error">([]);
+  // Each list also carries "loading"/"error" sentinels (audit #12, fix round
+  // 1 ruling): a failed read is not the same as a genuinely empty result, so
+  // the empty-state copy below only renders once the read has actually
+  // succeeded, and a retry resets to "loading" (never to `[]`, which would
+  // flash the empty-state sentence during the reload).
+  const [gigs, setGigs] = useState<GigRow[] | "loading" | "error">("loading");
   const [gigsRetry, setGigsRetry] = useState(0);
-  const [series, setSeries] = useState<SeriesRow[] | "error">([]);
+  const [series, setSeries] = useState<SeriesRow[] | "loading" | "error">("loading");
   const [seriesRetry, setSeriesRetry] = useState(0);
-  const [events, setEvents] = useState<EventRow[] | "error">([]);
+  const [events, setEvents] = useState<EventRow[] | "loading" | "error">("loading");
   const [eventsRetry, setEventsRetry] = useState(0);
   const [view, setView] = useState<EventView>({ kind: "list" });
 
@@ -338,7 +340,7 @@ export default function GigsList() {
     setLastProfileId(profileId);
     // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
-    setProfile("loading"); setGigs([]); setSeries([]); setEvents([]); setView({ kind: "list" });
+    setProfile("loading"); setGigs("loading"); setSeries("loading"); setEvents("loading"); setView({ kind: "list" });
   }
 
   useEffect(() => {
@@ -433,7 +435,7 @@ export default function GigsList() {
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load this. Retry." />
+          <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
             onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
         </View>
@@ -452,12 +454,13 @@ export default function GigsList() {
     );
   }
 
-  // Error-safe derived lists: an "error" sentinel behaves as empty for every
-  // downstream computation below, its own section renders the ErrorBanner
-  // instead of the ordinary empty-state copy (see the render below).
-  const gigsList = gigs === "error" ? [] : gigs;
-  const seriesList = series === "error" ? [] : series;
-  const eventsList = events === "error" ? [] : events;
+  // Error/loading-safe derived lists: a non-array sentinel behaves as empty
+  // for every downstream computation below, its own section renders the
+  // ErrorBanner or skeleton instead of the ordinary empty-state copy (see
+  // the render below).
+  const gigsList = gigs === "error" || gigs === "loading" ? [] : gigs;
+  const seriesList = series === "error" || series === "loading" ? [] : series;
+  const eventsList = events === "error" || events === "loading" ? [] : events;
 
   // A gig, once promoted, stays ineligible for "Promote a gig" regardless of
   // its resulting event's status (including cancelled), mirrors web's
@@ -528,17 +531,22 @@ export default function GigsList() {
           <Text muted>Your curator profile must be approved before you can post gigs.</Text>
         )}
 
-        {gigs === "error" ? (
+        {gigs === "loading" ? (
           <View style={{ gap: tokens.space.sm }}>
-            <ErrorBanner message="Couldn't load your gigs. Retry." />
+            <SkeletonCard />
+            <SkeletonCard />
+          </View>
+        ) : gigs === "error" ? (
+          <View style={{ gap: tokens.space.sm }}>
+            <ErrorBanner message="Couldn't load your gigs." />
             <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-              onPress={() => { setGigs([]); setGigsRetry((n) => n + 1); }} />
+              onPress={() => { setGigs("loading"); setGigsRetry((n) => n + 1); }} />
           </View>
         ) : (
           <>
             <View style={{ gap: 8 }}>
               <Text variant="title">Open ({open.length})</Text>
-              {open.length === 0 && <Text muted>No open gigs yet. Post one and musicians can apply.</Text>}
+              {open.length === 0 && <Text muted>No open gigs.</Text>}
               {open.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
             </View>
 
@@ -550,7 +558,7 @@ export default function GigsList() {
 
             <View style={{ gap: 8 }}>
               <Text variant="title">Past & closed ({past.length})</Text>
-              {past.length === 0 && <Text muted>No past gigs yet. Closed and cancelled gigs land here.</Text>}
+              {past.length === 0 && <Text muted>Nothing here yet.</Text>}
               {past.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
             </View>
           </>
@@ -564,9 +572,16 @@ export default function GigsList() {
             <Text variant="title" style={{ flexShrink: 1 }}>Ticketed events</Text>
             {profile.status === "approved" ? (
               <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
-                <Button variant="secondary" onPress={() => setView({ kind: "picker" })}>
-                  <Text variant="label">Promote a gig</Text>
-                </Button>
+                {/* Fix round 1, finding 7: with the events read still
+                    loading or failed, `usedGigIds` below can't tell which
+                    filled gigs are already promoted, hide the entry point
+                    entirely rather than let it wrongly offer an
+                    already-promoted gig again. */}
+                {events !== "error" && events !== "loading" && (
+                  <Button variant="secondary" onPress={() => setView({ kind: "picker" })}>
+                    <Text variant="label">Promote a gig</Text>
+                  </Button>
+                )}
                 <Button onPress={() => setView({ kind: "create", source: { kind: "standalone" } })}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.xs }}>
                     <IconPlus size={16} color={t.onAccent} />
@@ -581,11 +596,15 @@ export default function GigsList() {
               </View>
             )}
           </View>
-          {events === "error" ? (
+          {events === "loading" ? (
             <View style={{ gap: tokens.space.sm }}>
-              <ErrorBanner message="Couldn't load your events. Retry." />
+              <SkeletonCard />
+            </View>
+          ) : events === "error" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <ErrorBanner message="Couldn't load your events." />
               <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-                onPress={() => { setEvents([]); setEventsRetry((n) => n + 1); }} />
+                onPress={() => { setEvents("loading"); setEventsRetry((n) => n + 1); }} />
             </View>
           ) : activeEvents.length === 0 && pastEvents.length === 0 ? (
             <Card style={{ alignItems: "center", gap: 4, paddingVertical: tokens.space.lg }}>
@@ -615,20 +634,19 @@ export default function GigsList() {
 
         <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
           <Text variant="title">Series ({seriesList.length})</Text>
-          {series === "error" ? (
+          {series === "loading" ? (
             <View style={{ gap: tokens.space.sm }}>
-              <ErrorBanner message="Couldn't load your series. Retry." />
+              <SkeletonCard />
+            </View>
+          ) : series === "error" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <ErrorBanner message="Couldn't load your series." />
               <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-                onPress={() => { setSeries([]); setSeriesRetry((n) => n + 1); }} />
+                onPress={() => { setSeries("loading"); setSeriesRetry((n) => n + 1); }} />
             </View>
           ) : (
             <>
-              {seriesList.length === 0 && (
-                <View style={{ gap: 2 }}>
-                  <Text muted>No recurring series yet.</Text>
-                  <Text variant="meta" muted>Create a series when the same night repeats.</Text>
-                </View>
-              )}
+              {seriesList.length === 0 && <Text muted>No recurring series yet.</Text>}
               {seriesList.map((s) => (
                 <Pressable key={s.id} onPress={() => openSeries(s.id)}>
                   <Card style={{ padding: tokens.space.md, gap: 4 }}>

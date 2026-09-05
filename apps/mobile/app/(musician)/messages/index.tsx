@@ -80,7 +80,7 @@ export default function MusicianMessages() {
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load this. Retry." />
+          <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
             onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
         </View>

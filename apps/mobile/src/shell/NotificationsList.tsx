@@ -68,6 +68,25 @@ export function NotificationsList() {
     if (href) router.push(href as Href);
   };
 
+  // Fix round 1, finding 3: a signed-out mount (no user) never fires the
+  // effect above, so `notes` stays "loading" forever without this branch,
+  // a permanent skeleton instead of the ordinary empty list.
+  if (!user) {
+    return (
+      <View style={{ gap: tokens.space.md }}>
+        <Text variant="title">Notifications</Text>
+        <View style={{ alignItems: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <IconBell size={20} color={t.muted} />
+          <Text variant="label">All caught up</Text>
+          <Text muted style={{ textAlign: "center" }}>
+            Review updates and booking activity will land here the moment they happen. In the meantime, go see
+            what&apos;s playing.
+          </Text>
+          <Button variant="ghost" title="Browse gigs" onPress={() => router.push("/(musician)/gigs")} />
+        </View>
+      </View>
+    );
+  }
   if (notes === "loading") {
     return (
       <View style={{ padding: tokens.space.md, gap: tokens.space.md }}>
@@ -82,9 +101,9 @@ export function NotificationsList() {
     return (
       <View style={{ padding: tokens.space.md, gap: tokens.space.md }}>
         <Text variant="title">Notifications</Text>
-        <ErrorBanner message="Couldn't load this. Retry." />
+        <ErrorBanner message="Couldn't load notifications." />
         <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-          onPress={() => setRetryKey((n) => n + 1)} />
+          onPress={() => { setNotes("loading"); setRetryKey((n) => n + 1); }} />
       </View>
     );
   }

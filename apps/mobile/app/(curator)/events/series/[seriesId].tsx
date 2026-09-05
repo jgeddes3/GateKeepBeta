@@ -118,7 +118,10 @@ export default function SeriesDetail() {
   // identical comment.
   const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
   const [series, setSeries] = useState<GigSeriesDoc | "loading" | "error" | null>("loading");
-  const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "error">([]);
+  // Ruling (fix round 1, uniform retry feedback): a "loading" member so a
+  // retry can reset the sentinel there rather than to `[]`, which would
+  // flash the "No dates yet" empty-state sentence during the reload.
+  const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "loading" | "error">("loading");
   const [pauseBusy, setPauseBusy] = useState(false);
   const [endBusy, setEndBusy] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
@@ -129,7 +132,7 @@ export default function SeriesDetail() {
   // series' stale doc/occurrences/profile until the new subscriptions
   // resolve.
   const [lastSeriesId, setLastSeriesId] = useState(seriesId);
-  if (seriesId !== lastSeriesId) { setLastSeriesId(seriesId); setSeries("loading"); setOccurrences([]); setProfile("loading"); }
+  if (seriesId !== lastSeriesId) { setLastSeriesId(seriesId); setSeries("loading"); setOccurrences("loading"); setProfile("loading"); }
 
   useEffect(() => {
     if (!seriesId) return;
@@ -167,7 +170,12 @@ export default function SeriesDetail() {
       (e) => { console.error("SeriesDetail: occurrences onSnapshot failed", e); setOccurrences("error"); });
   }, [curatorProfileId, seriesId, retryKey]);
 
-  if (!user || series === "loading" || profile === "loading") {
+  // Fix round 1, finding 1: series's own "loading"/"error"/null are checked
+  // BEFORE profile's, same reasoning as [gigId].tsx's identical fix, profile
+  // only starts resolving once curatorProfileId is known (derived from
+  // series, below), so a combined ladder left a deleted or access-denied
+  // series on a permanent skeleton.
+  if (!user || series === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -179,25 +187,62 @@ export default function SeriesDetail() {
       </View>
     );
   }
-  if (series === "error" || profile === "error") {
+  if (series === "error") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load this. Retry." />
+          <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-            onPress={() => { setSeries("loading"); setProfile("loading"); setRetryKey((n) => n + 1); }} />
+            onPress={() => { setSeries("loading"); setRetryKey((n) => n + 1); }} />
         </View>
       </View>
     );
   }
-  if (!series || !profile) {
+  if (!series) {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
           <Text variant="title">Series not found</Text>
           <Button title="Back to gigs" variant="secondary" onPress={() => router.push("/(curator)/events")} />
+        </View>
+      </View>
+    );
+  }
+  // Past this point series is a real doc, so curatorProfileId is known and
+  // profile's own loading/error states are meaningful.
+  if (profile === "loading") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
+          <Skeleton height={28} width="60%" />
+          <SkeletonCard />
+          <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setRetryKey((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
         </View>
       </View>
     );
@@ -261,11 +306,16 @@ export default function SeriesDetail() {
         </View>
         <View style={{ gap: 8 }}>
           <Text variant="title">Occurrences</Text>
-          {occurrences === "error" ? (
+          {occurrences === "loading" ? (
             <View style={{ gap: tokens.space.sm }}>
-              <ErrorBanner message="Couldn't load this. Retry." />
+              <SkeletonCard />
+              <SkeletonCard />
+            </View>
+          ) : occurrences === "error" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <ErrorBanner message="Couldn't load this." />
               <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-                onPress={() => { setOccurrences([]); setRetryKey((n) => n + 1); }} />
+                onPress={() => { setOccurrences("loading"); setRetryKey((n) => n + 1); }} />
             </View>
           ) : (
             <>

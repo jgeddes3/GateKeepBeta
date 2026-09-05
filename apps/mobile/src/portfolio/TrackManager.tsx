@@ -5,7 +5,7 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
-import { Text, Button, Input, Card, ErrorBanner, StatusBadge } from "../ui";
+import { Text, Button, Input, Card, ErrorBanner, StatusBadge, Skeleton } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 
 type Row = TrackDoc & { id: string };
@@ -24,7 +24,12 @@ const STATUS_TONE: Record<TrackDoc["status"], "success" | "warning" | "destructi
 
 export function TrackManager({ profileId }: { profileId: string }) {
   const tok = useTokens();
-  const [tracks, setTracks] = useState<Row[]>([]);
+  // Fix round 1, ruling (uniform retry feedback): was `Row[]` plus a
+  // log-only `loadError` boolean that a Retry press never cleared until the
+  // fresh snapshot landed. Now the same four-way sentinel as every other
+  // list in this app; a retry resets straight to "loading" (never to `[]`,
+  // which would flash the reorder controls over an empty list).
+  const [tracks, setTracks] = useState<Row[] | "loading" | "error">("loading");
   // Single flag, not per-row: reorderTracks affects TWO rows at once (the
   // swapped pair), so a per-row lock wouldn't stop a second tap from racing
   // the first move's still-in-flight call against a still-stale `tracks`
@@ -33,19 +38,25 @@ export function TrackManager({ profileId }: { profileId: string }) {
   const [busy, setBusy] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
-  // Was log-only (audit #12): a failed read left `tracks` silently stuck on
-  // stale data with nothing on screen to say so. Now surfaces a small
-  // retryable banner instead.
-  const [loadError, setLoadError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
+  // Ruling (fix round 1, uniform retry feedback): a retry (retryKey bump)
+  // resets the sentinel back to "loading" here (render-time reset, not a
+  // synchronous setState in the effect body, which
+  // react-hooks/set-state-in-effect flags), rather than leaving the prior
+  // "error" on screen until the fresh snapshot lands.
+  const [lastKey, setLastKey] = useState(`${profileId}:${retryKey}`);
+  const key = `${profileId}:${retryKey}`;
+  if (key !== lastKey) { setLastKey(key); setTracks("loading"); }
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => { setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))); setLoadError(false); },
-      (e) => { console.error("tracks onSnapshot failed", e); setLoadError(true); });
+      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
+      (e) => { console.error("tracks onSnapshot failed", e); setTracks("error"); });
   }, [profileId, retryKey]);
+
+  const rows = tracks === "loading" || tracks === "error" ? [] : tracks;
 
   // Returns whether the call succeeded so callers that need to react to a
   // failure (saveRename re-opening its edit UI below) can, without every
@@ -58,12 +69,12 @@ export function TrackManager({ profileId }: { profileId: string }) {
   };
 
   const move = (i: number, dir: -1 | 1) => {
-    if (busy || !tracks[i] || !tracks[i + dir]) return;
+    if (busy || !rows[i] || !rows[i + dir]) return;
     // A single reorderTracks call with the whole reordered id list, not two
     // sequential updateTrack calls: reorderTracks owns ordering atomically;
     // two separate calls would be non-atomic (a reload between them leaves
     // two tracks sharing an order) and a no-op on ties.
-    const ids = tracks.map((t) => t.id);
+    const ids = rows.map((t) => t.id);
     [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
     void call("reorderTracks", { profileId, trackIds: ids });
   };
@@ -87,16 +98,22 @@ export function TrackManager({ profileId }: { profileId: string }) {
   return (
     <View style={{ gap: 8 }}>
       <Text variant="title">
-        Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
+        Tracks ({rows.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
       </Text>
-      {loadError && (
+      {tracks === "loading" && (
         <View style={{ gap: 8 }}>
-          <ErrorBanner message="Couldn't load your tracks. Retry." />
-          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-            onPress={() => setRetryKey((n) => n + 1)} />
+          <Skeleton height={64} />
+          <Skeleton height={64} />
         </View>
       )}
-      {tracks.map((t, i) => (
+      {tracks === "error" && (
+        <View style={{ gap: 8 }}>
+          <ErrorBanner message="Couldn't load your tracks." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setTracks("loading"); setRetryKey((n) => n + 1); }} />
+        </View>
+      )}
+      {rows.map((t, i) => (
         <Card key={t.id} style={{ gap: 6 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Text variant="label" style={{ flex: 1 }}>{t.title}</Text>
@@ -121,9 +138,9 @@ export function TrackManager({ profileId }: { profileId: string }) {
                 hitSlop={12} style={{ minHeight: 44, justifyContent: "center" }}>
                 <Text style={{ opacity: busy || i === 0 ? 0.4 : 1 }}>↑</Text>
               </Pressable>
-              <Pressable disabled={busy || i === tracks.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down"
+              <Pressable disabled={busy || i === rows.length - 1} onPress={() => move(i, 1)} accessibilityRole="button" accessibilityLabel="Move down"
                 hitSlop={12} style={{ minHeight: 44, justifyContent: "center" }}>
-                <Text style={{ opacity: busy || i === tracks.length - 1 ? 0.4 : 1 }}>↓</Text>
+                <Text style={{ opacity: busy || i === rows.length - 1 ? 0.4 : 1 }}>↓</Text>
               </Pressable>
               <Button variant="ghost" title="Rename" disabled={busy} onPress={() => startRename(t)} />
               <Button variant="ghost" disabled={busy} onPress={() => Alert.alert("Delete track?", t.title, [

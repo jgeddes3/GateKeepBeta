@@ -124,18 +124,29 @@ export default function EventManagementScreen() {
   // on why this is deliberately not a live subscription): re-fetched only
   // when `eventId` itself changes, same pattern as event/[eventId]'s render-
   // time reset above and web's EventsManager.tsx tiersEventId trick.
-  const [tiersEventId, setTiersEventId] = useState<string | null>(null);
-  const [initialTiers, setInitialTiers] = useState<TierRowState[] | "loading">("loading");
-  if (eventId !== tiersEventId) { setTiersEventId(eventId); setInitialTiers("loading"); }
+  // Fix round 1, finding 9: was `TierRowState[] | "loading"`, catching a
+  // failed read into `[]` (a genuinely empty tier list, indistinguishable
+  // from a load failure) and never re-running on the page's own Retry
+  // (eventRetry was missing from this effect's own deps below). Now the
+  // same four-way sentinel as the rest of this page, sharing the page's
+  // error screen and its one Retry button. `tiersKey` folds in eventRetry
+  // too (was just `tiersEventId`), so a page-level retry resets this
+  // sentinel via the same render-time-reset idiom as the rest of this file,
+  // rather than a synchronous setState in the effect body, which
+  // react-hooks/set-state-in-effect flags.
+  const [initialTiers, setInitialTiers] = useState<TierRowState[] | "loading" | "error">("loading");
+  const [tiersKey, setTiersKey] = useState(`${eventId}:${eventRetry}`);
+  const currentTiersKey = `${eventId}:${eventRetry}`;
+  if (currentTiersKey !== tiersKey) { setTiersKey(currentTiersKey); setInitialTiers("loading"); }
   useEffect(() => {
     if (!eventId) return;
     let cancelled = false;
     const { db } = getFirebase();
     getDocs(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder")))
       .then((snap) => { if (!cancelled) setInitialTiers(snap.docs.map((d) => tierRowFrom(d.id, d.data() as TicketTierDoc))); })
-      .catch((e) => { console.error("EventManagementScreen: tier load failed", eventId, e); if (!cancelled) setInitialTiers([]); });
+      .catch((e) => { console.error("EventManagementScreen: tier load failed", eventId, e); if (!cancelled) setInitialTiers("error"); });
     return () => { cancelled = true; };
-  }, [eventId]);
+  }, [eventId, eventRetry]);
 
   if (!user || event === "loading" || initialTiers === "loading") {
     return (
@@ -149,14 +160,14 @@ export default function EventManagementScreen() {
       </View>
     );
   }
-  if (event === "error") {
+  if (event === "error" || initialTiers === "error") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load this. Retry." />
+          <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-            onPress={() => { setEvent("loading"); setEventRetry((n) => n + 1); }} />
+            onPress={() => { setEvent("loading"); setInitialTiers("loading"); setEventRetry((n) => n + 1); }} />
         </View>
       </View>
     );

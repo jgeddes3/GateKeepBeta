@@ -100,7 +100,7 @@ export function SavedSearchesScreen() {
         )}
         {rows === "error" && (
           <View style={{ gap: tokens.space.sm }}>
-            <ErrorBanner message="Couldn't load your saved searches. Retry." />
+            <ErrorBanner message="Couldn't load your saved searches." />
             <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
               onPress={() => { setRows(null); setRetryKey((n) => n + 1); }} />
           </View>

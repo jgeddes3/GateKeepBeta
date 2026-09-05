@@ -180,11 +180,18 @@ export default function GigEditor() {
     let cancelled = false;
     void getDoc(doc(db, `gigs/${gigId}/private/location`))
       .then((s) => { if (!cancelled) setPrivateLoc(s.exists() ? (s.data() as GigPrivateLocation) : null); })
-      .catch((e) => { console.error("GigEditor: private location getDoc failed", e); if (!cancelled) setPrivateLoc("error"); });
+      .catch((e) => { if (!cancelled) { console.error("GigEditor: private location getDoc failed", e); setPrivateLoc("error"); } });
     return () => { cancelled = true; };
   }, [gigId, retryKey]);
 
-  if (!user || gig === "loading" || profile === "loading" || privateLoc === "loading") {
+  // Fix round 1, finding 1: gig's own "loading"/"error"/null are checked
+  // BEFORE profile/privateLoc's. profile only starts resolving once
+  // curatorProfileId is known (derived from gig, below), and privateLoc's
+  // own effect never guards on gig at all, so a ladder that waited on ALL
+  // THREE "loading" checks together left a deleted or access-denied gig on
+  // a permanent skeleton: profile could never leave its initial "loading"
+  // without a resolved gig to derive curatorProfileId from.
+  if (!user || gig === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -196,25 +203,62 @@ export default function GigEditor() {
       </View>
     );
   }
-  if (gig === "error" || profile === "error" || privateLoc === "error") {
+  if (gig === "error") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load this. Retry." />
+          <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-            onPress={() => { setGig("loading"); setProfile("loading"); setPrivateLoc("loading"); setRetryKey((n) => n + 1); }} />
+            onPress={() => { setGig("loading"); setRetryKey((n) => n + 1); }} />
         </View>
       </View>
     );
   }
-  if (!gig || !profile) {
+  if (!gig) {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
           <Text variant="title">Gig not found</Text>
           <Button title="Back to gigs" variant="secondary" onPress={() => router.push("/(curator)/events")} />
+        </View>
+      </View>
+    );
+  }
+  // Past this point gig is a real doc, so curatorProfileId is known and
+  // profile/privateLoc's own loading/error states are meaningful.
+  if (profile === "loading" || privateLoc === "loading") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
+          <Skeleton height={28} width="60%" />
+          <SkeletonCard />
+          <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (profile === "error" || privateLoc === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setPrivateLoc("loading"); setRetryKey((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
         </View>
       </View>
     );

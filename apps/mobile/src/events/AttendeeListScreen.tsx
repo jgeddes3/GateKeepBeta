@@ -38,6 +38,15 @@ interface UndoCheckInInput { eventId: string; ticketId: string }
 
 function useAttendees(eventId: string, retryKey: number): AttendeeRow[] | "loading" | "error" {
   const [rows, setRows] = useState<AttendeeRow[] | "loading" | "error">("loading");
+  // Ruling (fix round 1, uniform retry feedback): a retry (retryKey bump)
+  // resets the sentinel back to "loading" here (render-time reset, same
+  // idiom as this app's own profileId/gigId resets, rather than a
+  // synchronous setState in the effect body below, which
+  // react-hooks/set-state-in-effect flags), rather than leaving the prior
+  // "error" on screen until the fresh snapshot lands.
+  const [lastKey, setLastKey] = useState(`${eventId}:${retryKey}`);
+  const key = `${eventId}:${retryKey}`;
+  if (key !== lastKey) { setLastKey(key); setRows("loading"); }
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(collection(db, `events/${eventId}/attendees`),
@@ -219,7 +228,7 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
   if (rows === "error") {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
-        <ErrorBanner message="Couldn't load attendees. Retry." />
+        <ErrorBanner message="Couldn't load attendees." />
         <Button title="Retry" variant="secondary" onPress={() => setAttendeesRetry((n) => n + 1)} />
       </View>
     );

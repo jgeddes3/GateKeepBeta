@@ -175,8 +175,16 @@ export function TierEditor({ curatorProfileId, eventId, eventStatus, initialTier
 
 type LiveTier = { id: string } & TicketTierDoc;
 
-function useLiveTiers(eventId: string, retryKey: number): LiveTier[] | "loading" | "error" {
+function useLiveTiers(eventId: string, retryKey = 0): LiveTier[] | "loading" | "error" {
   const [tiers, setTiers] = useState<LiveTier[] | "loading" | "error">("loading");
+  // Ruling (fix round 1, uniform retry feedback): a retry (retryKey bump)
+  // resets the sentinel back to "loading" here (render-time reset, not a
+  // synchronous setState in the effect body, which
+  // react-hooks/set-state-in-effect flags), rather than leaving the prior
+  // "error" on screen until the fresh snapshot lands.
+  const [lastKey, setLastKey] = useState(`${eventId}:${retryKey}`);
+  const key = `${eventId}:${retryKey}`;
+  if (key !== lastKey) { setLastKey(key); setTiers("loading"); }
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder")),
@@ -216,12 +224,16 @@ function TierBarRows({ tiers }: { tiers: LiveTier[] }) {
 // index.tsx gains ticketed-event rows). RN twin of web's EventsManager.tsx
 // TierBars.
 export function TierBars({ eventId }: { eventId: string }) {
-  // Compact list row: an "error" here renders nothing, same as "loading",
-  // rather than a scary banner inside a dense list of gigs/events. The
-  // fuller TierSalesStats view below (the curator's own management screen)
-  // is where a load failure gets a visible, retryable banner instead.
-  const tiers = useLiveTiers(eventId, 0);
-  if (tiers === "loading" || tiers === "error" || tiers.length === 0) return null;
+  // Compact list row: "loading" (and a genuinely empty tier list) still
+  // render nothing, rather than a skeleton inside a dense list of
+  // gigs/events. Fix round 1, finding 2: an "error" DOES get a small
+  // no-Retry banner (the row's own Pressable already opens the management
+  // screen, where TierSalesStats below offers the real retry), matching
+  // web's EventsManager.tsx TierBars, which renders its own inline error
+  // the same way.
+  const tiers = useLiveTiers(eventId);
+  if (tiers === "loading" || (tiers !== "error" && tiers.length === 0)) return null;
+  if (tiers === "error") return <ErrorBanner message="Couldn't load ticket tiers." />;
   return <TierBarRows tiers={tiers} />;
 }
 
@@ -234,7 +246,7 @@ export function TierSalesStats({ eventId }: { eventId: string }) {
   if (tiers === "error") {
     return (
       <Card style={{ gap: tokens.space.sm }}>
-        <ErrorBanner message="Couldn't load sales. Retry." />
+        <ErrorBanner message="Couldn't load ticket tiers." />
         <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
           onPress={() => setRetryKey((n) => n + 1)} />
       </Card>

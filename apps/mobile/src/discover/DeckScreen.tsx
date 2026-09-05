@@ -103,19 +103,22 @@ function DeckControl({ icon, label, onPress, accessibilityLabel }: {
 // no longer this fan's show to attend).
 type UpcomingEvent = { eventId: string; event: EventDoc };
 
-function useUpcomingTicketedEvents(uid: string | null): UpcomingEvent[] {
+function useUpcomingTicketedEvents(uid: string | null): UpcomingEvent[] | "error" {
   // SP12 Task 14 follow-on (audit #11/#12): useMyTickets now widens to
-  // include an "error" sentinel. This deck row is non-critical (the
-  // Tickets tab is the real surface for a load failure, with its own
-  // retryable banner), so a failed read here just renders no upcoming
-  // shows, same treatment as "loading".
+  // include an "error" sentinel. Fix round 1, finding 10: this deck row is
+  // still non-critical (the Tickets tab is the real surface for a load
+  // failure, with its own retryable banner), but a failed read is no
+  // longer silently folded into "no upcoming shows", it now bubbles up as
+  // its own "error" so the caller can render a one-line notice instead of
+  // pretending there's genuinely nothing to show.
   const rows = useMyTickets(uid);
   const liveRows = rows === "loading" || rows === "error" ? [] : rows.filter((t) => t.status === "valid" || t.status === "checked_in");
   const eventIds = [...new Set(liveRows.map((t) => t.eventId))];
   const eventCache = useEventCache(eventIds);
   const now = useNow();
 
-  if (rows === "loading" || rows === "error" || now == null) return [];
+  if (rows === "error") return "error";
+  if (rows === "loading" || now == null) return [];
   const seen = new Set<string>();
   const out: UpcomingEvent[] = [];
   for (const t of liveRows) {
@@ -156,6 +159,7 @@ function UpcomingShows() {
   const { user } = useAuth();
   const router = useRouter();
   const upcoming = useUpcomingTicketedEvents(user?.uid ?? null);
+  if (upcoming === "error") return <ErrorBanner message="Couldn't load your tickets." />;
   if (upcoming.length === 0) return null;
   return (
     <View style={{ gap: tokens.space.sm }}>

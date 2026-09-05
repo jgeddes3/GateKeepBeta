@@ -42,6 +42,14 @@ export type EventLoad = { kind: "ok"; event: EventDoc } | { kind: "unavailable" 
 
 export function useMyTickets(uid: string | null, retryKey = 0): TicketRow[] | "loading" | "error" {
   const [rows, setRows] = useState<TicketRow[] | "loading" | "error">("loading");
+  // Ruling (fix round 1, uniform retry feedback): a retry (retryKey bump)
+  // resets the sentinel back to "loading" here (render-time reset, not a
+  // synchronous setState in the effect body, which
+  // react-hooks/set-state-in-effect flags), rather than leaving the prior
+  // "error" on screen until the fresh snapshot lands.
+  const [lastKey, setLastKey] = useState(`${uid}:${retryKey}`);
+  const key = `${uid}:${retryKey}`;
+  if (key !== lastKey) { setLastKey(key); setRows("loading"); }
   useEffect(() => {
     if (!uid) return;
     const { db } = getFirebase();
@@ -113,8 +121,15 @@ type TransferRow = { id: string } & TicketTransferDoc;
 // status/expiresAt are filtered client-side below rather than added as a
 // second `where` clause, which would need a composite index this task's
 // file list has no room to add.
-function useIncomingTransfers(uid: string | null): TransferRow[] {
-  const [rows, setRows] = useState<TransferRow[]>([]);
+//
+// Fix round 1, finding 8: was a bare `TransferRow[]`, catching a failed read
+// into `[]`, which asserted "no incoming offers" on an outright load
+// failure. Now the same four-way sentinel as every other list in this app.
+function useIncomingTransfers(uid: string | null, retryKey = 0): TransferRow[] | "loading" | "error" {
+  const [rows, setRows] = useState<TransferRow[] | "loading" | "error">("loading");
+  const [lastKey, setLastKey] = useState(`${uid}:${retryKey}`);
+  const key = `${uid}:${retryKey}`;
+  if (key !== lastKey) { setLastKey(key); setRows("loading"); }
   useEffect(() => {
     if (!uid) return;
     const { db } = getFirebase();
@@ -128,9 +143,9 @@ function useIncomingTransfers(uid: string | null): TransferRow[] {
           .sort((a, b) => b.createdAt - a.createdAt);
         setRows(offered);
       },
-      () => setRows([]),
+      (e) => { console.error("useIncomingTransfers: transfers onSnapshot failed", e); setRows("error"); },
     );
-  }, [uid]);
+  }, [uid, retryKey]);
   return rows;
 }
 
@@ -298,7 +313,9 @@ export function TicketList({ uid }: { uid: string }) {
   const rows = useMyTickets(uid, ticketsRetry);
   const eventIds = rows === "loading" || rows === "error" ? [] : [...new Set(rows.map((t) => t.eventId))];
   const eventCache = useEventCache(eventIds);
-  const incoming = useIncomingTransfers(uid);
+  const [transfersRetry, setTransfersRetry] = useState(0);
+  const incoming = useIncomingTransfers(uid, transfersRetry);
+  const incomingList = incoming === "loading" || incoming === "error" ? [] : incoming;
   const now = useNow();
 
   const [detailTicket, setDetailTicket] = useState<TicketRow | null>(null);
@@ -308,12 +325,12 @@ export function TicketList({ uid }: { uid: string }) {
   if (rows === "error") {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
-        <ErrorBanner message="Couldn't load your tickets. Retry." />
-        <Button title="Retry" variant="secondary" onPress={() => setTicketsRetry((n) => n + 1)} />
+        <ErrorBanner message="Couldn't load your tickets." />
+        <Button title="Retry" variant="secondary" onPress={() => { setTicketsRetry((n) => n + 1); }} />
       </View>
     );
   }
-  if (rows.length === 0 && incoming.length === 0) return <EmptyTickets />;
+  if (rows.length === 0 && incomingList.length === 0 && incoming !== "error") return <EmptyTickets />;
 
   const upcoming: TicketRow[] = []; const past: TicketRow[] = []; const unavailable: TicketRow[] = [];
   for (const t of rows) {
@@ -327,10 +344,16 @@ export function TicketList({ uid }: { uid: string }) {
 
   return (
     <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.xl }}>
-      {incoming.length > 0 && (
+      {incoming === "error" ? (
+        <View style={{ gap: tokens.space.sm }}>
+          <ErrorBanner message="Couldn't load your incoming offers." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => setTransfersRetry((n) => n + 1)} />
+        </View>
+      ) : incomingList.length > 0 && (
         <View style={{ gap: tokens.space.sm }}>
           <Text variant="title">Incoming offers</Text>
-          {incoming.map((tr) => <IncomingTransferCard key={tr.id} transfer={tr} />)}
+          {incomingList.map((tr) => <IncomingTransferCard key={tr.id} transfer={tr} />)}
         </View>
       )}
       {pending.length > 0 && (

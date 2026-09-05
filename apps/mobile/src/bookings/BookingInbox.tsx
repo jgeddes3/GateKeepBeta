@@ -9,7 +9,7 @@ import {
   DEPOSIT_PERCENT, SHOW_MORE_LABEL,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type CuratorBookingDoc, type GigDoc, type ProfileDoc,
 } from "@gatekeep/shared";
-import { Text, StatusBadge, Skeleton, Button, ErrorBanner } from "../ui";
+import { Text, StatusBadge, Skeleton, SkeletonCard, Button, ErrorBanner } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -245,12 +245,14 @@ const HISTORY_PAGE_INCREMENT = 20;
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const router = useRouter();
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
-  // Each list carries an "error" sentinel (audit #13): a failed read is not
-  // the same as a genuinely empty result, so the empty-state copy below only
-  // renders once the read has actually succeeded.
-  const [open, setOpen] = useState<BookingRow[] | "error">([]);
-  const [confirmed, setConfirmed] = useState<BookingRow[] | "error">([]);
-  const [history, setHistory] = useState<BookingRow[] | "error">([]);
+  // Each list carries "loading"/"error" sentinels (audit #13, fix round 1
+  // ruling): a failed read is not the same as a genuinely empty result, so
+  // the empty-state copy below only renders once the read has actually
+  // succeeded, and a retry resets to "loading" (never to `[]`, which would
+  // flash the empty-state sentence during the reload).
+  const [open, setOpen] = useState<BookingRow[] | "loading" | "error">("loading");
+  const [confirmed, setConfirmed] = useState<BookingRow[] | "loading" | "error">("loading");
+  const [history, setHistory] = useState<BookingRow[] | "loading" | "error">("loading");
   const [openPageSize, setOpenPageSize] = useState(OPEN_PAGE_INCREMENT);
   const [confirmedPageSize, setConfirmedPageSize] = useState(CONFIRMED_PAGE_INCREMENT);
   const [historyPageSize, setHistoryPageSize] = useState(HISTORY_PAGE_INCREMENT);
@@ -292,49 +294,59 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
     <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.xl }}>
       <Text variant="heading">Bookings</Text>
       <View style={{ gap: tokens.space.sm }}>
-        <Text variant="title">Open threads{open !== "error" && open.length > 0 ? ` (${open.length})` : ""}</Text>
-        {open === "error" ? (
+        <Text variant="title">
+          Open threads{open !== "error" && open !== "loading" && open.length > 0 ? ` (${open.length})` : ""}
+        </Text>
+        {open === "loading" ? (
+          <SkeletonCard />
+        ) : open === "error" ? (
           <>
-            <ErrorBanner message="Couldn't load your bookings. Retry." />
+            <ErrorBanner message="Couldn't load your bookings." />
             <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-              onPress={() => setOpenRetry((n) => n + 1)} />
+              onPress={() => { setOpen("loading"); setOpenRetry((n) => n + 1); }} />
           </>
         ) : open.length === 0
           ? <Text muted>No open threads yet. Offers and counters will show up here.</Text>
           : open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
-        {open !== "error" && open.length === openPageSize && (
+        {open !== "error" && open !== "loading" && open.length === openPageSize && (
           <Button title={SHOW_MORE_LABEL} variant="secondary"
             onPress={() => setOpenPageSize((n) => n + OPEN_PAGE_INCREMENT)} />
         )}
       </View>
       <View style={{ gap: tokens.space.sm }}>
-        <Text variant="title">Upcoming confirmed{confirmed !== "error" && confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
-        {confirmed === "error" ? (
+        <Text variant="title">
+          Upcoming confirmed{confirmed !== "error" && confirmed !== "loading" && confirmed.length > 0 ? ` (${confirmed.length})` : ""}
+        </Text>
+        {confirmed === "loading" ? (
+          <SkeletonCard />
+        ) : confirmed === "error" ? (
           <>
-            <ErrorBanner message="Couldn't load your bookings. Retry." />
+            <ErrorBanner message="Couldn't load your bookings." />
             <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-              onPress={() => setConfirmedRetry((n) => n + 1)} />
+              onPress={() => { setConfirmed("loading"); setConfirmedRetry((n) => n + 1); }} />
           </>
         ) : confirmed.length === 0
           ? <Text muted>Nothing confirmed yet. Accept an offer in Open threads above and it lands here as a date.</Text>
           : confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
-        {confirmed !== "error" && confirmed.length === confirmedPageSize && (
+        {confirmed !== "error" && confirmed !== "loading" && confirmed.length === confirmedPageSize && (
           <Button title={SHOW_MORE_LABEL} variant="secondary"
             onPress={() => setConfirmedPageSize((n) => n + CONFIRMED_PAGE_INCREMENT)} />
         )}
       </View>
       <View style={{ gap: tokens.space.sm }}>
         <Text variant="title">History</Text>
-        {history === "error" ? (
+        {history === "loading" ? (
+          <SkeletonCard />
+        ) : history === "error" ? (
           <>
-            <ErrorBanner message="Couldn't load your bookings. Retry." />
+            <ErrorBanner message="Couldn't load your bookings." />
             <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-              onPress={() => setHistoryRetry((n) => n + 1)} />
+              onPress={() => { setHistory("loading"); setHistoryRetry((n) => n + 1); }} />
           </>
         ) : history.length === 0
           ? <Text muted>No history yet. Completed and closed bookings will land here.</Text>
           : history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
-        {history !== "error" && history.length === historyPageSize && (
+        {history !== "error" && history !== "loading" && history.length === historyPageSize && (
           <Button title={SHOW_MORE_LABEL} variant="secondary"
             onPress={() => setHistoryPageSize((n) => n + HISTORY_PAGE_INCREMENT)} />
         )}

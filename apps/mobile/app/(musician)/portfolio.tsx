@@ -61,8 +61,11 @@ export default function Portfolio() {
   const [profileRetry, setProfileRetry] = useState(0);
   // Tracks listener used to log-only on a failed read (audit #12): now
   // surfaces a small retryable banner near the track manager instead of
-  // leaving the submit-lock silently stuck on stale data.
-  const [tracksError, setTracksError] = useState(false);
+  // leaving the submit-lock silently stuck on stale data. Fix round 1,
+  // ruling (uniform retry feedback): widened to a "loading" | "error"
+  // sentinel (was a bare `TrackRow[]` plus a boolean `tracksError`), so a
+  // retry resets to "loading" rather than leaving the stale error banner
+  // up until the fresh snapshot lands.
   const [tracksRetry, setTracksRetry] = useState(0);
   // Four states. "loading" is load-bearing, not just a nicety: BookingForm
   // seeds its local rate inputs from `initial` on mount: if `initial` were
@@ -82,7 +85,7 @@ export default function Portfolio() {
   // render branch below) to force the booking effect below to re-run
   // without also needing its own separate effect.
   const [bookingRetry, setBookingRetry] = useState(0);
-  const [tracks, setTracks] = useState<TrackRow[]>([]);
+  const [tracks, setTracks] = useState<TrackRow[] | "loading" | "error">("loading");
   const [submitBusy, setSubmitBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -135,9 +138,16 @@ export default function Portfolio() {
     activeIdRef.current = profileId;
     setProfile("loading");
     setBooking("loading");
-    setTracks([]);
-    setTracksError(false);
+    setTracks("loading");
   }
+  // Ruling (fix round 1, uniform retry feedback): a tracks retry
+  // (tracksRetry bump) also resets straight to "loading" here (render-time
+  // reset, not a synchronous setState in the effect body below, which
+  // react-hooks/set-state-in-effect flags), rather than leaving the prior
+  // "error" on screen until the fresh snapshot lands.
+  const [lastTracksKey, setLastTracksKey] = useState(`${profileId}:${tracksRetry}`);
+  const tracksKey = `${profileId}:${tracksRetry}`;
+  if (tracksKey !== lastTracksKey) { setLastTracksKey(tracksKey); setTracks("loading"); }
 
   useEffect(() => {
     // profile is already null here: the render-time reset above just ran
@@ -186,8 +196,9 @@ export default function Portfolio() {
   // TrackManager's own list UI, catching a track's status leaving
   // "processing" without polling.
   useEffect(() => {
-    // Same reasoning as the profile effect above: tracks is already []
-    // (render-time reset, or useState's own default) by the time this runs.
+    // Same reasoning as the profile effect above: tracks is already
+    // "loading" (render-time reset, or useState's own default) by the time
+    // this runs.
     if (!profileId) return;
     const forId = profileId;
     const { db } = getFirebase();
@@ -196,7 +207,6 @@ export default function Portfolio() {
       (s) => {
         if (activeIdRef.current !== forId) return;
         setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
-        setTracksError(false);
       },
       // Was log-only (audit #12): the submit-lock gate above silently kept
       // stale track data forever on a failed read. Now surfaces a small
@@ -204,7 +214,7 @@ export default function Portfolio() {
       (e) => {
         if (activeIdRef.current !== forId) return;
         console.error("tracks onSnapshot failed", e);
-        setTracksError(true);
+        setTracks("error");
       });
   }, [profileId, tracksRetry]);
 
@@ -234,7 +244,7 @@ export default function Portfolio() {
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
-          <ErrorBanner message="Couldn't load this. Retry." />
+          <ErrorBanner message="Couldn't load this." />
           <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
             onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
         </View>
@@ -258,7 +268,8 @@ export default function Portfolio() {
     setBookingRetry((n) => n + 1);
   };
 
-  const missing = missingForSubmit(profile, tracks);
+  const trackRows = tracks === "loading" || tracks === "error" ? [] : tracks;
+  const missing = missingForSubmit(profile, trackRows);
   const canSubmit = missing.length === 0;
   const showSubmit = profile.status === "draft" || profile.status === "rejected";
 
@@ -338,11 +349,11 @@ export default function Portfolio() {
         <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
         <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
         <TrackManager profileId={profileId} />
-        {tracksError && (
+        {tracks === "error" && (
           <View style={{ gap: tokens.space.sm }}>
-            <ErrorBanner message="Couldn't check your tracks. Retry." />
+            <ErrorBanner message="Couldn't check your tracks." />
             <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
-              onPress={() => setTracksRetry((n) => n + 1)} />
+              onPress={() => { setTracks("loading"); setTracksRetry((n) => n + 1); }} />
           </View>
         )}
         {booking === "error" ? (

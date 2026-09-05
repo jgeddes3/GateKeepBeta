@@ -14,7 +14,7 @@ import {
   instantFeePreviewCents,
   type PaymentDoc, type ProfileType, type StripeStatusResult,
 } from "@gatekeep/shared";
-import { Text, Button, Input, Callout, Skeleton, SkeletonCard } from "../ui";
+import { Text, Button, Input, Callout, ErrorBanner, Skeleton, SkeletonCard } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -86,8 +86,19 @@ type PaymentRow = PaymentDoc & { id: string; bookingId: string };
 // payments subcollection (same acceptable n+1 idiom as BookingInbox's
 // useRowGigTitle/useNextOccurrence, inbox/earnings scale, not a paginated
 // list).
-function usePaymentRows(profileId: string): PaymentRow[] {
-  const [rows, setRows] = useState<PaymentRow[]>([]);
+// Fix round 1, finding 8: was a bare `PaymentRow[]`, catching a failed read
+// into `[]`, which asserted "nothing pending" on an outright load failure.
+// Now the same four-way sentinel as every other list in this app.
+function usePaymentRows(profileId: string, retryKey = 0): PaymentRow[] | "loading" | "error" {
+  const [rows, setRows] = useState<PaymentRow[] | "loading" | "error">("loading");
+  // Ruling (fix round 1, uniform retry feedback): a retry (retryKey bump)
+  // resets the sentinel back to "loading" here (render-time reset, not a
+  // synchronous setState in the effect body, which
+  // react-hooks/set-state-in-effect flags), rather than leaving the prior
+  // "error" on screen until the fresh snapshot lands.
+  const [lastKey, setLastKey] = useState(`${profileId}:${retryKey}`);
+  const key = `${profileId}:${retryKey}`;
+  if (key !== lastKey) { setLastKey(key); setRows("loading"); }
   useEffect(() => {
     let cancelled = false;
     // Bumped on every onSnapshot fire so a late-resolving OLDER fan-out (the
@@ -118,13 +129,23 @@ function usePaymentRows(profileId: string): PaymentRow[] {
         }));
         if (!cancelled && myGeneration === generation) setRows(perBooking.flat());
       },
-      () => { if (!cancelled) setRows([]); });
+      (e) => { if (!cancelled) { console.error("usePaymentRows: bookings onSnapshot failed", profileId, e); setRows("error"); } });
     return () => { cancelled = true; unsubscribe(); };
-  }, [profileId]);
+  }, [profileId, retryKey]);
   return rows;
 }
 
-function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
+function PendingSettlementsList({ rows, error, onRetry }: { rows: PaymentRow[]; error: boolean; onRetry: () => void }) {
+  if (error) {
+    return (
+      <View style={{ gap: tokens.space.sm }}>
+        <ErrorBanner message="Couldn't load your pending settlements." />
+        <Button variant="ghost" onPress={onRetry} style={{ alignSelf: "flex-start" }}>
+          <Text variant="label">Retry</Text>
+        </Button>
+      </View>
+    );
+  }
   const pending = rows
     .filter((r) => r.settlement.status === "pending" || r.settlement.status === "past_due")
     .sort((a, b) => a.occurrenceStartsAt - b.occurrenceStartsAt);
@@ -165,7 +186,9 @@ export function EarningsPanel({ profileId, type }: { profileId: string; type: Pr
   // True while the Stripe-hosted onboarding browser is open, see
   // setupPayouts/the AppState listener below.
   const onboardingInFlight = useRef(false);
-  const rows = usePaymentRows(profileId);
+  const [rowsRetry, setRowsRetry] = useState(0);
+  const rows = usePaymentRows(profileId, rowsRetry);
+  const rowsList = rows === "loading" || rows === "error" ? [] : rows;
   // SP5c Task 11 role gate: onboarding, the cash-out amount field, and the
   // cash-out buttons are admin-only actions on a shared profile's money. A
   // plain member still sees the balance and history, just not the controls.
@@ -388,7 +411,8 @@ export function EarningsPanel({ profileId, type }: { profileId: string; type: Pr
           {type === "musician" && <SharesCard profileId={profileId} isAdmin={isAdmin} />}
           <View style={{ gap: tokens.space.sm }}>
             <Text variant="title">Pending settlements</Text>
-            <PendingSettlementsList rows={rows} />
+            <PendingSettlementsList rows={rowsList} error={rows === "error"}
+              onRetry={() => setRowsRetry((n) => n + 1)} />
           </View>
           <View style={{ gap: tokens.space.sm }}>
             <Text variant="title">History</Text>
