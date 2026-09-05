@@ -21,7 +21,13 @@ export default function MusicianTabs() {
           into its own tab per this app's mobile-idiom convention. */}
       <Tabs.Screen name="bookings" options={{ title: "Bookings",
         tabBarIcon: ({ color }) => <IconHandshake color={color} size={22} /> }} />
-      <Tabs.Screen name="messages" options={{ title: "Messages",
+      {/* SP12 Task 10: "messages" is now a folder (list -> thread) with its
+          own Stack navigator (see app/(musician)/messages/_layout.tsx):
+          headerShown:false here so the Tabs navigator's header doesn't
+          double up with the inner Stack's own per-screen headers, same
+          reasoning (curator)/_layout.tsx already records for the "events"
+          folder. */}
+      <Tabs.Screen name="messages" options={{ title: "Messages", headerShown: false,
         tabBarIcon: ({ color }) => <IconChatCircle color={color} size={22} /> }} />
       <Tabs.Screen name="account" options={{ title: "Account",
         tabBarIcon: ({ color }) => <IconUserCircle color={color} size={22} /> }} />

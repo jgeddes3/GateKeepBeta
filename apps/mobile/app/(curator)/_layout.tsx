@@ -26,7 +26,12 @@ export default function CuratorTabs() {
       {/* SP4 Task 12: BookingInbox for this curator profile's own threads. */}
       <Tabs.Screen name="bookings" options={{ title: "Bookings",
         tabBarIcon: ({ color }) => <IconHandshake color={color} size={22} /> }} />
-      <Tabs.Screen name="messages" options={{ title: "Messages",
+      {/* SP12 Task 10: "messages" is now a folder (list -> thread) with its
+          own Stack navigator (see app/(curator)/messages/_layout.tsx):
+          headerShown:false here so the Tabs navigator's header doesn't
+          double up with the inner Stack's own per-screen headers, same
+          reasoning as the "events" folder above. */}
+      <Tabs.Screen name="messages" options={{ title: "Messages", headerShown: false,
         tabBarIcon: ({ color }) => <IconChatCircle color={color} size={22} /> }} />
       <Tabs.Screen name="account" options={{ title: "Account",
         tabBarIcon: ({ color }) => <IconUserCircle color={color} size={22} /> }} />
