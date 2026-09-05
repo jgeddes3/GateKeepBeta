@@ -82,7 +82,7 @@ export function curatorJsonLd(profile: CuratorishProfile, url: string, imageUrl:
 export type JsonLdEventTier = { name: string; priceCents: number; capacity: number; soldCount: number };
 
 export function eventJsonLd(
-  event: Pick<EventDoc, "title" | "description" | "status" | "startsAt" | "endsAt" | "location">,
+  event: Pick<EventDoc, "title" | "description" | "status" | "startsAt" | "endsAt" | "location" | "doorsAt">,
   eventId: string,
   url: string,
   tiers: JsonLdEventTier[],
@@ -106,6 +106,9 @@ export function eventJsonLd(
     url,
     startDate: new Date(event.startsAt).toISOString(),
     endDate: new Date(event.endsAt).toISOString(),
+    // SP11: schema.org's MusicEvent carries doorTime; it has no age
+    // property, so the age badge on the page is text only (spec 3.4).
+    doorTime: event.doorsAt != null ? new Date(event.doorsAt).toISOString() : null,
     eventStatus: event.status === "cancelled" ? "https://schema.org/EventCancelled" : "https://schema.org/EventScheduled",
     location: withoutEmpty({
       "@type": "Place",

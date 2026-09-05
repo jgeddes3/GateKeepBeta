@@ -88,6 +88,15 @@ export function FilterBar({ face, filters, onChange, location }: {
             Has audio
           </Chip>
         )}
+        {/* SP11 (spec 3.4): the spec calls this a checkbox on web, but
+            FilterBar has no checkbox control and every sibling boolean here
+            is a Chip with aria-pressed, so it ships as a chip (plan-recorded
+            deviation, task-11 brief step 5). */}
+        {has("allAges") && (
+          <Chip active={!!filters.allAges} onClick={() => onChange({ ...filters, allAges: !filters.allAges })}>
+            All ages only
+          </Chip>
+        )}
 
         {has("actSize") && ACT_SIZE_CHIPS.map((a) => (
           <Chip key={a.value} active={filters.actSize === a.value}

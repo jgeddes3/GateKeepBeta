@@ -30,4 +30,14 @@ describe("jsonLd builders", () => {
     ]);
     expect(eventJsonLd({ ...(event as object), status: "cancelled" } as never, "e1", "u", [], null, []).eventStatus).toBe("https://schema.org/EventCancelled");
   });
+  it("adds doorTime when the event has one and omits it otherwise", () => {
+    const base = {
+      title: "Night", description: "d", status: "published" as const,
+      startsAt: Date.UTC(2026, 8, 4, 23, 0), endsAt: Date.UTC(2026, 8, 5, 2, 0),
+      location: { venueName: "Mohawk", address: null, city: "Austin", neighborhood: null, geo: null, addressVisibility: "public" as const },
+    };
+    const withDoors = eventJsonLd({ ...base, doorsAt: Date.UTC(2026, 8, 4, 22, 0) }, "ev1", "https://x/e/ev1", [], null, []);
+    expect(withDoors.doorTime).toBe(new Date(Date.UTC(2026, 8, 4, 22, 0)).toISOString());
+    expect(eventJsonLd(base, "ev1", "https://x/e/ev1", [], null, []).doorTime).toBeUndefined();
+  });
 });

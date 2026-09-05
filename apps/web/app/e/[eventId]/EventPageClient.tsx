@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import type { EventDoc } from "@gatekeep/shared";
+import { AGE_RESTRICTION_LABEL, type EventDoc, type TaggedActStatus } from "@gatekeep/shared";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { formatGigTime, gigLocationLabel } from "../../u/[handle]/gigDisplay";
 import { formatEventFullDate } from "../../../src/events/eventDisplay";
@@ -14,6 +14,8 @@ import { FollowButton } from "../../../src/discover/FollowButton";
 import { ShowPostsForAct } from "../../../src/discover/ShowPosts";
 import { IconMapPin, IconTicket } from "../../../src/ui/icons";
 import { ShareButton } from "../../../src/share/ShareButton";
+import { Badge } from "../../../src/ui/badge";
+import { ArtistTagBanner } from "../../../src/events/ArtistTagBanner";
 
 // Sub-project 6 task 9: the public event page's client half. page.tsx
 // (server) fetches the event + tiers via the anonymous, rules-governed
@@ -33,10 +35,14 @@ import { ShareButton } from "../../../src/share/ShareButton";
 export interface EventPageLineupEntry { name: string; handle: string | null; profileId: string | null }
 export type EventPageTier = TierPickerTier;
 
-export function EventPageClient({ eventId, event, posterUrl, curatorName, curatorHandle, lineup, tiers, now }: {
+export function EventPageClient({ eventId, event, posterUrl, curatorName, curatorHandle, lineup, tagged, tiers, now }: {
   eventId: string; event: EventDoc; posterUrl: string | null;
   curatorName: string; curatorHandle: string | null;
-  lineup: EventPageLineupEntry[]; tiers: EventPageTier[];
+  lineup: EventPageLineupEntry[];
+  // SP11 (spec 3.5): the tagged acts, plain summary shape (page.tsx's own
+  // LoadedEvent.tagged), handed straight to ArtistTagBanner.
+  tagged: Array<{ musicianProfileId: string; name: string; status: TaggedActStatus }>;
+  tiers: EventPageTier[];
   // The instant page.tsx's own server render captured, threaded down to
   // BuyTicketsFlow (see that file's useLiveNow for why this is a prop
   // rather than a bare client Date.now() call).
@@ -55,6 +61,11 @@ export function EventPageClient({ eventId, event, posterUrl, curatorName, curato
     <FollowsProvider uid={user?.uid ?? null}>
       <main className="flex-1 pb-10">
         <div className="mx-auto max-w-3xl px-4 pt-6 sm:px-6 sm:pt-8">
+          {/* SP11 (spec 3.5): the tag banner sits above the poster, so a
+              tagged admin sees it before anything else. Renders nothing for
+              every other visitor (ArtistTagBanner's own gate). */}
+          <ArtistTagBanner eventId={eventId} acts={tagged} uid={user?.uid ?? null} />
+
           {/* 1. POSTER (or the branded PhotoPlaceholder treatment). */}
           <div className="relative h-64 overflow-hidden rounded-gk border border-gk-border bg-gk-surface sm:h-80 lg:h-96">
             {posterUrl ? (
@@ -68,9 +79,17 @@ export function EventPageClient({ eventId, event, posterUrl, curatorName, curato
               the right of the heading without eating into its own line
               length (it wraps onto its own lines above the button instead). */}
           <div className="mt-5 flex items-start justify-between gap-3">
-            <h1 className="font-syne text-2xl font-extrabold leading-tight text-gk-text sm:text-4xl">
-              {event.title}
-            </h1>
+            <div className="flex min-w-0 items-start gap-2">
+              <h1 className="font-syne text-2xl font-extrabold leading-tight text-gk-text sm:text-4xl">
+                {event.title}
+              </h1>
+              {/* SP11 (spec 3.4): 18+/21+ badge beside the title; all ages
+                  renders nothing (schema.org has no age property, so this is
+                  text-only, unlike doorTime below). */}
+              {(event.ageRestriction === "18_plus" || event.ageRestriction === "21_plus") && (
+                <Badge>{AGE_RESTRICTION_LABEL[event.ageRestriction]}</Badge>
+              )}
+            </div>
             <ShareButton path={`/e/${eventId}`} title={event.title} />
           </div>
 
@@ -86,6 +105,11 @@ export function EventPageClient({ eventId, event, posterUrl, curatorName, curato
               subtitleHasDate
               className="px-0"
             />
+            {/* SP11 (spec 3.4): doors line, only when the curator set one.
+                Same single-instant formatter the range above uses. */}
+            {event.doorsAt != null && (
+              <p className="font-sora text-sm text-gk-muted">Doors {formatGigTime(event.doorsAt)}</p>
+            )}
           </div>
 
           {/* 4. VENUE CARD: name (linked to the curator's public page), the

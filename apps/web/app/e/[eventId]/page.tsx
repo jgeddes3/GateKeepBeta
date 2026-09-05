@@ -3,7 +3,9 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
 import { getServerFirebase } from "../../../src/lib/firebase-server";
-import { isValidDocId, type EventDoc, type EventAct, type TicketTierDoc, type ProfileDoc } from "@gatekeep/shared";
+import {
+  isValidDocId, type EventDoc, type EventAct, type TicketTierDoc, type ProfileDoc, type TaggedActStatus,
+} from "@gatekeep/shared";
 import { posterPublicUrl } from "../../../src/events/posterUrl";
 import { EventPageClient, type EventPageLineupEntry, type EventPageTier } from "./EventPageClient";
 import { getSiteUrl } from "../../../src/seo/siteUrl";
@@ -25,6 +27,12 @@ type LoadedEvent = {
   eventId: string; event: EventDoc; posterUrl: string | null;
   curatorName: string; curatorHandle: string | null;
   lineup: EventPageLineupEntry[]; tiers: EventPageTier[];
+  // SP11 (spec 3.5): the tagged acts as a plain summary, derived from
+  // event.lineup here so EventPageClient can mount ArtistTagBanner without
+  // re-reading the event doc client-side (this page's own doc read is
+  // anonymous and rules-governed; the banner's per-act membership reads are
+  // a separate, signed-in-only concern that belongs client-side).
+  tagged: Array<{ musicianProfileId: string; name: string; status: TaggedActStatus }>;
   // The instant this load ran, threaded down to BuyTicketsFlow's
   // useLiveNow. Computed HERE, inside a plain (non-component) function,
   // rather than as a bare `Date.now()` call in the EventPage component body
@@ -47,11 +55,14 @@ type LoadedEvent = {
 async function resolveLineup(
   db: ReturnType<typeof getServerFirebase>["db"], lineup: EventAct[],
 ): Promise<EventPageLineupEntry[]> {
-  const bookingIds = [...new Set(
-    lineup.filter((a): a is Extract<EventAct, { kind: "booking" }> => a.kind === "booking")
-      .map((a) => a.musicianProfileId))];
+  // SP11: an ACCEPTED tagged act is public exactly like a booking act (spec
+  // 3.5's "accepted acts link to the artist page exactly like booking
+  // acts"); a pending or declined one gets no handle lookup and renders as
+  // a plain name (resolveLineup's own return below).
+  const linkableIds = [...new Set(lineup.flatMap((a) =>
+    a.kind === "booking" || (a.kind === "tagged" && a.status === "accepted") ? [a.musicianProfileId] : []))];
   const handles = new Map<string, string | null>();
-  await Promise.all(bookingIds.map(async (id) => {
+  await Promise.all(linkableIds.map(async (id) => {
     try {
       const snap = await getDoc(doc(db, "profiles", id));
       handles.set(id, snap.exists() ? ((snap.data() as ProfileDoc).handle ?? null) : null);
@@ -65,9 +76,12 @@ async function resolveLineup(
       handles.set(id, null);
     }
   }));
-  return lineup.map((act) => act.kind === "booking"
-    ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null, profileId: act.musicianProfileId }
-    : { name: act.name, handle: null, profileId: null });
+  return lineup.map((act) => {
+    const linkable = act.kind === "booking" || (act.kind === "tagged" && act.status === "accepted");
+    return linkable
+      ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null, profileId: act.musicianProfileId }
+      : { name: act.name, handle: null, profileId: null };
+  });
 }
 
 export const loadEvent = cache(async (eventId: string): Promise<LoadedEvent | null> => {
@@ -100,10 +114,13 @@ export const loadEvent = cache(async (eventId: string): Promise<LoadedEvent | nu
       };
     });
 
+    const tagged = event.lineup.flatMap((a) =>
+      a.kind === "tagged" ? [{ musicianProfileId: a.musicianProfileId, name: a.name, status: a.status }] : []);
+
     return {
       eventId, event, posterUrl,
       curatorName: curator?.name ?? "Unknown", curatorHandle: curator?.handle ?? null,
-      lineup, tiers, now: Date.now(),
+      lineup, tagged, tiers, now: Date.now(),
     };
   } catch (e) {
     // permission-denied = the event isn't published/completed and this
