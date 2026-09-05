@@ -412,6 +412,69 @@ service cloud.firestore {
     match /handles/{handle}   { allow get: if true; allow list: if false; allow write: if false; }
     match /auditLogs/{logId}  { allow read: if isAdmin(); allow write: if false; }
 
+    // ---------- Sub-project 12: messaging, comments, reactions ----------
+    // conversations/{pairId}, pairId = "{musicianProfileId}__{curatorProfileId}".
+    // Members of EITHER participant profile read the doc and its messages;
+    // an admin may read one only while it carries an open report (the
+    // Reports panel opens exactly one conversation by id, so this is a get,
+    // never a list: an unfiltered admin list over the collection still
+    // fails, which is the point of scoping abuse review to what was
+    // reported). Every write is a callable (messaging.ts, reports.ts).
+    //
+    // The participants array-contains list query is provable per document:
+    // the two isMember() lookups are evaluated per result doc, exactly the
+    // shape bookings/{bookingId} above already uses.
+    match /conversations/{pairId} {
+      allow read: if isMember(resource.data.musicianProfileId)
+        || isMember(resource.data.curatorProfileId)
+        || (isAdmin() && resource.data.openReports > 0);
+      allow write: if false; // Cloud Functions only
+
+      match /messages/{messageId} {
+        // A message doc carries no participant ids of its own, so the
+        // audience is proven with a get() on the parent, the same idiom
+        // events/{id}/tiers and gigs/private/location already use.
+        allow read: if isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.musicianProfileId)
+          || isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.curatorProfileId)
+          || (isAdmin() && get(/databases/$(database)/documents/conversations/$(pairId)).data.openReports > 0);
+        allow write: if false;
+      }
+    }
+
+    // Abuse reports for both surfaces. Admin-read, server-write, the same
+    // posture as adminAlerts and disputes above; resolveReport is the only
+    // thing that flips status.
+    match /reports/{reportId} { allow read: if isAdmin(); allow write: if false; }
+
+    // events/{eventId}/comments/{commentId}: any signed-in caller reads a
+    // visible comment, admins read hidden ones too (spec 3.2: "Hidden
+    // comments vanish for everyone except admins"). Signed-in and not
+    // public, because commenting itself needs an account: an anonymous
+    // visitor sees the show, not the room's conversation. A non-admin list
+    // MUST pin hidden == false for the rule to hold over every result.
+    match /events/{eventId}/comments/{commentId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.hidden == false);
+      allow write: if false; // Cloud Functions only
+    }
+    // The "Going" toggle and the lineup-post heart: signed-in read (the
+    // counts themselves live on the parent event and post docs, which are
+    // already public), callable-only write.
+    match /events/{eventId}/reactions/{uid} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /events/{eventId}/posts/{postId}/hearts/{uid} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    // Per-user rolling comment-rate window (comments.ts) and per-profile
+    // rolling send-rate window (messaging.ts). Internal bookkeeping only,
+    // never read by any client (not even the owner or a member of the
+    // profile, and not an admin), same posture as geocodeBudgets and
+    // searchBudgets above.
+    match /commentWindows/{uid} { allow read, write: if false; }
+    match /messageWindows/{profileId} { allow read, write: if false; }
+
     // ---------- Sub-project 10: hardening ----------
     // Poster upload receipts: processPhoto writes one doc per upload nonce
     // under the uploader's uid; the client watches it to learn the final

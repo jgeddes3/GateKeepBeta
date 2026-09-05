@@ -316,7 +316,22 @@
   { "collectionGroup": "heldShares", "queryScope": "COLLECTION",
     "fields": [ { "fieldPath": "uid", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] },
   { "collectionGroup": "heldShares", "queryScope": "COLLECTION",
-    "fields": [ { "fieldPath": "profileId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] }
+    "fields": [ { "fieldPath": "profileId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] },
+  { "collectionGroup": "conversations", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "participants", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "comments", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "hidden", "order": "ASCENDING" },
+      { "fieldPath": "at", "order": "DESCENDING" }
+    ] },
+  { "collectionGroup": "reports", "queryScope": "COLLECTION",
+    "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" },
+      { "fieldPath": "createdAt", "order": "DESCENDING" }
+    ] }
 ], "fieldOverrides": [
   { "collectionGroup": "members", "fieldPath": "uid",
     "indexes": [ { "queryScope": "COLLECTION", "order": "ASCENDING" },
