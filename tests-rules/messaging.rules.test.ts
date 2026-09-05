@@ -37,10 +37,24 @@ async function seedPair() {
     unread: { cur1: 1 }, blockedBy: [], openReports: 0, createdAt: 1, updatedAt: 2,
   });
   await seed(`conversations/${PAIR}/messages/m1`, { senderProfileId: "mus1", senderUid: "mo", text: "hi", at: 2 });
+  // Per-profile mirrors, written by the same messaging callable transaction
+  // that writes the top-level doc (Task 3): the inbox list query targets
+  // these, never the top-level collection, since a top-level
+  // participants array-contains list can't be proven by security rules.
+  await seed(`profiles/mus1/conversations/${PAIR}`, {
+    otherProfileId: "cur1", otherProfileName: "The Room", otherProfileType: "curator",
+    lastMessage: { text: "hi", senderProfileId: "mus1", at: 2 }, lastMessageAt: 2,
+    unread: 0, blockedByMe: false, openReports: 0,
+  });
+  await seed(`profiles/cur1/conversations/${PAIR}`, {
+    otherProfileId: "mus1", otherProfileName: "The Act", otherProfileType: "musician",
+    lastMessage: { text: "hi", senderProfileId: "mus1", at: 2 }, lastMessageAt: 2,
+    unread: 1, blockedByMe: false, openReports: 0,
+  });
 }
 
 describe("conversations and messages", () => {
-  it("lets members of either side read the doc, the message, and their own list", async () => {
+  it("lets members of either side get the doc, the message, and list their own messages", async () => {
     await seedPair();
     for (const uid of ["mo", "co"]) {
       const db = env.authenticatedContext(uid).firestore();
@@ -48,10 +62,25 @@ describe("conversations and messages", () => {
       await assertSucceeds(getDoc(doc(db, `conversations/${PAIR}/messages/m1`)));
       await assertSucceeds(getDocs(query(collection(db, `conversations/${PAIR}/messages`), orderBy("at", "asc"))));
     }
+  });
+
+  it("lists a profile's own conversation mirror only, never another profile's, a stranger's, or an admin's", async () => {
+    await seedPair();
     const mine = env.authenticatedContext("mo").firestore();
     await assertSucceeds(getDocs(query(
-      collection(mine, "conversations"),
-      where("participants", "array-contains", "mus1"), orderBy("lastMessageAt", "desc"))));
+      collection(mine, "profiles/mus1/conversations"), orderBy("lastMessageAt", "desc"))));
+    // co is a real member, just of the OTHER profile in this pair.
+    const otherSide = env.authenticatedContext("co").firestore();
+    await assertFails(getDocs(query(
+      collection(otherSide, "profiles/mus1/conversations"), orderBy("lastMessageAt", "desc"))));
+    const stranger = env.authenticatedContext("zz").firestore();
+    await assertFails(getDocs(query(
+      collection(stranger, "profiles/mus1/conversations"), orderBy("lastMessageAt", "desc"))));
+    const admin = env.authenticatedContext("ad", { admin: true }).firestore();
+    await assertFails(getDocs(query(
+      collection(admin, "profiles/mus1/conversations"), orderBy("lastMessageAt", "desc"))));
+    // The mirror is server-written only, even for a genuine member.
+    await assertFails(setDoc(doc(mine, `profiles/mus1/conversations/${PAIR}`), { unread: 0 }));
   });
 
   it("refuses strangers, anonymous callers, and every client write", async () => {

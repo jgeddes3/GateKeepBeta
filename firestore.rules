@@ -414,31 +414,54 @@ service cloud.firestore {
 
     // ---------- Sub-project 12: messaging, comments, reactions ----------
     // conversations/{pairId}, pairId = "{musicianProfileId}__{curatorProfileId}".
-    // Members of EITHER participant profile read the doc and its messages;
-    // an admin may read one only while it carries an open report (the
-    // Reports panel opens exactly one conversation by id, so this is a get,
-    // never a list: an unfiltered admin list over the collection still
-    // fails, which is the point of scoping abuse review to what was
-    // reported). Every write is a callable (messaging.ts, reports.ts).
-    //
-    // The participants array-contains list query is provable per document:
-    // the two isMember() lookups are evaluated per result doc, exactly the
-    // shape bookings/{bookingId} above already uses.
+    // Members of EITHER participant profile GET the doc and its messages;
+    // an admin may GET one only while it carries an open report (the
+    // Reports panel opens exactly one conversation by id). LIST is
+    // admin-only, gated the same way, and even an admin's unfiltered scan
+    // still fails: openReports is not a field the query itself guarantees,
+    // and Cloud Firestore cannot prove a list rule for "any possible
+    // matching document" from data the query doesn't constrain (confirmed
+    // empirically: resource.data and the wildcard pairId are BOTH unbound
+    // during list-rule provability, not merely denied at get-time). Members
+    // never list this collection at all, for either participant profile;
+    // profiles/{profileId}/conversations below is what the inbox screen
+    // queries instead. Every write is a callable (messaging.ts, reports.ts).
     match /conversations/{pairId} {
-      allow read: if isMember(resource.data.musicianProfileId)
+      allow get: if isMember(resource.data.musicianProfileId)
         || isMember(resource.data.curatorProfileId)
         || (isAdmin() && resource.data.openReports > 0);
+      allow list: if isAdmin() && resource.data.openReports > 0;
       allow write: if false; // Cloud Functions only
 
       match /messages/{messageId} {
         // A message doc carries no participant ids of its own, so the
         // audience is proven with a get() on the parent, the same idiom
-        // events/{id}/tiers and gigs/private/location already use.
+        // events/{id}/tiers and gigs/private/location already use. This
+        // get() is scoped to the concrete, path-bound pairId the client is
+        // already inside (conversations/{pairId}/messages), not a
+        // top-level scan, so it never hits the list-provability limit
+        // above.
         allow read: if isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.musicianProfileId)
           || isMember(get(/databases/$(database)/documents/conversations/$(pairId)).data.curatorProfileId)
           || (isAdmin() && get(/databases/$(database)/documents/conversations/$(pairId)).data.openReports > 0);
         allow write: if false;
       }
+    }
+
+    // Per-profile conversation mirror: the inbox list query. A top-level
+    // participants array-contains list cannot be proven (see above), and
+    // denormalizing every profile member's uid onto the conversation doc
+    // just to make it provable would mean rewriting the doc's participant
+    // list every time a member is added or removed. Nesting the mirror
+    // under profiles/{profileId} sidesteps both: profileId is the bound
+    // path segment the client is already scoped to (the same reason
+    // profiles/{id}/members and bookings' payments subcollection are
+    // list-provable above), so isMember(profileId) reads like any other
+    // membership check here, get or list. Written by the same messaging
+    // callable transaction that writes the top-level doc (Task 3).
+    match /profiles/{profileId}/conversations/{pairId} {
+      allow read: if isMember(profileId);
+      allow write: if false; // Cloud Functions only
     }
 
     // Abuse reports for both surfaces. Admin-read, server-write, the same
