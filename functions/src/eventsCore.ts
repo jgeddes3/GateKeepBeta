@@ -13,8 +13,9 @@
 import { randomBytes } from "node:crypto";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  DEFAULT_TICKET_FEE_POLICY, GENRES,
-  type EventAct, type TicketFeePolicy, type TicketOrderItem, type TicketTierDoc,
+  DEFAULT_TICKET_FEE_POLICY, GENRES, AGE_RESTRICTIONS, DOORS_MAX_BEFORE_START_MS,
+  EVENT_DOORS_MESSAGE, EVENT_AGE_MESSAGE,
+  type AgeRestriction, type EventAct, type TicketFeePolicy, type TicketOrderItem, type TicketTierDoc,
 } from "@gatekeep/shared";
 
 // How long a pending ticket order holds its tier inventory before it expires
@@ -97,6 +98,7 @@ export function currentTicketFeePolicy(): TicketFeePolicy {
 export function validateEventInput(input: {
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[];
+  doorsAt?: number | null; ageRestriction?: AgeRestriction;
 }): void {
   if (typeof input.title !== "string" || input.title.trim().length < 1 || input.title.trim().length > 120) {
     throw new HttpsError("invalid-argument", "Title must be 1-120 characters.");
@@ -133,6 +135,22 @@ export function validateEventInput(input: {
         || input.maxTicketsPerBuyer < 1 || input.maxTicketsPerBuyer > 20) {
       throw new HttpsError("invalid-argument", "Max tickets per buyer must be 1-20.");
     }
+  }
+  // SP11: doors is optional (absent or null means "not published"), a whole
+  // number of ms strictly before startsAt and no more than
+  // DOORS_MAX_BEFORE_START_MS ahead of it. One message for every failure
+  // shape: a fan-facing form has one field here, so splitting "not a number"
+  // from "too early" would only make the client match two strings.
+  if (input.doorsAt !== undefined && input.doorsAt !== null) {
+    const doorsAt = input.doorsAt;
+    if (typeof doorsAt !== "number" || !Number.isInteger(doorsAt)
+        || doorsAt >= input.startsAt || input.startsAt - doorsAt > DOORS_MAX_BEFORE_START_MS) {
+      throw new HttpsError("invalid-argument", EVENT_DOORS_MESSAGE);
+    }
+  }
+  if (input.ageRestriction !== undefined
+      && !(AGE_RESTRICTIONS as readonly string[]).includes(input.ageRestriction)) {
+    throw new HttpsError("invalid-argument", EVENT_AGE_MESSAGE);
   }
 }
 

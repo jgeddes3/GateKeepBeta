@@ -20,7 +20,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
   isValidDocId, deriveEventGenres, tierProjection, SETTLEMENT_CLAIM_STALE_MS, GIG_ALREADY_PROMOTED_MESSAGE,
-  type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
+  type AgeRestriction, type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
   type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
   type AttendeeDoc,
 } from "@gatekeep/shared";
@@ -63,6 +63,7 @@ export interface CreateEventInput {
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
   curatorGenres?: string[];
+  doorsAt?: number | null; ageRestriction?: AgeRestriction;
 }
 
 export interface UpdateEventInput {
@@ -70,6 +71,7 @@ export interface UpdateEventInput {
   title: string; description: string; startsAt: number; endsAt: number;
   maxTicketsPerBuyer?: number; lineup: EventAct[]; posterPath?: string | null;
   curatorGenres?: string[];
+  doorsAt?: number | null; ageRestriction?: AgeRestriction;
 }
 
 export interface SetEventTiersInput {
@@ -279,6 +281,7 @@ export const createEvent = onCall<CreateEventInput>(
       maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
       lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
       gigId, createdAt: now, updatedAt: now,
+      doorsAt: input.doorsAt ?? null, ageRestriction: input.ageRestriction ?? "all_ages",
       genres, curatorGenres: curatorGenres ?? [], priceFromCents: null, hasFreeTier: false,
     };
 
@@ -338,6 +341,10 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
     maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
     lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
     posterPath, updatedAt: Date.now(),
+    // Full-replace, like every other field on this callable: an omitted
+    // doorsAt clears the door time and an omitted ageRestriction returns the
+    // event to all ages, so the editors on both clients always resend both.
+    doorsAt: input.doorsAt ?? null, ageRestriction: input.ageRestriction ?? "all_ages",
     genres, curatorGenres: curatorGenres ?? [],
   });
 
