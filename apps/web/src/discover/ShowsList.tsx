@@ -87,10 +87,12 @@ export function ShowsEmptyState() {
 // position resolves (the browser fix while the chip is on, else the
 // account's saved homeGeo, in that order), the rows below swap for
 // RankedShows' deck-backed, distance-ranked list; the date/free/genre chips
-// above keep filtering nothing in that mode (the deck ranks on location and
-// followed genres server-side, not these client-side dimensions). With no
-// position at all, this unchanged unranked query feed is exactly what
-// rendered before this task, which is the spec's stated fallback.
+// above keep filtering that list too (RankedShows applies the identical
+// dateWindow/free/genre predicates client-side over the deck's own cards,
+// review fix round 1), same as they already do over the unranked feed's
+// fetched page. With no position at all, this unchanged unranked query feed
+// is exactly what rendered before this task, which is the spec's stated
+// fallback.
 export function ShowsList({ uid }: { uid: string }) {
   const [rows, setRows] = useState<ShowRow[] | "loading">("loading");
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +118,14 @@ export function ShowsList({ uid }: { uid: string }) {
   // getDocs' own success/failure callback instead. A filter change keeps
   // showing the PREVIOUS result set until the new query resolves, rather
   // than flashing back to a loading skeleton.
+  //
+  // Review fix round 1: gated on `position == null` (an early return, no
+  // setState of its own, so the lint rule above still holds) because
+  // RankedShows owns the fetch once a position exists; without this guard,
+  // every Today/Free/genre chip toggle kept re-running this Firestore query
+  // for a result nobody was rendering.
   useEffect(() => {
+    if (position) return;
     let cancelled = false;
     const { db } = getFirebase();
     getDocs(showsQuery(db, { genre, free, now }))
@@ -131,7 +140,7 @@ export function ShowsList({ uid }: { uid: string }) {
         setError(e instanceof Error ? e.message : "Could not load shows.");
       });
     return () => { cancelled = true; };
-  }, [genre, free, now]);
+  }, [genre, free, now, position]);
 
   const filtered = useMemo(() => {
     if (rows === "loading") return [];
@@ -174,7 +183,15 @@ export function ShowsList({ uid }: { uid: string }) {
       </div>
 
       {position ? (
-        <RankedShows location={position} homeCity={homeGeo.homeCity} usingHomeCity={usingHomeCity} />
+        <RankedShows
+          location={position}
+          homeCity={homeGeo.homeCity}
+          usingHomeCity={usingHomeCity}
+          dateFilter={dateFilter}
+          free={free}
+          genre={genre}
+          now={now}
+        />
       ) : (
         <>
           {error && <ShowsErrorRow error={error} />}
