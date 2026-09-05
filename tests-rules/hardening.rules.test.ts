@@ -93,32 +93,32 @@ describe("notifications.read (F8)", () => {
 });
 
 describe("users.displayName (F7)", () => {
-  it("owner cannot delete or blank displayName; 1 to 80 characters stays allowed", async () => {
+  it("SP11: owner cannot update displayName, homeCity, or homeGeo", async () => {
     await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
     const alice = env.authenticatedContext("alice").firestore();
-    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: deleteField() }));
-    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "" }));
-    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: 42 }));
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { displayName: "A" }));
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(80) }));
-    // A homeCity-only update must still pass: displayName stays present in the resulting doc.
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: deleteField() })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "" })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: 42 })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "A" })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(80) })); // SP11: displayName and homeCity are written only by updateAccount
+    // A photoUrl-only update must still pass: displayName stays present in the resulting doc.
+    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: "https://example.com/a.jpg" }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" })); // SP11: displayName and homeCity are written only by updateAccount
   });
-  it("a whitespace-only displayName is refused", async () => {
+  it("a whitespace-only displayName cannot be set in SP11", async () => {
     await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
     const alice = env.authenticatedContext("alice").firestore();
-    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: " " }));
-    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "     " }));
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { displayName: " Alice " }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: " " })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "     " })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: " Alice " })); // SP11: displayName and homeCity are written only by updateAccount
   });
-  it("a doc with NO displayName cannot be patched at all, not even homeCity alone", async () => {
-    // The unpatchable-doc case onUserCreated's fallback exists to prevent:
-    // 'displayName' in request.resource.data is required on every update, so a
-    // seed that never wrote one locks its own owner out until a server fixes it.
+  it("a doc with NO displayName still cannot be patched in SP11", async () => {
+    // SP11: displayName is no longer owner-updatable, only written by updateAccount.
+    // A seeded doc without displayName can update photoUrl only, not homeCity.
     await seed("users/nameless", { email: "n@x.com", homeCity: null });
     const nameless = env.authenticatedContext("nameless").firestore();
-    await assertFails(updateDoc(doc(nameless, "users/nameless"), { homeCity: "Austin" }));
-    await assertSucceeds(updateDoc(doc(nameless, "users/nameless"), { displayName: "Nameless", homeCity: "Austin" }));
+    await assertFails(updateDoc(doc(nameless, "users/nameless"), { homeCity: "Austin" })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(nameless, "users/nameless"), { displayName: "Nameless", homeCity: "Austin" })); // SP11: displayName and homeCity are written only by updateAccount
   });
 });
 

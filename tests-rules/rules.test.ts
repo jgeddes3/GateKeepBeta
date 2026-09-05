@@ -74,11 +74,12 @@ const seedBooking = async (id: string, overrides: Record<string, unknown> = {}) 
 
 describe("users", () => {
   it("owner reads and updates own doc; strangers cannot", async () => {
-    await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
+    await seed("users/alice", { displayName: "Alice", email: "a@x.com", photoUrl: null });
     const alice = env.authenticatedContext("alice").firestore();
     const bob = env.authenticatedContext("bob").firestore();
     await assertSucceeds(getDoc(doc(alice, "users/alice")));
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { displayName: "Alice L" }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "Alice L" })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: "https://example.com/a.jpg" }));
     await assertFails(getDoc(doc(bob, "users/alice")));
     await assertFails(updateDoc(doc(bob, "users/alice"), { displayName: "hacked" }));
   });
@@ -91,16 +92,16 @@ describe("users", () => {
     const alice = env.authenticatedContext("alice").firestore();
     await assertFails(updateDoc(doc(alice, "users/alice"), { email: "changed@x.com" }));
   });
-  it("owner update enforces type/size constraints on displayName, photoUrl, homeCity", async () => {
+  it("owner update enforces type/size constraints on photoUrl; displayName and homeCity disallowed", async () => {
     await seed("users/alice", { displayName: "Alice", email: "a@x.com" });
     const alice = env.authenticatedContext("alice").firestore();
-    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(81) }));
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(80) }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(81) })); // Still fails: displayName not in hasOnly
+    await assertFails(updateDoc(doc(alice, "users/alice"), { displayName: "x".repeat(80) })); // SP11: displayName and homeCity are written only by updateAccount
     await assertFails(updateDoc(doc(alice, "users/alice"), { photoUrl: "http://insecure.example/pic.png" }));
     await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: "https://example.com/pic.png" }));
     await assertSucceeds(updateDoc(doc(alice, "users/alice"), { photoUrl: null }));
-    await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "x".repeat(81) }));
-    await assertSucceeds(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" }));
+    await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "x".repeat(81) })); // SP11: displayName and homeCity are written only by updateAccount
+    await assertFails(updateDoc(doc(alice, "users/alice"), { homeCity: "Austin" })); // SP11: displayName and homeCity are written only by updateAccount
   });
   // Task 8: displayNameLower (searchUsersByName's index field) is maintained
   // server-side only (onUserCreated + the onUserDocWritten trigger), it
