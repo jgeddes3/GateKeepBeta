@@ -5,6 +5,7 @@ import { doc, getDoc, getDocs, collection, query, where, orderBy } from "firebas
 import type { CuratorSubtype, EventDoc, ProfileDoc } from "@gatekeep/shared";
 import { publicStorageUrl } from "../../src/discover/storageUrl";
 import { FollowButton } from "../../src/discover/FollowButton";
+import { ShareButton } from "../../src/share/ShareButton";
 import { getFirebase } from "../../src/lib/firebase";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import { formatEventFullDate, formatEventTimeRange } from "../../src/events/eventDisplay";
@@ -171,6 +172,9 @@ export default function Venue() {
             <Badge label={SUBTYPE_LABEL[subtype]} />
             {c?.location?.neighborhood && <Badge label={c.location.neighborhood} />}
             <FollowButton targetId={profileId} targetType="curator" label={isVenue ? "Follow venue" : undefined} />
+            {/* SP11 (spec 3.1): the shared share affordance, hidden when
+                EXPO_PUBLIC_SITE_URL is unset. */}
+            <ShareButton path={`/u/${handle}`} title={profile.name} />
           </View>
 
           {photoUrls.length > 1 && (

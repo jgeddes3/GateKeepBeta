@@ -123,6 +123,12 @@ function Gate() {
             from the Following screen and notification deep links. Same
             themed native header as artist/[handle] above. */}
         <Stack.Screen name="venue/[handle]" options={{ headerShown: true, title: "Venue" }} />
+        {/* SP11: incoming universal and app links. /e/{id} redirects to the
+            event screen; /u/{handle} resolves the profile type and replaces
+            itself with the artist or venue screen. Both are headerless: the
+            screen they land on owns the header. */}
+        <Stack.Screen name="e/[eventId]" options={{ headerShown: false }} />
+        <Stack.Screen name="u/[handle]" options={{ headerShown: false }} />
       </Stack>
     </View>
   );

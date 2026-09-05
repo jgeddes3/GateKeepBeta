@@ -18,6 +18,7 @@ import {
 import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "../../src/payments/stripe";
 import { PostPurchaseGenrePrompt } from "../../src/discover/GenrePickerSheet";
 import { ShowPostsForAct } from "../../src/discover/ShowPosts";
+import { ShareButton } from "../../src/share/ShareButton";
 import {
   Text, Button, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconTicket, IconMapPin, IconMinus, IconPlus,
@@ -474,10 +475,15 @@ export default function EventScreen() {
           )}
         </View>
 
-        <View style={{ gap: 4 }}>
-          <Text variant="heading">{event.title}</Text>
-          <Text variant="label">{formatEventTimeRange(event.startsAt, event.endsAt)}</Text>
-          <Text muted>{formatEventFullDate(event.startsAt)}</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: tokens.space.sm }}>
+          <View style={{ gap: 4, flex: 1 }}>
+            <Text variant="heading">{event.title}</Text>
+            <Text variant="label">{formatEventTimeRange(event.startsAt, event.endsAt)}</Text>
+            <Text muted>{formatEventFullDate(event.startsAt)}</Text>
+          </View>
+          {/* SP11 (spec 3.1): the shared share affordance, hidden when
+              EXPO_PUBLIC_SITE_URL is unset. */}
+          <ShareButton path={`/e/${eventId}`} title={event.title} />
         </View>
 
         <Card style={{ gap: 4 }}>
