@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { callFn, signUpTestUser } from "./helpers";
+import { callFn, makeAdminUser, signUpTestUser } from "./helpers";
 import {
   adb, makeApprovedMusicianProfile, makeDraftEvent, addTiersAndPublish, makePublishedBookingEvent,
 } from "./discoverFixtures";
@@ -140,6 +140,14 @@ describe("replies, hiding, deleting", () => {
     const c = await say(e.eventId, "artist hides this", fan.user);
     await callFn("hideComment", { eventId: e.eventId, commentId: c.commentId }, e.musician.owner.user);
     expect((await comment(e.eventId, c.commentId))!.hiddenBy).toMatchObject({ role: "artist" });
+
+    // An admin moderates any event's comments (the Reports panel's "Hide
+    // comment" runs this same callable) and the trail records them as such.
+    const d = await say(e.eventId, "admin hides this", fan.user);
+    const moderator = await makeAdminUser("cm4adm");
+    await callFn("hideComment", { eventId: e.eventId, commentId: d.commentId }, moderator.user);
+    expect((await comment(e.eventId, d.commentId))!.hiddenBy)
+      .toMatchObject({ uid: moderator.uid, role: "admin" });
 
     await expect(callFn("deleteComment", { eventId: e.eventId, commentId: b.commentId }, e.owner.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
