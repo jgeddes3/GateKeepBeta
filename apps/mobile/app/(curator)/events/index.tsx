@@ -7,7 +7,7 @@ import { callFn } from "../../../src/lib/callable";
 import { useAuth } from "../../../src/auth/AuthProvider";
 import { useProfileContext } from "../../../src/shell/ProfileContext";
 import {
-  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, BUDGET_STRUCTURE_LABEL, WEEKDAY_LABELS, GIG_STATUS_TONE,
+  GIG_STATUS_LABEL, SERIES_STATUS_LABEL, SERIES_STATUS_TONE, BUDGET_STRUCTURE_LABEL, WEEKDAY_LABELS, GIG_STATUS_TONE,
   formatGigDateTime, formatCents,
   LocationFields, MAX_ADDRESS_LENGTH, OneOffDateTimeFields, emptyOneOffDateTime, oneOffDateTimeFrom, oneOffDateTimeToMs,
   type LocationValue,
@@ -544,7 +544,7 @@ export default function GigsList() {
               <Card style={{ padding: tokens.space.md, gap: 4 }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                   <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{s.template.title || "Untitled series"}</Text>
-                  <StatusBadge label={SERIES_STATUS_LABEL[s.status]} status="neutral" />
+                  <StatusBadge label={SERIES_STATUS_LABEL[s.status]} status={SERIES_STATUS_TONE[s.status]} />
                 </View>
                 <Text variant="meta" muted>
                   {WEEKDAY_LABELS[s.recurrence.weekday]}s, {String(s.recurrence.hour).padStart(2, "0")}:{String(s.recurrence.minute).padStart(2, "0")} (UTC), {s.recurrence.cadence}

@@ -4,7 +4,7 @@ import { callFn } from "../lib/callable";
 import { formatCents } from "../gigs/GigForms";
 import {
   MAX_TRUE_UP_EXTRA_MINUTES, MAX_TRUE_UP_EXTRA_SONGS, TRUE_UP_SHAPE_MESSAGE, trueUpOverCapMessage,
-  TRUE_UP_INCREASE_ONLY_MESSAGE, trueUpDeltaPreviewCents,
+  TRUE_UP_INCREASE_ONLY_MESSAGE, TRUE_UP_WHOLE_NUMBERS_MESSAGE, trueUpDeltaPreviewCents,
   type BudgetStructure, type FeePolicy,
 } from "@gatekeep/shared";
 import { Button } from "../ui/button";
@@ -57,8 +57,13 @@ export function TrueUpForm({
   if (structure === "perSet") return null; // flat: nothing to report
 
   const trimmed = rawInput.trim();
-  const parsedValue = Math.round(Number(trimmed));
-  const inputShapeOk = trimmed !== "" && Number.isFinite(Number(trimmed)) && Number.isInteger(parsedValue) && parsedValue >= 0;
+  // L64: parse without rounding, so a fractional entry is REFUSED rather
+  // than silently changed into a different number of minutes or songs. The
+  // server (confirmOccurrenceActuals) has always required an integer; this
+  // only stops the client from quietly inventing one on the user's behalf.
+  const parsedValue = Number(trimmed);
+  const isWholeNumber = trimmed !== "" && Number.isFinite(parsedValue) && Number.isInteger(parsedValue);
+  const inputShapeOk = isWholeNumber && parsedValue >= 0;
   const cap = isPerHour ? MAX_TRUE_UP_EXTRA_MINUTES : MAX_TRUE_UP_EXTRA_SONGS;
   const overCap = inputShapeOk && parsedValue > cap;
   const belowCurrent = inputShapeOk && parsedValue < (currentAxisValue ?? 0);
@@ -86,6 +91,9 @@ export function TrueUpForm({
     // increase-only ordering (different complaints, different fixes, see
     // messages.ts's header): the server independently re-validates all
     // three regardless.
+    if (trimmed !== "" && Number.isFinite(parsedValue) && !Number.isInteger(parsedValue)) {
+      setError(TRUE_UP_WHOLE_NUMBERS_MESSAGE); return;
+    }
     if (!shapeOk) { setError(TRUE_UP_SHAPE_MESSAGE); return; }
     if (overCap) { setError(trueUpOverCapMessage(isPerHour ? "minutes" : "songs", cap)); return; }
     if (belowCurrent) { setError(TRUE_UP_INCREASE_ONLY_MESSAGE); return; }

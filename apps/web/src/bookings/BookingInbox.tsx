@@ -6,10 +6,11 @@ import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { formatReliabilityLine } from "./BookingForms";
 import {
-  DEPOSIT_PERCENT,
+  DEPOSIT_PERCENT, SHOW_MORE_LABEL,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type CuratorBookingDoc, type GigDoc, type ProfileDoc,
 } from "@gatekeep/shared";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
 import { DateBlockRow } from "../components/DateBlockRow";
 import { Skeleton } from "../ui/skeleton";
 import { IconBookings } from "../ui/icons";
@@ -320,39 +321,55 @@ function InboxEmpty({ children }: { children: ReactNode }) {
 // on exactly the field firestore.rules' bookings read rule checks via
 // isMember(): the same list-provability shape as OfferComposer's own
 // curatorProfileId-filtered gigs query.
+// L68: each section's cap is a `pageSize` piece of state, seeded at the
+// original limit, rather than a `startAfter` cursor fetched once. "Show
+// more" grows the SAME live `onSnapshot` listener's limit instead of
+// appending a separate one-shot page: every row stays live (a status change
+// on row 40 still updates in place after paging to 60), which is the whole
+// point of using onSnapshot for this list in the first place. The tradeoff
+// is re-reading rows 1..N on every grow rather than only the new page, an
+// acceptable cost at the sizes an inbox reaches before a user stops
+// clicking "Show more".
+const OPEN_PAGE_INCREMENT = 50;
+const CONFIRMED_PAGE_INCREMENT = 50;
+const HISTORY_PAGE_INCREMENT = 20;
+
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
   const [open, setOpen] = useState<BookingRow[]>([]);
   const [confirmed, setConfirmed] = useState<BookingRow[]>([]);
   const [history, setHistory] = useState<BookingRow[]>([]);
+  const [openPageSize, setOpenPageSize] = useState(OPEN_PAGE_INCREMENT);
+  const [confirmedPageSize, setConfirmedPageSize] = useState(CONFIRMED_PAGE_INCREMENT);
+  const [historyPageSize, setHistoryPageSize] = useState(HISTORY_PAGE_INCREMENT);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "open"),
-        orderBy("updatedAt", "desc"), limit(50)),
+        orderBy("updatedAt", "desc"), limit(openPageSize)),
       (snap) => setOpen(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
       () => setOpen([]));
-  }, [field, profileId]);
+  }, [field, profileId, openPageSize]);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "confirmed"),
-        orderBy("updatedAt", "desc"), limit(50)),
+        orderBy("updatedAt", "desc"), limit(confirmedPageSize)),
       (snap) => setConfirmed(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
       () => setConfirmed([]));
-  }, [field, profileId]);
+  }, [field, profileId, confirmedPageSize]);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "bookings"), where(field, "==", profileId),
         where("status", "in", [...BOOKING_TERMINAL_STATUSES]),
-        orderBy("updatedAt", "desc"), limit(20)),
+        orderBy("updatedAt", "desc"), limit(historyPageSize)),
       (snap) => setHistory(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
       () => setHistory([]));
-  }, [field, profileId]);
+  }, [field, profileId, historyPageSize]);
 
   return (
     <div className="grid gap-6">
@@ -365,6 +382,12 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         ) : (
           <ul className="grid gap-2">{open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
+        {open.length === openPageSize && (
+          <Button type="button" variant="secondary" size="sm" className="justify-self-start"
+            onClick={() => setOpenPageSize((n) => n + OPEN_PAGE_INCREMENT)}>
+            {SHOW_MORE_LABEL}
+          </Button>
+        )}
       </section>
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">
@@ -375,6 +398,12 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         ) : (
           <ul className="grid gap-2">{confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} />)}</ul>
         )}
+        {confirmed.length === confirmedPageSize && (
+          <Button type="button" variant="secondary" size="sm" className="justify-self-start"
+            onClick={() => setConfirmedPageSize((n) => n + CONFIRMED_PAGE_INCREMENT)}>
+            {SHOW_MORE_LABEL}
+          </Button>
+        )}
       </section>
       <section className="grid gap-2.5">
         <h3 className="font-syne text-sm font-semibold text-gk-text">History</h3>
@@ -382,6 +411,12 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
           <InboxEmpty>No history yet. Completed and closed bookings will land here.</InboxEmpty>
         ) : (
           <ul className="grid gap-2">{history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} />)}</ul>
+        )}
+        {history.length === historyPageSize && (
+          <Button type="button" variant="secondary" size="sm" className="justify-self-start"
+            onClick={() => setHistoryPageSize((n) => n + HISTORY_PAGE_INCREMENT)}>
+            {SHOW_MORE_LABEL}
+          </Button>
         )}
       </section>
     </div>

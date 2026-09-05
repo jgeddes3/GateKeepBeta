@@ -6,10 +6,10 @@ import { getFirebase } from "../lib/firebase";
 import { formatCents, formatGigDateTime } from "../gigs/GigForms";
 import { formatReliabilityLine } from "./BookingForms";
 import {
-  DEPOSIT_PERCENT,
+  DEPOSIT_PERCENT, SHOW_MORE_LABEL,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type CuratorBookingDoc, type GigDoc, type ProfileDoc,
 } from "@gatekeep/shared";
-import { Text, StatusBadge, Skeleton } from "../ui";
+import { Text, StatusBadge, Skeleton, Button } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -233,40 +233,52 @@ function HistoryRow({ row, mySide, onPress }: { row: BookingRow; mySide: Booking
 // against. Three lists, each its own onSnapshot on the SAME
 // (profileId,status,updatedAt) composite index (Task 2), just a different
 // status filter/cap, mirrors web exactly.
+// L68: mirrors web's BookingInbox.tsx exactly, growing the same live
+// onSnapshot listener's limit via a `pageSize` piece of state instead of a
+// one-shot `startAfter` page, so every row (including ones already on
+// screen) stays live after paging. See the web file's comment for the full
+// reasoning; the tradeoff (re-reading rows 1..N on every grow) is the same.
+const OPEN_PAGE_INCREMENT = 50;
+const CONFIRMED_PAGE_INCREMENT = 50;
+const HISTORY_PAGE_INCREMENT = 20;
+
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const router = useRouter();
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
   const [open, setOpen] = useState<BookingRow[]>([]);
   const [confirmed, setConfirmed] = useState<BookingRow[]>([]);
   const [history, setHistory] = useState<BookingRow[]>([]);
+  const [openPageSize, setOpenPageSize] = useState(OPEN_PAGE_INCREMENT);
+  const [confirmedPageSize, setConfirmedPageSize] = useState(CONFIRMED_PAGE_INCREMENT);
+  const [historyPageSize, setHistoryPageSize] = useState(HISTORY_PAGE_INCREMENT);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "open"),
-        orderBy("updatedAt", "desc"), limit(50)),
+        orderBy("updatedAt", "desc"), limit(openPageSize)),
       (snap) => setOpen(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
       () => setOpen([]));
-  }, [field, profileId]);
+  }, [field, profileId, openPageSize]);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "confirmed"),
-        orderBy("updatedAt", "desc"), limit(50)),
+        orderBy("updatedAt", "desc"), limit(confirmedPageSize)),
       (snap) => setConfirmed(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
       () => setConfirmed([]));
-  }, [field, profileId]);
+  }, [field, profileId, confirmedPageSize]);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "bookings"), where(field, "==", profileId),
         where("status", "in", [...BOOKING_TERMINAL_STATUSES]),
-        orderBy("updatedAt", "desc"), limit(20)),
+        orderBy("updatedAt", "desc"), limit(historyPageSize)),
       (snap) => setHistory(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
       () => setHistory([]));
-  }, [field, profileId]);
+  }, [field, profileId, historyPageSize]);
 
   const openThread = (bookingId: string) => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } });
 
@@ -278,18 +290,30 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         {open.length === 0
           ? <Text muted>No open booking requests.</Text>
           : open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
+        {open.length === openPageSize && (
+          <Button title={SHOW_MORE_LABEL} variant="secondary"
+            onPress={() => setOpenPageSize((n) => n + OPEN_PAGE_INCREMENT)} />
+        )}
       </View>
       <View style={{ gap: tokens.space.sm }}>
         <Text variant="title">Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
         {confirmed.length === 0
           ? <Text muted>Nothing confirmed yet.</Text>
           : confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
+        {confirmed.length === confirmedPageSize && (
+          <Button title={SHOW_MORE_LABEL} variant="secondary"
+            onPress={() => setConfirmedPageSize((n) => n + CONFIRMED_PAGE_INCREMENT)} />
+        )}
       </View>
       <View style={{ gap: tokens.space.sm }}>
         <Text variant="title">History</Text>
         {history.length === 0
           ? <Text muted>No past bookings yet.</Text>
           : history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
+        {history.length === historyPageSize && (
+          <Button title={SHOW_MORE_LABEL} variant="secondary"
+            onPress={() => setHistoryPageSize((n) => n + HISTORY_PAGE_INCREMENT)} />
+        )}
       </View>
     </ScrollView>
   );
