@@ -44,13 +44,17 @@ export function AboutForm({ profileId, initial }: { profileId: string; initial: 
         <CardTitle>About</CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
-        <Textarea
-          rows={6}
-          maxLength={MAX_ABOUT_LENGTH}
-          value={about}
-          placeholder="Tell musicians what makes this a good gig: the room, the crowd, what you're building…"
-          onChange={(e) => setAbout(e.target.value)}
-        />
+        <div className="grid gap-1.5">
+          <label htmlFor="curator-about" className="font-sora text-sm font-medium text-gk-text">About</label>
+          <Textarea
+            id="curator-about"
+            rows={6}
+            maxLength={MAX_ABOUT_LENGTH}
+            value={about}
+            placeholder="Tell musicians what makes this a good gig: the room, the crowd, what you're building…"
+            onChange={(e) => setAbout(e.target.value)}
+          />
+        </div>
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save about"}
         </Button>
@@ -95,7 +99,9 @@ export function LocationForm({ profileId, subtype, initial }:
         {isVenue ? (
           <div className="grid gap-1.5">
             <p className="font-sora text-sm text-gk-muted">Venues show a full street address publicly.</p>
+            <label htmlFor="curator-address" className="font-sora text-sm font-medium text-gk-text">Street address</label>
             <Input
+              id="curator-address"
               placeholder="Street address"
               maxLength={MAX_ADDRESS_LENGTH}
               value={address}
@@ -172,13 +178,17 @@ export function LookingForForm({ profileId, initial }: { profileId: string; init
             ))}
           </div>
         </div>
-        <Textarea
-          rows={3}
-          maxLength={500}
-          value={notes}
-          placeholder="Anything else musicians should know (optional)"
-          onChange={(e) => setNotes(e.target.value)}
-        />
+        <div className="grid gap-1.5">
+          <label htmlFor="curator-looking-for-notes" className="font-sora text-sm font-medium text-gk-text">Notes</label>
+          <Textarea
+            id="curator-looking-for-notes"
+            rows={3}
+            maxLength={500}
+            value={notes}
+            placeholder="Anything else musicians should know (optional)"
+            onChange={(e) => setNotes(e.target.value)}
+          />
+        </div>
         <Button type="button" onClick={save} disabled={busy} className="justify-self-start">
           {busy ? "Saving…" : "Save preferences"}
         </Button>
@@ -273,13 +283,17 @@ export function AmenitiesForm({ profileId, initial, initialAdvertising }:
             ))}
           </div>
         </div>
-        <Textarea
-          rows={3}
-          maxLength={MAX_AMENITY_NOTES_LENGTH}
-          value={notes}
-          placeholder="Other amenities (optional)"
-          onChange={(e) => setNotes(e.target.value)}
-        />
+        <div className="grid gap-1.5">
+          <label htmlFor="curator-amenity-notes" className="font-sora text-sm font-medium text-gk-text">Other amenities</label>
+          <Textarea
+            id="curator-amenity-notes"
+            rows={3}
+            maxLength={MAX_AMENITY_NOTES_LENGTH}
+            value={notes}
+            placeholder="Other amenities (optional)"
+            onChange={(e) => setNotes(e.target.value)}
+          />
+        </div>
         <div className="flex items-center gap-3">
           <Switch id="curator-advertising" checked={advertisingInterest} onCheckedChange={setAdvertisingInterest} />
           <label htmlFor="curator-advertising" className="font-sora text-sm text-gk-text">

@@ -203,7 +203,7 @@ function LineupFields({ lineup, onChange, eventId, profileId }: {
       )}
       <div className="flex flex-wrap gap-2">
         <Input
-          value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Act name" maxLength={80}
+          value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Act name" aria-label="Act name" maxLength={80}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAct(); } }}
         />
         <Button type="button" variant="secondary" onClick={addAct} disabled={!draft.trim()}>
@@ -388,12 +388,14 @@ function TierEditor({ profileId, eventId, eventStatus, initialTiers }: {
           </div>
           <div className="flex flex-wrap items-end gap-3">
             <div className="grid gap-1">
-              <label className="font-sora text-xs text-gk-muted">Sale starts (optional)</label>
-              <Input type="datetime-local" className="w-56" value={r.saleStartsAt} onChange={(e) => update(r.key, { saleStartsAt: e.target.value })} />
+              <label htmlFor={`tier-${r.key}-sale-starts`} className="font-sora text-xs text-gk-muted">Sale starts (optional)</label>
+              <Input id={`tier-${r.key}-sale-starts`} type="datetime-local" className="w-56" value={r.saleStartsAt}
+                onChange={(e) => update(r.key, { saleStartsAt: e.target.value })} />
             </div>
             <div className="grid gap-1">
-              <label className="font-sora text-xs text-gk-muted">Sale ends (optional)</label>
-              <Input type="datetime-local" className="w-56" value={r.saleEndsAt} onChange={(e) => update(r.key, { saleEndsAt: e.target.value })} />
+              <label htmlFor={`tier-${r.key}-sale-ends`} className="font-sora text-xs text-gk-muted">Sale ends (optional)</label>
+              <Input id={`tier-${r.key}-sale-ends`} type="datetime-local" className="w-56" value={r.saleEndsAt}
+                onChange={(e) => update(r.key, { saleEndsAt: e.target.value })} />
             </div>
           </div>
         </div>
@@ -445,7 +447,8 @@ function CancelPanel({ profileId, eventId, title, onClose, onCancelled }: {
           This cancels the event and automatically refunds every ticket already sold, in full. This can&apos;t be undone.
         </p>
         <Textarea rows={2} maxLength={500} value={reason} disabled={busy}
-          onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional, shown to ticket holders)" />
+          onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional, shown to ticket holders)"
+          aria-label="Cancellation reason" />
         {error && <ErrorBox message={error} />}
         <div className="flex gap-2">
           <Button onClick={submit} disabled={busy} variant="destructive">

@@ -7,6 +7,7 @@ import { useAuth } from "../../../src/auth/AuthProvider";
 import { EarningsPanel } from "../../../src/payments/EarningsPanel";
 import type { ProfileDoc } from "@gatekeep/shared";
 import { Skeleton } from "../../../src/ui/skeleton";
+import { ListError } from "../../../src/ui/ListError";
 import { IconEarnings } from "../../../src/ui/icons";
 
 type ProfileSummary = { profileId: string; name: string; type: ProfileDoc["type"] };
@@ -19,25 +20,28 @@ type ProfileSummary = { profileId: string; name: string; type: ProfileDoc["type"
 // Mounted with key={user.uid} by the page below for the same
 // remount-on-identity-change reason ProfilesList documents.
 function EarningsProfilesList({ uid }: { uid: string }) {
-  const [profiles, setProfiles] = useState<ProfileSummary[] | "loading">("loading");
+  const [profiles, setProfiles] = useState<ProfileSummary[] | "loading" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const { db } = getFirebase();
-    const unsubscribe = onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", uid)), async (snap) => {
-      const out: ProfileSummary[] = [];
-      for (const m of snap.docs) {
-        if (cancelled) return;
-        const p = await getDoc(doc(db, "profiles", m.ref.parent.parent!.id));
-        if (cancelled) return;
-        if (p.exists()) {
-          const d = p.data() as ProfileDoc;
-          if (d.type === "musician" || d.type === "curator") out.push({ profileId: p.id, name: d.name, type: d.type });
+    const unsubscribe = onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", uid)),
+      async (snap) => {
+        const out: ProfileSummary[] = [];
+        for (const m of snap.docs) {
+          if (cancelled) return;
+          const p = await getDoc(doc(db, "profiles", m.ref.parent.parent!.id));
+          if (cancelled) return;
+          if (p.exists()) {
+            const d = p.data() as ProfileDoc;
+            if (d.type === "musician" || d.type === "curator") out.push({ profileId: p.id, name: d.name, type: d.type });
+          }
         }
-      }
-      if (!cancelled) setProfiles(out);
-    });
+        if (!cancelled) setProfiles(out);
+      },
+      (e) => { console.error("EarningsProfilesList: members onSnapshot failed", uid, e); if (!cancelled) setProfiles("error"); });
     return () => { cancelled = true; unsubscribe(); };
-  }, [uid]);
+  }, [uid, reloadKey]);
 
   if (profiles === "loading") {
     return (
@@ -46,6 +50,9 @@ function EarningsProfilesList({ uid }: { uid: string }) {
         <Skeleton className="h-9 w-40" />
       </div>
     );
+  }
+  if (profiles === "error") {
+    return <ListError message="Couldn't load your profiles." onRetry={() => setReloadKey((k) => k + 1)} />;
   }
   if (profiles.length === 0) {
     return (

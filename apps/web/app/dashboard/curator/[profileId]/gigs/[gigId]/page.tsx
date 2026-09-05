@@ -21,6 +21,7 @@ import { Badge } from "../../../../../../src/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/ui/card";
 import { Input } from "../../../../../../src/ui/input";
 import { Skeleton } from "../../../../../../src/ui/skeleton";
+import { ListError } from "../../../../../../src/ui/ListError";
 import { IconWarning } from "../../../../../../src/ui/icons";
 
 const toLocalInput = (ms: number) => {
@@ -180,8 +181,10 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
   const { profileId, gigId } = use(props.params);
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
-  const [gig, setGig] = useState<GigDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
+  const [gig, setGig] = useState<GigDoc | null | "loading" | "error">("loading");
+  const [gigReloadKey, setGigReloadKey] = useState(0);
   const [privateLoc, setPrivateLoc] = useState<GigPrivateLocation | null | "loading">("loading");
   // Render-time reset (React's documented "adjust state when a prop
   // changes" pattern, see PortfolioEditor's identical `bookingProfileId`
@@ -201,15 +204,15 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [user, profileId]);
+      (e) => { console.error("GigEditor: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [user, profileId, profileReloadKey]);
   useEffect(() => {
     if (!user) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "gigs", gigId),
       (s) => setGig(s.exists() ? (s.data() as GigDoc) : null),
-      () => setGig(null));
-  }, [user, gigId]);
+      (e) => { console.error("GigEditor: gig onSnapshot failed", gigId, e); setGig("error"); });
+  }, [user, gigId, gigReloadKey]);
   useEffect(() => {
     if (!user) return;
     const { db } = getFirebase();
@@ -231,6 +234,16 @@ export default function GigEditor(props: { params: Promise<{ profileId: string; 
         <div className="mt-8 grid gap-6">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32 w-full" />)}
         </div>
+      </main>
+    );
+  }
+  if (profile === "error" || gig === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError
+          message="Couldn't load this gig."
+          onRetry={() => { setProfileReloadKey((k) => k + 1); setGigReloadKey((k) => k + 1); }}
+        />
       </main>
     );
   }

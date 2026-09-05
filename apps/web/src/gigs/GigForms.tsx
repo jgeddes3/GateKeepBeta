@@ -203,8 +203,8 @@ export function ProvisionsFields({ value, onChange }: { value: ProvisionsState; 
           </Chip>
         </div>
       </div>
-      <Textarea rows={2} maxLength={500} placeholder="Other provisions (optional)" value={value.notes}
-        onChange={(e) => onChange({ ...value, notes: e.target.value })} />
+      <Textarea rows={2} maxLength={500} placeholder="Other provisions (optional)" aria-label="Other provisions"
+        value={value.notes} onChange={(e) => onChange({ ...value, notes: e.target.value })} />
     </div>
   );
 }

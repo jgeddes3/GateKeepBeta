@@ -138,105 +138,111 @@ export function SignInForm({ next }: { next: string | null }) {
               <CardTitle className="font-syne text-2xl font-bold text-gk-text">{heading}</CardTitle>
               <CardDescription>{subline}</CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4">
-              <div className="grid gap-1.5">
-                <label htmlFor="signin-email" className="font-sora text-sm font-medium text-gk-text">
-                  Email
-                </label>
-                <Input
-                  id="signin-email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <label htmlFor="signin-password" className="font-sora text-sm font-medium text-gk-text">
-                  Password
-                </label>
-                <Input
-                  id="signin-password"
-                  type="password"
-                  autoComplete={mode === "in" ? "current-password" : "new-password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-
-              {error && errorKind === "success" && (
-                <div
-                  role="status"
-                  className="flex items-start gap-2 rounded-gk border border-gk-success/40 bg-gk-success/14 px-3.5 py-2.5 font-sora text-sm text-gk-success"
-                >
-                  <IconCheck size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-                  <p>{error}</p>
+            <CardContent>
+              {/* Task 16 (audit #21): a real <form> so Enter submits from
+                  either field. The social buttons and the two link toggles
+                  below stay type="button" inside this same form so they
+                  never trigger its submit. */}
+              <form className="grid gap-4" onSubmit={(e) => { e.preventDefault(); if (!busy) void emailAuth(); }}>
+                <div className="grid gap-1.5">
+                  <label htmlFor="signin-email" className="font-sora text-sm font-medium text-gk-text">
+                    Email
+                  </label>
+                  <Input
+                    id="signin-email"
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                  />
                 </div>
-              )}
-              {error && errorKind === "error" && (
-                <div
-                  role="alert"
-                  className="flex items-start gap-2 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-2.5 font-sora text-sm text-gk-destructive"
-                >
-                  <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-                  <p>{error}</p>
+                <div className="grid gap-1.5">
+                  <label htmlFor="signin-password" className="font-sora text-sm font-medium text-gk-text">
+                    Password
+                  </label>
+                  <Input
+                    id="signin-password"
+                    type="password"
+                    autoComplete={mode === "in" ? "current-password" : "new-password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
                 </div>
-              )}
 
-              <Button type="button" onClick={emailAuth} disabled={busy}>
-                {busy
-                  ? (mode === "in" ? "Signing in…" : "Creating account…")
-                  : (mode === "in" ? "Sign in" : "Create account")}
-              </Button>
+                {error && errorKind === "success" && (
+                  <div
+                    role="status"
+                    className="flex items-start gap-2 rounded-gk border border-gk-success/40 bg-gk-success/14 px-3.5 py-2.5 font-sora text-sm text-gk-success"
+                  >
+                    <IconCheck size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                    <p>{error}</p>
+                  </div>
+                )}
+                {error && errorKind === "error" && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 rounded-gk border border-gk-destructive/40 bg-gk-destructive/14 px-3.5 py-2.5 font-sora text-sm text-gk-destructive"
+                  >
+                    <IconWarning size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                    <p>{error}</p>
+                  </div>
+                )}
 
-              <div className="flex items-center gap-3 py-1">
-                <div className="h-px flex-1 bg-gk-border" />
-                <span className="font-sora text-xs text-gk-muted">or</span>
-                <div className="h-px flex-1 bg-gk-border" />
-              </div>
-
-              <Button type="button" variant="secondary" onClick={() => social("google")} disabled={busy}>
-                <IconGoogle size={18} aria-hidden="true" />
-                Continue with Google
-              </Button>
-              <Button type="button" variant="secondary" onClick={() => social("apple")} disabled={busy}>
-                <IconApple size={18} aria-hidden="true" />
-                Continue with Apple
-              </Button>
-
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-                <Button
-                  type="button"
-                  variant="link"
-                  className="h-auto p-0 text-gk-muted"
-                  onClick={() => setMode(mode === "in" ? "up" : "in")}
-                >
-                  {mode === "in" ? "New here? Create an account" : "Have an account? Sign in"}
+                <Button type="submit" disabled={busy}>
+                  {busy
+                    ? (mode === "in" ? "Signing in…" : "Creating account…")
+                    : (mode === "in" ? "Sign in" : "Create account")}
                 </Button>
-                <Button
-                  type="button"
-                  variant="link"
-                  className="h-auto p-0 text-gk-muted"
-                  onClick={async () => {
-                    if (!email.trim()) {
-                      setError("Enter your email above, then press Forgot password.");
-                      setErrorKind("error");
-                      return;
-                    }
-                    const { sendPasswordResetEmail } = await import("firebase/auth");
-                    try {
-                      await sendPasswordResetEmail(auth, email.trim());
-                      setError("Reset link sent: check your email.");
-                      setErrorKind("success");
-                    } catch {
-                      setError("Couldn't send the reset email.");
-                      setErrorKind("error");
-                    }
-                  }}
-                >
-                  Forgot password?
+
+                <div className="flex items-center gap-3 py-1">
+                  <div className="h-px flex-1 bg-gk-border" />
+                  <span className="font-sora text-xs text-gk-muted">or</span>
+                  <div className="h-px flex-1 bg-gk-border" />
+                </div>
+
+                <Button type="button" variant="secondary" onClick={() => social("google")} disabled={busy}>
+                  <IconGoogle size={18} aria-hidden="true" />
+                  Continue with Google
                 </Button>
-              </div>
+                <Button type="button" variant="secondary" onClick={() => social("apple")} disabled={busy}>
+                  <IconApple size={18} aria-hidden="true" />
+                  Continue with Apple
+                </Button>
+
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="h-auto p-0 text-gk-muted"
+                    onClick={() => setMode(mode === "in" ? "up" : "in")}
+                  >
+                    {mode === "in" ? "New here? Create an account" : "Have an account? Sign in"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="h-auto p-0 text-gk-muted"
+                    onClick={async () => {
+                      if (!email.trim()) {
+                        setError("Enter your email above, then press Forgot password.");
+                        setErrorKind("error");
+                        return;
+                      }
+                      const { sendPasswordResetEmail } = await import("firebase/auth");
+                      try {
+                        await sendPasswordResetEmail(auth, email.trim());
+                        setError("Reset link sent: check your email.");
+                        setErrorKind("success");
+                      } catch {
+                        setError("Couldn't send the reset email.");
+                        setErrorKind("error");
+                      }
+                    }}
+                  >
+                    Forgot password?
+                  </Button>
+                </div>
+              </form>
             </CardContent>
           </Card>
         </div>

@@ -55,11 +55,24 @@ export function SignedInRedirect() {
     if (!uid) return;
     let cancelled = false;
     const { db } = getFirebase();
-    const unsubscribe = onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", uid)), (snap) => {
-      if (cancelled) return;
-      setHasProfile(!snap.empty);
-      setResolved(true);
-    });
+    const unsubscribe = onSnapshot(query(collectionGroup(db, "members"), where("uid", "==", uid)),
+      (snap) => {
+        if (cancelled) return;
+        setHasProfile(!snap.empty);
+        setResolved(true);
+      },
+      // SP12 follow-on: this component renders nothing (see the header
+      // comment), so a failed read has no box to show an error in. Without
+      // an error callback at all, a failure left `resolved` false forever
+      // and the redirect below just never fired, stranding a signed-in
+      // visitor silently on the landing page. Failing open to "no profile"
+      // (the safe, always-reachable /discover destination) beats hanging.
+      (e) => {
+        console.error("SignedInRedirect: members onSnapshot failed", uid, e);
+        if (cancelled) return;
+        setHasProfile(false);
+        setResolved(true);
+      });
     return () => { cancelled = true; unsubscribe(); };
   }, [uid]);
 

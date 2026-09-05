@@ -9,6 +9,7 @@ import { CuratorFace } from "../../../../../src/search/CuratorFace";
 import type { ProfileDoc } from "@gatekeep/shared";
 import { Button } from "../../../../../src/ui/button";
 import { Skeleton } from "../../../../../src/ui/skeleton";
+import { ListError } from "../../../../../src/ui/ListError";
 
 // Curator-context "Find musicians": member-gated client-side exactly like
 // the other curator dashboard pages (see gigs/page.tsx and gigs/new/page.tsx
@@ -17,7 +18,8 @@ export default function FindMusicians(props: { params: Promise<{ profileId: stri
   const { profileId } = use(props.params);
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
 
   useEffect(() => { if (!loading && !user) router.replace("/sign-in"); }, [user, loading, router]);
   useEffect(() => {
@@ -25,8 +27,8 @@ export default function FindMusicians(props: { params: Promise<{ profileId: stri
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [user, profileId]);
+      (e) => { console.error("FindMusicians: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [user, profileId, profileReloadKey]);
 
   if (loading || !user || profile === "loading") {
     return (
@@ -36,6 +38,13 @@ export default function FindMusicians(props: { params: Promise<{ profileId: stri
         <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-56 w-full" />)}
         </div>
+      </main>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError message="Couldn't load your curator profile." onRetry={() => setProfileReloadKey((k) => k + 1)} />
       </main>
     );
   }

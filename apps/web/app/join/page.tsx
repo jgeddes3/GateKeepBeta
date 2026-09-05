@@ -119,7 +119,10 @@ export default function Join() {
       </p>
 
       <Card className="mt-6">
-        <CardContent className="grid gap-5">
+        <CardContent>
+          {/* Task 16 (audit #21): a real <form> so Enter submits from the
+              name/handle fields, matching /sign-in's precedent. */}
+          <form className="grid gap-5" onSubmit={(e) => { e.preventDefault(); if (!busy) void createDraft(); }}>
           <div className="grid gap-2">
             <span className="font-sora text-sm font-medium text-gk-text">Profile type</span>
             <div className="flex flex-wrap gap-2">
@@ -196,9 +199,10 @@ export default function Join() {
             </div>
           )}
 
-          <Button type="button" onClick={createDraft} disabled={busy}>
+          <Button type="submit" disabled={busy}>
             {busy ? "Creating…" : "Create my profile"}
           </Button>
+          </form>
         </CardContent>
       </Card>
     </main>

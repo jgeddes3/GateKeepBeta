@@ -119,7 +119,9 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
             <Button type="button" variant="secondary" onClick={onClose} className="justify-self-start">Close</Button>
           </>
         ) : (
-          <>
+          // Task 16 (audit #21): a real <form> so Enter submits from any
+          // field. Cancel stays type="button" so it never triggers submit.
+          <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); if (!busy) void submit(); }}>
             <div className="grid max-w-sm gap-1.5">
               <label htmlFor={gigSelectId} className="font-sora text-sm font-medium text-gk-text">Gig</label>
               <Select value={selectedGigId} onValueChange={setGigOverride}>
@@ -143,10 +145,10 @@ export function OfferComposer({ curatorProfileId, musicianProfileId, musicianNam
             {error && <GatePrompt message={error} curatorProfileId={curatorProfileId} onRetry={submit} />}
             <p className="font-sora text-xs text-gk-muted">{selectedGig?.fillMode === "whole_run" ? DEPOSIT_HONESTY_RUN_LINE : DEPOSIT_HONESTY_LINE}</p>
             <div className="flex gap-2">
-              <Button onClick={submit} disabled={busy}>{busy ? "Sending…" : "Send offer"}</Button>
+              <Button type="submit" disabled={busy}>{busy ? "Sending…" : "Send offer"}</Button>
               <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
             </div>
-          </>
+          </form>
         )}
       </CardContent>
     </Card>

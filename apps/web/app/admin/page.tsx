@@ -1235,6 +1235,7 @@ function EventsTakedown() {
       <div className="flex flex-wrap gap-2">
         <Input
           placeholder="Event id or @handle"
+          aria-label="Event id or handle"
           value={term}
           className="w-72"
           onChange={(e) => setTerm(e.target.value)}
@@ -1388,6 +1389,7 @@ function TakedownsPanel() {
       <div className="flex flex-wrap gap-2">
         <Input
           placeholder="@handle"
+          aria-label="Profile handle"
           value={handle}
           className="w-56"
           onChange={(e) => setHandle(e.target.value)}
@@ -2097,6 +2099,7 @@ function UserLookup() {
         <div className="flex flex-1 min-w-56 gap-2">
           <Input
             placeholder={mode === "email" ? "exact email" : "name prefix"}
+            aria-label="Email or name"
             value={term}
             disabled={busy}
             className="max-w-xs"

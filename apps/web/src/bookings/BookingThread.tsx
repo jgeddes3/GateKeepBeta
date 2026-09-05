@@ -549,11 +549,15 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
           </div>
         </div>
       ) : (
-        <Button onClick={() => setShowReportForm(true)} disabled={bothSides}
-          title={bothSides ? "Disabled: you're on both sides of this booking" : undefined}
-          variant="secondary" className="w-fit text-gk-destructive">
-          Report a no-show
-        </Button>
+        <div className="grid w-fit gap-1.5">
+          <Button onClick={() => setShowReportForm(true)} disabled={bothSides}
+            variant="secondary" className="w-fit text-gk-destructive">
+            Report a no-show
+          </Button>
+          {/* Task 16 (audit #27): the disabled reason used to live only in
+              a title attribute, unreachable by keyboard or touch. */}
+          {bothSides && <p className="font-sora text-xs text-gk-muted">Disabled: you&apos;re on both sides of this booking</p>}
+        </div>
       )}
     </div>
   );
@@ -631,8 +635,11 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                 <Button onClick={() => setShowAcceptConfirm(true)} disabled={actionBusy !== null}>
                   Accept {formatCents(lastEntry.amountCents)}
                 </Button>
+                {/* Task 16 (audit #27): dropped the redundant title
+                    attribute; THREAD_FULL_MESSAGE already renders as visible
+                    text right below this button group when threadFull. */}
                 <Button onClick={() => setShowCounterForm(true)} disabled={actionBusy !== null || threadFull}
-                  title={threadFull ? THREAD_FULL_MESSAGE : undefined} variant="secondary">Counter…</Button>
+                  variant="secondary">Counter…</Button>
                 <Button onClick={decline} disabled={actionBusy !== null} variant="ghost">
                   {actionBusy === "decline" ? "Declining…" : "Decline"}
                 </Button>
@@ -752,7 +759,7 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                           // is the binding shape for cancel/report, unlike negotiation actions.
                           <Button
                             onClick={() => setShowCancelFor({ mode: "occurrence", gigId: o.id, startsAt: o.startsAt })}
-                            disabled={bothSides || actionBusy !== null} title={bothSides ? "Disabled: you're on both sides of this booking" : undefined}
+                            disabled={bothSides || actionBusy !== null}
                             variant="link" size="sm" className="ml-auto h-auto p-0 text-gk-destructive">
                             Cancel this date
                           </Button>
@@ -761,6 +768,12 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
                     );
                   })}
                 </ul>
+              )}
+              {/* Task 16 (audit #27): shown once for the whole Dates group,
+                  not once per "Cancel this date" button, so the same
+                  sentence doesn't repeat down the list. */}
+              {bothSides && occurrences.some((o) => now != null && o.startsAt > now) && (
+                <p className="font-sora text-xs text-gk-muted">Disabled: you&apos;re on both sides of this booking</p>
               )}
             </div>
           )}
@@ -771,11 +784,14 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
               onClose={() => setShowCancelFor(null)} onDone={() => setShowCancelFor(null)} />
           ) : (
             cancelTarget && (
-              <Button onClick={() => setShowCancelFor({ mode: "booking", startsAt: cancelTarget.startsAt })}
-                disabled={bothSides || actionBusy !== null} title={bothSides ? "Disabled: you're on both sides of this booking" : undefined}
-                variant="secondary" className="w-fit text-gk-destructive">
-                Cancel this booking
-              </Button>
+              <div className="grid w-fit gap-1.5">
+                <Button onClick={() => setShowCancelFor({ mode: "booking", startsAt: cancelTarget.startsAt })}
+                  disabled={bothSides || actionBusy !== null}
+                  variant="secondary" className="w-fit text-gk-destructive">
+                  Cancel this booking
+                </Button>
+                {bothSides && <p className="font-sora text-xs text-gk-muted">Disabled: you&apos;re on both sides of this booking</p>}
+              </div>
             )
           )}
 

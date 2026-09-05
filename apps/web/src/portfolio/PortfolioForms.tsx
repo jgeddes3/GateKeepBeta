@@ -103,13 +103,17 @@ export function BioGenresForm({ profileId, initial, onSaved }:
         <CardTitle>Bio &amp; genres</CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
-        <Textarea
-          rows={6}
-          maxLength={2000}
-          value={bio}
-          placeholder="Tell curators and fans who you are…"
-          onChange={(e) => setBio(e.target.value)}
-        />
+        <div className="grid gap-1.5">
+          <label htmlFor="musician-bio" className="font-sora text-sm font-medium text-gk-text">Bio</label>
+          <Textarea
+            id="musician-bio"
+            rows={6}
+            maxLength={2000}
+            value={bio}
+            placeholder="Tell curators and fans who you are…"
+            onChange={(e) => setBio(e.target.value)}
+          />
+        </div>
         <label className="grid gap-1.5">
           <span className="font-sora text-sm font-medium text-gk-text">Home city</span>
           <Input
@@ -198,6 +202,7 @@ export function LinksForm({ profileId, initial }:
           </Select>
           <Input
             placeholder="https://…"
+            aria-label="Link URL"
             value={url}
             disabled={busy}
             onChange={(e) => setUrl(e.target.value)}
@@ -381,10 +386,13 @@ export function BookingForm({ profileId, initial }:
     return (
       <div key={key} className="grid gap-1.5">
         <div className="flex flex-wrap items-center gap-3">
-          <span className="w-28 shrink-0 font-sora text-sm font-medium text-gk-text">{label}</span>
+          <label htmlFor={`rate-${key}-amount`} className="w-28 shrink-0 font-sora text-sm font-medium text-gk-text">
+            {label}
+          </label>
           <div className="flex items-center gap-1.5">
             <span className="font-sora text-sm text-gk-muted">$</span>
             <Input
+              id={`rate-${key}-amount`}
               type="number"
               min={0}
               step="0.01"
@@ -395,6 +403,7 @@ export function BookingForm({ profileId, initial }:
           </div>
           <Input
             placeholder="Note (optional)"
+            aria-label={`${label} note`}
             maxLength={200}
             className="min-w-[160px] flex-1"
             value={rateInputs[key].note ?? ""}

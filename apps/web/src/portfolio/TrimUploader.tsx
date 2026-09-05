@@ -194,7 +194,8 @@ export function TrimUploader({ profileId, onDone }: { profileId: string; onDone:
       </label>
       {file && duration > 0 && (
         <>
-          <Input placeholder="Track title" value={title} maxLength={80} onChange={(e) => setTitle(e.target.value)} />
+          <Input placeholder="Track title" aria-label="Track title" value={title} maxLength={80}
+            onChange={(e) => setTitle(e.target.value)} />
           {wholeFileUsed ? (
             <p className="font-sora text-sm text-gk-muted">Whole file will be used (30 seconds or less)</p>
           ) : (

@@ -20,6 +20,7 @@ import { Button } from "../../../../../../src/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../../../../../src/ui/card";
 import { Input } from "../../../../../../src/ui/input";
 import { Skeleton } from "../../../../../../src/ui/skeleton";
+import { ListError } from "../../../../../../src/ui/ListError";
 import { IconWarning } from "../../../../../../src/ui/icons";
 
 // The composer's one-off/series fork mirrors /join's musician/curator toggle
@@ -31,7 +32,8 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
   const { profileId } = use(props.params);
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [profile, setProfile] = useState<ProfileDoc | null | "loading">("loading");
+  const [profile, setProfile] = useState<ProfileDoc | null | "loading" | "error">("loading");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [isSeries, setIsSeries] = useState(false);
   const [content, setContent] = useState(emptyContent());
   const [budget, setBudget] = useState(emptyBudget());
@@ -49,8 +51,8 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [user, profileId]);
+      (e) => { console.error("NewGigOrSeries: profile onSnapshot failed", profileId, e); setProfile("error"); });
+  }, [user, profileId, profileReloadKey]);
 
   if (loading || !user || profile === "loading") {
     return (
@@ -60,6 +62,13 @@ export default function NewGigOrSeries(props: { params: Promise<{ profileId: str
         <div className="mt-8 grid gap-6">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32 w-full" />)}
         </div>
+      </main>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <main className="mx-auto w-full max-w-xl flex-1 px-4 py-16 sm:px-6">
+        <ListError message="Couldn't load your curator profile." onRetry={() => setProfileReloadKey((k) => k + 1)} />
       </main>
     );
   }

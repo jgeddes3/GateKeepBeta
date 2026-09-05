@@ -25,7 +25,11 @@ import { cn } from "@/src/lib/utils";
 // bordered-ghost button going forward; components should not reference
 // variant="outline".
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap font-sora text-sm font-medium outline-none transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 focus-visible:ring-2 focus-visible:ring-gk-focus",
+  // SP12 follow-on (audit #20, R-03). The coarse-pointer variant lifts every
+  // size to the 44px minimum on touch while leaving the mouse heights alone:
+  // a phone or tablet gets the target, a desktop keeps the density. Tailwind
+  // 4's `pointer-coarse:` variant maps to @media (pointer: coarse).
+  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap font-sora text-sm font-medium outline-none transition-colors pointer-coarse:min-h-11 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 focus-visible:ring-2 focus-visible:ring-gk-focus",
   {
     variants: {
       variant: {
@@ -39,7 +43,11 @@ const buttonVariants = cva(
         default: "h-10 px-5 has-[>svg]:px-4",
         sm: "h-9 gap-1.5 px-4 text-sm has-[>svg]:px-3",
         lg: "h-11 px-6 has-[>svg]:px-5",
-        icon: "size-10 rounded-gk-sm",
+        // pointer-coarse:size-11 (not just min-h, which only bounds height):
+        // an icon-only control is a fixed square, so touch needs its WIDTH
+        // lifted to 44px too, or it stays a 40px-wide target with taller
+        // padding.
+        icon: "size-10 rounded-gk-sm pointer-coarse:size-11",
       },
     },
     defaultVariants: {
