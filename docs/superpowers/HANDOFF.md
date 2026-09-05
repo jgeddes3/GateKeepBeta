@@ -1,7 +1,7 @@
 # GateKeep: fresh-session handoff
 
-Read this first in any new session or on a new machine. Last updated 2026-09-04, after the 8 and
-5c merges. Update this file whenever a sub-project merges.
+Read this first in any new session or on a new machine. Last updated 2026-09-05, after the 5c and
+11 merges. Update this file whenever a sub-project merges.
 
 ## What GateKeep is
 
@@ -70,6 +70,15 @@ Done and merged (each has a rulings doc that is the authority for its area):
    the four new composite indexes, and a real Stripe test-mode smoke (README "Sub-project 5c
    launch checklist").
 
+11. SP7 reconciliation (`sp11-rulings.md`): sharing and deep links (a Share button on both
+   platforms, mobile-native `/e/` and `/u/` deep links, the web well-known handlers), web location
+   plus the home-city fallback for Discover, the account editor (`updateAccount` writes
+   `displayName`, `homeCity`, `homeGeo`), doors and age fields on events (badge, filter, JSON-LD),
+   and consent-based artist tags on the lineup (tag, accept, decline, untag). Owner smoke owed: the
+   sub-11 checklist in README, both platforms; the domain, the site-URL and well-known env values,
+   and a new EAS build for associated domains and intent filters (README "Sub-project 11 launch
+   checklist").
+
 10. Hardening, branches A and B (`sp10b-rulings.md`): no new features. Branch A (merged
    2026-09-02 at `ee433d4`, plan `plans/2026-09-02-hardening-sweep.md`): every em dash removed
    repo-wide, Cloud Functions on Node 22 (`.nvmrc`), the `tickets.orderId` and `members.uid` index
@@ -87,19 +96,13 @@ Done and merged (each has a rulings doc that is the authority for its area):
 
 ## Roadmap
 
-- **From the SP7 reconciliation**:
-  - Add a share affordance to event pages and universal or app links (associatedDomains,
-    intentFilters) so a shared event URL opens the app; today `app.json` carries only the custom
-    scheme.
-  - Build a web location or distance story for discover, and give fans a way to set homeCity or
-    grant device location; today only the mobile deck ranks by device location.
-  - Add a fan account editor, starting with the display name that appears on a ticket; the fan
-    account screen has no editable fields today.
-  - Add doorsAt and an age-restriction field to the event model; neither exists in the schema.
-  - Add artist linkage for standalone events that are not tied to a booking (curator tags an
-    artist, artist accepts), so artist-page discovery is not limited to promoted gigs.
+- The SP7 reconciliation's five gaps (event sharing and deep links, web location story, fan
+  account editor, event doorsAt and age fields, non-booking artist linkage) shipped in
+  sub-project 11 (`sp11-rulings.md`).
 - **Messaging**: general musician to curator chat beyond the terms-only booking thread.
-  Unscheduled; the mobile Messages tabs stay coming-soon until it gets a number.
+  Unscheduled; the mobile Messages tabs stay coming-soon until it gets a number. Owner decision
+  2026-09-04: Messaging plus the optional follow-ons (antislop #10 to #29, hardening rows L62 to
+  L80) form the final sub-project.
 - **Follow-on if wanted**: the accessibility and state-coverage findings (antislop #10 to #29)
   and the hardening ledger rows L62 to L80.
 - Unscheduled by design: advertising, subscriptions, 2FA beyond Google-only admins, SMS, video
@@ -109,8 +112,8 @@ Done and merged (each has a rulings doc that is the authority for its area):
 the 6 merge (19 blockers and near-blockers, per-area verdicts, the SP7 brief, and the
 fix-before-SP7 list). The audit's SP7 brief has been reconciled against `sp7-rulings.md` and
 sub-project 10B; the five remaining gaps (event sharing and deep links, web location story, fan
-account editor, event doorsAt and age fields, non-booking artist linkage) are tracked in the
-roadmap above. Detail reports live in `docs/superpowers/audit/` and
+account editor, event doorsAt and age fields, non-booking artist linkage) are closed by
+sub-project 11. Detail reports live in `docs/superpowers/audit/` and
 `anti-slop/audit-001-2026-09-01.md`.
 
 ## Binding rules for ALL work
@@ -162,6 +165,9 @@ roadmap above. Detail reports live in `docs/superpowers/audit/` and
    (`sp10b-rulings.md` ruling 6).
 7. `distributeEarnings` is the only way earnings reach a profile; a new settlement path must call
    it, never `transferToAccount` directly (`sp5c-rulings.md` ruling 1).
+8. `isLinkableAct` (booking, or tagged and accepted) is the one predicate for treating a lineup
+   act as a linked artist; a new consumer of `lineup` must use it, never `kind === "booking"`
+   alone (`sp11-rulings.md` ruling 12).
 
 ## Dev environment quickstart
 
@@ -182,8 +188,8 @@ roadmap above. Detail reports live in `docs/superpowers/audit/` and
   @testvenue).
 - Web: `pnpm --filter @gatekeep/web dev` (:3000). Both apps auto-connect to the emulators in
   dev, including from LAN devices. Mobile needs a dev-client build (see sp5b rulings).
-- Gates before any merge: `pnpm typecheck` (5/5), shared tests (209), web tests (7), `pnpm emu:test`
-  (917 across 54 files, single blocking call), `pnpm emu:rules` (137 across 8 files), web lint (0
+- Gates before any merge: `pnpm typecheck` (5/5), shared tests (212), web tests (14), `pnpm emu:test`
+  (936 across 58 files, single blocking call), `pnpm emu:rules` (140 across 9 files), web lint (0
   errors) + build, mobile lint (0 new warnings) + `expo export` bundles.
 - Firebase dev project: `gatekeep-dev-jg`. Machine quirks: PS 5.1 corrupts UTF-8 pipelines
   (byte-safe tools only); hermesc.exe is App-Control-blocked (use `expo export --no-bytecode`
@@ -270,3 +276,8 @@ section names refer to the README as rewritten in sub-project 10.
 | 68 | `APP_ORIGIN` covers `/dashboard/payouts/onboarding/return` and `/refresh` | Launch | README "Sub-project 5c launch checklist" |
 | 69 | Deploy and confirm the four new composite indexes (`heldShares` by uid and status, by profileId and status; `ledger` by profileId and at, by uid and at) finish building after `firebase deploy --only firestore:indexes` | Launch | README "Sub-project 5c launch checklist" |
 | 70 | Real Stripe test-mode smoke for 5c: onboard a member, set shares on a band, settle a booking and a ticketed event, watch the split legs and a held release, cash out as the member (standard and instant), report a no-show and confirm only the band's leg reverses | Launch | README "Sub-project 5c launch checklist" |
+| 71 | Choose the production domain and replace `REPLACE_WITH_LINK_DOMAIN` in `app.json` | Device | README "Sub-project 11 launch checklist" |
+| 72 | Set `NEXT_PUBLIC_SITE_URL` and `EXPO_PUBLIC_SITE_URL` | Launch | README "Sub-project 11 launch checklist" |
+| 73 | Set the four well-known env values (`APPLE_TEAM_ID`, `IOS_BUNDLE_ID`, `ANDROID_PACKAGE`, `ANDROID_CERT_SHA256`) and verify both well-known URLs resolve | Launch | README "Sub-project 11 launch checklist" |
+| 74 | New EAS build for associated domains and intent filters | Device | README "Sub-project 11 launch checklist" |
+| 75 | Sub-11 device smoke: share from each screen, open a shared link cold and warm, tag an artist and accept from the other account, set a home city and confirm Discover ranks by it with location off, set doors and an age on an event and see the badge and the all-ages filter on both platforms | Device | README "Sub-project 11 launch checklist" |

@@ -47,7 +47,8 @@ auto-refund, and email-targeted in-app transfers (mobile only). See "Events and 
 **Sub-project 7: Fan discovery.** Follows on musicians, curators, and genres; notifications for a
 show announced, a lineup addition, a reschedule, and new approved music from someone followed;
 short show posts from lineup musicians; a ranked discover deck and filterable list on mobile and a
-filterable `/discover` grid on web. See the sub-project 7 checklists below.
+filterable `/discover` grid on web. Web's grid ranks too as of sub-project 11, see
+`sp11-rulings.md`. See the sub-project 7 checklists below.
 
 **Sub-project 10: Hardening.** No new features. The whole-project audit's money, lifecycle, and
 copy defects closed: transfer sourcing rules, two Stripe webhook scopes, dispute handling, the
@@ -578,10 +579,12 @@ dashboard. Live-mode activation is an owner launch item.
 **Concepts.** An `events/{eventId}` doc is a curator-published show, standalone or promoted from a
 `filled` gig (at most one event per `gigId`; a second promotion is refused with
 `GIG_ALREADY_PROMOTED_MESSAGE`), with `status` in `draft`, `published`, `completed`, `cancelled`,
-a lineup of booking acts or external names, a public-precision location, and an optional poster.
-A booking act is verified server-side (`verifyLineupBookingActs`): the booking must exist, belong
-to the calling curator, match the musician, and be `confirmed`, so a curator cannot fabricate an
-association on a musician's public page. Tiers live at `events/{eventId}/tiers/{tierId}`
+a lineup of booking acts, external names, or (as of sub-project 11) tagged artists, a
+public-precision location, and an optional poster. A booking act is verified server-side
+(`verifyLineupBookingActs`): the booking must exist, belong to the calling curator, match the
+musician, and be `confirmed`, so a curator cannot fabricate an association on a musician's public
+page. A tagged act works the same way in spirit but through consent instead of a booking; see
+`sp11-rulings.md`. Tiers live at `events/{eventId}/tiers/{tierId}`
 (`priceCents`, `capacity`, server-maintained `soldCount`, an optional sale window); inventory truth
 is a transactional `soldCount <= capacity` check, and after publish a capacity can only go up.
 Orders (`orders/{orderId}`), tickets (`users/{uid}/tickets/{ticketId}`), the attendee projection
@@ -651,7 +654,12 @@ string / no-op) by default and only matters for a production deploy.
 | `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | web | reCAPTCHA v3 site key for Firebase App Check | App Check init skipped |
 | `NEXT_PUBLIC_SENTRY_DSN` | web | Sentry DSN for crash/error reporting | Sentry init skipped (no-op) |
 | `EXPO_PUBLIC_SENTRY_DSN` | mobile | Sentry DSN for crash/error reporting | `Sentry.init` runs with an empty DSN and is a no-op |
-| `NEXT_PUBLIC_SITE_URL` | web | absolute base URL for the public portfolio page's canonical link + OpenGraph `og:url`/images (`apps/web/app/layout.tsx`'s `metadataBase`) | falls back to Vercel's own `VERCEL_PROJECT_PRODUCTION_URL` if present; if neither is set, `metadataBase` is omitted and those URLs render relative instead of absolute (never a hardcoded localhost fallback) |
+| `NEXT_PUBLIC_SITE_URL` | web | absolute base URL for the public portfolio page's canonical link + OpenGraph `og:url`/images (`apps/web/app/layout.tsx`'s `metadataBase`); the web Share button's `/e/`/`/u/` links are built from it too | falls back to Vercel's own `VERCEL_PROJECT_PRODUCTION_URL` if present; if neither is set, `metadataBase` is omitted and those URLs render relative instead of absolute (never a hardcoded localhost fallback) |
+| `EXPO_PUBLIC_SITE_URL` | mobile | the web origin mobile Share links are built from (`/e/{id}`, `/u/{handle}`) | the Share button is hidden on every screen |
+| `APPLE_TEAM_ID` | web (server only, never `NEXT_PUBLIC`) | read at request time by the deep-link verification route that serves `/.well-known/apple-app-site-association` | the file 404s while any of the pair is unset |
+| `IOS_BUNDLE_ID` | web (server only, never `NEXT_PUBLIC`) | read at request time by the same route, paired with `APPLE_TEAM_ID` | the file 404s while any of the pair is unset |
+| `ANDROID_PACKAGE` | web (server only, never `NEXT_PUBLIC`) | read at request time by the deep-link verification route that serves `/.well-known/assetlinks.json` | the file 404s while any of the pair is unset |
+| `ANDROID_CERT_SHA256` | web (server only, never `NEXT_PUBLIC`) | read at request time by the same route, paired with `ANDROID_PACKAGE` | the file 404s while any of the pair is unset |
 | `GEOCODER_PROVIDER` | functions | set to `google` to geocode gig/curator addresses via the real Google Geocoding API (`functions/src/geocode.ts`'s `getGeocoder()`) | unset/any other value → `StubGeocoder`, a deterministic dev/test-only hash-based geocoder with a US-centric bounding box, **launch item**, see checklist below |
 | `GEOCODER_API_KEY` | functions | Google Geocoding API key; required (throws at call time) when `GEOCODER_PROVIDER=google` | n/a while `GEOCODER_PROVIDER` is unset |
 | `STRIPE_SECRET_KEY` | functions | Stripe secret key (`sk_test_…` / `sk_live_…`), a `defineSecret()` param, its presence is what selects the REAL Stripe client | unset → `FakeStripe`, but **only inside the emulator**; a deployed function without it throws rather than moving fake money (`functions/src/stripeClient.ts`'s `getStripe()` fails closed) |
@@ -1383,6 +1391,36 @@ settlement.
 - The curator's history shows one settlement row per paid order for a ticketed event.
 - Each payout notification kind (`share_paid`, `share_held`, `share_released`,
   `member_payout_failed`) deep-links to the payouts surface on tap.
+
+### Sub-project 11 launch checklist (SP7 reconciliation)
+
+- **Choose the domain and replace `REPLACE_WITH_LINK_DOMAIN`** in `app.json` (associated domains
+  and the intent filter).
+- **Set `NEXT_PUBLIC_SITE_URL` and `EXPO_PUBLIC_SITE_URL`** so both platforms' Share buttons build
+  real links.
+- **Set the four verification env values** (`APPLE_TEAM_ID`, `IOS_BUNDLE_ID`, `ANDROID_PACKAGE`,
+  `ANDROID_CERT_SHA256`) on the web host, then confirm both well-known URLs resolve with a 200 and
+  the right JSON.
+- **A new EAS build.** Associated domains and intent filters are native config; no dev-client
+  reload picks them up.
+- No new composite index and no new Stripe configuration in this sub-project.
+
+### Sub-project 11 smoke checklist (SP7 reconciliation)
+
+Sub-project 11 adds sharing and deep links, web location plus the home-city fallback, the account
+editor, doors and age fields, and artist tags on the lineup.
+
+**Both platforms, both themes:**
+- Share from the web event page and profile page (native share sheet where supported, clipboard
+  fallback otherwise) and from all three mobile screens (event, artist, venue).
+- Open a shared `/e/` and `/u/` link cold and warm on device.
+- Tag an artist on a draft, publish, and accept from the other account; confirm the artist page,
+  search index, a show post, and the follower announce.
+- Set a home city and confirm Discover ranks by it with location off, on both web and mobile;
+  confirm "Ranked near {city}" links to the account card.
+- Set doors and an age on an event and confirm the line and the badge on both platforms, including
+  the "All ages only" filter.
+- Confirm the well-known files resolve on the production domain.
 
 ### Sub-project 2 polish follow-ups (non-blocking)
 
