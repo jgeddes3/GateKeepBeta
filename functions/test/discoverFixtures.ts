@@ -134,7 +134,15 @@ export async function makePublishedBookingEvent(prefix: string, tiers: Record<st
     ...eventContent({ lineup: [{ kind: "booking", bookingId, musicianProfileId: musician.profileId, name: "The Act" }] }),
   }, curator.owner.user);
   await addTiersAndPublish(curator.profileId, eventId, curator.owner.user, tiers);
-  return { curator, musician, eventId };
+  // SP12's comment tests need the musician side too (a comment posted by a
+  // member of the booking act must derive the "artist" role), so both sides
+  // are also flattened here: `owner`/`profileId` are the curator's, and
+  // `musicianProfileId` the act's. Uids stay under `.owner.uid` on each side.
+  return {
+    curator, musician, eventId,
+    owner: curator.owner, profileId: curator.profileId,
+    musicianProfileId: musician.profileId,
+  };
 }
 
 // Triggers run asynchronously in the emulator: poll until the index doc
