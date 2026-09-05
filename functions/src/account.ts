@@ -3,10 +3,14 @@ import { getFirestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import {
   DELETE_ACCOUNT_TICKETS_MESSAGE, DELETE_ACCOUNT_TRANSFERS_MESSAGE, DELETE_ACCOUNT_ORDERS_MESSAGE,
+  ACCOUNT_NAME_MESSAGE, ACCOUNT_CITY_MESSAGE,
   type TicketDoc, type EventDoc, type TicketTransferDoc, type TicketOrderDoc, type InviteDoc,
+  type UpdateAccountInput, type UpdateAccountResult,
 } from "@gatekeep/shared";
 import { writeAudit } from "./review.js";
 import { reassignShareOnRemoval } from "./payoutShares.js";
+import { requireAuthUid, requireVerifiedEmail } from "./guards.js";
+import { getGeocoder, coarsen, consumeGeocodeBudget, geocoderApiKey } from "./geocode.js";
 
 // Consumes membership invariants (Task 8: never-zero-admins per profile) and
 // the users/{uid} tree created by onUserCreated (Task 5).
@@ -196,3 +200,68 @@ export const deleteAccount = onCall({ region: "us-central1" }, async (req) => {
   await writeAudit({ actorUid: uid, action: "account_deleted", targetId: uid, detail: "self-service deleteAccount" });
   return { ok: true };
 });
+
+// SP11 (spec section 5): the ONLY writer of users/{uid}.displayName,
+// .homeCity, and .homeGeo. firestore.rules dropped all three from the
+// owner's own update set in the same sub-project, so a client cannot set a
+// city without the coarse point that ranks its Discover feed, and cannot set
+// a point at all.
+//
+// displayName is stamped as given (after trim); displayNameLower is left to
+// the onUserDocWritten trigger, which is already the single writer of that
+// projection. Existing tickets and attendee rows keep the name they
+// snapshotted; nothing is backfilled (spec section 3.3), and the account
+// editors on both clients say so in their helper copy.
+//
+// The geocode is charged to consumeGeocodeBudget BEFORE the provider call,
+// the same order every other address-resolving callable uses, and only when
+// a non-empty city is actually being resolved: a name-only save and a clear
+// never touch the budget. A geocoder MISS is not an error: the city text is
+// what the fan typed and is worth keeping on screen, so it is stored with
+// homeGeo null and reported as { geocoded: false } so the client can say
+// ACCOUNT_GEOCODE_MISS_MESSAGE.
+export const updateAccount = onCall<UpdateAccountInput>(
+  { region: "us-central1", secrets: [geocoderApiKey] }, async (req): Promise<UpdateAccountResult> => {
+    const uid = requireAuthUid(req);
+    requireVerifiedEmail(req);
+    const input = (req.data ?? {}) as UpdateAccountInput;
+    const updates: Record<string, unknown> = {};
+
+    if (input.displayName !== undefined) {
+      if (typeof input.displayName !== "string") throw new HttpsError("invalid-argument", ACCOUNT_NAME_MESSAGE);
+      const name = input.displayName.trim();
+      if (name.length < 1 || name.length > 80) throw new HttpsError("invalid-argument", ACCOUNT_NAME_MESSAGE);
+      updates.displayName = name;
+    }
+
+    let geocoded: boolean | null = null;
+    if (input.homeCity !== undefined) {
+      if (input.homeCity !== null && typeof input.homeCity !== "string") {
+        throw new HttpsError("invalid-argument", ACCOUNT_CITY_MESSAGE);
+      }
+      const city = (input.homeCity ?? "").trim();
+      if (city.length > 80) throw new HttpsError("invalid-argument", ACCOUNT_CITY_MESSAGE);
+      if (city.length === 0) {
+        updates.homeCity = null;
+        updates.homeGeo = null;
+      } else {
+        await consumeGeocodeBudget(uid);
+        let point: { lat: number; lng: number } | null = null;
+        try {
+          const hit = await getGeocoder().geocode(city);
+          if (hit) point = coarsen(hit);
+        } catch (e) {
+          // A provider outage must not lose the fan's typed city. Same
+          // posture as the miss below: store the text, no point.
+          console.error("updateAccount: geocode failed", { uid }, e);
+        }
+        updates.homeCity = city;
+        updates.homeGeo = point;
+        geocoded = point !== null;
+      }
+    }
+
+    if (Object.keys(updates).length === 0) return { ok: true, geocoded: null };
+    await getFirestore().doc(`users/${uid}`).update(updates);
+    return { ok: true, geocoded };
+  });
