@@ -154,17 +154,39 @@ export function useOtherProfileForConversation(
   const pair = conversationId ? parsePairId(conversationId) : null;
   const invalid = conversationId !== null && profileId !== null
     && (!pair || (pair.musicianProfileId !== profileId && pair.curatorProfileId !== profileId));
-  const otherId = (pair && profileId)
+  // Fix round 1: `invalid` is folded INTO `otherId` itself, not just into
+  // the state the render-time reset below writes. Before this fix, a
+  // foreign pair (well-formed, but naming two profiles neither of which is
+  // `profileId`) still computed a real `otherId` (the ternary's fallback
+  // branch always resolves to `pair.musicianProfileId` when `profileId`
+  // matches neither side), and the fetch effect below is keyed ONLY on
+  // `otherId` - so it fired anyway, fetched that unrelated profile, and
+  // overwrote the render-time reset's `null` with a real (wrong) result,
+  // rendering an unrelated profile's name and a working composer as if it
+  // were this conversation's other side. Null here means the effect below
+  // never runs at all for an invalid pair, on first render or any later
+  // profile switch.
+  const otherId = (pair && profileId && !invalid)
     ? (pair.musicianProfileId === profileId ? pair.curatorProfileId : pair.musicianProfileId)
     : null;
 
-  const [state, setState] = useState<OtherProfileSummary | "loading" | "error" | null>("loading");
   // Render-time reset (see useConversations' own comment above for why this
   // is a render-time assignment and not a setState call inside the effect
-  // body): `otherId` changing means a genuinely different fetch is about to
-  // run, so the previous conversation's resolved profile is dropped back to
-  // "loading" (or straight to null for a malformed/foreign id) here, before
-  // the effect below fires.
+  // body): `otherId`/`invalid` changing means a genuinely different
+  // resolution is about to run, so the previous conversation's resolved
+  // profile is dropped back to "loading" (or straight to null for a
+  // malformed/foreign id) here, before the effect below fires.
+  //
+  // Fix round 1: the INITIAL value is now a lazy initializer computed from
+  // `invalid` at mount time, not a bare "loading". The old code initialized
+  // `trackedTrackedKey` to `trackedKey`'s own current value, so on the very
+  // FIRST render the two were equal by construction and the "did the key
+  // change" check below never fired - a conversation that was ALREADY
+  // malformed or foreign on mount (the common case: it arrives that way
+  // from a bad ?c= or a stale deep link, never becomes that way mid-render)
+  // stayed at the bare initial "loading" forever, hanging the thread pane
+  // in its skeleton state.
+  const [state, setState] = useState<OtherProfileSummary | "loading" | "error" | null>(() => (invalid ? null : "loading"));
   const trackedKey = otherId ?? (invalid ? "invalid" : "pending");
   const [trackedTrackedKey, setTrackedTrackedKey] = useState(trackedKey);
   if (trackedKey !== trackedTrackedKey) {
