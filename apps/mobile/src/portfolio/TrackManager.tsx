@@ -5,7 +5,7 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { MAX_TRACKS, type TrackDoc } from "@gatekeep/shared";
 import { TrimUploader } from "./TrimUploader";
-import { Text, Input, Card, StatusBadge } from "../ui";
+import { Text, Button, Input, Card, ErrorBanner, StatusBadge } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 
 type Row = TrackDoc & { id: string };
@@ -33,14 +33,19 @@ export function TrackManager({ profileId }: { profileId: string }) {
   const [busy, setBusy] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
+  // Was log-only (audit #12): a failed read left `tracks` silently stuck on
+  // stale data with nothing on screen to say so. Now surfaces a small
+  // retryable banner instead.
+  const [loadError, setLoadError] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `profiles/${profileId}/tracks`), orderBy("order")),
-      (s) => setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))),
-      (e) => console.error("tracks onSnapshot failed", e));
-  }, [profileId]);
+      (s) => { setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) }))); setLoadError(false); },
+      (e) => { console.error("tracks onSnapshot failed", e); setLoadError(true); });
+  }, [profileId, retryKey]);
 
   // Returns whether the call succeeded so callers that need to react to a
   // failure (saveRename re-opening its edit UI below) can, without every
@@ -84,6 +89,13 @@ export function TrackManager({ profileId }: { profileId: string }) {
       <Text variant="title">
         Tracks ({tracks.filter((t) => !["rejected", "failed"].includes(t.status)).length}/{MAX_TRACKS})
       </Text>
+      {loadError && (
+        <View style={{ gap: 8 }}>
+          <ErrorBanner message="Couldn't load your tracks. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => setRetryKey((n) => n + 1)} />
+        </View>
+      )}
       {tracks.map((t, i) => (
         <Card key={t.id} style={{ gap: 6 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>

@@ -7,7 +7,7 @@ import { useAuth } from "../../../../src/auth/AuthProvider";
 import type { EventDoc } from "@gatekeep/shared";
 import { ScannerScreen } from "../../../../src/events/ScannerScreen";
 import { AttendeeListScreen } from "../../../../src/events/AttendeeListScreen";
-import { Text, Chip, PageBackground, Skeleton, SkeletonCard } from "../../../../src/ui";
+import { Text, Button, Chip, ErrorBanner, PageBackground, Skeleton, SkeletonCard } from "../../../../src/ui";
 import { tokens } from "../../../../src/theme/tokens";
 
 // Sub-project 6 task 12: the door, one route hosting two tabs (brief
@@ -20,30 +20,55 @@ export default function DoorScreen() {
   const { eventId: rawEventId } = useLocalSearchParams<{ eventId: string }>();
   const eventId = rawEventId ?? "";
   const { user } = useAuth();
-  const [event, setEvent] = useState<EventDoc | null>(null);
+  // Four-way sentinel (audit #11), see (curator)/dashboard.tsx's identical
+  // comment.
+  const [event, setEvent] = useState<EventDoc | "loading" | "error" | null>("loading");
+  const [eventRetry, setEventRetry] = useState(0);
   const [tab, setTab] = useState<Tab>("scan");
 
   // Render-time reset, same idiom as [gigId].tsx's privLocGigId: navigating
   // from one event's door screen to another's (same route pattern,
   // different eventId) does not remount this screen.
   const [loadedEventId, setLoadedEventId] = useState(eventId);
-  if (eventId !== loadedEventId) { setLoadedEventId(eventId); setEvent(null); }
+  if (eventId !== loadedEventId) { setLoadedEventId(eventId); setEvent("loading"); }
 
   useEffect(() => {
     if (!eventId) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "events", eventId),
       (s) => setEvent(s.exists() ? (s.data() as EventDoc) : null),
-      () => setEvent(null));
-  }, [eventId]);
+      (e) => { console.error("DoorScreen: event onSnapshot failed", e); setEvent("error"); });
+  }, [eventId, eventRetry]);
 
-  if (!user || !event) {
+  if (!user || event === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
           <Skeleton height={28} width="60%" />
           <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (event === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setEvent("loading"); setEventRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!event) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Event not found</Text>
         </View>
       </View>
     );

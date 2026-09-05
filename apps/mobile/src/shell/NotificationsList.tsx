@@ -4,14 +4,20 @@ import { useRouter, type Href } from "expo-router";
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, updateDoc } from "firebase/firestore";
 import { getFirebase } from "../lib/firebase";
 import { useAuth } from "../auth/AuthProvider";
-import { Badge, Text } from "../ui";
+import { Badge, Button, ErrorBanner, Skeleton, Text, IconBell } from "../ui";
+import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 import { notificationHref, UNREAD_MARKER_LABEL, type NotificationDoc, type ProfileDoc } from "@gatekeep/shared";
 
 export function NotificationsList() {
   const { user } = useAuth();
   const router = useRouter();
-  const [notes, setNotes] = useState<({ id: string } & NotificationDoc)[]>([]);
+  const t = useTokens();
+  // Four-way sentinel (audit #11): "loading" while the first snapshot
+  // hasn't landed, "error" on a failed read (distinct from a genuinely
+  // empty inbox, which gets its own "All caught up" empty state below).
+  const [notes, setNotes] = useState<({ id: string } & NotificationDoc)[] | "loading" | "error">("loading");
+  const [retryKey, setRetryKey] = useState(0);
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
@@ -21,9 +27,14 @@ export function NotificationsList() {
       (s) => {
         if (cancelled) return;
         setNotes(s.docs.map((d) => ({ id: d.id, ...(d.data() as NotificationDoc) })));
+      },
+      (e) => {
+        if (cancelled) return;
+        console.error("NotificationsList: notifications onSnapshot failed", e);
+        setNotes("error");
       });
     return () => { cancelled = true; unsubscribe(); };
-  }, [user?.uid]);
+  }, [user?.uid, retryKey]);
   const markRead = (id: string) =>
     updateDoc(doc(getFirebase().db, `users/${user!.uid}/notifications/${id}`), { read: true });
   // Task 29: booking/ticket/event-kind hrefs come from the shared href map
@@ -56,10 +67,48 @@ export function NotificationsList() {
     const href = notificationHref(item.kind, item.refId, "mobile", item.refKind);
     if (href) router.push(href as Href);
   };
+
+  if (notes === "loading") {
+    return (
+      <View style={{ padding: tokens.space.md, gap: tokens.space.md }}>
+        <Text variant="title">Notifications</Text>
+        <Skeleton height={16} width="70%" />
+        <Skeleton height={16} width="55%" />
+        <Skeleton height={16} width="60%" />
+      </View>
+    );
+  }
+  if (notes === "error") {
+    return (
+      <View style={{ padding: tokens.space.md, gap: tokens.space.md }}>
+        <Text variant="title">Notifications</Text>
+        <ErrorBanner message="Couldn't load this. Retry." />
+        <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+          onPress={() => setRetryKey((n) => n + 1)} />
+      </View>
+    );
+  }
+  if (notes.length === 0) {
+    // Web dashboard's own empty card (apps/web/app/dashboard/page.tsx:286-300),
+    // ported verbatim (audit #16).
+    return (
+      <View style={{ gap: tokens.space.md }}>
+        <Text variant="title">Notifications</Text>
+        <View style={{ alignItems: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <IconBell size={20} color={t.muted} />
+          <Text variant="label">All caught up</Text>
+          <Text muted style={{ textAlign: "center" }}>
+            Review updates and booking activity will land here the moment they happen. In the meantime, go see
+            what&apos;s playing.
+          </Text>
+          <Button variant="ghost" title="Browse gigs" onPress={() => router.push("/(musician)/gigs")} />
+        </View>
+      </View>
+    );
+  }
   return (
     <FlatList data={notes} keyExtractor={(n) => n.id}
       ListHeaderComponent={<Text variant="title">Notifications</Text>}
-      ListEmptyComponent={<Text variant="body" muted style={{ padding: tokens.space.md }}>No notifications yet.</Text>}
       renderItem={({ item }) => (
         // SP12 follow-on (audit #26): read no longer relies on opacity
         // alone. An unread row carries a "New" Badge (a real text channel,

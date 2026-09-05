@@ -175,13 +175,14 @@ export function TierEditor({ curatorProfileId, eventId, eventStatus, initialTier
 
 type LiveTier = { id: string } & TicketTierDoc;
 
-function useLiveTiers(eventId: string): LiveTier[] | "loading" {
-  const [tiers, setTiers] = useState<LiveTier[] | "loading">("loading");
+function useLiveTiers(eventId: string, retryKey: number): LiveTier[] | "loading" | "error" {
+  const [tiers, setTiers] = useState<LiveTier[] | "loading" | "error">("loading");
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(query(collection(db, `events/${eventId}/tiers`), orderBy("sortOrder")),
-      (snap) => setTiers(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketTierDoc) }))));
-  }, [eventId]);
+      (snap) => setTiers(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketTierDoc) }))),
+      (e) => { console.error("useLiveTiers: tiers onSnapshot failed", e); setTiers("error"); });
+  }, [eventId, retryKey]);
   return tiers;
 }
 
@@ -215,16 +216,31 @@ function TierBarRows({ tiers }: { tiers: LiveTier[] }) {
 // index.tsx gains ticketed-event rows). RN twin of web's EventsManager.tsx
 // TierBars.
 export function TierBars({ eventId }: { eventId: string }) {
-  const tiers = useLiveTiers(eventId);
-  if (tiers === "loading" || tiers.length === 0) return null;
+  // Compact list row: an "error" here renders nothing, same as "loading",
+  // rather than a scary banner inside a dense list of gigs/events. The
+  // fuller TierSalesStats view below (the curator's own management screen)
+  // is where a load failure gets a visible, retryable banner instead.
+  const tiers = useLiveTiers(eventId, 0);
+  if (tiers === "loading" || tiers === "error" || tiers.length === 0) return null;
   return <TierBarRows tiers={tiers} />;
 }
 
 // The management screen's fuller version (Task 12 anatomy: per-tier
 // sold/capacity bars + a face-value total, display only).
 export function TierSalesStats({ eventId }: { eventId: string }) {
-  const tiers = useLiveTiers(eventId);
-  if (tiers === "loading" || tiers.length === 0) return null;
+  const [retryKey, setRetryKey] = useState(0);
+  const tiers = useLiveTiers(eventId, retryKey);
+  if (tiers === "loading") return null;
+  if (tiers === "error") {
+    return (
+      <Card style={{ gap: tokens.space.sm }}>
+        <ErrorBanner message="Couldn't load sales. Retry." />
+        <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+          onPress={() => setRetryKey((n) => n + 1)} />
+      </Card>
+    );
+  }
+  if (tiers.length === 0) return null;
   const totalCents = tiers.reduce((sum, tier) => sum + tier.soldCount * tier.priceCents, 0);
   return (
     <Card style={{ gap: tokens.space.sm }}>

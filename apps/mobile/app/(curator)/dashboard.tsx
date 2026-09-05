@@ -56,7 +56,11 @@ export default function CuratorDashboard() {
   const t = useTokens();
   const profileId = typeof activeContext === "object" && activeContext.type === "curator"
     ? activeContext.profileId : null;
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
+  // Four-way sentinel (audit #11): "loading" for not-yet-resolved, "error"
+  // for a failed read (distinct from `null`, which means the doc genuinely
+  // doesn't exist), matching (musician)/portfolio.tsx's booking doc.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [profileRetry, setProfileRetry] = useState(0);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -82,13 +86,13 @@ export default function CuratorDashboard() {
     setLastProfileId(profileId);
     // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
-    setProfile(null);
+    setProfile("loading");
   }
 
   useEffect(() => {
-    // profile is already null here: the render-time reset above just ran
-    // (or this mounted with profileId already null, matching useState's own
-    // default).
+    // profile is already "loading" here: the render-time reset above just
+    // ran (or this mounted with profileId already null, matching useState's
+    // own default).
     if (!profileId) return;
     const forId = profileId;
     const { db } = getFirebase();
@@ -97,11 +101,12 @@ export default function CuratorDashboard() {
         if (activeIdRef.current !== forId) return;
         setProfile(s.exists() ? (s.data() as ProfileDoc) : null);
       },
-      () => {
+      (e) => {
         if (activeIdRef.current !== forId) return;
-        setProfile(null);
+        console.error("dashboard: profile onSnapshot failed", e);
+        setProfile("error");
       });
-  }, [profileId]);
+  }, [profileId, profileRetry]);
 
   // Empty state: no signed-in user or no active curator profile to edit.
   if (!user || !profileId) {
@@ -117,7 +122,7 @@ export default function CuratorDashboard() {
   }
 
   // Loading state: profile doc not yet resolved for the active profileId.
-  if (!profile) {
+  if (profile === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -126,6 +131,32 @@ export default function CuratorDashboard() {
           <Skeleton height={16} width="40%" />
           <SkeletonCard />
           <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  // Error state: the read failed (offline, a transient error), distinct
+  // from "no such profile" below.
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  // Not-found: the doc genuinely doesn't exist (e.g. deleted elsewhere).
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
         </View>
       </View>
     );

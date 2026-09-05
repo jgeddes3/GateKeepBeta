@@ -40,17 +40,17 @@ import { tokens } from "../theme/tokens";
 export type TicketRow = { id: string } & TicketDoc;
 export type EventLoad = { kind: "ok"; event: EventDoc } | { kind: "unavailable" };
 
-export function useMyTickets(uid: string | null): TicketRow[] | "loading" {
-  const [rows, setRows] = useState<TicketRow[] | "loading">("loading");
+export function useMyTickets(uid: string | null, retryKey = 0): TicketRow[] | "loading" | "error" {
+  const [rows, setRows] = useState<TicketRow[] | "loading" | "error">("loading");
   useEffect(() => {
     if (!uid) return;
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, `users/${uid}/tickets`), orderBy("createdAt", "desc")),
       (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as TicketDoc) }))),
-      () => setRows([]),
+      (e) => { console.error("useMyTickets: tickets onSnapshot failed", e); setRows("error"); },
     );
-  }, [uid]);
+  }, [uid, retryKey]);
   return rows;
 }
 
@@ -294,8 +294,9 @@ function EmptyTickets() {
 }
 
 export function TicketList({ uid }: { uid: string }) {
-  const rows = useMyTickets(uid);
-  const eventIds = rows === "loading" ? [] : [...new Set(rows.map((t) => t.eventId))];
+  const [ticketsRetry, setTicketsRetry] = useState(0);
+  const rows = useMyTickets(uid, ticketsRetry);
+  const eventIds = rows === "loading" || rows === "error" ? [] : [...new Set(rows.map((t) => t.eventId))];
   const eventCache = useEventCache(eventIds);
   const incoming = useIncomingTransfers(uid);
   const now = useNow();
@@ -304,6 +305,14 @@ export function TicketList({ uid }: { uid: string }) {
   const [transferTicket, setTransferTicket] = useState<TicketRow | null>(null);
 
   if (rows === "loading" || now == null) return <TicketListSkeleton />;
+  if (rows === "error") {
+    return (
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
+        <ErrorBanner message="Couldn't load your tickets. Retry." />
+        <Button title="Retry" variant="secondary" onPress={() => setTicketsRetry((n) => n + 1)} />
+      </View>
+    );
+  }
   if (rows.length === 0 && incoming.length === 0) return <EmptyTickets />;
 
   const upcoming: TicketRow[] = []; const past: TicketRow[] = []; const unavailable: TicketRow[] = [];

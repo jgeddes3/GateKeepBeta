@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ScrollView, View, Image, Pressable } from "react-native";
+import { ActivityIndicator, ScrollView, View, Image, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
 import {
@@ -543,7 +543,11 @@ export default function EventScreen() {
               <Button variant="secondary" title="Back" onPress={resetPurchase} style={{ alignSelf: "flex-start" }} />
             </>
           ) : phase === "finalizing" ? (
-            <Text muted>Confirming your order…</Text>
+            <View accessibilityRole="progressbar" accessibilityLabel="Confirming your order…"
+              style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+              <ActivityIndicator color={t.accent} />
+              <Text muted>Confirming your order…</Text>
+            </View>
           ) : paymentConfirmed ? (
             <>
               {error && <ErrorBanner message={error} />}
@@ -559,7 +563,11 @@ export default function EventScreen() {
                   <Button variant="secondary" title="Cancel" onPress={() => void cancelOrder(orderId)} style={{ alignSelf: "flex-start" }} />
                 </>
               ) : (
-                <Text muted>Opening the payment sheet…</Text>
+                <View accessibilityRole="progressbar" accessibilityLabel="Opening the payment sheet…"
+                  style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.sm }}>
+                  <ActivityIndicator color={t.accent} />
+                  <Text muted>Opening the payment sheet…</Text>
+                </View>
               )}
             </>
           )}

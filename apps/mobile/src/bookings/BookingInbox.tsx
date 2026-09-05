@@ -9,7 +9,7 @@ import {
   DEPOSIT_PERCENT, SHOW_MORE_LABEL,
   type BookingRequestDoc, type BookingSide, type BookingStatus, type CuratorBookingDoc, type GigDoc, type ProfileDoc,
 } from "@gatekeep/shared";
-import { Text, StatusBadge, Skeleton, Button } from "../ui";
+import { Text, StatusBadge, Skeleton, Button, ErrorBanner } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -245,12 +245,18 @@ const HISTORY_PAGE_INCREMENT = 20;
 export function BookingInbox({ profileId, role }: { profileId: string; role: BookingSide }) {
   const router = useRouter();
   const field = role === "musician" ? "musicianProfileId" : "curatorProfileId";
-  const [open, setOpen] = useState<BookingRow[]>([]);
-  const [confirmed, setConfirmed] = useState<BookingRow[]>([]);
-  const [history, setHistory] = useState<BookingRow[]>([]);
+  // Each list carries an "error" sentinel (audit #13): a failed read is not
+  // the same as a genuinely empty result, so the empty-state copy below only
+  // renders once the read has actually succeeded.
+  const [open, setOpen] = useState<BookingRow[] | "error">([]);
+  const [confirmed, setConfirmed] = useState<BookingRow[] | "error">([]);
+  const [history, setHistory] = useState<BookingRow[] | "error">([]);
   const [openPageSize, setOpenPageSize] = useState(OPEN_PAGE_INCREMENT);
   const [confirmedPageSize, setConfirmedPageSize] = useState(CONFIRMED_PAGE_INCREMENT);
   const [historyPageSize, setHistoryPageSize] = useState(HISTORY_PAGE_INCREMENT);
+  const [openRetry, setOpenRetry] = useState(0);
+  const [confirmedRetry, setConfirmedRetry] = useState(0);
+  const [historyRetry, setHistoryRetry] = useState(0);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -258,8 +264,8 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "open"),
         orderBy("updatedAt", "desc"), limit(openPageSize)),
       (snap) => setOpen(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
-      () => setOpen([]));
-  }, [field, profileId, openPageSize]);
+      (e) => { console.error("BookingInbox: open bookings onSnapshot failed", e); setOpen("error"); });
+  }, [field, profileId, openPageSize, openRetry]);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -267,8 +273,8 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
       query(collection(db, "bookings"), where(field, "==", profileId), where("status", "==", "confirmed"),
         orderBy("updatedAt", "desc"), limit(confirmedPageSize)),
       (snap) => setConfirmed(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
-      () => setConfirmed([]));
-  }, [field, profileId, confirmedPageSize]);
+      (e) => { console.error("BookingInbox: confirmed bookings onSnapshot failed", e); setConfirmed("error"); });
+  }, [field, profileId, confirmedPageSize, confirmedRetry]);
 
   useEffect(() => {
     const { db } = getFirebase();
@@ -277,8 +283,8 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
         where("status", "in", [...BOOKING_TERMINAL_STATUSES]),
         orderBy("updatedAt", "desc"), limit(historyPageSize)),
       (snap) => setHistory(snap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRequestDoc) }))),
-      () => setHistory([]));
-  }, [field, profileId, historyPageSize]);
+      (e) => { console.error("BookingInbox: history bookings onSnapshot failed", e); setHistory("error"); });
+  }, [field, profileId, historyPageSize, historyRetry]);
 
   const openThread = (bookingId: string) => router.push({ pathname: "/booking/[bookingId]", params: { bookingId } });
 
@@ -286,31 +292,49 @@ export function BookingInbox({ profileId, role }: { profileId: string; role: Boo
     <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.xl }}>
       <Text variant="heading">Bookings</Text>
       <View style={{ gap: tokens.space.sm }}>
-        <Text variant="title">Open threads{open.length > 0 ? ` (${open.length})` : ""}</Text>
-        {open.length === 0
-          ? <Text muted>No open booking requests.</Text>
+        <Text variant="title">Open threads{open !== "error" && open.length > 0 ? ` (${open.length})` : ""}</Text>
+        {open === "error" ? (
+          <>
+            <ErrorBanner message="Couldn't load your bookings. Retry." />
+            <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+              onPress={() => setOpenRetry((n) => n + 1)} />
+          </>
+        ) : open.length === 0
+          ? <Text muted>No open threads yet. Offers and counters will show up here.</Text>
           : open.map((row) => <OpenThreadRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
-        {open.length === openPageSize && (
+        {open !== "error" && open.length === openPageSize && (
           <Button title={SHOW_MORE_LABEL} variant="secondary"
             onPress={() => setOpenPageSize((n) => n + OPEN_PAGE_INCREMENT)} />
         )}
       </View>
       <View style={{ gap: tokens.space.sm }}>
-        <Text variant="title">Upcoming confirmed{confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
-        {confirmed.length === 0
-          ? <Text muted>Nothing confirmed yet.</Text>
+        <Text variant="title">Upcoming confirmed{confirmed !== "error" && confirmed.length > 0 ? ` (${confirmed.length})` : ""}</Text>
+        {confirmed === "error" ? (
+          <>
+            <ErrorBanner message="Couldn't load your bookings. Retry." />
+            <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+              onPress={() => setConfirmedRetry((n) => n + 1)} />
+          </>
+        ) : confirmed.length === 0
+          ? <Text muted>Nothing confirmed yet. Accept an offer in Open threads above and it lands here as a date.</Text>
           : confirmed.map((row) => <ConfirmedRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
-        {confirmed.length === confirmedPageSize && (
+        {confirmed !== "error" && confirmed.length === confirmedPageSize && (
           <Button title={SHOW_MORE_LABEL} variant="secondary"
             onPress={() => setConfirmedPageSize((n) => n + CONFIRMED_PAGE_INCREMENT)} />
         )}
       </View>
       <View style={{ gap: tokens.space.sm }}>
         <Text variant="title">History</Text>
-        {history.length === 0
-          ? <Text muted>No past bookings yet.</Text>
+        {history === "error" ? (
+          <>
+            <ErrorBanner message="Couldn't load your bookings. Retry." />
+            <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+              onPress={() => setHistoryRetry((n) => n + 1)} />
+          </>
+        ) : history.length === 0
+          ? <Text muted>No history yet. Completed and closed bookings will land here.</Text>
           : history.map((row) => <HistoryRow key={row.id} row={row} mySide={role} onPress={() => openThread(row.id)} />)}
-        {history.length === historyPageSize && (
+        {history !== "error" && history.length === historyPageSize && (
           <Button title={SHOW_MORE_LABEL} variant="secondary"
             onPress={() => setHistoryPageSize((n) => n + HISTORY_PAGE_INCREMENT)} />
         )}

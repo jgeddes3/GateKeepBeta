@@ -16,7 +16,7 @@ import {
   CURATOR_FORFEIT_WINDOW_HOURS, MUSICIAN_MARK_WINDOW_HOURS, depositChargePreviewCents,
   type BookingRequestDoc, type BookingSide, type GigDoc,
 } from "@gatekeep/shared";
-import { Text, Button, Card, TextArea, StatusBadge, Callout, IconWarningCircle } from "../ui";
+import { Text, Button, Card, TextArea, StatusBadge, Callout, SkeletonCard, IconWarningCircle } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -216,7 +216,14 @@ export function BookingThread({ bookingId, uid }: { bookingId: string; uid: stri
   const now = useNow();
   const openRunDates = useOpenRunDates(booking !== "loading" && booking !== "unavailable" && booking ? booking.seriesId : null);
 
-  if (booking === "loading" || role === "loading") return <Text muted>Loading…</Text>;
+  if (booking === "loading" || role === "loading") {
+    return (
+      <View style={{ gap: tokens.space.md }}>
+        <SkeletonCard />
+        <SkeletonCard />
+      </View>
+    );
+  }
   if (booking === "unavailable" || !booking) {
     return <Text>You don&apos;t have access to this booking, or it doesn&apos;t exist.</Text>;
   }

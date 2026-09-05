@@ -54,14 +54,22 @@ export default function SignIn() {
   // errors). Does not change what triggers a catch or what message is
   // computed, only where the message renders. Success alerts are untouched.
   const [error, setError] = useState<string | null>(null);
+  // Single busy flag across all three sign-in methods (audit #15): a double
+  // tap on any of them (or a tap on a second one while the first is still
+  // in flight) can't fire twice, since Button's own `loading` prop disables
+  // itself and swaps in a spinner.
+  const [busy, setBusy] = useState(false);
   const { auth } = getFirebase();
   const t = useTokens();
 
   const emailSignIn = async () => {
+    setBusy(true);
     try { await signInWithEmailAndPassword(auth, email.trim(), password); }
     catch (e: any) { setError(authMessage(e?.code ?? "")); }
+    finally { setBusy(false); }
   };
   const googleSignIn = async () => {
+    setBusy(true);
     try {
       await GoogleSignin.hasPlayServices();
       const res = await GoogleSignin.signIn();
@@ -75,9 +83,12 @@ export default function SignIn() {
         return;
       }
       setError("Google sign-in didn't complete.");
+    } finally {
+      setBusy(false);
     }
   };
   const appleSignIn = async () => {
+    setBusy(true);
     try {
       const cred = await AppleAuthentication.signInAsync({
         requestedScopes: [AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -95,6 +106,8 @@ export default function SignIn() {
         return;
       }
       setError("Apple sign-in didn't complete.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -108,11 +121,11 @@ export default function SignIn() {
           value={email} onChangeText={setEmail} />
         <Input placeholder="Password" secureTextEntry
           value={password} onChangeText={setPassword} />
-        <Button title="Sign in" onPress={() => { setError(null); void emailSignIn(); }} />
-        <Button title="Continue with Google" variant="secondary"
+        <Button title="Sign in" loading={busy} onPress={() => { setError(null); void emailSignIn(); }} />
+        <Button title="Continue with Google" variant="secondary" loading={busy}
           onPress={() => { setError(null); void googleSignIn(); }} />
         {Platform.OS === "ios" && (
-          <Button title="Continue with Apple" variant="secondary"
+          <Button title="Continue with Apple" variant="secondary" loading={busy}
             onPress={() => { setError(null); void appleSignIn(); }} />
         )}
         <Button title="Forgot password?" variant="ghost" onPress={async () => {

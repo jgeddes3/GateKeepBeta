@@ -36,13 +36,14 @@ interface CheckInTicketInput {
 }
 interface UndoCheckInInput { eventId: string; ticketId: string }
 
-function useAttendees(eventId: string): AttendeeRow[] | "loading" {
-  const [rows, setRows] = useState<AttendeeRow[] | "loading">("loading");
+function useAttendees(eventId: string, retryKey: number): AttendeeRow[] | "loading" | "error" {
+  const [rows, setRows] = useState<AttendeeRow[] | "loading" | "error">("loading");
   useEffect(() => {
     const { db } = getFirebase();
     return onSnapshot(collection(db, `events/${eventId}/attendees`),
-      (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as AttendeeDoc) }))));
-  }, [eventId]);
+      (snap) => setRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as AttendeeDoc) }))),
+      (e) => { console.error("AttendeeListScreen: attendees onSnapshot failed", e); setRows("error"); });
+  }, [eventId, retryKey]);
   return rows;
 }
 
@@ -161,7 +162,8 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
   curatorProfileId: string; eventId: string; eventStatus: EventStatus; eventEndsAt: number;
 }) {
   const t = useTokens();
-  const rows = useAttendees(eventId);
+  const [attendeesRetry, setAttendeesRetry] = useState(0);
+  const rows = useAttendees(eventId, attendeesRetry);
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [checkInRow, setCheckInRow] = useState<AttendeeRow | null>(null);
@@ -214,6 +216,14 @@ export function AttendeeListScreen({ curatorProfileId, eventId, eventStatus, eve
   };
 
   if (rows === "loading") return <AttendeeListSkeleton />;
+  if (rows === "error") {
+    return (
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
+        <ErrorBanner message="Couldn't load attendees. Retry." />
+        <Button title="Retry" variant="secondary" onPress={() => setAttendeesRetry((n) => n + 1)} />
+      </View>
+    );
+  }
 
   const q = search.trim().toLowerCase();
   const filtered = q

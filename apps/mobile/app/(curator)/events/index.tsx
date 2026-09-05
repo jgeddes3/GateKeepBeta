@@ -307,10 +307,19 @@ export default function GigsList() {
   const { activeContext } = useProfileContext();
   const profileId = typeof activeContext === "object" && activeContext.type === "curator"
     ? activeContext.profileId : null;
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  const [gigs, setGigs] = useState<GigRow[]>([]);
-  const [series, setSeries] = useState<SeriesRow[]>([]);
-  const [events, setEvents] = useState<EventRow[]>([]);
+  // Four-way sentinel (audit #11), see (curator)/dashboard.tsx's identical
+  // comment.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [profileRetry, setProfileRetry] = useState(0);
+  // Each list also carries an "error" sentinel (audit #12): a failed read
+  // is not the same as a genuinely empty result, so the empty-state copy
+  // below only renders once the read has actually succeeded.
+  const [gigs, setGigs] = useState<GigRow[] | "error">([]);
+  const [gigsRetry, setGigsRetry] = useState(0);
+  const [series, setSeries] = useState<SeriesRow[] | "error">([]);
+  const [seriesRetry, setSeriesRetry] = useState(0);
+  const [events, setEvents] = useState<EventRow[] | "error">([]);
+  const [eventsRetry, setEventsRetry] = useState(0);
   const [view, setView] = useState<EventView>({ kind: "list" });
 
   // Same render-time-reset + late-callback guard as (curator)/dashboard.tsx:
@@ -329,7 +338,7 @@ export default function GigsList() {
     setLastProfileId(profileId);
     // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
-    setProfile(null); setGigs([]); setSeries([]); setEvents([]); setView({ kind: "list" });
+    setProfile("loading"); setGigs([]); setSeries([]); setEvents([]); setView({ kind: "list" });
   }
 
   useEffect(() => {
@@ -338,8 +347,12 @@ export default function GigsList() {
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => { if (activeIdRef.current !== forId) return; setProfile(s.exists() ? (s.data() as ProfileDoc) : null); },
-      () => { if (activeIdRef.current !== forId) return; setProfile(null); });
-  }, [profileId]);
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("GigsList: profile onSnapshot failed", e);
+        setProfile("error");
+      });
+  }, [profileId, profileRetry]);
   // where(curatorProfileId=='X') with NO status filter, rules-provable for a
   // member via the member disjunct alone (see firestore.rules' comment on
   // gigs' read rule + tests-rules/rules.test.ts's "curator dashboard" test),
@@ -352,8 +365,13 @@ export default function GigsList() {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "gigs"), where("curatorProfileId", "==", profileId)),
-      (s) => { if (activeIdRef.current !== forId) return; setGigs(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))); });
-  }, [profileId]);
+      (s) => { if (activeIdRef.current !== forId) return; setGigs(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) }))); },
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("GigsList: gigs onSnapshot failed", e);
+        setGigs("error");
+      });
+  }, [profileId, gigsRetry]);
   // Same shape for gigSeries, its read rule (isMember(curatorProfileId) ||
   // isAdmin(), no public disjunct) is provable the identical way.
   useEffect(() => {
@@ -362,8 +380,13 @@ export default function GigsList() {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "gigSeries"), where("curatorProfileId", "==", profileId)),
-      (s) => { if (activeIdRef.current !== forId) return; setSeries(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigSeriesDoc) }))); });
-  }, [profileId]);
+      (s) => { if (activeIdRef.current !== forId) return; setSeries(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigSeriesDoc) }))); },
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("GigsList: series onSnapshot failed", e);
+        setSeries("error");
+      });
+  }, [profileId, seriesRetry]);
   // where(curatorProfileId=='X') with NO status filter: rules-provable for a
   // member via the isMember disjunct alone (firestore.rules' events read
   // rule), same shape as the gigs query above, and every status comes back
@@ -374,8 +397,13 @@ export default function GigsList() {
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "events"), where("curatorProfileId", "==", profileId)),
-      (s) => { if (activeIdRef.current !== forId) return; setEvents(s.docs.map((d) => ({ id: d.id, ...(d.data() as EventDoc) }))); });
-  }, [profileId]);
+      (s) => { if (activeIdRef.current !== forId) return; setEvents(s.docs.map((d) => ({ id: d.id, ...(d.data() as EventDoc) }))); },
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("GigsList: events onSnapshot failed", e);
+        setEvents("error");
+      });
+  }, [profileId, eventsRetry]);
 
   if (!user || !profileId) {
     return (
@@ -388,7 +416,7 @@ export default function GigsList() {
       </View>
     );
   }
-  if (!profile) {
+  if (profile === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -400,12 +428,42 @@ export default function GigsList() {
       </View>
     );
   }
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Error-safe derived lists: an "error" sentinel behaves as empty for every
+  // downstream computation below, its own section renders the ErrorBanner
+  // instead of the ordinary empty-state copy (see the render below).
+  const gigsList = gigs === "error" ? [] : gigs;
+  const seriesList = series === "error" ? [] : series;
+  const eventsList = events === "error" ? [] : events;
 
   // A gig, once promoted, stays ineligible for "Promote a gig" regardless of
   // its resulting event's status (including cancelled), mirrors web's
   // EventsManager.tsx identical `usedGigIds` rule.
-  const usedGigIds = new Set(events.filter((e) => e.gigId).map((e) => e.gigId));
-  const eligibleGigsForPromotion = gigs.filter((g) => g.status === "filled" && !usedGigIds.has(g.id));
+  const usedGigIds = new Set(eventsList.filter((e) => e.gigId).map((e) => e.gigId));
+  const eligibleGigsForPromotion = gigsList.filter((g) => g.status === "filled" && !usedGigIds.has(g.id));
 
   const promoteGig = async (gig: GigRow) => {
     let seedLineup: EventAct[] = [];
@@ -450,11 +508,11 @@ export default function GigsList() {
     );
   }
 
-  const open = gigs.filter((g) => g.status === "open").sort(byStartsAtAsc);
-  const drafts = gigs.filter((g) => g.status === "draft").sort(byStartsAtAsc);
-  const past = gigs.filter((g) => g.status === "closed" || g.status === "cancelled" || g.status === "taken_down").sort(byStartsAtDesc);
-  const activeEvents = events.filter((e) => e.status === "draft" || e.status === "published").sort(byStartsAtAsc);
-  const pastEvents = events.filter((e) => e.status === "completed" || e.status === "cancelled").sort(byStartsAtDesc);
+  const open = gigsList.filter((g) => g.status === "open").sort(byStartsAtAsc);
+  const drafts = gigsList.filter((g) => g.status === "draft").sort(byStartsAtAsc);
+  const past = gigsList.filter((g) => g.status === "closed" || g.status === "cancelled" || g.status === "taken_down").sort(byStartsAtDesc);
+  const activeEvents = eventsList.filter((e) => e.status === "draft" || e.status === "published").sort(byStartsAtAsc);
+  const pastEvents = eventsList.filter((e) => e.status === "completed" || e.status === "cancelled").sort(byStartsAtDesc);
 
   const openGig = (gigId: string) => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId } });
   const openSeries = (seriesId: string) => router.push({ pathname: "/(curator)/events/series/[seriesId]", params: { seriesId } });
@@ -470,23 +528,33 @@ export default function GigsList() {
           <Text muted>Your curator profile must be approved before you can post gigs.</Text>
         )}
 
-        <View style={{ gap: 8 }}>
-          <Text variant="title">Open ({open.length})</Text>
-          {open.length === 0 && <Text muted>No open gigs.</Text>}
-          {open.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
-        </View>
+        {gigs === "error" ? (
+          <View style={{ gap: tokens.space.sm }}>
+            <ErrorBanner message="Couldn't load your gigs. Retry." />
+            <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+              onPress={() => { setGigs([]); setGigsRetry((n) => n + 1); }} />
+          </View>
+        ) : (
+          <>
+            <View style={{ gap: 8 }}>
+              <Text variant="title">Open ({open.length})</Text>
+              {open.length === 0 && <Text muted>No open gigs yet. Post one and musicians can apply.</Text>}
+              {open.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
+            </View>
 
-        <View style={{ gap: 8 }}>
-          <Text variant="title">Drafts ({drafts.length})</Text>
-          {drafts.length === 0 && <Text muted>No drafts.</Text>}
-          {drafts.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
-        </View>
+            <View style={{ gap: 8 }}>
+              <Text variant="title">Drafts ({drafts.length})</Text>
+              {drafts.length === 0 && <Text muted>No drafts.</Text>}
+              {drafts.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
+            </View>
 
-        <View style={{ gap: 8 }}>
-          <Text variant="title">Past & closed ({past.length})</Text>
-          {past.length === 0 && <Text muted>Nothing here yet.</Text>}
-          {past.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
-        </View>
+            <View style={{ gap: 8 }}>
+              <Text variant="title">Past & closed ({past.length})</Text>
+              {past.length === 0 && <Text muted>No past gigs yet. Closed and cancelled gigs land here.</Text>}
+              {past.map((g) => <GigListItem key={g.id} gig={g} onPress={() => openGig(g.id)} onSeriesPress={() => g.seriesId && openSeries(g.seriesId)} />)}
+            </View>
+          </>
+        )}
 
         <View style={{ gap: tokens.space.sm, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.sm }}>
@@ -510,7 +578,13 @@ export default function GigsList() {
               </View>
             )}
           </View>
-          {activeEvents.length === 0 && pastEvents.length === 0 ? (
+          {events === "error" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <ErrorBanner message="Couldn't load your events. Retry." />
+              <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+                onPress={() => { setEvents([]); setEventsRetry((n) => n + 1); }} />
+            </View>
+          ) : activeEvents.length === 0 && pastEvents.length === 0 ? (
             <Card style={{ alignItems: "center", gap: 4, paddingVertical: tokens.space.lg }}>
               <IconTicket size={22} color={t.muted} />
               <Text variant="label" style={{ textAlign: "center" }}>No ticketed events yet</Text>
@@ -537,21 +611,36 @@ export default function GigsList() {
         </View>
 
         <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: t.border, paddingTop: 16 }}>
-          <Text variant="title">Series ({series.length})</Text>
-          {series.length === 0 && <Text muted>No recurring series yet.</Text>}
-          {series.map((s) => (
-            <Pressable key={s.id} onPress={() => openSeries(s.id)}>
-              <Card style={{ padding: tokens.space.md, gap: 4 }}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{s.template.title || "Untitled series"}</Text>
-                  <StatusBadge label={SERIES_STATUS_LABEL[s.status]} status={SERIES_STATUS_TONE[s.status]} />
+          <Text variant="title">Series ({seriesList.length})</Text>
+          {series === "error" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <ErrorBanner message="Couldn't load your series. Retry." />
+              <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+                onPress={() => { setSeries([]); setSeriesRetry((n) => n + 1); }} />
+            </View>
+          ) : (
+            <>
+              {seriesList.length === 0 && (
+                <View style={{ gap: 2 }}>
+                  <Text muted>No recurring series yet.</Text>
+                  <Text variant="meta" muted>Create a series when the same night repeats.</Text>
                 </View>
-                <Text variant="meta" muted>
-                  {WEEKDAY_LABELS[s.recurrence.weekday]}s, {String(s.recurrence.hour).padStart(2, "0")}:{String(s.recurrence.minute).padStart(2, "0")} (UTC), {s.recurrence.cadence}
-                </Text>
-              </Card>
-            </Pressable>
-          ))}
+              )}
+              {seriesList.map((s) => (
+                <Pressable key={s.id} onPress={() => openSeries(s.id)}>
+                  <Card style={{ padding: tokens.space.md, gap: 4 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text variant="label" style={{ flex: 1 }} numberOfLines={1}>{s.template.title || "Untitled series"}</Text>
+                      <StatusBadge label={SERIES_STATUS_LABEL[s.status]} status={SERIES_STATUS_TONE[s.status]} />
+                    </View>
+                    <Text variant="meta" muted>
+                      {WEEKDAY_LABELS[s.recurrence.weekday]}s, {String(s.recurrence.hour).padStart(2, "0")}:{String(s.recurrence.minute).padStart(2, "0")} (UTC), {s.recurrence.cadence}
+                    </Text>
+                  </Card>
+                </Pressable>
+              ))}
+            </>
+          )}
         </View>
       </ScrollView>
     </View>

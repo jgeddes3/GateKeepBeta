@@ -13,7 +13,7 @@ import {
   PAID_DEPOSIT_STATUSES, paymentRowKind, resolveFeePolicy,
   type BookingRequestDoc, type PaymentDoc, type PaymentRowKind, type StripeStatusResult,
 } from "@gatekeep/shared";
-import { Text, Card, StatusBadge, type StatusTone } from "../ui";
+import { Text, Card, StatusBadge, Skeleton, type StatusTone } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -223,7 +223,10 @@ export function PaymentStatus({ bookingId, uid }: { bookingId: string; uid: stri
               onSaved={() => { setShowSaveCard(false); setStripeReloadKey((k) => k + 1); }}
               onClose={() => setShowSaveCard(false)} />
           ) : stripeStatus === "loading" ? (
-            <Text muted>Loading card status…</Text>
+            <View style={{ gap: 6 }}>
+              <Skeleton height={14} width="60%" />
+              <Skeleton height={14} width="40%" />
+            </View>
           ) : stripeStatus === "error" ? (
             <View style={{ gap: tokens.space.xs }}>
               <Text color={t.warning}>Couldn&apos;t load your card status.</Text>

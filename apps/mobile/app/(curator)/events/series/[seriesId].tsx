@@ -114,11 +114,14 @@ export default function SeriesDetail() {
   const { user } = useAuth();
   const router = useRouter();
   const t = useTokens();
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  const [series, setSeries] = useState<GigSeriesDoc | null>(null);
-  const [occurrences, setOccurrences] = useState<OccurrenceRow[]>([]);
+  // Four-way sentinel (audit #11) for both docs, see (curator)/dashboard.tsx's
+  // identical comment.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [series, setSeries] = useState<GigSeriesDoc | "loading" | "error" | null>("loading");
+  const [occurrences, setOccurrences] = useState<OccurrenceRow[] | "error">([]);
   const [pauseBusy, setPauseBusy] = useState(false);
   const [endBusy, setEndBusy] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Render-time reset: navigating from one series' detail screen to
   // another's (same route pattern, different seriesId) does NOT remount this
@@ -126,15 +129,15 @@ export default function SeriesDetail() {
   // series' stale doc/occurrences/profile until the new subscriptions
   // resolve.
   const [lastSeriesId, setLastSeriesId] = useState(seriesId);
-  if (seriesId !== lastSeriesId) { setLastSeriesId(seriesId); setSeries(null); setOccurrences([]); setProfile(null); }
+  if (seriesId !== lastSeriesId) { setLastSeriesId(seriesId); setSeries("loading"); setOccurrences([]); setProfile("loading"); }
 
   useEffect(() => {
     if (!seriesId) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "gigSeries", seriesId),
       (s) => setSeries(s.exists() ? (s.data() as GigSeriesDoc) : null),
-      () => setSeries(null));
-  }, [seriesId]);
+      (e) => { console.error("SeriesDetail: series onSnapshot failed", e); setSeries("error"); });
+  }, [seriesId, retryKey]);
   // Keyed off the series' OWN curatorProfileId, not whichever profile
   // happens to be "active" in the global ContextSwitcher, which is
   // independent and can change while this screen (reached by a Stack push)
@@ -147,23 +150,24 @@ export default function SeriesDetail() {
   // isMember(curatorProfileId)); where(curatorProfileId)+where(seriesId) is
   // two plain equality filters, no composite index needed. Sorted
   // client-side by startsAt. Mirrors web's identical query exactly.
-  const curatorProfileId = series?.curatorProfileId ?? null;
+  const curatorProfileId = series && series !== "loading" && series !== "error" ? series.curatorProfileId : null;
   useEffect(() => {
     if (!curatorProfileId) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", curatorProfileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [curatorProfileId]);
+      (e) => { console.error("SeriesDetail: profile onSnapshot failed", e); setProfile("error"); });
+  }, [curatorProfileId, retryKey]);
   useEffect(() => {
     if (!curatorProfileId) return;
     const { db } = getFirebase();
     return onSnapshot(
       query(collection(db, "gigs"), where("curatorProfileId", "==", curatorProfileId), where("seriesId", "==", seriesId)),
-      (s) => setOccurrences(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) })).sort((a, b) => a.startsAt - b.startsAt)));
-  }, [curatorProfileId, seriesId]);
+      (s) => setOccurrences(s.docs.map((d) => ({ id: d.id, ...(d.data() as GigDoc) })).sort((a, b) => a.startsAt - b.startsAt)),
+      (e) => { console.error("SeriesDetail: occurrences onSnapshot failed", e); setOccurrences("error"); });
+  }, [curatorProfileId, seriesId, retryKey]);
 
-  if (!user || !series || !profile) {
+  if (!user || series === "loading" || profile === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -171,6 +175,29 @@ export default function SeriesDetail() {
           <Skeleton height={28} width="60%" />
           <SkeletonCard />
           <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (series === "error" || profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setSeries("loading"); setProfile("loading"); setRetryKey((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!series || !profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
+          <Text variant="title">Series not found</Text>
+          <Button title="Back to gigs" variant="secondary" onPress={() => router.push("/(curator)/events")} />
         </View>
       </View>
     );
@@ -234,19 +261,29 @@ export default function SeriesDetail() {
         </View>
         <View style={{ gap: 8 }}>
           <Text variant="title">Occurrences</Text>
-          {occurrences.length === 0 && (
-            <Text muted>No dates yet. The daily sweep materializes upcoming occurrences from this template automatically.</Text>
+          {occurrences === "error" ? (
+            <View style={{ gap: tokens.space.sm }}>
+              <ErrorBanner message="Couldn't load this. Retry." />
+              <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+                onPress={() => { setOccurrences([]); setRetryKey((n) => n + 1); }} />
+            </View>
+          ) : (
+            <>
+              {occurrences.length === 0 && (
+                <Text muted>No dates yet. The daily sweep materializes upcoming occurrences from this template automatically.</Text>
+              )}
+              {occurrences.map((occ) => (
+                <Pressable key={occ.id} onPress={() => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId: occ.id } })}>
+                  <Card style={{ padding: tokens.space.md, gap: 4 }}>
+                    <Text variant="label">{formatGigDateTime(occ.startsAt)}</Text>
+                    <Text variant="meta" muted>
+                      {GIG_STATUS_LABEL[occ.status]}{occ.detachedFromTemplate && " · detached"}
+                    </Text>
+                  </Card>
+                </Pressable>
+              ))}
+            </>
           )}
-          {occurrences.map((occ) => (
-            <Pressable key={occ.id} onPress={() => router.push({ pathname: "/(curator)/events/[gigId]", params: { gigId: occ.id } })}>
-              <Card style={{ padding: tokens.space.md, gap: 4 }}>
-                <Text variant="label">{formatGigDateTime(occ.startsAt)}</Text>
-                <Text variant="meta" muted>
-                  {GIG_STATUS_LABEL[occ.status]}{occ.detachedFromTemplate && " · detached"}
-                </Text>
-              </Card>
-            </Pressable>
-          ))}
         </View>
       </ScrollView>
     </View>

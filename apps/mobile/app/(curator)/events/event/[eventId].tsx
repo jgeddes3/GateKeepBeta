@@ -88,7 +88,10 @@ export default function EventManagementScreen() {
   const { user } = useAuth();
   const router = useRouter();
   const t = useTokens();
-  const [event, setEvent] = useState<EventDoc | null>(null);
+  // Four-way sentinel (audit #11), see (curator)/dashboard.tsx's identical
+  // comment.
+  const [event, setEvent] = useState<EventDoc | "loading" | "error" | null>("loading");
+  const [eventRetry, setEventRetry] = useState(0);
   const [showCancel, setShowCancel] = useState(false);
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
@@ -107,15 +110,15 @@ export default function EventManagementScreen() {
   // does not remount when navigating from one event's management screen
   // directly to another's (same route pattern, different eventId).
   const [loadedEventId, setLoadedEventId] = useState(eventId);
-  if (eventId !== loadedEventId) { setLoadedEventId(eventId); setEvent(null); }
+  if (eventId !== loadedEventId) { setLoadedEventId(eventId); setEvent("loading"); }
 
   useEffect(() => {
     if (!eventId) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "events", eventId),
       (s) => setEvent(s.exists() ? (s.data() as EventDoc) : null),
-      () => setEvent(null));
-  }, [eventId]);
+      (e) => { console.error("EventManagementScreen: event onSnapshot failed", e); setEvent("error"); });
+  }, [eventId, eventRetry]);
 
   // Tiers one-shot buffer for TierEditor (see that file's own header comment
   // on why this is deliberately not a live subscription): re-fetched only
@@ -134,7 +137,7 @@ export default function EventManagementScreen() {
     return () => { cancelled = true; };
   }, [eventId]);
 
-  if (!user || !event || initialTiers === "loading") {
+  if (!user || event === "loading" || initialTiers === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -142,6 +145,29 @@ export default function EventManagementScreen() {
           <Skeleton height={28} width="60%" />
           <SkeletonCard />
           <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (event === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setEvent("loading"); setEventRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!event) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
+          <Text variant="title">Event not found</Text>
+          <Button title="Back to gigs" variant="secondary" onPress={() => router.push("/(curator)/events")} />
         </View>
       </View>
     );

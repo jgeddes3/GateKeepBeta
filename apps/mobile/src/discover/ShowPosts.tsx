@@ -10,7 +10,7 @@ import { getFirebase } from "../lib/firebase";
 import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { useProfileContext } from "../shell/ProfileContext";
-import { Text, Card, Button, TextArea, Sheet, ErrorBanner, IconTrash, IconHeart } from "../ui";
+import { Text, Card, Button, TextArea, Sheet, ErrorBanner, Skeleton, IconTrash, IconHeart } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -224,7 +224,7 @@ export function ShowPostsForAct({ eventId, musicianProfileId, artistName, endsAt
 
   return (
     <View style={{ gap: tokens.space.sm }}>
-      {posts === "loading" && <Text variant="meta" muted>Loading posts…</Text>}
+      {posts === "loading" && <Skeleton height={14} width="60%" />}
       {posts !== "loading" && posts.length > 0 && (
         <View style={{ gap: tokens.space.xs }}>
           {posts.map((p) => (

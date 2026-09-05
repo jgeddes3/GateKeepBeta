@@ -206,7 +206,11 @@ export function ScannerScreen({ curatorProfileId, eventId }: { curatorProfileId:
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
         <PageBackground />
-        <ActivityIndicator color={t.accent} />
+        <View accessibilityRole="progressbar" accessibilityLabel="Checking camera access"
+          style={{ alignItems: "center", gap: tokens.space.sm }}>
+          <ActivityIndicator color={t.accent} />
+          <Text muted>Checking camera access</Text>
+        </View>
       </View>
     );
   }

@@ -29,7 +29,10 @@ export default function NewGigOrSeries() {
   const { activeContext } = useProfileContext();
   const profileId = typeof activeContext === "object" && activeContext.type === "curator"
     ? activeContext.profileId : null;
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
+  // Four-way sentinel (audit #11), see (curator)/dashboard.tsx's identical
+  // comment.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [profileRetry, setProfileRetry] = useState(0);
   const [isSeries, setIsSeries] = useState(false);
   const [content, setContent] = useState(emptyContent());
   const [budget, setBudget] = useState(emptyBudget());
@@ -57,7 +60,7 @@ export default function NewGigOrSeries() {
     setLastProfileId(profileId);
     // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
-    setProfile(null);
+    setProfile("loading");
   }
 
   useEffect(() => {
@@ -66,8 +69,12 @@ export default function NewGigOrSeries() {
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", profileId),
       (s) => { if (activeIdRef.current !== forId) return; setProfile(s.exists() ? (s.data() as ProfileDoc) : null); },
-      () => { if (activeIdRef.current !== forId) return; setProfile(null); });
-  }, [profileId]);
+      (e) => {
+        if (activeIdRef.current !== forId) return;
+        console.error("NewGigOrSeries: profile onSnapshot failed", e);
+        setProfile("error");
+      });
+  }, [profileId, profileRetry]);
 
   if (!user || !profileId) {
     return (
@@ -80,13 +87,36 @@ export default function NewGigOrSeries() {
       </View>
     );
   }
-  if (!profile) {
+  if (profile === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
         <View style={{ padding: tokens.space.lg, gap: tokens.space.lg }}>
           <Skeleton height={28} width="60%" />
           <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
         </View>
       </View>
     );

@@ -126,9 +126,12 @@ export default function GigEditor() {
   const { user } = useAuth();
   const router = useRouter();
   const t = useTokens();
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
-  const [gig, setGig] = useState<GigDoc | null>(null);
-  const [privateLoc, setPrivateLoc] = useState<GigPrivateLocation | null | "loading">("loading");
+  // Four-way sentinel (audit #11) for both docs, see (curator)/dashboard.tsx's
+  // identical comment.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [gig, setGig] = useState<GigDoc | "loading" | "error" | null>("loading");
+  const [privateLoc, setPrivateLoc] = useState<GigPrivateLocation | null | "loading" | "error">("loading");
+  const [retryKey, setRetryKey] = useState(0);
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
@@ -140,15 +143,15 @@ export default function GigEditor() {
   // (and stale gig doc) until the new subscriptions resolve. Mirrors web's
   // identical privLocGigId trick.
   const [privLocGigId, setPrivLocGigId] = useState(gigId);
-  if (gigId !== privLocGigId) { setPrivLocGigId(gigId); setPrivateLoc("loading"); setGig(null); setProfile(null); }
+  if (gigId !== privLocGigId) { setPrivLocGigId(gigId); setPrivateLoc("loading"); setGig("loading"); setProfile("loading"); }
 
   useEffect(() => {
     if (!gigId) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "gigs", gigId),
       (s) => setGig(s.exists() ? (s.data() as GigDoc) : null),
-      () => setGig(null));
-  }, [gigId]);
+      (e) => { console.error("GigEditor: gig onSnapshot failed", e); setGig("error"); });
+  }, [gigId, retryKey]);
   // The gig's OWN curatorProfileId, not whichever profile happens to be
   // "active" in the global ContextSwitcher, those are independent, and a
   // curator can switch their active profile while this screen (reached by a
@@ -160,14 +163,14 @@ export default function GigEditor() {
   // anywhere but the gig doc itself. Only transitions when gigId itself
   // changes (already handled by the render-time reset above), so no extra
   // late-callback guard is needed here.
-  const curatorProfileId = gig?.curatorProfileId ?? null;
+  const curatorProfileId = gig && gig !== "loading" && gig !== "error" ? gig.curatorProfileId : null;
   useEffect(() => {
     if (!curatorProfileId) return;
     const { db } = getFirebase();
     return onSnapshot(doc(db, "profiles", curatorProfileId),
       (s) => setProfile(s.exists() ? (s.data() as ProfileDoc) : null),
-      () => setProfile(null));
-  }, [curatorProfileId]);
+      (e) => { console.error("GigEditor: profile onSnapshot failed", e); setProfile("error"); });
+  }, [curatorProfileId, retryKey]);
   useEffect(() => {
     if (!gigId) return;
     const { db } = getFirebase();
@@ -177,11 +180,11 @@ export default function GigEditor() {
     let cancelled = false;
     void getDoc(doc(db, `gigs/${gigId}/private/location`))
       .then((s) => { if (!cancelled) setPrivateLoc(s.exists() ? (s.data() as GigPrivateLocation) : null); })
-      .catch(() => { if (!cancelled) setPrivateLoc(null); });
+      .catch((e) => { console.error("GigEditor: private location getDoc failed", e); if (!cancelled) setPrivateLoc("error"); });
     return () => { cancelled = true; };
-  }, [gigId]);
+  }, [gigId, retryKey]);
 
-  if (!user || !gig || !profile || privateLoc === "loading") {
+  if (!user || gig === "loading" || profile === "loading" || privateLoc === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -189,6 +192,29 @@ export default function GigEditor() {
           <Skeleton height={28} width="60%" />
           <SkeletonCard />
           <SkeletonCard />
+        </View>
+      </View>
+    );
+  }
+  if (gig === "error" || profile === "error" || privateLoc === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setGig("loading"); setProfile("loading"); setPrivateLoc("loading"); setRetryKey((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!gig || !profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.md }}>
+          <Text variant="title">Gig not found</Text>
+          <Button title="Back to gigs" variant="secondary" onPress={() => router.push("/(curator)/events")} />
         </View>
       </View>
     );

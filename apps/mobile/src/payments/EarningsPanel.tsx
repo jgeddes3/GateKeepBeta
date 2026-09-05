@@ -14,7 +14,7 @@ import {
   instantFeePreviewCents,
   type PaymentDoc, type ProfileType, type StripeStatusResult,
 } from "@gatekeep/shared";
-import { Text, Button, Input, Callout, Skeleton } from "../ui";
+import { Text, Button, Input, Callout, Skeleton, SkeletonCard } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
 import { tokens } from "../theme/tokens";
 
@@ -128,7 +128,9 @@ function PendingSettlementsList({ rows }: { rows: PaymentRow[] }) {
   const pending = rows
     .filter((r) => r.settlement.status === "pending" || r.settlement.status === "past_due")
     .sort((a, b) => a.occurrenceStartsAt - b.occurrenceStartsAt);
-  if (pending.length === 0) return <Text muted>Nothing pending.</Text>;
+  if (pending.length === 0) {
+    return <Text muted>Nothing pending right now. A confirmed date shows up here once it&apos;s played and waiting to settle.</Text>;
+  }
   return (
     <View style={{ gap: tokens.space.sm }}>
       {pending.map((r) => (
@@ -296,7 +298,12 @@ export function EarningsPanel({ profileId, type }: { profileId: string; type: Pr
 
   return (
     <View style={{ gap: tokens.space.lg }}>
-      {status === "loading" && <Text muted>Loading…</Text>}
+      {status === "loading" && (
+        <View style={{ gap: tokens.space.sm }}>
+          <SkeletonCard />
+          <SkeletonCard />
+        </View>
+      )}
       {status === "error" && (
         <View style={{ gap: tokens.space.sm }}>
           <Callout tone="warning"><Text color={t.warning}>Couldn&apos;t load payout status.</Text></Callout>

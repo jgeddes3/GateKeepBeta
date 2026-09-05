@@ -55,7 +55,15 @@ export default function Portfolio() {
   const t = useTokens();
   const profileId = typeof activeContext === "object" && activeContext.type === "musician"
     ? activeContext.profileId : null;
-  const [profile, setProfile] = useState<ProfileDoc | null>(null);
+  // Four-way sentinel (audit #11), see the `booking` doc below (already this
+  // shape) and (curator)/dashboard.tsx's identical comment.
+  const [profile, setProfile] = useState<ProfileDoc | "loading" | "error" | null>("loading");
+  const [profileRetry, setProfileRetry] = useState(0);
+  // Tracks listener used to log-only on a failed read (audit #12): now
+  // surfaces a small retryable banner near the track manager instead of
+  // leaving the submit-lock silently stuck on stale data.
+  const [tracksError, setTracksError] = useState(false);
+  const [tracksRetry, setTracksRetry] = useState(0);
   // Four states. "loading" is load-bearing, not just a nicety: BookingForm
   // seeds its local rate inputs from `initial` on mount: if `initial` were
   // `null` for the ordinary "getDoc hasn't resolved yet" case
@@ -125,9 +133,10 @@ export default function Portfolio() {
     // after commit+paint) this closes.
     // eslint-disable-next-line react-hooks/refs
     activeIdRef.current = profileId;
-    setProfile(null);
+    setProfile("loading");
     setBooking("loading");
     setTracks([]);
+    setTracksError(false);
   }
 
   useEffect(() => {
@@ -146,11 +155,12 @@ export default function Portfolio() {
         if (activeIdRef.current !== forId) return;
         setProfile(s.exists() ? (s.data() as ProfileDoc) : null);
       },
-      // A read failure (offline, a rules edge case) is treated as "gone"
-      // rather than left stale, same as web's page.tsx.
-      () => {
+      // A read failure (offline, a rules edge case) is now its own "error"
+      // sentinel (audit #11), distinct from `null` (genuinely no such doc).
+      (e) => {
         if (activeIdRef.current !== forId) return;
-        setProfile(null);
+        console.error("Portfolio: profile onSnapshot failed", e);
+        setProfile("error");
       });
     let cancelled = false;
     void getDoc(doc(db, `profiles/${profileId}/private/booking`))
@@ -168,7 +178,7 @@ export default function Portfolio() {
         setBooking("error");
       });
     return () => { cancelled = true; unsub(); };
-  }, [profileId, bookingRetry]);
+  }, [profileId, bookingRetry, profileRetry]);
 
   // Own subscription, separate from TrackManager's below: the submit-lock
   // gate needs live track statuses at THIS level (to enable/disable the
@@ -186,14 +196,19 @@ export default function Portfolio() {
       (s) => {
         if (activeIdRef.current !== forId) return;
         setTracks(s.docs.map((d) => ({ id: d.id, ...(d.data() as TrackDoc) })));
+        setTracksError(false);
       },
+      // Was log-only (audit #12): the submit-lock gate above silently kept
+      // stale track data forever on a failed read. Now surfaces a small
+      // retryable banner near the track manager below instead.
       (e) => {
         if (activeIdRef.current !== forId) return;
         console.error("tracks onSnapshot failed", e);
+        setTracksError(true);
       });
-  }, [profileId]);
+  }, [profileId, tracksRetry]);
 
-  if (!user || !profileId || !profile || booking === "loading") {
+  if (!user || !profileId || profile === "loading" || booking === "loading") {
     return (
       <View style={{ flex: 1 }}>
         <PageBackground />
@@ -211,6 +226,29 @@ export default function Portfolio() {
             <SkeletonCard />
           </ScrollView>
         )}
+      </View>
+    );
+  }
+  if (profile === "error") {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ padding: tokens.space.lg, gap: tokens.space.md }}>
+          <ErrorBanner message="Couldn't load this. Retry." />
+          <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+            onPress={() => { setProfile("loading"); setProfileRetry((n) => n + 1); }} />
+        </View>
+      </View>
+    );
+  }
+  if (!profile) {
+    return (
+      <View style={{ flex: 1 }}>
+        <PageBackground />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: tokens.space.xl, gap: tokens.space.sm }}>
+          <Text variant="title">Profile not found</Text>
+          <Text muted style={{ textAlign: "center" }}>This profile may have been deleted.</Text>
+        </View>
       </View>
     );
   }
@@ -300,6 +338,13 @@ export default function Portfolio() {
         <BioGenresForm key={profileId} profileId={profileId} initial={profile.portfolio} />
         <LinksForm key={profileId} profileId={profileId} initial={profile.portfolio} />
         <TrackManager profileId={profileId} />
+        {tracksError && (
+          <View style={{ gap: tokens.space.sm }}>
+            <ErrorBanner message="Couldn't check your tracks. Retry." />
+            <Button title="Retry" variant="secondary" style={{ alignSelf: "flex-start" }}
+              onPress={() => setTracksRetry((n) => n + 1)} />
+          </View>
+        )}
         {booking === "error" ? (
           <View style={{ gap: tokens.space.sm }}>
             <Text variant="title">Rates & preferences</Text>
