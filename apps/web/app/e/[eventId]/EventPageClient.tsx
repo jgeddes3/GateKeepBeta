@@ -12,6 +12,8 @@ import { PhotoPlaceholder } from "../../../src/components/GigCard";
 import { FollowsProvider } from "../../../src/discover/useFollows";
 import { FollowButton } from "../../../src/discover/FollowButton";
 import { ShowPostsForAct } from "../../../src/discover/ShowPosts";
+import { GoingButton } from "../../../src/events/GoingButton";
+import { EventComments } from "../../../src/events/EventComments";
 import { IconMapPin, IconTicket } from "../../../src/ui/icons";
 import { ShareButton } from "../../../src/share/ShareButton";
 import { Badge } from "../../../src/ui/badge";
@@ -195,6 +197,19 @@ export function EventPageClient({ eventId, event, posterUrl, curatorName, curato
               </p>
             </section>
           )}
+
+          {/* SP12 (spec 3.2): the show's reaction row and its fan comments,
+              under the lineup and above the tickets block. */}
+          <section className="mt-6 border-t border-gk-border pt-6">
+            <GoingButton eventId={eventId} eventStatus={event.status} initialCount={event.goingCount ?? 0} />
+            <EventComments
+              eventId={eventId}
+              eventStatus={event.status}
+              curatorProfileId={event.curatorProfileId}
+              lineupMusicianProfileIds={event.lineupMusicianProfileIds}
+              commentCount={event.commentCount ?? 0}
+            />
+          </section>
 
           {/* 6. TICKETS: the tier picker + sticky Buy button. */}
           <section className="mt-8 border-t border-gk-border pt-6">

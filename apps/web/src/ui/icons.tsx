@@ -16,9 +16,11 @@ import {
   Circle,
   Compass,
   DotsThreeVertical,
+  EyeSlash,
   FunnelSimple,
   Globe,
   GoogleLogo,
+  Heart,
   House,
   Image,
   Images,
@@ -203,3 +205,13 @@ export const IconShare = pin(ShareNetwork);
 export function IconRadioDot(props: Omit<IconProps, "weight">) {
   return <Circle {...props} weight="fill" />;
 }
+
+// Sub-project 12 task 8: fan comments and reactions on the public event
+// page. Heart is the lineup-post heart's own glyph (the one accent touch on
+// that row, ShowPosts.tsx's own comment) and the "Going" toggle needs no
+// icon of its own (its label + count already say what it is). EyeSlash
+// names Hide distinctly from IconTrash's Delete (antislop R-04: two
+// different, non-reversible-looking actions on the same comment row need
+// two different marks, not one glyph doing double duty).
+export const IconHeart = pin(Heart);
+export const IconEyeSlash = pin(EyeSlash);

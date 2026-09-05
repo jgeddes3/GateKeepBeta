@@ -10,7 +10,7 @@ import { callFn } from "../lib/callable";
 import { useAuth } from "../auth/AuthProvider";
 import { Textarea } from "../ui/textarea";
 import { Button } from "../ui/button";
-import { IconTrash, IconWarning } from "../ui/icons";
+import { IconHeart, IconTrash, IconWarning } from "../ui/icons";
 
 // Task 9: a musician's "show note" thread on one event, and its one-line
 // preview. Two exports because the two call sites (MusicianProfile.tsx's
@@ -54,6 +54,7 @@ function showPostErrorMessage(e: unknown): string {
 function PostRowItem({ post, canRemove, onRemoved }: {
   post: PostRow; canRemove: boolean; onRemoved: (postId: string) => void;
 }) {
+  const { user } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,6 +67,47 @@ function PostRowItem({ post, canRemove, onRemoved }: {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove. Try again.");
       setBusy(false);
+    }
+  };
+
+  // SP12 (spec 3.2): one heart per signed-in user per lineup post. The
+  // count comes off the post doc (server-maintained by setPostHeart), the
+  // "did I heart it" flag from a single getDoc on the per-user heart doc,
+  // which the rules allow any signed-in caller to read (never a list).
+  const [hearted, setHearted] = useState(false);
+  const [heartCount, setHeartCount] = useState(post.heartCount ?? 0);
+  const [hearting, setHearting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const lookup = user
+      ? getDoc(doc(getFirebase().db, `events/${post.eventId}/posts/${post.id}/hearts/${user.uid}`))
+        .then((snap) => snap.exists())
+        .catch(() => false)
+      : Promise.resolve(false);
+    lookup.then((isHearted) => { if (!cancelled) setHearted(isHearted); });
+    return () => { cancelled = true; };
+  }, [post.eventId, post.id, user]);
+
+  const toggleHeart = async () => {
+    if (!user || hearting) return;
+    const prevHearted = hearted;
+    const prevCount = heartCount;
+    const next = !hearted;
+    setHearted(next);
+    setHeartCount(Math.max(0, prevCount + (next ? 1 : -1)));
+    setHearting(true);
+    try {
+      const res = await callFn<{ eventId: string; postId: string; hearted: boolean }, { hearted: boolean; heartCount: number }>(
+        "setPostHeart", { eventId: post.eventId, postId: post.id, hearted: next },
+      );
+      setHearted(res.data.hearted);
+      setHeartCount(res.data.heartCount);
+    } catch {
+      setHearted(prevHearted);
+      setHeartCount(prevCount);
+    } finally {
+      setHearting(false);
     }
   };
 
@@ -82,7 +124,22 @@ function PostRowItem({ post, canRemove, onRemoved }: {
           </button>
         )}
       </div>
-      <p className="font-sora text-xs text-gk-muted">{new Date(post.createdAt).toLocaleString()}</p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-sora text-xs text-gk-muted">{new Date(post.createdAt).toLocaleString()}</p>
+        {/* SP12 (spec 3.2): the post's ONE ember touch, and the only accent
+            on this row (ShowPosts.tsx's own comment above PostRowItem). */}
+        <button
+          type="button"
+          aria-label={hearted ? `Remove your heart from this post (${heartCount})` : `Heart this post (${heartCount})`}
+          aria-pressed={hearted}
+          disabled={!user || hearting}
+          onClick={() => void toggleHeart()}
+          className="flex shrink-0 items-center gap-1 rounded-gk-sm px-1.5 py-1 font-sora text-xs text-gk-muted outline-none hover:text-gk-text focus-visible:ring-2 focus-visible:ring-gk-focus disabled:opacity-50"
+        >
+          <IconHeart size={14} aria-hidden="true" className={hearted ? "text-gk-accent" : undefined} />
+          {heartCount}
+        </button>
+      </div>
       {error && <p role="alert" className="font-sora text-xs text-gk-destructive">{error}</p>}
     </li>
   );
