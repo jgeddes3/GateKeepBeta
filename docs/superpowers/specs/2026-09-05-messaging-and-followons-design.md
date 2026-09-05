@@ -179,11 +179,17 @@ launch.
   tagged act, else fan); 10 comments per 10 minutes per user; writes the comment, increments
   `commentCount`; a curator or artist reply to a fan's comment notifies the fan under
   `comment_reply:{commentId}`.
-- `hideComment({ eventId, commentId })`: curator member or artist member of the event (or admin);
-  sets `hidden` and `hiddenBy`. `deleteComment({ eventId, commentId })`: the author; deletes the
-  doc (replies to it stay, rendered with "Comment deleted" as the quoted parent).
-- `setGoing({ eventId, going })` and `setPostHeart({ eventId, postId, hearted })`: signed in;
-  toggles the per-user doc and adjusts the count in one transaction.
+- `hideComment({ eventId, commentId, hidden? })`: curator member or artist member of the event
+  (or admin) hides; only an admin may pass `hidden: false` to unhide (clearing `hiddenBy`).
+  `commentCount` counts visible comments: hide decrements, unhide increments.
+  `deleteComment({ eventId, commentId })`: the author; refused while the comment is hidden or
+  has an open report ("This comment cannot be deleted while it is hidden or reported."); deletes
+  the doc and decrements the count (replies to it stay, rendered with "Comment deleted" as the
+  quoted parent). A reply to a hidden parent is refused.
+- `setGoing({ eventId, going })` and `setPostHeart({ eventId, postId, hearted })`: verified
+  email; the event open (published or completed) and, for hearts, the post `live`; 60 toggles
+  per 10 minutes per user (a second array on `commentWindows/{uid}`); toggles the per-user doc
+  and adjusts the count in one transaction.
 - The event cascade on cancel or takedown does not delete comments; the composer closes on the
   client by event status.
 
@@ -197,7 +203,8 @@ launch.
 - Comments: "Going"; "Add a comment"; "Reply"; "Hide"; "Delete"; "Comments are closed."; "No
   comments yet."; "Comments are 1 to 500 characters."; "Hidden by {who}"; "Comment deleted";
   notification title "{name} replied to your comment".
-- Admin: "Reports"; "Resolve"; "Open conversation"; "Hide comment"; "No open reports."
+- Admin: "Reports"; "Resolve"; "Open conversation"; "Hide comment"; "Unhide"; "No open reports."
+- Comment refusals: "This comment cannot be deleted while it is hidden or reported."
 - Follow-ons: "Whole numbers only."; "No tickets on sale yet."; "New"; "Show more"; dialog
   primitives "Confirm", "Cancel".
 
