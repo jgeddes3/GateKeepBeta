@@ -3,6 +3,7 @@ import { View, Pressable, Alert } from "react-native";
 import { useRouter } from "expo-router";
 import { useAuth } from "../auth/AuthProvider";
 import { callFn } from "../lib/callable";
+import { EditAccountSheet } from "../account/EditAccountSheet";
 import { NotificationsList } from "./NotificationsList";
 import { Text, Button, Card, ThemeToggle, PageBackground, IconCaretRight, ErrorBanner } from "../ui";
 import { useTokens } from "../theme/ThemeProvider";
@@ -21,6 +22,9 @@ export function AccountScreen() {
   // renders inline under the button instead of a native alert, so the user
   // can act on it with the rest of the screen still in view.
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // SP11 Task 13 (spec section 3.3): the mobile twin of the web Account
+  // card, opened as a sheet rather than a page section.
+  const [editing, setEditing] = useState(false);
   const deleteAccount = () => {
     Alert.alert("Delete account", "This permanently deletes your account and data. Continue?",
       [{ text: "Cancel", style: "cancel" },
@@ -43,7 +47,19 @@ export function AccountScreen() {
       <View style={{ flex: 1, padding: tokens.space.xl, gap: tokens.space.lg }}>
         <Text variant="title">{user?.email}</Text>
         <Card style={{ gap: tokens.space.md }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.md }}>
+          {/* SP11 Task 13: the FIRST row (above Appearance), same shape as
+              Following / Saved searches / Payouts below. */}
+          <Pressable
+            onPress={() => setEditing(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Edit account"
+            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.md }}
+          >
+            <Text variant="label">Edit account</Text>
+            <IconCaretRight size={16} color={t.muted} />
+          </Pressable>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: tokens.space.md,
+            borderTopWidth: 1, borderTopColor: t.border, paddingTop: tokens.space.md }}>
             <Text variant="label">Appearance</Text>
             <ThemeToggle />
           </View>
@@ -92,6 +108,7 @@ export function AccountScreen() {
         <ErrorBanner message={deleteError} />
         <NotificationsList />
       </View>
+      <EditAccountSheet visible={editing} onClose={() => setEditing(false)} />
     </View>
   );
 }

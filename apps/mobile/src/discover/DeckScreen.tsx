@@ -21,6 +21,7 @@ import { GenrePickerSheet, useGenrePickerGate } from "./GenrePickerSheet";
 import { LocationPromptSheet } from "./LocationPromptSheet";
 import { useDeckAudio } from "./useDeckAudio";
 import { useDeckLocation, type DeckLocation } from "./useDeckLocation";
+import { useHomeGeo } from "./useHomeGeo";
 import {
   Text, Card, Chip, Button, ErrorBanner, SkeletonCard, PageBackground, PhotoPlaceholder,
   IconCompass, IconListBullets, IconMusicNotes, IconSpeakerHigh, IconSpeakerSlash, IconTicket,
@@ -170,7 +171,13 @@ export function DeckScreen() {
   const { user } = useAuth();
   const audio = useDeckAudio();
   const location = useDeckLocation();
+  const home = useHomeGeo(user?.uid ?? null);
   const genreGate = useGenrePickerGate(user?.uid ?? null);
+  // SP11: device position when the fan granted it, else the account's saved
+  // home city point. `location: null` is still never sent (the callable
+  // rejects it), so with neither the key is simply omitted and the deck is
+  // unranked by distance, exactly as before.
+  const position = location.location ?? home.homeGeo;
 
   const [cards, setCards] = useState<DeckCard[]>([]);
   const [loading, setLoading] = useState(true);
@@ -213,7 +220,7 @@ export function DeckScreen() {
       // key is omitted entirely when there is no position. A reset asks for a
       // fresh deck: no exclusions, no seed, so the server picks a new one.
       const input: GetDiscoverDeckInput = {};
-      if (location.location) input.location = location.location;
+      if (position) input.location = position;
       if (!reset) {
         if (shownIds.current.length > 0) input.excludeIds = shownIds.current;
         if (seed.current != null) input.seed = seed.current;
@@ -263,7 +270,7 @@ export function DeckScreen() {
         setRefreshing(false);
       }
     }
-  }, [location.location]);
+  }, [position]);
 
   const cardCount = useRef(0);
   useEffect(() => {
@@ -275,16 +282,19 @@ export function DeckScreen() {
   // The first page, and one more if a position arrives later: the fan can
   // still grant location from the empty state's "Turn on location", and the
   // deck that was ranked without distances has to be re-ranked with them.
-  // useDeckLocation only ever builds one object per fix, so identity is a
-  // fair "same position" test.
+  // useDeckLocation only ever builds one object per fix (and useHomeGeo one
+  // per doc read), so identity is a fair "same position" test. The first
+  // fetch waits for both location.resolving and home.loading to clear so the
+  // opening page is ranked once, with whichever of device position or home
+  // city is available, rather than fetched twice.
   const rankedFor = useRef<DeckLocation | null>(null);
   useEffect(() => {
-    if (location.resolving) return;
-    if (started.current && rankedFor.current === location.location) return;
+    if (location.resolving || home.loading) return;
+    if (started.current && rankedFor.current === position) return;
     started.current = true;
-    rankedFor.current = location.location;
+    rankedFor.current = position;
     void loadPage(true);
-  }, [location.resolving, location.location, loadPage]);
+  }, [location.resolving, home.loading, position, loadPage]);
 
   const onViewableItemsChanged = useCallback((info: { viewableItems: ViewToken[] }) => {
     const first = info.viewableItems.find((v) => v.isViewable);
@@ -450,7 +460,7 @@ export function DeckScreen() {
         </View>
       )}
 
-      <LocationPromptSheet state={location} />
+      <LocationPromptSheet state={location} showHomeCityHint={!home.homeCity} />
 
       <GenrePickerSheet visible={genrePickerVisible} onClose={() => void genreGate.markSeen()} />
     </View>
