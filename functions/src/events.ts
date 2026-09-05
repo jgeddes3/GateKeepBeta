@@ -20,6 +20,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
   isValidDocId, deriveEventGenres, tierProjection, SETTLEMENT_CLAIM_STALE_MS, GIG_ALREADY_PROMOTED_MESSAGE,
+  ARTIST_TAG_UNKNOWN_MESSAGE,
   type AgeRestriction, type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
   type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
   type AttendeeDoc,
@@ -37,6 +38,7 @@ import { stripeSecretKey } from "./stripeClient.js";
 import { refundOrdersForCancelledEvent, type CancelledEventOrdersResult } from "./ticketing.js";
 import { notifyFollowers } from "./follows.js";
 import { announceTargets, showAnnouncedNote, onTheBillNote, showRescheduledNote, notifyLineupMembers } from "./announce.js";
+import { deriveLineupMusicianProfileIds, reconcileTaggedActs, notifyPendingTags } from "./eventArtistTags.js";
 
 const MAX_TIERS_PER_EVENT = 20;
 
@@ -165,19 +167,6 @@ async function verifyLineupBookingActs(
   }
 }
 
-// EventDoc.lineupMusicianProfileIds: server-maintained projection of the
-// lineup's "booking" acts' musicianProfileId, deduplicated. Recomputed
-// wherever lineup is written (create and update both replace lineup
-// wholesale, matching updateGig's full-content-replace convention), so this
-// never needs an incremental diff against the prior value.
-function deriveLineupMusicianProfileIds(lineup: EventAct[]): string[] {
-  const ids = new Set<string>();
-  for (const act of lineup) {
-    if (act.kind === "booking") ids.add(act.musicianProfileId);
-  }
-  return [...ids];
-}
-
 // EventDoc.genres: the discovery-surface genre projection. A curator-set
 // curatorGenres list always wins (deriveEventGenres's own precedence rule);
 // otherwise this reads each booking act's profile once and derives the
@@ -217,6 +206,12 @@ export const createEvent = onCall<CreateEventInput>(
     }
     validateEventInput(input);
     validateLineupIdentity(input.lineup);
+    // SP11: tags are created by tagEventArtist against a saved event, so a
+    // create payload never carries one. Both editors disable the picker
+    // until the event exists and say so.
+    if (input.lineup.some((a) => a.kind === "tagged")) {
+      throw new HttpsError("invalid-argument", ARTIST_TAG_UNKNOWN_MESSAGE);
+    }
     validateSourceInput(input.source);
     const curatorGenres = validateCuratorGenres(input.curatorGenres);
     const posterPath = resolvePosterPath(input.posterPath, input.curatorProfileId);
@@ -335,11 +330,16 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
     throw new HttpsError("failed-precondition", `Cannot edit an event in status "${event.status}".`);
   }
 
+  // SP11: the client resends the whole lineup, tagged acts included. Their
+  // status is server state, so every tagged entry is replaced by the stored
+  // copy and an entry the server has never seen is refused.
+  const lineup = reconcileTaggedActs(event.lineup ?? [], input.lineup);
+
   await eventRef.update({
     title: input.title.trim(), description: input.description.trim(),
     startsAt: input.startsAt, endsAt: input.endsAt,
     maxTicketsPerBuyer: input.maxTicketsPerBuyer ?? DEFAULT_MAX_TICKETS_PER_BUYER,
-    lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup),
+    lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(lineup),
     posterPath, updatedAt: Date.now(),
     // Full-replace, like every other field on this callable: an omitted
     // doorsAt clears the door time and an omitted ageRestriction returns the
@@ -353,7 +353,7 @@ export const updateEvent = onCall<UpdateEventInput>({ region: "us-central1" }, a
   if (event.status === "published") {
     const updated: EventDoc = {
       ...event, title: input.title.trim(), startsAt: input.startsAt, endsAt: input.endsAt,
-      lineup: input.lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(input.lineup), genres,
+      lineup, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(lineup), genres,
     };
     // A lineup addition announces only to the NEW act(s)' own followers.
     // announceTargets(updated) would re-notify the venue/genre followers who
@@ -547,6 +547,7 @@ export const publishEvent = onCall<PublishEventInput>({ region: "us-central1" },
     const published: EventDoc = { ...event, status: "published" };
     await notifyFollowers(announceTargets(published), showAnnouncedNote(input.eventId, published), `announce:${input.eventId}`);
     await notifyLineupMembers(db, published.lineupMusicianProfileIds, onTheBillNote(input.eventId, published), `bill:${input.eventId}`);
+    await notifyPendingTags(db, input.eventId, published);
   } catch (e) {
     console.error(`publishEvent: fan-out failed for event ${input.eventId}`, e);
   }

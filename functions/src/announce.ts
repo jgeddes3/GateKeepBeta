@@ -41,6 +41,16 @@ export function showAnnouncedNote(eventId: string, event: EventDoc): Note {
   };
 }
 
+// SP11: the curator tagged this musician profile on an event lineup. Sent to
+// the musician profile's ADMINS (not every member): accepting is a decision
+// about the act's public page, the same authority level as payout shares.
+export function artistTagNote(eventId: string, event: EventDoc, curatorName: string): Note {
+  return {
+    kind: "artist_tag", refId: eventId, title: "You were tagged on a lineup",
+    body: `${curatorName} tagged you on ${event.title}.`,
+  };
+}
+
 export function onTheBillNote(eventId: string, event: EventDoc): Note {
   return {
     kind: "show_announced", refId: eventId, title: "You're on the bill",

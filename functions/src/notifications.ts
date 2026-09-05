@@ -96,8 +96,12 @@ export async function notifyProfileMembers(profileId: string, note: Omit<Notific
 
 // SP5c: some notes (e.g. a payout-share change) are for profile admins only,
 // not every member. Same query shape and error posture as notifyProfileMembers
-// above, just filtered to role == "admin".
-export async function notifyProfileAdmins(profileId: string, note: Omit<NotificationDoc, "read" | "createdAt">) {
+// above, just filtered to role == "admin". SP11 widens this with an optional
+// dedupeKey (eventArtistTags.ts's artist_tag fan-out); the SP5c caller passes
+// two arguments and is unaffected.
+export async function notifyProfileAdmins(
+  profileId: string, note: Omit<NotificationDoc, "read" | "createdAt">, dedupeKey?: string,
+) {
   const admins = await getFirestore().collection(`profiles/${profileId}/members`).where("role", "==", "admin").get();
-  await Promise.all(admins.docs.map((m) => notifyUser(m.id, note)));
+  await Promise.all(admins.docs.map((m) => notifyUser(m.id, note, dedupeKey)));
 }

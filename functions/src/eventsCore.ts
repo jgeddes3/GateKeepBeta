@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { HttpsError } from "firebase-functions/v2/https";
 import {
-  DEFAULT_TICKET_FEE_POLICY, GENRES, AGE_RESTRICTIONS, DOORS_MAX_BEFORE_START_MS,
+  DEFAULT_TICKET_FEE_POLICY, GENRES, AGE_RESTRICTIONS, DOORS_MAX_BEFORE_START_MS, isValidDocId,
   EVENT_DOORS_MESSAGE, EVENT_AGE_MESSAGE,
   type AgeRestriction, type EventAct, type TicketFeePolicy, type TicketOrderItem, type TicketTierDoc,
 } from "@gatekeep/shared";
@@ -123,11 +123,18 @@ export function validateEventInput(input: {
   }
   for (const act of input.lineup) {
     if (typeof act !== "object" || act === null
-        || (act.kind !== "booking" && act.kind !== "external")) {
+        || (act.kind !== "booking" && act.kind !== "external" && act.kind !== "tagged")) {
       throw new HttpsError("invalid-argument", "Invalid lineup act.");
     }
     if (typeof act.name !== "string" || act.name.trim().length < 1 || act.name.trim().length > 80) {
       throw new HttpsError("invalid-argument", "Act names must be 1-80 characters.");
+    }
+    // SP11: a "tagged" act's status, taggedAt and respondedAt are server
+    // state. This only checks the shape is well formed; events.ts's
+    // reconcileTaggedActs is what refuses a payload that invents an act or
+    // rewrites a stored one's status.
+    if (act.kind === "tagged" && !isValidDocId(act.musicianProfileId)) {
+      throw new HttpsError("invalid-argument", "Invalid lineup act.");
     }
   }
   if (input.maxTicketsPerBuyer !== undefined) {

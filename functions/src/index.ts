@@ -31,6 +31,7 @@ export { createMemberOnboardingLink, getMemberPayoutStatus, requestMemberPayout 
 export { getPayoutHistory } from "./payoutHistory.js";
 export { createEvent, updateEvent, setEventTiers, publishEvent, cancelEvent } from "./events.js";
 export { takedownEvent } from "./eventsAdmin.js";
+export { tagEventArtist, untagEventArtist, respondToArtistTag } from "./eventArtistTags.js";
 export {
   createTicketOrder, finalizeTicketOrder, cancelTicketOrder, refundTicket, checkInTicket, undoCheckIn,
   offerTransfer, respondToTransfer,
