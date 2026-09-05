@@ -181,6 +181,17 @@ export const onTrackWrittenSearch = onDocumentWritten("profiles/{profileId}/trac
   }
 });
 
+// Both projections are built by the same code path from the same `now`, so
+// their key order is identical and stringifying is a sound deep-equal here.
+const sameProjection = (a: SearchIndexDoc | null, b: SearchIndexDoc | null): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
+
+// The only event fields rebuildArtistIndex reads (through its published,
+// upcoming-events query and that query's busyDays maths).
+const sameArtistInputs = (a: EventDoc | undefined, b: EventDoc | undefined): boolean =>
+  a?.status === b?.status && a?.startsAt === b?.startsAt && a?.endsAt === b?.endsAt
+  && JSON.stringify(a?.lineupMusicianProfileIds ?? []) === JSON.stringify(b?.lineupMusicianProfileIds ?? []);
+
 export const onEventWrittenSearch = onDocumentWritten("events/{eventId}", async (event) => {
   const eventId = event.params.eventId;
   try {
@@ -188,7 +199,17 @@ export const onEventWrittenSearch = onDocumentWritten("events/{eventId}", async 
     const now = Date.now();
     const before = event.data?.before.data() as EventDoc | undefined;
     const after = event.data?.after.data() as EventDoc | undefined;
-    await applyProjection(db.doc(`searchIndex/${indexDocId("show", eventId)}`), projectShow(eventId, after, now));
+    // SP12: an event doc is now written by every "Going" tap and every comment
+    // (goingCount, commentCount), none of which the search index projects.
+    // Without these guards one reaction loop would rewrite the show doc and
+    // rebuild EVERY lineup artist (a multi-query walk each) per tap.
+    const showBefore = projectShow(eventId, before, now);
+    const showAfter = projectShow(eventId, after, now);
+    const showChanged = !sameProjection(showBefore, showAfter);
+    const artistInputsChanged = !sameArtistInputs(before, after);
+    if (!showChanged && !artistInputsChanged) return;
+    if (showChanged) await applyProjection(db.doc(`searchIndex/${indexDocId("show", eventId)}`), showAfter);
+    if (!artistInputsChanged) return;
     const lineup = new Set<string>([...(before?.lineupMusicianProfileIds ?? []), ...(after?.lineupMusicianProfileIds ?? [])]);
     for (const profileId of lineup) await rebuildArtistIndex(db, profileId, now);
   } catch (e) {

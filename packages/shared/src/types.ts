@@ -1187,6 +1187,10 @@ export interface EventDoc {
   // SP12: server-maintained reaction and comment counters. Absent on every
   // pre-SP12 event doc and read as 0 everywhere.
   goingCount?: number;
+  // VISIBLE comments only (SP12 Task 4 review ruling 5): posting increments,
+  // hiding decrements, unhiding increments again, and deleting decrements only
+  // when the comment was still visible. The client renders this number beside a
+  // list it has already had hidden rows filtered out of, so the two must agree.
   commentCount?: number;
   // SP10 hardening: epoch ms a settlement/takedown-adjacent claim was made
   // against this event (distinct from settlementStartedAt's Stripe-transfer
@@ -1476,6 +1480,15 @@ export const COMMENT_MAX_CHARS = 500;
 export const COMMENT_RATE_MAX = 10;
 export const COMMENT_RATE_WINDOW_MS = 10 * 60 * 1000;
 export const COMMENT_PAGE_SIZE = 20;
+// Reactions are cheap to tap and expensive to serve (every toggle writes the
+// event or post doc, which wakes the search trigger), so they carry their own
+// looser cap over the SAME window. 60 per 10 minutes is far above real use and
+// well below what a held-down toggle would do.
+export const REACTION_RATE_MAX = 60;
+// commentWindows/{uid}: server-only, client-unreadable (firestore.rules), one
+// doc per user holding BOTH rolling windows. `reactions` is absent until the
+// user's first toggle, so every reader treats absence as [].
+export interface CommentWindowDoc { at: number[]; reactions?: number[] }
 
 // events/{eventId}/reactions/{uid}: the "Going" toggle, one doc per user.
 export interface EventReactionDoc { going: boolean; at: number; }

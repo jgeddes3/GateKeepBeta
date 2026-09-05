@@ -241,6 +241,9 @@ export const COMMENT_LENGTH_MESSAGE = "Comments are 1 to 500 characters.";
 export const commentHiddenLine = (who: string): string => `Hidden by ${who}`;
 // The quoted parent of a reply whose parent the author deleted.
 export const COMMENT_DELETED_LINE = "Comment deleted";
+// An author cannot delete their way out of moderation: once a comment is
+// hidden or reported it stays put as the evidence behind that decision.
+export const COMMENT_UNDER_REVIEW_MESSAGE = "This comment cannot be deleted while it is hidden or reported.";
 export const commentReplyNotificationTitle = (name: string): string => `${name} replied to your comment`;
 export const COMMENT_EVENT_CLOSED_MESSAGE = "Comments are closed.";
 
