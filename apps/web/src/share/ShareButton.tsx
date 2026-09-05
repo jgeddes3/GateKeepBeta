@@ -59,7 +59,11 @@ export function ShareButton({ path, title }: { path: string; title: string }) {
       variant="secondary"
       size="sm"
       onClick={() => void onClick()}
-      {...(copied ? { "aria-live": "polite" as const } : {})}
+      // Static, not conditional: a live region has to exist in the DOM
+      // BEFORE its content changes for a screen reader to announce the
+      // change. Added at the same moment as the new label, it usually
+      // announces nothing at all.
+      aria-live="polite"
     >
       <IconShare size={16} aria-hidden="true" />
       {copied ? SHARE_LINK_COPIED_MESSAGE : "Share"}

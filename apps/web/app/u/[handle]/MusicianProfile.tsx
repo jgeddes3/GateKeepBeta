@@ -138,8 +138,19 @@ export function MusicianProfile({ data }: { data: MusicianLoaded }) {
     <main className="flex-1 pb-24">
       {/* 1. HERO (spec 6.4): full-bleed cover with --gk-scrim melting into
           the page, small avatar beside the overlaid Syne name, genre/act-
-          size chips, instant-play, "Offer a gig", and a "Shows" jump link. */}
-      <section className="relative h-72 overflow-hidden sm:h-96">
+          size chips, instant-play, "Offer a gig", and a "Shows" jump link.
+
+          data-theme="dark" is forced on this section deliberately, not a
+          stray override, exactly as HeroCarousel.tsx documents: DESIGN.md
+          makes --gk-scrim the one token that never flips for the light
+          theme, because it always sits over a dark photo. Everything drawn
+          on top of that scrim here (the Syne name, the chips, the buttons)
+          needs the same "always dark" foreground colors, and CSS custom
+          properties cascade from data-theme on a subtree exactly like they
+          do from the root toggle, so gk-text/gk-muted/gk-accent resolve
+          correctly whatever theme the visitor chose, with no new token and
+          no hardcoded hex. */}
+      <section data-theme="dark" className="relative h-72 overflow-hidden sm:h-96">
         {coverUrl ? (
           <img src={coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
         ) : (

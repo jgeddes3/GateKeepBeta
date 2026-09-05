@@ -53,7 +53,10 @@ export function AccountCard({ uid }: { uid: string }) {
     return () => { cancelled = true; };
   }, [uid]);
 
-  const dirty = name !== savedName || city !== savedCity;
+  // Trimmed on both sides, because that is what save actually sends: typing a
+  // trailing space into a field would otherwise enable Save for a write that
+  // stores the identical value.
+  const dirty = name.trim() !== savedName.trim() || city.trim() !== savedCity.trim();
 
   const save = async () => {
     setBusy(true);
@@ -109,7 +112,7 @@ export function AccountCard({ uid }: { uid: string }) {
                 maxLength={80}
                 value={name}
                 disabled={busy}
-                onChange={(e) => { setName(e.target.value); setStatus(null); }}
+                onChange={(e) => { setName(e.target.value); setStatus(null); setError(null); }}
               />
               <p className="font-sora text-xs text-gk-muted">{ACCOUNT_NAME_HELP}</p>
             </div>
@@ -122,7 +125,7 @@ export function AccountCard({ uid }: { uid: string }) {
                 maxLength={80}
                 value={city}
                 disabled={busy}
-                onChange={(e) => { setCity(e.target.value); setStatus(null); }}
+                onChange={(e) => { setCity(e.target.value); setStatus(null); setError(null); }}
               />
               <p className="font-sora text-xs text-gk-muted">{ACCOUNT_CITY_HELP}</p>
             </div>
