@@ -85,7 +85,7 @@ export function FilterChips({ face, filters, onChange, location }: {
     if (DATE_RE.test(text)) onChange({ ...filters, availableOn: text });
   };
 
-  const showChipRow = has("when") || has("freeOnly") || has("hasAudio") || has("nearMe")
+  const showChipRow = has("when") || has("freeOnly") || has("allAges") || has("hasAudio") || has("nearMe")
     || has("budgetMinCents") || has("actSize");
 
   return (
@@ -103,6 +103,11 @@ export function FilterChips({ face, filters, onChange, location }: {
 
           {has("freeOnly") && (
             <Chip label="Free" active={!!filters.freeOnly} onPress={() => onChange({ ...filters, freeOnly: !filters.freeOnly })} />
+          )}
+          {/* SP11 (spec 3.4): the fan-facing all-ages filter. */}
+          {has("allAges") && (
+            <Chip label="All ages only" active={!!filters.allAges}
+              onPress={() => onChange({ ...filters, allAges: !filters.allAges })} />
           )}
           {has("hasAudio") && (
             <Chip label="Has audio" active={!!filters.hasAudio} onPress={() => onChange({ ...filters, hasAudio: !filters.hasAudio })} />

@@ -3,24 +3,26 @@ import { ScrollView, View, Image, Pressable } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { doc, getDoc, getDocs, collection, query, orderBy } from "firebase/firestore";
 import {
+  AGE_RESTRICTION_LABEL, ARTIST_TAG_BANNER_TITLE,
   DEFAULT_TICKET_FEE_POLICY, ticketOrderTotals, SALES_FINAL_LINE,
   EVENT_SOLD_OUT_MESSAGE, EVENT_SALE_CLOSED_MESSAGE, EVENT_BUYER_CAP_MESSAGE, EVENT_NOT_ON_SALE_MESSAGE,
-  type EventAct, type EventDoc, type ProfileDoc, type TicketOrderStatus, type TicketTierDoc,
+  type EventAct, type EventDoc, type ProfileDoc, type TaggedActStatus, type TicketOrderStatus, type TicketTierDoc,
 } from "@gatekeep/shared";
 import { getFirebase } from "../../src/lib/firebase";
 import { callFn } from "../../src/lib/callable";
+import { useAuth } from "../../src/auth/AuthProvider";
 import { useNow } from "../../src/bookings/BookingThread";
 import { gigLocationLabel } from "../../src/bookings/BookingForms";
 import {
-  formatCents, formatEventFullDate, formatEventTimeRange, formatTierPrice, tierFeeLine, tierAvailability,
-  TIER_AVAILABILITY_LABEL, eventSalesClosedReason, posterPublicUrl,
+  formatCents, formatEventFullDate, formatEventTimeRange, formatGigTime, formatTierPrice, tierFeeLine,
+  tierAvailability, TIER_AVAILABILITY_LABEL, eventSalesClosedReason, posterPublicUrl,
 } from "../../src/events/eventDisplay";
 import { stripeEnabled, runPaymentSheet, sheetAppearanceFromTokens } from "../../src/payments/stripe";
 import { PostPurchaseGenrePrompt } from "../../src/discover/GenrePickerSheet";
 import { ShowPostsForAct } from "../../src/discover/ShowPosts";
 import { ShareButton } from "../../src/share/ShareButton";
 import {
-  Text, Button, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
+  Text, Button, Badge, Card, Callout, ErrorBanner, PageBackground, PhotoPlaceholder, Skeleton, SkeletonCard,
   IconTicket, IconMapPin, IconMinus, IconPlus,
 } from "../../src/ui";
 import { useTokens } from "../../src/theme/ThemeProvider";
@@ -65,14 +67,20 @@ type Phase = "idle" | "creating" | "confirm" | "finalizing" | "done";
 // resolveLineup exactly (n+1-avoidance over the UNIQUE booking
 // musicianProfileIds; only the handle is resolved, a "booking" act already
 // carries its own name snapshot).
+// SP11 (spec 3.5): the same widening web's own resolveLineup (page.tsx)
+// took, an ACCEPTED tagged act is public exactly like a booking act; a
+// pending or declined one gets no handle lookup and renders as a plain
+// name below, same as an external act.
+function isLinkable(act: EventAct): act is Extract<EventAct, { kind: "booking" }> | Extract<EventAct, { kind: "tagged" }> & { status: "accepted" } {
+  return act.kind === "booking" || (act.kind === "tagged" && act.status === "accepted");
+}
+
 async function resolveLineup(
   db: ReturnType<typeof getFirebase>["db"], lineup: EventAct[],
 ): Promise<LineupEntry[]> {
-  const bookingIds = [...new Set(
-    lineup.filter((a): a is Extract<EventAct, { kind: "booking" }> => a.kind === "booking")
-      .map((a) => a.musicianProfileId))];
+  const linkableIds = [...new Set(lineup.filter(isLinkable).map((a) => a.musicianProfileId))];
   const handles = new Map<string, string | null>();
-  await Promise.all(bookingIds.map(async (id) => {
+  await Promise.all(linkableIds.map(async (id) => {
     try {
       const snap = await getDoc(doc(db, "profiles", id));
       handles.set(id, snap.exists() ? ((snap.data() as ProfileDoc).handle ?? null) : null);
@@ -82,9 +90,103 @@ async function resolveLineup(
       handles.set(id, null);
     }
   }));
-  return lineup.map((act) => act.kind === "booking"
+  return lineup.map((act) => isLinkable(act)
     ? { name: act.name, handle: handles.get(act.musicianProfileId) ?? null, profileId: act.musicianProfileId }
     : { name: act.name, handle: null, profileId: null });
+}
+
+// SP11 (spec 3.5): the artist side of a curator's "Tag a GateKeep artist"
+// lineup entry, mounted above the poster so a tagged admin sees it before
+// anything else. Only a PENDING tagged act whose musician profile this
+// signed-in uid administers ever produces a card: a self-read of
+// profiles/{musicianProfileId}/members/{uid} (the same clause
+// useProfileRole.ts leans on in firestore.rules) says whether this uid is a
+// member at all, and only "admin" qualifies. Accepted/declined acts never
+// get a card: the banner exists to collect a response, not to re-announce
+// one.
+interface TagBannerAct { musicianProfileId: string; name: string; status: TaggedActStatus }
+type TagActState =
+  | { phase: "idle" | "busy" }
+  | { phase: "done"; status: "accepted" | "declined" }
+  | { phase: "error"; message: string };
+
+function ArtistTagBanner({ eventId, acts, uid }: { eventId: string; acts: TagBannerAct[]; uid: string | null }) {
+  const pending = acts.filter((a) => a.status === "pending");
+  const pendingKey = pending.map((a) => a.musicianProfileId).join(",");
+  const [adminActs, setAdminActs] = useState<TagBannerAct[]>([]);
+  const [states, setStates] = useState<Record<string, TagActState>>({});
+
+  useEffect(() => {
+    if (!uid || pending.length === 0) { setAdminActs([]); return; }
+    let cancelled = false;
+    const { db } = getFirebase();
+    Promise.all(pending.map(async (act) => {
+      try {
+        const snap = await getDoc(doc(db, `profiles/${act.musicianProfileId}/members/${uid}`));
+        return snap.data()?.role === "admin" ? act : null;
+      } catch {
+        // Denied or missing both mean "not an admin of this profile", the
+        // same duck-typed shrug useProfileRole.ts's own catch takes.
+        return null;
+      }
+    })).then((results) => {
+      if (!cancelled) setAdminActs(results.filter((a): a is TagBannerAct => a !== null));
+    });
+    return () => { cancelled = true; };
+    // pendingKey (not `pending`, a fresh array every render) is the real
+    // dependency: it only changes when the SET of pending musicianProfileIds
+    // actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, pendingKey]);
+
+  if (adminActs.length === 0) return null;
+
+  const respond = async (musicianProfileId: string, accept: boolean) => {
+    setStates((prev) => ({ ...prev, [musicianProfileId]: { phase: "busy" } }));
+    try {
+      await callFn("respondToArtistTag", { eventId, musicianProfileId, accept });
+      setStates((prev) => ({
+        ...prev, [musicianProfileId]: { phase: "done", status: accept ? "accepted" : "declined" },
+      }));
+    } catch (e) {
+      setStates((prev) => ({
+        ...prev,
+        [musicianProfileId]: { phase: "error", message: e instanceof Error ? e.message : "Could not respond to this tag." },
+      }));
+    }
+  };
+
+  return (
+    <View style={{ gap: tokens.space.sm }}>
+      {adminActs.map((act) => {
+        const state: TagActState = states[act.musicianProfileId] ?? { phase: "idle" };
+        return (
+          <Card key={act.musicianProfileId} style={{ gap: tokens.space.sm }}>
+            <Text variant="label">{ARTIST_TAG_BANNER_TITLE}</Text>
+            {state.phase === "done" ? (
+              <Text muted>{state.status === "accepted" ? "Accepted" : "Declined"}</Text>
+            ) : (
+              <>
+                {state.phase === "error" && <ErrorBanner message={state.message} />}
+                <View style={{ flexDirection: "row", gap: tokens.space.sm }}>
+                  <Button
+                    title="Accept" disabled={state.phase === "busy"}
+                    onPress={() => void respond(act.musicianProfileId, true)}
+                    style={{ alignSelf: "flex-start" }}
+                  />
+                  <Button
+                    variant="secondary" title="Decline" disabled={state.phase === "busy"}
+                    onPress={() => void respond(act.musicianProfileId, false)}
+                    style={{ alignSelf: "flex-start" }}
+                  />
+                </View>
+              </>
+            )}
+          </Card>
+        );
+      })}
+    </View>
+  );
 }
 
 function TierCard({ tier, now, selected, quantity, onSelect, onQuantityChange, disabled }: {
@@ -173,6 +275,7 @@ export default function EventScreen() {
   const router = useRouter();
   const t = useTokens();
   const now = useNow();
+  const { user } = useAuth();
 
   const [state, setState] = useState<"loading" | "notfound" | Loaded>("loading");
   // Render-time reset (React's documented "adjust state while rendering"
@@ -463,10 +566,18 @@ export default function EventScreen() {
     );
   }
 
+  const tagged: TagBannerAct[] = event.lineup.flatMap((a) =>
+    a.kind === "tagged" ? [{ musicianProfileId: a.musicianProfileId, name: a.name, status: a.status }] : []);
+
   return (
     <View style={{ flex: 1 }}>
       <PageBackground />
       <ScrollView contentContainerStyle={{ padding: tokens.space.lg, gap: tokens.space.lg, paddingBottom: tokens.space.xl }}>
+        {/* SP11 (spec 3.5): the tag banner sits above the poster, so a
+            tagged admin sees it before anything else. Renders nothing for
+            every other visitor (ArtistTagBanner's own gate). */}
+        <ArtistTagBanner eventId={eventId} acts={tagged} uid={user?.uid ?? null} />
+
         <View style={{ height: 200, borderRadius: tokens.radius.card, overflow: "hidden", borderWidth: 1, borderColor: t.border }}>
           {posterUrl ? (
             <Image source={{ uri: posterUrl }} style={{ width: "100%", height: "100%" }} />
@@ -477,9 +588,22 @@ export default function EventScreen() {
 
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: tokens.space.sm }}>
           <View style={{ gap: 4, flex: 1 }}>
-            <Text variant="heading">{event.title}</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: tokens.space.xs, flexWrap: "wrap" }}>
+              <Text variant="heading">{event.title}</Text>
+              {/* SP11 (spec 3.4): 18+/21+ badge beside the title; all ages
+                  renders nothing. */}
+              {(event.ageRestriction === "18_plus" || event.ageRestriction === "21_plus") && (
+                <Badge label={AGE_RESTRICTION_LABEL[event.ageRestriction]} />
+              )}
+            </View>
             <Text variant="label">{formatEventTimeRange(event.startsAt, event.endsAt)}</Text>
             <Text muted>{formatEventFullDate(event.startsAt)}</Text>
+            {/* SP11 (spec 3.4): doors line, only when the curator set one.
+                Ruling: reuses eventDisplay.ts's existing formatGigTime
+                (single-instant) rather than a new formatEventTime. */}
+            {event.doorsAt != null && (
+              <Text variant="meta" muted>{`Doors ${formatGigTime(event.doorsAt)}`}</Text>
+            )}
           </View>
           {/* SP11 (spec 3.1): the shared share affordance, hidden when
               EXPO_PUBLIC_SITE_URL is unset. */}
