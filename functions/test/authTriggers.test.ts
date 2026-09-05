@@ -2,8 +2,7 @@
 process.env.FIRESTORE_EMULATOR_HOST = "localhost:8080";
 
 import { describe, it, expect } from "vitest";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
-import { signUpTestUser, db, wait, callFn } from "./helpers";
+import { signUpTestUser, wait, callFn } from "./helpers";
 import * as adminApp from "firebase-admin/app";
 import { getFirestore as adminFirestore } from "firebase-admin/firestore";
 import { getAuth as adminAuth } from "firebase-admin/auth";
@@ -103,8 +102,11 @@ describe("computeDisplayNameLowerFix", () => {
 });
 
 // Task 8: onUserDocWritten (v2 onDocumentWritten("users/{uid}")) keeps
-// displayNameLower in sync with displayName after creation, e.g. a client
-// update via the users update rule (owner may write displayName directly).
+// displayNameLower in sync with displayName after creation, whoever wrote it.
+// SP11 narrowed the users update rule so a client can no longer write
+// displayName at all (updateAccount is the only writer), so these seed the
+// change server-side, the way the other trigger tests in this file do; the
+// trigger's own contract is unchanged.
 describe("onUserDocWritten", () => {
   it(
     "syncs displayNameLower when displayName changes",
@@ -112,7 +114,8 @@ describe("onUserDocWritten", () => {
       const { uid } = await signUpTestUser(`carol-${Date.now()}@test.com`);
       await waitForUserDoc(uid);
 
-      await updateDoc(doc(db, "users", uid), { displayName: "CaRoL Mixed CASE" });
+      // SP11: displayName is written by updateAccount, not the client.
+      await adminFirestore(admin).doc(`users/${uid}`).update({ displayName: "CaRoL Mixed CASE" });
 
       const deadline = Date.now() + 10_000;
       let adata = (await adminFirestore(admin).doc(`users/${uid}`).get()).data();
@@ -133,7 +136,8 @@ describe("onUserDocWritten", () => {
       const { uid } = await signUpTestUser(`dave-${Date.now()}@test.com`);
       await waitForUserDoc(uid);
 
-      await updateDoc(doc(db, "users", uid), { displayName: "Dave Settled" });
+      // SP11: displayName is written by updateAccount, not the client.
+      await adminFirestore(admin).doc(`users/${uid}`).update({ displayName: "Dave Settled" });
 
       const deadline = Date.now() + 10_000;
       let snap = await adminFirestore(admin).doc(`users/${uid}`).get();

@@ -16,7 +16,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, ARTIST_TAG_DUPLICATE_MESSAGE, ARTIST_TAG_UNAPPROVED_MESSAGE,
+  isValidDocId, deriveEventGenres, ARTIST_TAG_DUPLICATE_MESSAGE, ARTIST_TAG_UNAPPROVED_MESSAGE,
   ARTIST_TAG_ANSWERED_MESSAGE, ARTIST_TAG_UNKNOWN_MESSAGE, ARTIST_TAG_EVENT_CLOSED_MESSAGE,
   type EventAct, type EventDoc, type ProfileDoc, type TaggedActStatus,
 } from "@gatekeep/shared";
@@ -47,16 +47,40 @@ function alreadyOnLineup(lineup: EventAct[], musicianProfileId: string): boolean
     (a.kind === "booking" || a.kind === "tagged") && a.musicianProfileId === musicianProfileId);
 }
 
+// The one "does this act link to a real GateKeep artist" predicate. A booking
+// act always does; a tagged act only once its artist accepted. Every surface
+// that resolves a lineup id back to the act it came from (the discover deck's
+// preview and latest-post artist names) or reads the acts behind the
+// projection (the genre derivation below) must agree with
+// deriveLineupMusicianProfileIds, so they all read this one rule.
+export function isLinkableAct(act: EventAct): act is Extract<EventAct, { kind: "booking" }> | TaggedAct {
+  return act.kind === "booking" || (act.kind === "tagged" && act.status === "accepted");
+}
+
 // EventDoc.lineupMusicianProfileIds: booking acts plus ACCEPTED tagged acts.
 // Kept here rather than in events.ts because both files derive it now and
 // this one owns the tagged half of the rule.
 export function deriveLineupMusicianProfileIds(lineup: EventAct[]): string[] {
-  const ids = new Set<string>();
-  for (const act of lineup) {
-    if (act.kind === "booking") ids.add(act.musicianProfileId);
-    if (act.kind === "tagged" && act.status === "accepted") ids.add(act.musicianProfileId);
-  }
-  return [...ids];
+  return [...new Set(lineup.filter(isLinkableAct).map((a) => a.musicianProfileId))];
+}
+
+// EventDoc.genres: the discovery-surface genre projection. A curator-set
+// curatorGenres list always wins (deriveEventGenres's own precedence rule);
+// otherwise this reads each LINKABLE act's profile once and derives the
+// event's genres from the union of their portfolio genres.
+//
+// Lives here, not in events.ts, for the same reason
+// deriveLineupMusicianProfileIds does: it now turns on isLinkableAct, the
+// tagged-act rule this file owns, and events.ts already imports from here, so
+// the dependency stays one-way.
+export async function computeEventGenres(
+  db: Firestore, lineup: EventAct[], curatorGenres: string[] | undefined,
+): Promise<string[]> {
+  if (curatorGenres && curatorGenres.length > 0) return deriveEventGenres([], curatorGenres);
+  const ids = deriveLineupMusicianProfileIds(lineup);
+  const snaps = await Promise.all(ids.map((id) => db.doc(`profiles/${id}`).get()));
+  const actGenres = snaps.map((s) => ((s.data() as ProfileDoc | undefined)?.portfolio?.genres ?? []));
+  return deriveEventGenres(actGenres, null);
 }
 
 // updateEvent replaces the lineup wholesale, so an incoming payload carries
@@ -66,12 +90,21 @@ export function deriveLineupMusicianProfileIds(lineup: EventAct[]): string[] {
 // tagEventArtist. An omitted entry is a removal, which is the existing
 // lineup edit path and needs no special handling here.
 export function reconcileTaggedActs(stored: EventAct[], incoming: EventAct[]): EventAct[] {
-  return incoming.map((act) => {
-    if (act.kind !== "tagged") return act;
+  const seen = new Set<string>();
+  const out: EventAct[] = [];
+  for (const act of incoming) {
+    if (act.kind !== "tagged") { out.push(act); continue; }
+    // A payload naming the same tagged artist twice keeps the FIRST entry
+    // only. Every one of them resolves to the same stored copy, so without
+    // this the bill would carry identical duplicate rows for one artist and
+    // the editors would resend them forever.
+    if (seen.has(act.musicianProfileId)) continue;
+    seen.add(act.musicianProfileId);
     const known = taggedIn(stored, act.musicianProfileId);
     if (!known) throw new HttpsError("invalid-argument", ARTIST_TAG_UNKNOWN_MESSAGE);
-    return known;
-  });
+    out.push(known);
+  }
+  return out;
 }
 
 async function loadOwnedEvent(
@@ -197,13 +230,24 @@ export const untagEventArtist = onCall<{ curatorProfileId: string; eventId: stri
       const fresh = (await tx.get(ref)).data() as EventDoc | undefined;
       if (!fresh) throw new HttpsError("not-found", "Event not found.");
       const lineup = fresh.lineup ?? [];
-      if (!taggedIn(lineup, musicianProfileId)) throw new HttpsError("not-found", "That artist is not tagged on this lineup.");
+      const removed = taggedIn(lineup, musicianProfileId);
+      if (!removed) throw new HttpsError("not-found", "That artist is not tagged on this lineup.");
       // The act stays on the bill as a plain external name (the show still
       // has that act), it just stops claiming a GateKeep artist. Removing it
       // entirely is the existing lineup edit path.
       const next: EventAct[] = lineup.map((a) =>
         a.kind === "tagged" && a.musicianProfileId === musicianProfileId ? { kind: "external", name: a.name } : a);
-      tx.update(ref, { lineup: next, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(next), updatedAt: now });
+      const update: Record<string, unknown> = {
+        lineup: next, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(next), updatedAt: now,
+      };
+      // Only an ACCEPTED tag was feeding the genre projection, so only its
+      // removal can shrink it. Recomputed through the same helper the update
+      // path uses, with the stored curatorGenres, so a curator-set list still
+      // wins. A pending or declined tag never counted: nothing to redo.
+      if (removed.status === "accepted") {
+        update.genres = await computeEventGenres(db, next, fresh.curatorGenres);
+      }
+      tx.update(ref, update);
     });
     return { ok: true };
   });
@@ -240,8 +284,16 @@ export const respondToArtistTag = onCall<{ eventId: string; musicianProfileId: s
       const next: EventAct[] = (fresh.lineup ?? []).map((a) =>
         a.kind === "tagged" && a.musicianProfileId === musicianProfileId
           ? { ...a, status, respondedAt: now } : a);
-      tx.update(ref, { lineup: next, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(next), updatedAt: now });
-      return { ...fresh, lineup: next, lineupMusicianProfileIds: deriveLineupMusicianProfileIds(next) };
+      const ids = deriveLineupMusicianProfileIds(next);
+      const update: Record<string, unknown> = { lineup: next, lineupMusicianProfileIds: ids, updatedAt: now };
+      // An accept adds this artist to the linkable set, so the event's genre
+      // projection can gain their portfolio genres. Recomputed through the
+      // same helper the update path uses, with the stored curatorGenres, so a
+      // curator-set list still wins. A decline changes no linkable act.
+      const genres = accept ? await computeEventGenres(db, next, fresh.curatorGenres) : fresh.genres;
+      if (accept) update.genres = genres;
+      tx.update(ref, update);
+      return { ...fresh, lineup: next, lineupMusicianProfileIds: ids, genres };
     });
 
     // Accepting on a PUBLISHED event announces the show to this artist's own

@@ -19,10 +19,10 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
-  isValidDocId, deriveEventGenres, tierProjection, SETTLEMENT_CLAIM_STALE_MS, GIG_ALREADY_PROMOTED_MESSAGE,
+  isValidDocId, tierProjection, SETTLEMENT_CLAIM_STALE_MS, GIG_ALREADY_PROMOTED_MESSAGE,
   ARTIST_TAG_UNKNOWN_MESSAGE,
   type AgeRestriction, type EventAct, type EventDoc, type GigDoc, type GigPublicLocation, type GigPrivateLocation,
-  type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc, type ProfileDoc,
+  type TicketTierDoc, type CuratorSubtype, type CuratorDetails, type BookingRequestDoc,
   type AttendeeDoc,
 } from "@gatekeep/shared";
 import {
@@ -38,7 +38,9 @@ import { stripeSecretKey } from "./stripeClient.js";
 import { refundOrdersForCancelledEvent, type CancelledEventOrdersResult } from "./ticketing.js";
 import { notifyFollowers } from "./follows.js";
 import { announceTargets, showAnnouncedNote, onTheBillNote, showRescheduledNote, notifyLineupMembers } from "./announce.js";
-import { deriveLineupMusicianProfileIds, reconcileTaggedActs, notifyPendingTags } from "./eventArtistTags.js";
+import {
+  deriveLineupMusicianProfileIds, reconcileTaggedActs, notifyPendingTags, computeEventGenres,
+} from "./eventArtistTags.js";
 
 const MAX_TIERS_PER_EVENT = 20;
 
@@ -165,21 +167,6 @@ async function verifyLineupBookingActs(
       throw new HttpsError("failed-precondition", `Booking ${act.bookingId} is not a confirmed booking.`);
     }
   }
-}
-
-// EventDoc.genres: the discovery-surface genre projection. A curator-set
-// curatorGenres list always wins (deriveEventGenres's own precedence rule);
-// otherwise this reads each booking act's profile once and derives the
-// event's genres from the union of their portfolio genres.
-export async function computeEventGenres(
-  db: Firestore, lineup: EventAct[], curatorGenres: string[] | undefined,
-): Promise<string[]> {
-  if (curatorGenres && curatorGenres.length > 0) return deriveEventGenres([], curatorGenres);
-  const ids = [...new Set(lineup.filter((a): a is Extract<EventAct, { kind: "booking" }> => a.kind === "booking")
-    .map((a) => a.musicianProfileId))];
-  const snaps = await Promise.all(ids.map((id) => db.doc(`profiles/${id}`).get()));
-  const actGenres = snaps.map((s) => ((s.data() as ProfileDoc | undefined)?.portfolio?.genres ?? []));
-  return deriveEventGenres(actGenres, null);
 }
 
 // posterPath, when set, must be a processed photo path belonging to THIS

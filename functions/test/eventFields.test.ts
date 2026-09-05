@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
-import { callFn } from "./helpers";
+import { callFn, signUpTestUser } from "./helpers";
 import { adb, makeApprovedCuratorProfile, eventContent, addTiersAndPublish } from "./discoverFixtures";
-import type { EventDoc } from "@gatekeep/shared";
+import { EVENT_DOORS_MESSAGE, type EventDoc } from "@gatekeep/shared";
 vi.setConfig({ testTimeout: 40_000 });
 
 const HOUR = 3_600_000;
 const event = async (eventId: string) => (await adb.doc(`events/${eventId}`).get()).data() as EventDoc;
+const reschedNotes = async (uid: string) =>
+  (await adb.collection(`users/${uid}/notifications`).where("kind", "==", "show_rescheduled").get()).docs;
 
 describe("doors and age on createEvent", () => {
   it("stores both, defaults age to all_ages and doors to null, and refuses bad values", async () => {
@@ -50,6 +52,12 @@ describe("doors and age on updateEvent", () => {
     const startsAt = base.startsAt as number;
     const { eventId } = await callFn<Record<string, unknown>, { eventId: string }>("createEvent",
       { curatorProfileId: profileId, source: { kind: "standalone" }, ...base }, owner.user);
+    // The reschedule fan-out reaches FOLLOWERS and ticket holders, never the
+    // curator who made the edit, so the "did it fire?" assertions need a fan
+    // following the curator profile before publish (the pattern
+    // eventArtistTags.test.ts's announce-dedupe case uses).
+    const fan = await signUpTestUser(`ef2f-${Date.now()}@test.com`);
+    await callFn("followTarget", { targetId: profileId, targetType: "curator" }, fan.user);
     await addTiersAndPublish(profileId, eventId, owner.user,
       [{ name: "GA", priceCents: 0, capacity: 10, saleStartsAt: null, saleEndsAt: null }]);
 
@@ -62,13 +70,42 @@ describe("doors and age on updateEvent", () => {
     expect(await event(eventId)).toMatchObject({ doorsAt: startsAt - 2 * HOUR, ageRestriction: "18_plus" });
 
     // A doors-only edit must not tell followers or ticket holders the show moved.
-    const before = await adb.collection(`users/${owner.uid}/notifications`).get();
     await callFn("updateEvent", { ...payload, doorsAt: startsAt - 3 * HOUR, ageRestriction: "18_plus" }, owner.user);
-    const after = await adb.collection(`users/${owner.uid}/notifications`).get();
-    expect(after.size).toBe(before.size);
-    expect(after.docs.some((d) => d.id === `resched:${eventId}:${startsAt}`)).toBe(false);
+    expect(await reschedNotes(fan.uid)).toHaveLength(0);
 
-    await callFn("updateEvent", { ...payload, doorsAt: null }, owner.user);
+    // Moving the start an hour later IS a reschedule, and the same fan hears
+    // about it: the assertion above is a real negative, not a dead uid.
+    const movedAt = startsAt + HOUR;
+    await callFn("updateEvent",
+      { ...payload, startsAt: movedAt, doorsAt: startsAt - 3 * HOUR, ageRestriction: "18_plus" }, owner.user);
+    expect(await reschedNotes(fan.uid)).toHaveLength(1);
+    expect((await adb.doc(`users/${fan.uid}/notifications/resched:${eventId}:${movedAt}`).get()).exists).toBe(true);
+
+    await callFn("updateEvent", { ...payload, startsAt: movedAt, doorsAt: null }, owner.user);
     expect(await event(eventId)).toMatchObject({ doorsAt: null, ageRestriction: "all_ages" });
+  });
+
+  // Task 4 review, parked: the shared validator refuses a reschedule that
+  // would strand a saved doors time AFTER the new start, which is exactly
+  // what both editors send when a curator drags the start earlier and resends
+  // the doors time already on the event.
+  it("refuses moving startsAt earlier than a saved doorsAt", async () => {
+    const { owner, profileId } = await makeApprovedCuratorProfile("ef3", "venue");
+    const base = eventContent();
+    const startsAt = base.startsAt as number;
+    const { eventId } = await callFn<Record<string, unknown>, { eventId: string }>("createEvent",
+      { curatorProfileId: profileId, source: { kind: "standalone" }, ...base }, owner.user);
+    const payload = {
+      curatorProfileId: profileId, eventId,
+      title: base.title, description: base.description, startsAt, endsAt: base.endsAt,
+      lineup: base.lineup,
+    };
+    await callFn("updateEvent", { ...payload, doorsAt: startsAt - HOUR }, owner.user);
+    expect((await event(eventId)).doorsAt).toBe(startsAt - HOUR);
+
+    await expect(callFn("updateEvent",
+      { ...payload, startsAt: startsAt - 2 * HOUR, doorsAt: startsAt - HOUR }, owner.user))
+      .rejects.toMatchObject({ code: "functions/invalid-argument", message: EVENT_DOORS_MESSAGE });
+    expect(await event(eventId)).toMatchObject({ startsAt, doorsAt: startsAt - HOUR });
   });
 });

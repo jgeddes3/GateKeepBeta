@@ -5,7 +5,8 @@ import {
   addTiersAndPublish, eventContent, waitForIndex, makePublishedBookingEvent,
 } from "./discoverFixtures";
 import { addMember } from "./payoutFixtures";
-import type { EventDoc, EventAct, NotificationDoc } from "@gatekeep/shared";
+import type { EventDoc, EventAct, NotificationDoc, GetDiscoverDeckResult } from "@gatekeep/shared";
+import type { User } from "firebase/auth";
 vi.setConfig({ testTimeout: 60_000 });
 
 const FREE_TIER = [{ name: "GA", priceCents: 0, capacity: 20, saleStartsAt: null, saleEndsAt: null }];
@@ -17,10 +18,29 @@ const notes = async (uid: string, kind: string) =>
   (await adb.collection(`users/${uid}/notifications`).where("kind", "==", kind).get()).docs
     .map((d) => d.data() as NotificationDoc);
 
+// The deck is a ranked page of at most 20 cards over the emulator's shared,
+// never-cleared corpus, so a caller steers the ranking (follow a genre no
+// other fixture uses) and this pages once with page one's ids excluded before
+// giving up, the same fallback discover.test.ts's venue-distance case uses.
+const deck = (user: User, data: Record<string, unknown>) =>
+  callFn<Record<string, unknown>, GetDiscoverDeckResult>("getDiscoverDeck", data, user);
+async function findShowCard(user: User, eventId: string) {
+  const page1 = await deck(user, { seed: 11 });
+  const hit = page1.cards.find((c) => c.kind === "show" && c.id === eventId);
+  if (hit) return hit;
+  const page2 = await deck(user, { seed: 11, excludeIds: page1.cards.map((c) => c.id) });
+  return page2.cards.find((c) => c.kind === "show" && c.id === eventId);
+}
+
 describe("tagEventArtist", () => {
   it("tags on a draft silently, notifies once on publish, and the artist accepts", async () => {
     const { owner, profileId, eventId } = await makeDraftEvent("at1");
     const artist = await makeApprovedMusicianProfile("at1m");
+    // A genre no other fixture in this suite uses. It is both what the
+    // accepted tag is expected to contribute to the event's own genre
+    // projection (the curator set none) and how the deck read at the end of
+    // this test is steered onto page one.
+    await adb.doc(`profiles/${artist.profileId}`).update({ "portfolio.genres": ["classical"] });
 
     const { actIndex } = await callFn<Record<string, unknown>, { actIndex: number }>(
       "tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: artist.profileId }, owner.user);
@@ -49,9 +69,22 @@ describe("tagEventArtist", () => {
     expect(accepted.lineupMusicianProfileIds).toContain(artist.profileId);
     expect(await taggedAct(eventId, artist.profileId)).toMatchObject({ status: "accepted" });
     expect((await taggedAct(eventId, artist.profileId))!.respondedAt).toBeTypeOf("number");
+    // An accepted tag contributes its portfolio genres to the event's genre
+    // projection, exactly as a booking act does; this curator set none.
+    expect(accepted.genres).toContain("classical");
     // The accepted act reaches the search index through the event trigger.
     const indexed = await waitForIndex(`show_${eventId}`, (d) => !!d?.relatedProfileIds.includes(artist.profileId));
     expect(indexed?.relatedProfileIds).toContain(artist.profileId);
+
+    // The deck resolves a lineupMusicianProfileIds entry back to the act it
+    // came from for the preview's artist name. An accepted tagged act has to
+    // resolve there like a booking act, or the card reads as nameless audio.
+    const fan = await signUpTestUser(`at1f-${Date.now()}@test.com`);
+    await callFn("followTarget", { targetId: "genre:classical", targetType: "genre" }, fan.user);
+    const card = await findShowCard(fan.user, eventId);
+    expect(card).toBeDefined();
+    if (card?.kind === "show") expect(card.preview?.artistName).toBe("The Act");
+
     // A second publish attempt cannot double-send announce or the tag note.
     await expect(callFn("publishEvent", { curatorProfileId: profileId, eventId }, owner.user))
       .rejects.toMatchObject({ code: "functions/failed-precondition" });
@@ -111,10 +144,13 @@ describe("tagEventArtist", () => {
     await callFn("tagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: second.profileId }, owner.user);
     await callFn("respondToArtistTag", { eventId, musicianProfileId: second.profileId, accept: true }, second.owner.user);
     expect((await event(eventId)).lineupMusicianProfileIds).toContain(second.profileId);
+    expect((await event(eventId)).genres).toContain("rock");
     await callFn("untagEventArtist", { curatorProfileId: profileId, eventId, musicianProfileId: second.profileId }, owner.user);
     const untagged = await event(eventId);
     expect(untagged.lineupMusicianProfileIds).not.toContain(second.profileId);
     expect(untagged.lineup.some((a) => a.kind === "external" && a.name === "The Act")).toBe(true);
+    // The genre the accepted tag contributed goes with it.
+    expect(untagged.genres).not.toContain("rock");
 
     // Re-tagging the SAME artist converts that external act back rather than
     // appending a duplicate row (fix round 1, Important 3), and notifies
@@ -136,7 +172,7 @@ describe("tagEventArtist", () => {
   });
 
   it("lets a tagged artist post only after accepting, and a co-admin answer counts", async () => {
-    const { curator, musician, eventId } = await makePublishedTaggedEvent("at4");
+    const { musician, eventId } = await makePublishedTaggedEvent("at4");
     await expect(callFn("createShowPost",
       { eventId, musicianProfileId: musician.profileId, text: "Doors soon" }, musician.owner.user))
       .rejects.toMatchObject({ code: "functions/permission-denied" });
@@ -145,7 +181,6 @@ describe("tagEventArtist", () => {
     const { postId } = await callFn<Record<string, unknown>, { postId: string }>(
       "createShowPost", { eventId, musicianProfileId: musician.profileId, text: "Doors soon" }, musician.owner.user);
     expect(postId).toBeTypeOf("string");
-    expect(curator.profileId).toBeTypeOf("string");
   });
 
   it("keeps a stored tag's status when the curator resaves the lineup, and refuses an invented one", async () => {

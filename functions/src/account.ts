@@ -251,6 +251,10 @@ export const updateAccount = onCall<UpdateAccountInput>(
           const hit = await getGeocoder().geocode(city);
           if (hit) point = coarsen(hit);
         } catch (e) {
+          // getGeocoder() throws an HttpsError when no provider is configured
+          // at all: an operator misconfiguration, not a geocoder miss, so it
+          // escapes as itself rather than being reported as { geocoded: false }.
+          if (e instanceof HttpsError) throw e;
           // A provider outage must not lose the fan's typed city. Same
           // posture as the miss below: store the text, no point.
           console.error("updateAccount: geocode failed", { uid }, e);

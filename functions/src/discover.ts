@@ -7,6 +7,7 @@ import {
 } from "@gatekeep/shared";
 import { requireAuthUid } from "./guards.js";
 import { rankDeck, type DeckCandidate } from "./discoverRank.js";
+import { isLinkableAct } from "./eventArtistTags.js";
 
 const EVENT_LIMIT = 100; const ARTIST_LIMIT = 150; const VENUE_LIMIT = 100;
 type Geo = { lat: number; lng: number };
@@ -149,7 +150,10 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
     if (c.kind === "show") {
       const ev = eventById.get(c.id)!;
       const curator = await profileName(ev.curatorProfileId);
-      const nameOf = (id: string) => ev.lineup.find((a) => a.kind === "booking" && a.musicianProfileId === id)?.name ?? "";
+      // SP11: lineupMusicianProfileIds carries booking acts AND accepted
+      // tagged acts, so the reverse lookup has to accept both or an accepted
+      // tagged artist shows up nameless on the preview and the latest post.
+      const nameOf = (id: string) => ev.lineup.find((a) => isLinkableAct(a) && a.musicianProfileId === id)?.name ?? "";
       const [preview, postSnap] = await Promise.all([
         previewFor(db, ev.lineupMusicianProfileIds, nameOf),
         db.collection(`events/${c.id}/posts`).where("status", "==", "live").orderBy("createdAt", "desc").limit(1).get(),
@@ -176,7 +180,7 @@ export const getDiscoverDeck = onCall<GetDiscoverDeckInput>({ region: "us-centra
     const next = nextByVenue.get(c.id);
     const nextShow: DeckNextShow = next ? { eventId: next.id, title: next.ev.title, venueName: p.name, startsAt: next.ev.startsAt } : null;
     const preview = next
-      ? await previewFor(db, next.ev.lineupMusicianProfileIds, (id) => next.ev.lineup.find((a) => a.kind === "booking" && a.musicianProfileId === id)?.name ?? "")
+      ? await previewFor(db, next.ev.lineupMusicianProfileIds, (id) => next.ev.lineup.find((a) => isLinkableAct(a) && a.musicianProfileId === id)?.name ?? "")
       : null;
     return { kind: "venue", id: c.id, profileId: c.id, handle: p.handle, name: p.name, neighborhood: p.curator?.location?.neighborhood ?? null,
       distanceMeters: c.distanceMeters, photoPath: p.curator?.photoPaths?.[0] ?? null, genres: p.curator?.lookingFor?.genres ?? [], nextShow, preview };
